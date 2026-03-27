@@ -14,10 +14,11 @@ Rather than simply converting speech to text, VoiceX connects the entire input p
 
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
 - **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status without interrupting your workflow.
-- **Multiple ASR backends** — switch between four cloud and local speech recognition providers to balance accuracy, latency, language, and privacy.
+- **Multiple ASR backends** — switch between seven cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
 - **Smart text injection** — recognized text is pasted into the active app via clipboard (with automatic backup/restore) or simulated typing, seamlessly.
-- **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with audio playback.
+- **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with audio playback and re-transcription.
+- **Full bilingual interface** — complete `zh-CN` / `en-US` localization across the app shell, settings, history, HUD overlay, tray menu, and built-in default prompts.
 - **Cross-device sync** — a self-hosted sync server keeps history in sync across your machines.
 - **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
 
@@ -40,9 +41,12 @@ Hold threshold and double-tap window are configurable. Press **Escape** at any t
 | Volcengine (Doubao Speech) | Cloud streaming (WebSocket) | Optimized for Chinese; hot-word boosting, ITN, punctuation, DDC |
 | Google Cloud Speech-to-Text V2 | Cloud streaming (gRPC) | Multi-language, phrase boost, configurable endpointing |
 | Qwen (DashScope Realtime ASR) | Cloud streaming (WebSocket) | Alibaba Cloud; `qwen3-asr-flash-realtime` model |
+| Gemini Audio Transcription | Cloud batch file upload | `gemini-3.1-flash-lite-preview`; starts after recording stops; supports auto / zh / en / zh+en hints |
+| Gemini Live Realtime | Cloud streaming (WebSocket) | `gemini-3.1-flash-live-preview`; realtime input-audio transcription with language hints |
+| Cohere Audio Transcription | Cloud batch file upload | `cohere-transcribe-03-2026`; whole-file transcription with explicit ISO-639-1 language hint |
 | [Coli](https://www.npmjs.com/package/@marswave/coli) | Local offline | SenseVoice / Whisper based; installed separately via npm |
 
-All cloud backends stream audio in 100 ms Opus-encoded chunks for low latency.
+Streaming backends send audio in 100 ms Opus-encoded chunks for low latency. Batch backends upload the finished recording only after capture stops, which is useful for higher-quality offline transcription and comparison.
 
 > **Note:** Cloud ASR services require API keys from their respective providers. For Volcengine, you only need an **App Key** and **Access Key** — all other parameters have sensible defaults. Coli must be [installed separately](https://www.npmjs.com/package/@marswave/coli) (`npm i -g @marswave/coli`) before use.
 
@@ -79,8 +83,15 @@ Features:
 
 - Full history grouped by date, with per-record audio playback, copy, and detail view.
 - Side-by-side comparison of original ASR output vs. LLM-corrected text.
+- Re-transcribe any saved recording with a different ASR backend and optional LLM correction to compare providers on the same audio.
 - Configurable retention policies for text and audio (7 / 30 / 180 / 365 days, or forever).
 - Overview dashboard: total duration, character count, AI correction calls, average dictation speed — aggregated per device.
+
+## Localization
+
+- Full `zh-CN` and `en-US` coverage across the main UI, HUD overlay, tray menu, and default prompt templates.
+- System / Chinese / English interface switcher, with automatic OS locale fallback when `system` is selected.
+- Localized history, settings, diagnostics, and provider descriptions, so the bilingual experience is consistent end to end.
 
 ## Cross-Device Sync
 
@@ -160,6 +171,26 @@ On Windows, no code-signing is needed for local development. Build directly with
 ```powershell
 .\scripts\Build-VoiceX.ps1
 ```
+
+### Release Flow
+
+You do not need a separate Windows development machine just to produce release installers. GitHub Actions can build Tauri apps on a native Windows runner and upload the generated installer back to the same GitHub Release automatically.
+
+This repository includes `.github/workflows/windows-release.yml`, which triggers when a GitHub Release is published. The workflow checks out the tagged commit, builds the Windows bundles on `windows-latest`, and attaches them to that release.
+
+For a dry run, you can trigger the same workflow manually from the GitHub Actions page with an existing tag. In manual mode it builds the Windows bundles but uploads them as a short-lived Actions artifact instead of attaching them to a release.
+
+Recommended flow:
+
+1. Bump the app version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+2. Build your macOS package locally if you still want to sign or verify it on your Mac.
+3. Push the tag/commit to GitHub and optionally run a manual Windows build test for that tag from the Actions page.
+4. Publish the GitHub Release for that tag when you are ready.
+5. Wait for the `windows-release` workflow to finish; the Windows installer assets will be added automatically.
+
+The workflow only accepts tags whose commit is already contained in the `main` branch history, which helps prevent accidental Windows release builds from side branches.
+
+If you later add Apple Developer signing credentials to GitHub Actions, the same pattern can be extended to build macOS release artifacts in CI as well.
 
 ### LLM Benchmark Tool (optional)
 
