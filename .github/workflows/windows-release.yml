@@ -49,6 +49,17 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Normalize pnpm workspace manifest for older tags
+        shell: pwsh
+        run: |
+          if (Test-Path 'pnpm-workspace.yaml') {
+            $content = Get-Content 'pnpm-workspace.yaml' -Raw
+            if ($content -notmatch '(?m)^packages:') {
+              $normalized = "packages:`n  - '.'`n`n$content"
+              Set-Content 'pnpm-workspace.yaml' -Value $normalized -Encoding utf8
+            }
+          }
+
       - name: Enable pnpm
         shell: pwsh
         run: |
