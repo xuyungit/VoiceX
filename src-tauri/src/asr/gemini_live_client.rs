@@ -20,7 +20,7 @@ use super::protocol::{AsrError, AsrEvent};
 const GEMINI_LIVE_WS_URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 const SETUP_COMPLETE_WAIT_MS: u64 = 1500;
 const STREAM_COMPLETION_WAIT_MS: u64 = 10_000;
-const SILENT_STREAM_COMPLETION_WAIT_MS: u64 = 1_500;
+const NO_INPUT_TRANSCRIPTION_WAIT_MS: u64 = 4_000;
 
 pub struct GeminiLiveClient {
     config: AsrConfig,
@@ -282,7 +282,7 @@ impl GeminiLiveClient {
         let completion_wait_ms = if saw_input_transcription.load(Ordering::SeqCst) {
             STREAM_COMPLETION_WAIT_MS
         } else {
-            SILENT_STREAM_COMPLETION_WAIT_MS
+            NO_INPUT_TRANSCRIPTION_WAIT_MS
         };
 
         match tokio::time::timeout(Duration::from_millis(completion_wait_ms), reader_handle).await {

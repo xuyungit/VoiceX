@@ -34,6 +34,7 @@ const asrProviderOptions = [
   { label: 'Google', value: 'google' },
   { label: 'Qwen', value: 'qwen' },
   { label: 'Gemini', value: 'gemini' },
+  { label: 'Gemini Live', value: 'gemini-live' },
   { label: 'Cohere', value: 'cohere' },
   { label: '本地 (Coli)', value: 'coli' },
 ]
