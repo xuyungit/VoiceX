@@ -41,6 +41,7 @@ pub struct AppSettings {
     pub coli_use_vad: bool,
     pub coli_asr_interval_ms: u32,
     pub coli_final_refinement_mode: String, // "off" | "sensevoice" | "whisper"
+    pub coli_realtime: bool, // true = streaming (default), false = batch mode
 
     // LLM settings
     pub enable_llm_correction: bool,
@@ -150,9 +151,10 @@ impl Default for AppSettings {
             qwen_asr_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime".to_string(),
             qwen_asr_language: "zh".to_string(),
             coli_command_path: String::new(),
-            coli_use_vad: false,
+            coli_use_vad: true,
             coli_asr_interval_ms: 1000,
             coli_final_refinement_mode: "off".to_string(),
+            coli_realtime: true,
 
             enable_llm_correction: false,
             llm_provider_type: "volcengine".to_string(),

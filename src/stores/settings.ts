@@ -17,6 +17,7 @@ export interface AppSettings {
     coliUseVad: boolean
     coliAsrIntervalMs: number
     coliFinalRefinementMode: 'off' | 'sensevoice' | 'whisper'
+    coliRealtime: boolean
 
     // ASR Provider: Google Cloud Speech-to-Text V2
     googleSttApiKey: string
@@ -170,9 +171,10 @@ const defaultSettings: AppSettings = {
     forceToSpeechTime: 3500,
     enableDdc: true,
     coliCommandPath: '',
-    coliUseVad: false,
+    coliUseVad: true,
     coliAsrIntervalMs: 1000,
     coliFinalRefinementMode: 'off',
+    coliRealtime: true,
 
     googleSttApiKey: '',
     googleSttProjectId: '',

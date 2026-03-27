@@ -47,6 +47,7 @@ pub struct AsrConfig {
     pub coli_use_vad: bool,
     pub coli_asr_interval_ms: u32,
     pub coli_final_refinement_mode: crate::asr::ColiRefinementMode,
+    pub coli_realtime: bool,
 
     // Audio config
     pub chunk_ms: u32,
@@ -94,9 +95,10 @@ impl Default for AsrConfig {
             qwen_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime".to_string(),
             qwen_language: "zh".to_string(),
             coli_command_path: String::new(),
-            coli_use_vad: false,
+            coli_use_vad: true,
             coli_asr_interval_ms: 1000,
             coli_final_refinement_mode: crate::asr::ColiRefinementMode::Off,
+            coli_realtime: true,
             chunk_ms: 100,
             enable_nonstream: false,
             show_utterances: false,
@@ -146,6 +148,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             coli_final_refinement_mode: crate::asr::ColiRefinementMode::from_str(
                 &settings.coli_final_refinement_mode,
             ),
+            coli_realtime: settings.coli_realtime,
             chunk_ms: 100,
             enable_nonstream: settings.enable_nonstream,
             show_utterances: false,
@@ -179,6 +182,16 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
 }
 
 impl AsrConfig {
+    /// Returns true when the provider does not support streaming and requires
+    /// the complete audio file before recognition can start.
+    pub fn is_batch(&self) -> bool {
+        match self.provider_type {
+            AsrProviderType::Coli => !self.coli_realtime,
+            // Future batch providers (Gemini, Cohere, …) will match here.
+            _ => false,
+        }
+    }
+
     /// Check if the configuration is valid for the selected provider
     pub fn is_valid(&self) -> bool {
         match self.provider_type {

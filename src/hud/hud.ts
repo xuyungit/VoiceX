@@ -15,15 +15,17 @@ if (!statusIcon || !countdown || !textArea || !intentChip) {
     });
 }
 
-let currentMode: 'idle' | 'push_to_talk' | 'hands_free' | 'correcting' = 'idle';
+let currentMode: 'idle' | 'push_to_talk' | 'hands_free' | 'recognizing' | 'correcting' = 'idle';
 let currentIntent: 'assistant' | 'translate_en' = 'assistant';
-let lastActiveIcon: 'mic' | 'waveform' | 'wand' = 'mic';
+let isBatchRecording = false;
+let lastActiveIcon: 'mic' | 'waveform' | 'cloud' | 'wand' = 'mic';
 let partialText = '';
 let lastNonEmptyText = '';
 
 const icons: Record<string, Element | null | undefined> = {
     mic: statusIcon?.querySelector('.icon-mic') ?? null,
     waveform: statusIcon?.querySelector('.icon-waveform') ?? null,
+    cloud: statusIcon?.querySelector('.icon-cloud') ?? null,
     wand: statusIcon?.querySelector('.icon-wand') ?? null
 };
 
@@ -34,20 +36,26 @@ function showIcon(name: keyof typeof icons) {
 
 function updateStatus(mode: typeof currentMode) {
     currentMode = mode;
-    document.body.classList.remove('recording', 'correcting');
+    document.body.classList.remove('recording', 'recognizing', 'correcting');
 
     switch (mode) {
         case 'push_to_talk':
             document.body.classList.add('recording');
-            showIcon('mic');
+            showIcon(isBatchRecording ? 'waveform' : 'mic');
             statusIcon?.classList.add('animating');
-            lastActiveIcon = 'mic';
+            lastActiveIcon = isBatchRecording ? 'waveform' : 'mic';
             break;
         case 'hands_free':
             document.body.classList.add('recording');
             showIcon('waveform');
             statusIcon?.classList.add('animating');
             lastActiveIcon = 'waveform';
+            break;
+        case 'recognizing':
+            document.body.classList.add('recognizing');
+            showIcon('cloud');
+            statusIcon?.classList.add('animating');
+            lastActiveIcon = 'cloud';
             break;
         case 'correcting':
             document.body.classList.add('correcting');
@@ -61,6 +69,8 @@ function updateStatus(mode: typeof currentMode) {
             statusIcon?.classList.remove('animating');
             break;
     }
+
+    renderTranscript();
 }
 
 function resetTranscript() {
@@ -72,6 +82,8 @@ function resetTranscript() {
 // Keep the visible snippet within ~2 lines to avoid CSS ellipsis cutting the tail.
 const MAX_DISPLAY_CHARS = 36;
 
+const WAVEFORM_BARS_HTML = '<div class="waveform-bars"><span></span><span></span><span></span><span></span><span></span></div>';
+
 function renderTranscript() {
     let display = partialText.trim() || lastNonEmptyText.trim();
     if (display.length > MAX_DISPLAY_CHARS) {
@@ -80,12 +92,21 @@ function renderTranscript() {
 
     if (!display) {
         textArea?.classList.add('is-placeholder');
+
+        // Batch recording: show animated waveform bars instead of text placeholder.
+        if (isBatchRecording && (currentMode === 'push_to_talk' || currentMode === 'hands_free')) {
+            textArea!.innerHTML = WAVEFORM_BARS_HTML;
+            return;
+        }
+
         const placeholder =
             currentMode === 'correcting'
                 ? '正在处理文本...'
-                : currentMode === 'push_to_talk' || currentMode === 'hands_free'
+                : currentMode === 'recognizing'
                   ? '正在识别...'
-                  : '按下热键开始录音';
+                  : currentMode === 'push_to_talk' || currentMode === 'hands_free'
+                    ? '正在录音...'
+                    : '按下热键开始录音';
         textArea!.innerHTML = `<span class="placeholder">${placeholder}</span>`;
     } else {
         textArea?.classList.remove('is-placeholder');
@@ -150,20 +171,30 @@ async function initListeners() {
         unsubs.push(unsub);
     };
 
-    await add('state:recording_style', (event: { payload?: { style?: string } }) => {
+    await add('state:recording_style', (event: { payload?: { style?: string; batch?: boolean } }) => {
         const style = event.payload?.style;
         const wasIdle = currentMode === 'idle';
+        isBatchRecording = !!event.payload?.batch;
 
         if (style === 'push_to_talk') {
             updateStatus('push_to_talk');
         } else if (style === 'hands_free') {
             updateStatus('hands_free');
         } else {
+            isBatchRecording = false;
             updateStatus('idle');
         }
 
         if (wasIdle && (style === 'push_to_talk' || style === 'hands_free')) {
             resetTranscript();
+        }
+    });
+
+    await add('state:recognizing', (event: { payload?: { is_recognizing?: boolean } }) => {
+        if (event.payload?.is_recognizing) {
+            updateStatus('recognizing');
+        } else if (currentMode === 'recognizing') {
+            updateStatus('idle');
         }
     });
 

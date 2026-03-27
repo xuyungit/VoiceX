@@ -162,6 +162,11 @@ const coliFinalRefinementMode = computed({
   set: (v: 'off' | 'sensevoice' | 'whisper') => settingsStore.updateSetting('coliFinalRefinementMode', v)
 })
 
+const coliRealtime = computed({
+  get: () => settingsStore.settings.coliRealtime,
+  set: (v: boolean) => settingsStore.updateSetting('coliRealtime', v)
+})
+
 const coliStatus = ref<LocalAsrStatus | null>(null)
 const coliStatusLoading = ref(false)
 const coliStatusError = ref('')
@@ -481,7 +486,7 @@ watch(coliCommandPath, () => {
       <div class="card-header">
         <div class="card-title">Local coli Configuration</div>
         <div class="card-sub">
-          `coli` 通过本地 CLI 跑离线识别。关闭 VAD 时，HUD 可以显示实时 partial；开启 VAD 后，通常只会在一句话结束或停顿后返回 final。
+          `coli` 通过本地 CLI 跑离线识别。开启 VAD 后按语音停顿分段，性能稳定；关闭 VAD 时 HUD 可实时出 partial，但长录音性能会下降。
         </div>
       </div>
       <div class="field-list">
@@ -539,14 +544,26 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
+            <div class="field-label">Realtime Streaming</div>
+            <div class="field-note">
+              开启后实时流式识别，HUD 会显示识别中的文字。关闭后进入 Batch 模式：录音期间 HUD 只显示波形，录完后整段音频一次性识别。
+            </div>
+          </div>
+          <NCheckbox v-model:checked="coliRealtime" />
+        </div>
+        <div v-if="coliRealtime" class="field-row">
+          <div class="field-text">
             <div class="field-label">Enable VAD</div>
             <div class="field-note">
-              开启后更像“按句分段转写”，但 HUD 通常不会实时出 partial；默认关闭，保留实时文字预览。
+              推荐开启。开启后按语音停顿分段识别，性能稳定；关闭后 HUD 可实时显示 partial，但长时间录音会显著变慢。
             </div>
           </div>
           <NCheckbox v-model:checked="coliUseVad" />
         </div>
-        <div v-if="!coliUseVad" class="field-row">
+        <div v-if="coliRealtime && !coliUseVad" class="warning-box">
+          关闭 VAD 后，识别引擎每次间隔都会重新处理全部已录制音频，录音超过 30 秒后性能将明显下降。建议仅在需要实时文字预览的短录音场景下关闭。
+        </div>
+        <div v-if="coliRealtime && !coliUseVad" class="field-row">
           <div class="field-text">
             <div class="field-label">Streaming Interval (ms)</div>
             <div class="field-note">多久刷新一次 partial。数值越小，HUD 更新越频繁。</div>
@@ -559,7 +576,7 @@ watch(coliCommandPath, () => {
             class="field-control short"
           />
         </div>
-        <div class="field-row">
+        <div v-if="coliRealtime" class="field-row">
           <div class="field-text">
             <div class="field-label">Final Refinement</div>
             <div class="field-note">

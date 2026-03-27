@@ -78,22 +78,30 @@ impl HudService {
         let _ = self.app_handle.emit_to("hud", "state:countdown", payload);
     }
 
-    pub fn emit_recording_style(&self, style: Option<RecordingStyle>) {
+    pub fn emit_recording_style(&self, style: Option<RecordingStyle>, is_batch: bool) {
         let style_str = match style {
             Some(RecordingStyle::PushToTalk) => Some("push_to_talk"),
             Some(RecordingStyle::HandsFree) => Some("hands_free"),
             None => None,
         };
 
-        let _ = self
-            .app_handle
-            .emit("state:recording_style", json!({ "style": style_str }));
+        let _ = self.app_handle.emit(
+            "state:recording_style",
+            json!({ "style": style_str, "batch": is_batch }),
+        );
     }
 
     pub fn emit_correcting(&self, is_correcting: bool) {
         let _ = self.app_handle.emit(
             "state:correcting",
             json!({ "is_correcting": is_correcting }),
+        );
+    }
+
+    pub fn emit_recognizing(&self, is_recognizing: bool) {
+        let _ = self.app_handle.emit(
+            "state:recognizing",
+            json!({ "is_recognizing": is_recognizing }),
         );
     }
 
@@ -115,7 +123,7 @@ impl HudService {
     /// Reset HUD-visible state to a neutral baseline.
     pub fn reset_display(&self) {
         self.emit_countdown(None);
-        self.emit_recording_style(None);
+        self.emit_recording_style(None, false);
         self.emit_correcting(false);
         self.emit_intent(ProcessingIntent::Assistant);
         self.emit_transcript("", false);
