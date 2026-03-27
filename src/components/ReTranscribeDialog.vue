@@ -33,6 +33,8 @@ const asrProviderOptions = [
   { label: '火山引擎', value: 'volcengine' },
   { label: 'Google', value: 'google' },
   { label: 'Qwen', value: 'qwen' },
+  { label: 'Gemini', value: 'gemini' },
+  { label: 'Cohere', value: 'cohere' },
   { label: '本地 (Coli)', value: 'coli' },
 ]
 

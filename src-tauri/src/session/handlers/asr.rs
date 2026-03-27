@@ -1,7 +1,10 @@
 use serde_json::json;
 
 use crate::{
-    asr::{AsrConfig, AsrEvent, AsrProviderType, ColiAsrClient, ColiRefinementMode},
+    asr::{
+        AsrConfig, AsrEvent, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
+        ColiRefinementMode, GeminiTranscriptionClient,
+    },
     state::{AppState, HotkeySessionState, ProcessingIntent},
 };
 
@@ -632,8 +635,61 @@ impl SessionController {
                         }
                     }
                 }
+                AsrProviderType::Cohere => {
+                    let client = CohereTranscriptionClient::new(config.clone());
+                    match client.transcribe_file(&audio_path).await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            controller.send_message(SessionMessage::BatchAsrDone {
+                                text,
+                                model_name: Some(format!(
+                                    "Cohere / {}",
+                                    config.cohere_model.trim()
+                                )),
+                                batch_epoch,
+                            });
+                        }
+                        Ok(_) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: "Batch ASR returned empty result".to_string(),
+                                batch_epoch,
+                            });
+                        }
+                        Err(e) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: e.to_string(),
+                                batch_epoch,
+                            });
+                        }
+                    }
+                }
+                AsrProviderType::Gemini => {
+                    let client = GeminiTranscriptionClient::new(config.clone());
+                    match client.transcribe_file(&audio_path).await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            controller.send_message(SessionMessage::BatchAsrDone {
+                                text,
+                                model_name: Some(format!(
+                                    "Gemini / {}",
+                                    config.gemini_model.trim()
+                                )),
+                                batch_epoch,
+                            });
+                        }
+                        Ok(_) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: "Batch ASR returned empty result".to_string(),
+                                batch_epoch,
+                            });
+                        }
+                        Err(e) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: e.to_string(),
+                                batch_epoch,
+                            });
+                        }
+                    }
+                }
                 _ => {
-                    // Future batch providers (Gemini, Cohere, etc.) will be handled here.
                     controller.send_message(SessionMessage::BatchAsrFailed {
                         reason: format!(
                             "Batch mode not supported for provider {:?}",
