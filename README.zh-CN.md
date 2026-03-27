@@ -178,7 +178,7 @@ Windows 上本地开发不需要代码签名，直接用 PowerShell 构建即可
 
 仓库里现在包含 `.github/workflows/windows-release.yml`。当你发布一个 GitHub Release 时，这个 workflow 会自动检出对应 tag，在 `windows-latest` 上构建 Windows bundle，然后把产物附加回该 release。
 
-如果想先试跑一次，也可以在 GitHub 的 Actions 页面手动触发这个 workflow，并填一个已经存在的 tag。手动模式只会构建 Windows 安装包，并把结果作为短期保留的 Actions artifact 上传，不会直接改动 release。
+如果想先试跑一次，也可以在 GitHub 的 Actions 页面手动触发这个 workflow，并填一个已经存在的 tag。手动模式既可以只把结果作为短期保留的 Actions artifact 上传，也可以在你显式开启时，直接把构建好的 Windows 安装包补传到这个 tag 对应的现有 release。
 
 推荐流程：
 

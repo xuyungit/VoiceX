@@ -7,6 +7,11 @@ on:
         description: Existing tag to build on Windows
         required: true
         type: string
+      upload_to_release:
+        description: Upload built Windows bundles to the existing GitHub Release for this tag
+        required: false
+        default: false
+        type: boolean
   release:
     types:
       - published
@@ -78,7 +83,7 @@ jobs:
 
       - name: Build and upload Windows bundles to GitHub Release
         if: github.event_name == 'release'
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -90,7 +95,7 @@ jobs:
         run: pnpm tauri build
 
       - name: Upload manual test bundles
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && inputs.upload_to_release != true
         uses: actions/upload-artifact@v4
         with:
           name: windows-bundle-${{ env.TAG_NAME }}
@@ -99,3 +104,14 @@ jobs:
             src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 3
+
+      - name: Upload manual bundles to existing GitHub Release
+        if: github.event_name == 'workflow_dispatch' && inputs.upload_to_release == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release upload "${TAG_NAME}" \
+            src-tauri/target/release/bundle/msi/*.msi \
+            src-tauri/target/release/bundle/nsis/*.exe \
+            --clobber

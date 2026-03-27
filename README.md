@@ -178,7 +178,7 @@ You do not need a separate Windows development machine just to produce release i
 
 This repository includes `.github/workflows/windows-release.yml`, which triggers when a GitHub Release is published. The workflow checks out the tagged commit, builds the Windows bundles on `windows-latest`, and attaches them to that release.
 
-For a dry run, you can trigger the same workflow manually from the GitHub Actions page with an existing tag. In manual mode it builds the Windows bundles but uploads them as a short-lived Actions artifact instead of attaching them to a release.
+For a dry run, you can trigger the same workflow manually from the GitHub Actions page with an existing tag. In manual mode it can either upload the bundles as a short-lived Actions artifact, or upload them directly to an existing GitHub Release for that tag if you explicitly enable that option.
 
 Recommended flow:
 
