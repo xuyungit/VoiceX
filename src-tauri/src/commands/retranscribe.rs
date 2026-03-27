@@ -101,6 +101,7 @@ async fn run_retranscribe(
     // --- ASR ---
     let asr_text = match config.provider_type {
         AsrProviderType::Coli => run_coli_asr(path, config).await?,
+        AsrProviderType::Google => run_google_asr(path, config, cancel.clone()).await?,
         _ => run_streaming_asr(path, config, cancel.clone()).await?,
     };
 
@@ -140,6 +141,32 @@ async fn run_coli_asr(path: &PathBuf, config: &mut AsrConfig) -> Result<String, 
         Ok(None) => Err("Coli ASR 返回空结果".into()),
         Err(e) => Err(format!("Coli ASR 失败: {}", e)),
     }
+}
+
+/// Run ASR via Google: try sync Recognize first (fast, ≤60s), fall back to streaming.
+async fn run_google_asr(
+    path: &PathBuf,
+    config: &AsrConfig,
+    cancel: CancellationToken,
+) -> Result<String, String> {
+    let client = GoogleSttClient::new(config.clone());
+
+    // Try sync Recognize first — much faster for short audio
+    match client.recognize_file(path).await {
+        Ok(text) => {
+            log::info!("Google STT Recognize (sync) succeeded");
+            return Ok(text);
+        }
+        Err(e) => {
+            log::warn!(
+                "Google STT Recognize (sync) failed, falling back to streaming: {}",
+                e
+            );
+        }
+    }
+
+    // Fallback to streaming (handles >60s audio and other edge cases)
+    run_streaming_asr(path, config, cancel).await
 }
 
 /// Run ASR via streaming interface (Volcengine/Google/Qwen) by feeding decoded PCM.
