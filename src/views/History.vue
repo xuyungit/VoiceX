@@ -6,6 +6,7 @@ import { useHistoryStore, type HistoryRecord } from '../stores/history'
 import { useSyncStore } from '../stores/sync'
 import { useSettingsStore } from '../stores/settings'
 import { trimTrailingPunctuation } from '../utils/text'
+import ReTranscribeDialog from '../components/ReTranscribeDialog.vue'
 
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
@@ -58,6 +59,8 @@ const groupedRecords = computed(() => {
 
 const detailVisible = ref(false)
 const detailRecord = ref<HistoryRecord | null>(null)
+const reTranscribeVisible = ref(false)
+const reTranscribeRecord = ref<HistoryRecord | null>(null)
 const audioPlayer = ref<HTMLAudioElement | null>(null)
 const playingId = ref<string | null>(null)
 const objectUrl = ref<string | null>(null)
@@ -321,6 +324,12 @@ function moreOptions(record: HistoryRecord): DropdownOption[] {
       icon: renderIcon(isPlaying ? 'M8 5h3v14H8zm5 0h3v14h-3z' : 'M8 5.14 19 12l-11 6.86V5.14z')
     },
     {
+      label: '重新转录',
+      key: 'retranscribe',
+      disabled: !record.audioPath,
+      icon: renderIcon('M17.65 6.35A7.96 7.96 0 0 0 12 4C7.58 4 4.01 7.58 4.01 12S7.58 20 12 20c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z')
+    },
+    {
       label: '查看详情',
       key: 'details',
       icon: renderIcon('M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm0 2.5L17.5 8H14V4.5zM8 13h8v2H8v-2zm0 4h8v2H8v-2zm0-8h5v2H8V9z')
@@ -331,6 +340,12 @@ function moreOptions(record: HistoryRecord): DropdownOption[] {
 function handleMoreAction(key: string | number, record: HistoryRecord) {
   if (key === 'play') {
     void togglePlayback(record)
+    return
+  }
+
+  if (key === 'retranscribe') {
+    reTranscribeRecord.value = record
+    reTranscribeVisible.value = true
     return
   }
 
@@ -566,6 +581,11 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
       </div>
     </NModal>
+
+    <ReTranscribeDialog
+      v-model:show="reTranscribeVisible"
+      :record="reTranscribeRecord"
+    />
   </div>
 </template>
 

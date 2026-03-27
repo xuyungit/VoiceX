@@ -259,6 +259,8 @@ pub fn run() {
             commands::hotword::sync_hotwords,
             commands::hotword::force_download_hotwords,
             commands::hotword::list_online_vocabularies,
+            commands::retranscribe::re_transcribe,
+            commands::retranscribe::cancel_retranscribe,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
