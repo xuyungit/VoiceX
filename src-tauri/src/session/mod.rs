@@ -1,0 +1,924 @@
+//! Session controller: orchestrates hotkey-driven state machine, HUD lifecycle,
+//! and timers for push-to-talk / hands-free modes.
+mod handlers;
+mod message;
+mod utils;
+
+pub use message::{CancelReason, SessionMessage};
+
+use std::{
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+
+use tauri::async_runtime::JoinHandle;
+use tauri::{AppHandle, Manager};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+
+use crate::{
+    injector::TextInjectionMode,
+    services::{
+        audio_manager::AudioManager,
+        countdown_service::CountdownService,
+        hud_service::HudService,
+        llm_service::{LlmCorrectionResult, LlmService},
+    },
+    state::{AppState, HotkeySessionState, ProcessingIntent, TranslationTriggerMode},
+};
+
+const FINALIZE_HIDE_DELAY_MS: u64 = 1200;
+const MIN_RECORDING_MS: u64 = 500;
+const COUNTDOWN_THRESHOLD_SECS: u64 = 30;
+const MIN_CORRECTION_CHARS: usize = 5;
+const ASR_FINAL_WAIT_MS: u64 = 15_000;
+
+/// Serializes session actions onto a single async task and owns AppState (actor style).
+#[derive(Clone)]
+pub struct SessionCoordinator {
+    sender: UnboundedSender<SessionMessage>,
+}
+
+impl SessionCoordinator {
+    pub fn new(controller: SessionController) -> Self {
+        let (tx, mut rx) = unbounded_channel::<SessionMessage>();
+        controller.attach_sender(tx.clone());
+        tauri::async_runtime::spawn(async move {
+            // Own the state inside the loop to avoid external locking.
+            let mut state = AppState::new();
+            while let Some(msg) = rx.recv().await {
+                controller.handle_message(&mut state, msg);
+            }
+        });
+
+        Self { sender: tx }
+    }
+
+    pub fn send(&self, msg: SessionMessage) {
+        let _ = self.sender.send(msg);
+    }
+}
+
+#[derive(Clone)]
+pub struct SessionController {
+    hud_service: Arc<Mutex<Option<HudService>>>,
+    audio_manager: Arc<Mutex<Option<AudioManager>>>,
+    countdown_service: Arc<Mutex<Option<CountdownService>>>,
+    app_handle: Arc<Mutex<Option<AppHandle>>>,
+    coordinator_tx: Arc<Mutex<Option<UnboundedSender<SessionMessage>>>>,
+    hold_timer: Arc<Mutex<Option<JoinHandle<()>>>>,
+    asr_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    asr_cancel_token: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
+    asr_final_timeout: Arc<Mutex<Option<JoinHandle<()>>>>,
+    injection_epoch: Arc<AtomicU64>,
+    injection_cancel_flag: Arc<AtomicBool>,
+}
+
+impl SessionController {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn attach_sender(&self, sender: UnboundedSender<SessionMessage>) {
+        if let Ok(mut guard) = self.coordinator_tx.lock() {
+            *guard = Some(sender);
+        }
+    }
+
+    fn send_message(&self, msg: SessionMessage) {
+        if let Ok(guard) = self.coordinator_tx.lock() {
+            if let Some(tx) = guard.as_ref() {
+                let _ = tx.send(msg);
+            }
+        }
+    }
+
+    /// Attach the running app handle so background threads can emit events.
+    pub fn init_with_handle(&self, app: &AppHandle) {
+        if let Ok(mut guard) = self.hud_service.lock() {
+            *guard = Some(HudService::new(app.clone()));
+        }
+        if let Ok(mut guard) = self.audio_manager.lock() {
+            *guard = Some(AudioManager::new(app.clone()));
+        }
+        if let Ok(mut guard) = self.countdown_service.lock() {
+            *guard = Some(CountdownService::new());
+        }
+        if let Ok(mut guard) = self.app_handle.lock() {
+            *guard = Some(app.clone());
+        }
+    }
+
+    /// Update runtime settings that affect timers and restart hands-free countdowns if needed.
+    pub fn apply_settings(
+        &self,
+        hold_threshold_ms: u32,
+        max_recording_minutes: u32,
+        text_injection_mode: &str,
+        input_device_uid: Option<String>,
+        remove_trailing_punctuation: bool,
+        short_sentence_threshold: u32,
+        replacement_rules: Vec<crate::commands::settings::ReplacementRule>,
+        translation_enabled: bool,
+        translation_trigger_mode: &str,
+        double_tap_window_ms: u32,
+    ) {
+        // If coordinator is attached, route through message loop; otherwise apply directly (startup).
+        if self
+            .coordinator_tx
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().cloned())
+            .is_some()
+        {
+            self.send_message(SessionMessage::ApplySettings {
+                hold_threshold_ms,
+                max_recording_minutes,
+                text_injection_mode: text_injection_mode.to_string(),
+                input_device_uid,
+                remove_trailing_punctuation,
+                short_sentence_threshold,
+                replacement_rules,
+                translation_enabled,
+                translation_trigger_mode: translation_trigger_mode.to_string(),
+                double_tap_window_ms,
+            });
+            return;
+        }
+
+        // If coordinator not attached, apply directly (should be rare).
+        let mut state = AppState::new();
+        self.handle_apply_settings_state(
+            &mut state,
+            hold_threshold_ms,
+            max_recording_minutes,
+            text_injection_mode,
+            input_device_uid.as_deref(),
+            remove_trailing_punctuation,
+            short_sentence_threshold,
+            replacement_rules,
+            translation_enabled,
+            translation_trigger_mode,
+            double_tap_window_ms,
+        );
+    }
+
+    fn handle_apply_settings_state(
+        &self,
+        state: &mut AppState,
+        hold_threshold_ms: u32,
+        max_recording_minutes: u32,
+        text_injection_mode: &str,
+        input_device_uid: Option<&str>,
+        remove_trailing_punctuation: bool,
+        short_sentence_threshold: u32,
+        replacement_rules: Vec<crate::commands::settings::ReplacementRule>,
+        translation_enabled: bool,
+        translation_trigger_mode: &str,
+        double_tap_window_ms: u32,
+    ) {
+        state.hold_threshold_ms = hold_threshold_ms as u64;
+        state.max_recording_minutes = max_recording_minutes;
+        state.text_injection_mode = TextInjectionMode::from_str(text_injection_mode);
+        state.remove_trailing_punctuation = remove_trailing_punctuation;
+        state.short_sentence_threshold = short_sentence_threshold;
+        state.replacement_rules = replacement_rules;
+        state.translation_enabled = translation_enabled;
+        state.translation_trigger_mode = TranslationTriggerMode::from_str(translation_trigger_mode);
+        state.double_tap_window_ms = double_tap_window_ms as u64;
+        if !state.translation_enabled
+            || state.translation_trigger_mode == TranslationTriggerMode::Off
+        {
+            state.pending_translation_upgrade = false;
+            state.double_tap_upgrade_deadline = None;
+        }
+        let should_restart_timeout =
+            state.session_state == HotkeySessionState::HandsFree && state.is_recording;
+
+        // Always cancel existing countdowns so new limits take effect immediately.
+        self.cancel_hands_free_timeout();
+
+        if should_restart_timeout {
+            self.start_hands_free_timeout(max_recording_minutes);
+        }
+
+        if let Some(manager) = self.audio_manager() {
+            if let Err(err) = manager.set_preferred_device(input_device_uid.map(|s| s.to_string()))
+            {
+                log::warn!("Failed to set preferred audio device: {}", err);
+            }
+        }
+    }
+
+    /// Message dispatcher: update state inside the coordinator loop.
+    fn handle_message(&self, state: &mut AppState, msg: SessionMessage) {
+        match msg {
+            SessionMessage::HotkeyPressed => self.on_hotkey_pressed(state),
+            SessionMessage::HotkeyReleased => self.on_hotkey_released(state),
+            SessionMessage::HoldThresholdReached => self.on_hold_threshold_reached_state(state),
+            SessionMessage::CancelSession(reason) => {
+                if state.session_state == HotkeySessionState::Idle
+                    && !state.is_recording
+                    && !state.is_correcting
+                {
+                    log::debug!("Cancel ignored in idle state: {:?}", reason);
+                    self.set_escape_swallowing(false);
+                } else {
+                    self.handle_cancel_session_state(state, reason)
+                }
+            }
+            SessionMessage::HandsFreeCountdownTick(remaining) => {
+                self.emit_countdown(Some(remaining))
+            }
+            SessionMessage::HandsFreeTimeout => self.on_hands_free_timeout_state(state),
+            SessionMessage::FinalizeHideReady => self.on_finalize_hide_ready_state(state),
+            SessionMessage::AsrFinalTimeout => self.on_asr_final_timeout(state),
+            SessionMessage::AsrEvent(evt) => {
+                if state.session_state == HotkeySessionState::Idle
+                    && !state.is_recording
+                    && !state.is_correcting
+                {
+                    log::debug!("Dropping stale ASR event after cancel");
+                    return;
+                }
+                self.handle_asr_event_state(state, evt)
+            }
+            SessionMessage::AsrStreamFinished => {
+                if state.session_state == HotkeySessionState::Idle
+                    && !state.is_recording
+                    && !state.is_correcting
+                {
+                    log::debug!("Dropping stale ASR stream-finished after cancel");
+                    return;
+                }
+                self.on_asr_stream_finished_state(state)
+            }
+            SessionMessage::CorrectingStart => self.on_correcting_start(state),
+            SessionMessage::CorrectingStop => self.on_correcting_stop(state),
+            SessionMessage::ApplySettings {
+                hold_threshold_ms,
+                max_recording_minutes,
+                text_injection_mode,
+                input_device_uid,
+                remove_trailing_punctuation,
+                short_sentence_threshold,
+                replacement_rules,
+                translation_enabled,
+                translation_trigger_mode,
+                double_tap_window_ms,
+            } => self.handle_apply_settings_state(
+                state,
+                hold_threshold_ms,
+                max_recording_minutes,
+                &text_injection_mode,
+                input_device_uid.as_deref(),
+                remove_trailing_punctuation,
+                short_sentence_threshold,
+                replacement_rules,
+                translation_enabled,
+                &translation_trigger_mode,
+                double_tap_window_ms,
+            ),
+            SessionMessage::AudioStarted {
+                sample_rate,
+                channels,
+                path,
+            } => self.handle_audio_started_state(state, sample_rate, channels, path),
+            SessionMessage::AudioStopped {
+                path,
+                refinement_path,
+                duration_ms,
+            } => self.handle_audio_stopped_state(state, path, refinement_path, duration_ms),
+            SessionMessage::AudioStartFailed { reason } => {
+                self.on_audio_start_failed_state(state, reason)
+            }
+            SessionMessage::AsrRefinementDone {
+                text,
+                model_name,
+                refinement_epoch,
+            } => {
+                if self.injection_epoch.load(Ordering::SeqCst) != refinement_epoch {
+                    log::debug!(
+                        "Dropping stale ASR refinement result after epoch change (epoch={}, current={})",
+                        refinement_epoch,
+                        self.injection_epoch.load(Ordering::SeqCst)
+                    );
+                    return;
+                }
+                if state.session_state == HotkeySessionState::Idle
+                    && !state.is_recording
+                    && !state.is_correcting
+                {
+                    log::debug!("Dropping stale ASR refinement result in idle state");
+                    return;
+                }
+                self.on_asr_refinement_done_state(state, text, model_name)
+            }
+            SessionMessage::AsrRefinementFailed {
+                reason,
+                refinement_epoch,
+            } => {
+                if self.injection_epoch.load(Ordering::SeqCst) != refinement_epoch {
+                    log::debug!(
+                        "Dropping stale ASR refinement failure after epoch change (epoch={}, current={})",
+                        refinement_epoch,
+                        self.injection_epoch.load(Ordering::SeqCst)
+                    );
+                    return;
+                }
+                if state.session_state == HotkeySessionState::Idle
+                    && !state.is_recording
+                    && !state.is_correcting
+                {
+                    log::debug!("Dropping stale ASR refinement failure in idle state");
+                    return;
+                }
+                self.on_asr_refinement_failed_state(state, reason)
+            }
+            SessionMessage::InjectDone {
+                text,
+                corrected,
+                llm_invoked,
+                recording_style,
+                duration_ms,
+                audio_path,
+                original_for_history,
+                injection_version,
+                intent,
+            } => self.handle_inject_done_state(
+                state,
+                text,
+                corrected,
+                llm_invoked,
+                recording_style,
+                duration_ms,
+                audio_path,
+                original_for_history,
+                injection_version,
+                intent,
+            ),
+        }
+    }
+
+    /// Hotkey pressed -> enter Pending, arm hold timer, show HUD.
+    pub fn handle_hotkey_pressed(&self) {
+        self.send_message(SessionMessage::HotkeyPressed);
+    }
+
+    /// Hotkey released -> resolve to hands-free or finalize depending on mode.
+    pub fn handle_hotkey_released(&self) {
+        self.send_message(SessionMessage::HotkeyReleased);
+    }
+
+    /// ESC or manual cancel -> abort current session.
+    pub fn handle_escape_pressed(&self) {
+        self.send_message(SessionMessage::CancelSession(CancelReason::EscapeKey));
+    }
+
+    /// Called when long-press threshold is reached while still held down.
+    pub fn on_hold_threshold_reached(&self) {
+        self.send_message(SessionMessage::HoldThresholdReached);
+    }
+
+    /// Apply LLM correction if enabled; returns LLM invocation details.
+    async fn correct_text_if_enabled(
+        &self,
+        text: &str,
+        intent: ProcessingIntent,
+    ) -> LlmCorrectionResult {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return LlmCorrectionResult {
+                text: text.to_string(),
+                invoked: false,
+                changed: false,
+            };
+        }
+        if intent == ProcessingIntent::Assistant && trimmed.chars().count() <= MIN_CORRECTION_CHARS
+        {
+            log::info!(
+                "LLM correction skipped for short text (len <= {}): {}",
+                MIN_CORRECTION_CHARS,
+                trimmed
+            );
+            return LlmCorrectionResult {
+                text: text.to_string(),
+                invoked: false,
+                changed: false,
+            };
+        }
+
+        // Reflect correcting flag via coordinator-managed state.
+        self.send_message(SessionMessage::CorrectingStart);
+        // Keep HUD text visible during correction by re-emitting the last transcript.
+        self.emit_transcript(trimmed, true);
+
+        let service = LlmService::new();
+        let result = service.correct_text_if_enabled(trimmed, intent).await;
+        if result.changed {
+            log::info!("LLM correction applied before injection");
+        }
+
+        self.send_message(SessionMessage::CorrectingStop);
+        result
+    }
+
+    pub(crate) fn show_hud(&self) {
+        if let Some(hud) = self.hud_service() {
+            hud.show();
+        }
+        self.set_escape_swallowing(true);
+    }
+
+    pub(crate) fn hide_hud(&self) {
+        if let Some(hud) = self.hud_service() {
+            hud.hide();
+        }
+        self.set_escape_swallowing(false);
+    }
+
+    pub(crate) fn hide_hud_and_reset_state(&self, state: &mut AppState) {
+        self.cancel_auto_hide();
+        self.cancel_asr_final_timeout();
+        // If an audio file is still referenced in state, it was never persisted to the
+        // database (e.g. ASR returned no result).  Delete it so it doesn't become an orphan.
+        self.discard_session_audio_file(state, "session_reset");
+        self.discard_session_refinement_audio_file(state, "session_reset");
+        self.hide_hud();
+        state.reset();
+        self.emit_state_from(state);
+    }
+
+    pub(crate) fn discard_session_audio_file(&self, state: &mut AppState, reason: &str) {
+        let Some(path) = state.session_audio_path.take() else {
+            return;
+        };
+
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                log::info!(
+                    "Removed session audio file (reason: {}, path: {})",
+                    reason,
+                    path.display()
+                );
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                log::debug!(
+                    "Session audio file already removed (reason: {}, path: {})",
+                    reason,
+                    path.display()
+                );
+            }
+            Err(err) => {
+                log::warn!(
+                    "Failed to remove session audio file (reason: {}, path: {}, err: {})",
+                    reason,
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    pub(crate) fn discard_session_refinement_audio_file(&self, state: &mut AppState, reason: &str) {
+        let Some(path) = state.session_refinement_audio_path.take() else {
+            return;
+        };
+
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                log::info!(
+                    "Removed refinement audio file (reason: {}, path: {})",
+                    reason,
+                    path.display()
+                );
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                log::debug!(
+                    "Refinement audio file already removed (reason: {}, path: {})",
+                    reason,
+                    path.display()
+                );
+            }
+            Err(err) => {
+                log::warn!(
+                    "Failed to remove refinement audio file (reason: {}, path: {}, err: {})",
+                    reason,
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
+    fn start_hold_timer(&self, threshold_ms: u64) {
+        self.cancel_hold_timer();
+        self.cancel_asr_final_timeout();
+
+        let controller = self.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(threshold_ms)).await;
+            controller.send_message(SessionMessage::HoldThresholdReached);
+        });
+
+        if let Ok(mut guard) = self.hold_timer.lock() {
+            *guard = Some(handle);
+        }
+    }
+
+    fn cancel_hold_timer(&self) {
+        if let Ok(mut guard) = self.hold_timer.lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    fn start_hands_free_timeout(&self, minutes: u32) {
+        self.cancel_hands_free_timeout();
+        self.cancel_asr_final_timeout();
+
+        let controller = self.clone();
+        let total_secs = (minutes as u64) * 60;
+
+        if total_secs == 0 {
+            log::debug!("Hands-free timeout disabled (minutes=0)");
+            return;
+        }
+
+        log::debug!("Hands-free timeout scheduled for {} seconds", total_secs);
+        if let Some(countdown) = self.countdown_service() {
+            let controller_tick = controller.clone();
+            countdown.start(
+                total_secs,
+                move |remaining| {
+                    if remaining as u64 <= COUNTDOWN_THRESHOLD_SECS {
+                        controller_tick
+                            .send_message(SessionMessage::HandsFreeCountdownTick(remaining));
+                    }
+                },
+                move || {
+                    controller.send_message(SessionMessage::HandsFreeTimeout);
+                },
+            );
+        }
+    }
+
+    fn cancel_hands_free_timeout(&self) {
+        if let Some(countdown) = self.countdown_service() {
+            if countdown.cancel() {
+                log::debug!("Hands-free timeout cancelled");
+            }
+        }
+        self.emit_countdown(None);
+    }
+
+    fn abort_asr_task(&self) {
+        if let Ok(mut token_guard) = self.asr_cancel_token.lock() {
+            if let Some(token) = token_guard.take() {
+                token.cancel();
+            }
+        }
+        if let Ok(mut guard) = self.asr_task.lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    fn schedule_finalize_cleanup(&self) {
+        self.cancel_auto_hide();
+
+        let controller = self.clone();
+        if let Some(hud) = self.hud_service() {
+            hud.schedule_hide(FINALIZE_HIDE_DELAY_MS, move || {
+                controller.send_message(SessionMessage::FinalizeHideReady);
+            });
+        }
+    }
+
+    pub(crate) fn cancel_auto_hide(&self) {
+        if let Some(hud) = self.hud_service() {
+            hud.cancel_hide();
+        }
+    }
+
+    pub(crate) fn cancel_asr_final_timeout(&self) {
+        if let Ok(mut guard) = self.asr_final_timeout.lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    pub(crate) fn emit_state_from(&self, state: &AppState) {
+        if let Some(hud) = self.hud_service() {
+            let recording_style_for_hud = match state.session_state {
+                HotkeySessionState::Idle | HotkeySessionState::Finalizing => None,
+                _ => state.recording_style,
+            };
+            hud.emit_recording_style(recording_style_for_hud);
+            hud.emit_correcting(state.is_correcting);
+            hud.emit_intent(state.intent);
+            if state.session_state == HotkeySessionState::Finalizing {
+                hud.emit_recognition_stopped();
+            }
+        }
+    }
+
+    fn emit_transcript(&self, text: &str, is_final: bool) {
+        if let Some(hud) = self.hud_service() {
+            hud.emit_transcript(text, is_final);
+        }
+    }
+
+    fn emit_countdown(&self, seconds: Option<u32>) {
+        if let Some(hud) = self.hud_service() {
+            hud.emit_countdown(seconds);
+        }
+    }
+
+    fn set_escape_swallowing(&self, enabled: bool) {
+        if let Ok(handle_guard) = self.app_handle.lock() {
+            if let Some(app) = handle_guard.as_ref() {
+                let manager: tauri::State<'_, crate::hotkey::HotkeyManager> = app.state();
+                manager.set_escape_swallowing(enabled);
+            }
+        }
+    }
+
+    fn handle_cancel_session_state(&self, state: &mut AppState, reason: CancelReason) {
+        log::info!("Cancelling session: {:?}", reason);
+        // Invalidate any in-flight injection tasks.
+        self.injection_epoch.fetch_add(1, Ordering::SeqCst);
+        self.injection_cancel_flag.store(true, Ordering::SeqCst);
+        self.cancel_hold_timer();
+        self.cancel_hands_free_timeout();
+        self.cancel_auto_hide();
+        // Stop ASR task immediately to avoid stale events/stream-finished driving injection.
+        self.abort_asr_task();
+
+        // Stop capture/asr first so downstream callbacks won't emit into a stale state.
+        if state.is_recording {
+            self.stop_audio_capture("cancelled");
+        } else {
+            self.abort_asr_task();
+        }
+
+        self.discard_session_audio_file(state, "session_cancelled");
+        self.discard_session_refinement_audio_file(state, "session_cancelled");
+
+        self.hide_hud();
+        state.reset();
+        self.emit_state_from(state);
+        self.set_escape_swallowing(false);
+    }
+
+    fn start_audio_capture(&self) {
+        if let Some(manager) = self.audio_manager() {
+            let capture_refinement_pcm = crate::storage::get_settings()
+                .map(|settings| {
+                    let config = crate::asr::AsrConfig::from(&settings);
+                    config.provider_type == crate::asr::AsrProviderType::Coli
+                        && config.coli_final_refinement_mode != crate::asr::ColiRefinementMode::Off
+                })
+                .unwrap_or(false);
+            log::info!(
+                "COLI_REFINE capture_buffer_enabled={}",
+                capture_refinement_pcm
+            );
+            match manager.start_capture(capture_refinement_pcm) {
+                Ok(handle) => {
+                    let rx = handle.receiver;
+                    let path_str = handle
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string());
+                    self.send_message(SessionMessage::AudioStarted {
+                        sample_rate: handle.sample_rate,
+                        channels: handle.channels,
+                        path: path_str.clone(),
+                    });
+                    log::info!(
+                        "Audio capture started ({} Hz, {} ch)",
+                        handle.sample_rate,
+                        handle.channels
+                    );
+                    self.spawn_asr(rx, handle.sample_rate, handle.channels);
+                }
+                Err(err) => {
+                    let reason = format!("Failed to start audio capture: {}", err);
+                    log::error!("{}", reason);
+                    self.send_message(SessionMessage::AudioStartFailed { reason });
+                }
+            }
+        } else {
+            let reason = "Audio manager not initialized; cannot start capture".to_string();
+            log::error!("{}", reason);
+            self.send_message(SessionMessage::AudioStartFailed { reason });
+        }
+    }
+
+    fn stop_audio_capture(&self, reason: &str) {
+        // No further auto-stop after we intentionally stop capture.
+        self.cancel_hands_free_timeout();
+
+        if let Some(manager) = self.audio_manager() {
+            match manager.stop_capture() {
+                Ok(summary) => {
+                    let path_str = summary
+                        .path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "<none>".to_string());
+                    self.send_message(SessionMessage::AudioStopped {
+                        path: summary
+                            .path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().to_string()),
+                        refinement_path: summary
+                            .refinement_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().to_string()),
+                        duration_ms: Some(summary.duration_ms),
+                    });
+                    log::info!(
+                        "COLI_REFINE audio_stop opus_path={} refinement_wav_path={}",
+                        summary
+                            .path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<none>".to_string()),
+                        summary
+                            .refinement_path
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<none>".to_string())
+                    );
+                    log::info!(
+                        "Audio capture stopped (reason: {}, duration {} ms, bytes {}, path={})",
+                        reason,
+                        summary.duration_ms,
+                        summary.bytes_written,
+                        path_str
+                    );
+                }
+                Err(err) => {
+                    log::error!("Failed to stop audio capture (reason: {}): {}", reason, err);
+                }
+            }
+        } else {
+            log::error!("Audio manager not initialized; cannot stop capture");
+        }
+    }
+
+    fn hud_service(&self) -> Option<HudService> {
+        self.hud_service.lock().ok().and_then(|h| h.clone())
+    }
+
+    fn audio_manager(&self) -> Option<AudioManager> {
+        self.audio_manager.lock().ok().and_then(|m| m.clone())
+    }
+
+    fn countdown_service(&self) -> Option<CountdownService> {
+        self.countdown_service.lock().ok().and_then(|c| c.clone())
+    }
+
+    fn app_handle(&self) -> Option<AppHandle> {
+        self.app_handle.lock().ok().and_then(|h| h.clone())
+    }
+
+    fn handle_audio_started_state(
+        &self,
+        state: &mut AppState,
+        _sample_rate: u32,
+        _channels: u16,
+        path: Option<String>,
+    ) {
+        state.session_audio_path = path.map(|p| p.into());
+        state.session_start = Some(Instant::now());
+    }
+
+    fn handle_audio_stopped_state(
+        &self,
+        state: &mut AppState,
+        path: Option<String>,
+        refinement_path: Option<String>,
+        duration_ms: Option<u64>,
+    ) {
+        state.session_audio_path = path.as_ref().map(|p| p.into());
+        state.session_refinement_audio_path = refinement_path.as_ref().map(|p| p.into());
+        state.session_duration_ms = duration_ms;
+        state.session_start = None;
+
+        if let Some(ms) = duration_ms {
+            if ms < MIN_RECORDING_MS {
+                log::info!(
+                    "Recording too short ({} ms); skipping ASR/LLM/injection",
+                    ms
+                );
+                self.send_message(SessionMessage::CancelSession(CancelReason::TooShort {
+                    duration_ms: ms,
+                    audio_path: path.clone(),
+                }));
+                return;
+            }
+        }
+
+        // If no final result arrived but we have a transcript, promote the latest transcript to final as a fallback.
+        if !state.has_final_result && !state.transcript_text.is_empty() {
+            log::warn!(
+                "No ASR final before stop; using last transcript as final (len={})",
+                state.transcript_text.chars().count()
+            );
+            state.session_final_text = state.transcript_text.clone();
+            state.last_injected_text = state.transcript_text.clone();
+            state.has_final_result = true;
+        }
+
+        log::info!(
+            "Recording stopped: duration_ms={:?}, has_final={}, final_len={}, is_recording={}, final_injected={}, asr_finished={}",
+            duration_ms,
+            state.has_final_result,
+            state.session_final_text.chars().count(),
+            state.is_recording,
+            state.final_injected,
+            state.asr_stream_finished
+        );
+
+        // If a final already arrived (we treat it as ASR finished), inject immediately.
+        if state.has_final_result && state.asr_stream_finished {
+            self.maybe_inject_final_state(state);
+            return;
+        }
+
+        // Wait for ASR stream-finished; schedule a fallback in case the server never closes.
+        if !state.asr_stream_finished {
+            let controller = self.clone();
+            let handle = tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(ASR_FINAL_WAIT_MS)).await;
+                controller.send_message(SessionMessage::AsrFinalTimeout);
+            });
+            if let Ok(mut guard) = self.asr_final_timeout.lock() {
+                *guard = Some(handle);
+            }
+        }
+    }
+
+    fn on_correcting_start(&self, state: &mut AppState) {
+        // Keep HUD visible during correction; cancel pending auto-hide.
+        self.cancel_auto_hide();
+        state.is_correcting = true;
+        self.emit_state_from(state);
+    }
+
+    fn on_correcting_stop(&self, state: &mut AppState) {
+        state.is_correcting = false;
+        self.emit_state_from(state);
+
+        if state.session_state == HotkeySessionState::Finalizing {
+            // If hide was cancelled during correction, reschedule it so final text stays visible briefly.
+            self.schedule_finalize_cleanup();
+        }
+    }
+
+    fn on_audio_start_failed_state(&self, state: &mut AppState, reason: String) {
+        log::warn!("Audio start failed; resetting session: {}", reason);
+
+        // Invalidate any in-flight operations just in case.
+        self.injection_epoch.fetch_add(1, Ordering::SeqCst);
+        self.injection_cancel_flag.store(true, Ordering::SeqCst);
+
+        self.cancel_hold_timer();
+        self.cancel_hands_free_timeout();
+        self.cancel_auto_hide();
+        self.abort_asr_task();
+
+        self.discard_session_audio_file(state, "audio_start_failed");
+        self.discard_session_refinement_audio_file(state, "audio_start_failed");
+        self.hide_hud();
+        state.reset();
+        self.emit_state_from(state);
+        self.set_escape_swallowing(false);
+    }
+}
+
+impl Default for SessionController {
+    fn default() -> Self {
+        Self {
+            hud_service: Arc::new(Mutex::new(None)),
+            audio_manager: Arc::new(Mutex::new(None)),
+            countdown_service: Arc::new(Mutex::new(None)),
+            app_handle: Arc::new(Mutex::new(None)),
+            coordinator_tx: Arc::new(Mutex::new(None)),
+            hold_timer: Arc::new(Mutex::new(None)),
+            asr_task: Arc::new(Mutex::new(None)),
+            asr_cancel_token: Arc::new(Mutex::new(None)),
+            asr_final_timeout: Arc::new(Mutex::new(None)),
+            injection_epoch: Arc::new(AtomicU64::new(0)),
+            injection_cancel_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}

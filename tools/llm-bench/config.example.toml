@@ -1,0 +1,86 @@
+# LLM Benchmark Configuration
+# Copy to config.toml and fill in your API keys
+
+# Global settings
+rounds = 3  # Number of rounds per provider per test case
+
+# System prompt template for text correction
+# {{DICTIONARY}} will be replaced with the dictionary content
+prompt = """你是一个语音转写文本纠正助手。
+
+你的任务：
+- 修正语音识别文本中的识别错误、同音字错误、错别字和标点问题
+- 保持原意，不增删信息
+- 当识别结果中出现与用户词典中词汇发音相似的词时，替换为词典中的标准形式
+
+用户热词词典：
+{{DICTIONARY}}
+
+输出：
+纠正后的文本或原文（如果不需要任何修改），不要输出任何其他说明性的内容"""
+
+# Dictionary words (one per line)
+dictionary = """
+Kubernetes
+Docker
+VoiceX
+"""
+
+# --- Providers ---
+# Each [[provider]] is one model to benchmark.
+# api_key supports ${ENV_VAR} syntax for environment variables.
+# type: "volcengine" | "openai" | "custom"
+# [provider.extra] can inject arbitrary fields into the request body.
+
+[[provider]]
+name = "Doubao-Seed-Lite"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+api_key = "${VOLCENGINE_API_KEY}"
+model = "doubao-seed-1-6-lite-251015"
+type = "volcengine"
+reasoning_effort = "minimal"
+
+[[provider]]
+name = "Doubao-Seed-Pro"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+api_key = "${VOLCENGINE_API_KEY}"
+model = "doubao-seed-1-6-pro-251015"
+type = "volcengine"
+reasoning_effort = "minimal"
+
+[[provider]]
+name = "GPT-4o-mini"
+base_url = "https://api.openai.com/v1"
+api_key = "${OPENAI_API_KEY}"
+model = "gpt-4o-mini"
+type = "openai"
+
+[[provider]]
+name = "Qwen3.5-Plus"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+api_key = "${DASHSCOPE_API_KEY}"
+model = "qwen3.5-plus"
+type = "custom"
+[provider.extra]
+enable_thinking = false
+
+# [[provider]]
+# name = "DeepSeek-V3"
+# base_url = "https://api.deepseek.com/v1"
+# api_key = "${DEEPSEEK_API_KEY}"
+# model = "deepseek-chat"
+# type = "custom"
+
+# [[provider]]
+# name = "Gemini-2.0-Flash"
+# base_url = "https://generativelanguage.googleapis.com/v1beta"
+# api_key = "${GEMINI_API_KEY}"
+# model = "gemini-2.0-flash"
+# type = "gemini"
+
+# [[provider]]
+# name = "Gemini-2.5-Pro"
+# base_url = "https://generativelanguage.googleapis.com/v1beta"
+# api_key = "${GEMINI_API_KEY}"
+# model = "gemini-2.5-pro-preview-03-25"
+# type = "gemini"

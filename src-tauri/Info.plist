@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>VoiceX 需要访问麦克风以进行录音和语音识别。</string>
+    <key>NSInputMonitoringUsageDescription</key>
+    <string>VoiceX 需要监听全局热键来启动和停止录音。</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>VoiceX 需要辅助功能权限以模拟键盘输入和粘贴文本。</string>
+  </dict>
+</plist>

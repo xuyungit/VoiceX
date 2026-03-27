@@ -1,0 +1,43 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies & build output
+node_modules
+dist
+dist-ssr
+*.local
+
+# Rust build artifacts
+src-tauri/target
+sync-server/target
+tools/llm-bench/target
+
+# Local config with credentials (use *.example.toml as template)
+tools/llm-bench/config.toml
+tools/llm-bench/test_cases.toml
+
+# Sync server runtime data
+sync-server/*.db
+sync-server/*.db-shm
+sync-server/*.db-wal
+sync-server/logs
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Claude Code local config
+.claude/settings.local.json

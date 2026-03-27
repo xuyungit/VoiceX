@@ -1,0 +1,22 @@
+# LLM Benchmark Test Cases
+# Copy to test_cases.toml and customize
+
+[[case]]
+name = "Simple typo"
+input = "今天天汽很好，我们去公园万吧"
+expected = "今天天气很好，我们去公园玩吧"
+
+[[case]]
+name = "Technical terms"
+input = "我们用的是库伯内提斯来部署容器"
+expected = "我们用的是 Kubernetes 来部署容器"
+
+[[case]]
+name = "Homophone errors"
+input = "这个项目的进度已经严重之后了，我们需要加快速度"
+expected = "这个项目的进度已经严重滞后了，我们需要加快速度"
+
+[[case]]
+name = "Mixed Chinese-English"
+input = "请把这个docker镜像推送到仓库里面"
+expected = "请把这个 Docker 镜像推送到仓库里面"

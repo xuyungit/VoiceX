@@ -1,0 +1,2 @@
+[env]
+CMAKE_x86_64_pc_windows_msvc = { value = "cmake-wrap.cmd", relative = true }

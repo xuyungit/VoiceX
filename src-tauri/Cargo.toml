@@ -1,0 +1,96 @@
+[package]
+name = "voicex"
+version = "0.6.0"
+description = "Cross-platform voice input application with ASR"
+authors = ["VoiceX Contributors"]
+license = "MIT"
+edition = "2021"
+
+[lib]
+name = "voicex_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+tonic-build = "0.12"
+protoc-bin-vendored = "3"
+
+[dependencies]
+# Tauri core
+tauri = { version = "2", features = ["image-png", "tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Clipboard
+arboard = "3"
+
+# Compression (for ASR protocol)
+flate2 = "1"
+
+# HTTP client (for LLM)
+reqwest = { version = "0.11", features = ["json", "multipart", "stream"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# UUID
+uuid = { version = "1", features = ["v4"] }
+
+# Audio capture
+cpal = "0.15"
+audiopus = { version = "0.3.0-rc.0", features = ["coder"] }
+audiopus_sys = { version = "0.2.2", features = ["static"] }
+ogg = "0.9"
+rand = "0.8"
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+
+# gRPC (Google Cloud Speech-to-Text V2)
+tonic = { version = "0.12", features = ["tls", "tls-native-roots", "transport"] }
+prost = "0.13"
+prost-types = "0.13"
+tokio-stream = "0.1"
+
+# JWT signing for Google Service Account auth
+ring = "0.17"
+base64 = "0.22"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Crypto for Volcengine V4 Signature
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+urlencoding = "2.1"
+
+# Error handling
+thiserror = "1"
+
+# Global hotkey
+rdev = { version = "0.5", features = ["unstable_grab"] }
+enigo = "0.6"
+regex = "1.12.2"
+
+[patch.crates-io]
+rdev = { path = "vendor/rdev" }
+audiopus_sys = { path = "vendor/audiopus_sys" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS specific - will add core-graphics etc. later
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows specific - SendInput API for direct unicode injection
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation"] }
