@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-03-27
+
+### Added
+- **Bilingual UI localization** with Chinese and English support across the main window, tray menu, and HUD, including a follow-system language option.
+- **History re-transcription** for existing recordings.
+- **Batch ASR mode for Coli** to improve local offline recognition workflows.
+
+### Changed
+- Google Speech-to-Text re-transcription now uses the synchronous Recognize API for recordings up to 60 seconds.
+- Tuned Coli VAD defaults for more reliable local ASR behavior.
+- Refined the main window chrome by removing the redundant brand header and reducing top spacing.
+
+### Fixed
+- Increased the overall re-transcription timeout to 300 seconds.
+- Re-transcription details now show the original ASR and LLM model names more clearly.
+
 ## [0.6.1] - 2026-03-27
 
 ### Fixed
