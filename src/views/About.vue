@@ -2,6 +2,7 @@
 import { computed, ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { NSwitch } from 'naive-ui'
+import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 
 type BuildInfo = {
@@ -16,6 +17,7 @@ const buildProfile = ref('—')
 const commit = ref('—')
 const builtAt = ref('—')
 const settingsStore = useSettingsStore()
+const { t, locale } = useI18n()
 
 const enableDiagnostics = computed({
   get: () => settingsStore.settings.enableDiagnostics,
@@ -39,7 +41,7 @@ const commitLabel = computed(() => {
 const builtAtLabel = computed(() => {
   const seconds = Number(builtAt.value)
   if (!Number.isFinite(seconds) || seconds <= 0) return '—'
-  return new Date(seconds * 1000).toLocaleString('zh-CN', { hour12: false })
+  return new Date(seconds * 1000).toLocaleString(locale.value, { hour12: false })
 })
 
 onMounted(async () => {
@@ -61,29 +63,29 @@ onMounted(async () => {
       <h1 class="page-title">VoiceX</h1>
       <div class="page-subtitle">
         <span class="subtitle-item">
-          <span class="subtitle-label">Version</span>
+          <span class="subtitle-label">{{ t('about.version') }}</span>
           <span class="pill">{{ version }} ({{ profileLabel }})</span>
         </span>
       </div>
     </div>
 
     <div class="surface-card build-card">
-      <div class="section-title">Build Info</div>
+      <div class="section-title">{{ t('about.buildInfo') }}</div>
       <div class="build-grid">
         <div class="build-row">
-          <span class="muted">Version</span>
+          <span class="muted">{{ t('about.version') }}</span>
           <span>{{ version }}</span>
         </div>
         <div class="build-row">
-          <span class="muted">Build</span>
+          <span class="muted">{{ t('about.build') }}</span>
           <span>{{ profileLabel }}</span>
         </div>
         <div class="build-row">
-          <span class="muted">Commit</span>
+          <span class="muted">{{ t('about.commit') }}</span>
           <span>{{ commitLabel }}</span>
         </div>
         <div class="build-row">
-          <span class="muted">Built</span>
+          <span class="muted">{{ t('about.built') }}</span>
           <span>{{ builtAtLabel }}</span>
         </div>
       </div>
@@ -92,8 +94,8 @@ onMounted(async () => {
     <div class="surface-card support-card">
       <div class="section-header">
         <div>
-          <div class="section-title">Diagnostics</div>
-          <div class="section-hint">显示热词同步和 ASR 供应商诊断信息，仅用于调试。</div>
+          <div class="section-title">{{ t('about.diagnostics') }}</div>
+          <div class="section-hint">{{ t('about.diagnosticsHint') }}</div>
         </div>
         <NSwitch v-model:value="enableDiagnostics" />
       </div>

@@ -1,10 +1,14 @@
 // VoiceX HUD Logic (TypeScript source)
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import zhCN from '../i18n/locales/zh-CN';
+import enUS from '../i18n/locales/en-US';
 
 const statusIcon = document.getElementById('statusIcon');
 const countdown = document.getElementById('countdown');
 const textArea = document.getElementById('textArea');
 const intentChip = document.getElementById('intentChip');
+const titleElement = document.querySelector('title');
 
 if (!statusIcon || !countdown || !textArea || !intentChip) {
     console.error('[HUD] Missing required DOM elements', {
@@ -21,6 +25,7 @@ let isBatchRecording = false;
 let lastActiveIcon: 'mic' | 'waveform' | 'cloud' | 'wand' = 'mic';
 let partialText = '';
 let lastNonEmptyText = '';
+let currentLocale: 'zh-CN' | 'en-US' = 'en-US';
 
 const icons: Record<string, Element | null | undefined> = {
     mic: statusIcon?.querySelector('.icon-mic') ?? null,
@@ -28,6 +33,25 @@ const icons: Record<string, Element | null | undefined> = {
     cloud: statusIcon?.querySelector('.icon-cloud') ?? null,
     wand: statusIcon?.querySelector('.icon-wand') ?? null
 };
+
+const hudMessages = {
+    'zh-CN': zhCN.hud,
+    'en-US': enUS.hud
+};
+
+function t(key: keyof typeof zhCN.hud) {
+    return hudMessages[currentLocale][key];
+}
+
+function setHudLocale(locale: string | undefined) {
+    currentLocale = locale === 'zh-CN' ? 'zh-CN' : 'en-US';
+    document.documentElement.lang = currentLocale;
+    if (titleElement) {
+        titleElement.textContent = 'VoiceX HUD';
+    }
+    updateIntent(currentIntent);
+    renderTranscript();
+}
 
 function showIcon(name: keyof typeof icons) {
     Object.values(icons).forEach((icon) => icon?.classList.remove('active'));
@@ -101,12 +125,12 @@ function renderTranscript() {
 
         const placeholder =
             currentMode === 'correcting'
-                ? '正在处理文本...'
+                ? t('processingText')
                 : currentMode === 'recognizing'
-                  ? '正在识别...'
+                  ? t('recognizing')
                   : currentMode === 'push_to_talk' || currentMode === 'hands_free'
-                    ? '正在录音...'
-                    : '按下热键开始录音';
+                    ? t('recording')
+                    : t('startRecording');
         textArea!.innerHTML = `<span class="placeholder">${placeholder}</span>`;
     } else {
         textArea?.classList.remove('is-placeholder');
@@ -152,10 +176,10 @@ function updateIntent(intent?: string) {
     if (!intentChip) return;
 
     if (currentIntent === 'translate_en') {
-        intentChip.textContent = 'EN Translate';
+        intentChip.textContent = t('translateEn');
         intentChip.classList.add('translate');
     } else {
-        intentChip.textContent = 'Assistant';
+        intentChip.textContent = t('assistant');
         intentChip.classList.remove('translate');
     }
 }
@@ -223,11 +247,25 @@ async function initListeners() {
         updateStatus('idle');
     });
 
+    await add<{ locale?: 'zh-CN' | 'en-US' }>('ui:locale-changed', (event) => {
+        setHudLocale(event.payload?.locale);
+    });
+
     window.addEventListener('beforeunload', () => {
         unsubs.forEach((fn) => fn && fn());
     });
 }
 
-initListeners().catch((err) => {
-    console.error('[HUD] Failed to initialize:', err);
-});
+invoke<'zh-CN' | 'en-US'>('get_resolved_ui_locale')
+    .then((locale) => {
+        setHudLocale(locale);
+    })
+    .catch((err) => {
+        console.error('[HUD] Failed to resolve locale:', err);
+        setHudLocale('en-US');
+    })
+    .finally(() => {
+        initListeners().catch((err) => {
+            console.error('[HUD] Failed to initialize:', err);
+        });
+    });

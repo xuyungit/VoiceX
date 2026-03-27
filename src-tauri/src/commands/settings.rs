@@ -1,7 +1,7 @@
 //! Settings-related commands
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::services::sync_service::SyncService;
 use crate::session::SessionController;
@@ -10,6 +10,8 @@ use crate::session::SessionController;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
+    pub ui_language: String, // "system" | "zh-CN" | "en-US"
+
     // ASR settings
     pub asr_provider_type: String, // "volcengine" | "google" | "qwen" | "coli"
     pub asr_app_key: String,
@@ -128,6 +130,7 @@ pub struct ReplacementRule {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            ui_language: crate::ui_locale::UI_LANGUAGE_SYSTEM.to_string(),
             asr_provider_type: "volcengine".to_string(),
             asr_app_key: String::new(),
             asr_access_key: String::new(),
@@ -223,16 +226,32 @@ pub fn get_settings() -> Result<AppSettings, String> {
     crate::storage::get_settings().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn get_resolved_ui_locale(preferred: Option<String>) -> Result<String, String> {
+    let requested_language = if let Some(preferred) = preferred {
+        preferred
+    } else {
+        crate::storage::get_settings()
+            .map(|settings| settings.ui_language)
+            .map_err(|e| e.to_string())?
+    };
+
+    Ok(crate::ui_locale::resolve_ui_locale(&requested_language))
+}
+
 /// Save settings
 #[tauri::command]
 pub fn save_settings(
     mut settings: AppSettings,
+    app: AppHandle,
     session: State<'_, SessionController>,
     sync: State<'_, SyncService>,
 ) -> Result<(), String> {
     let current_settings = crate::storage::get_settings().map_err(|e| e.to_string())?;
+    settings.ui_language = crate::ui_locale::normalize_ui_language(&settings.ui_language);
 
     let text_changed = settings.dictionary_text != current_settings.dictionary_text;
+    let ui_language_changed = settings.ui_language != current_settings.ui_language;
     if text_changed {
         settings.local_hotword_updated_at = chrono::Utc::now().to_rfc3339();
         log::info!(
@@ -245,6 +264,25 @@ pub fn save_settings(
     }
 
     crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+
+    if ui_language_changed {
+        let resolved_locale = crate::ui_locale::resolve_ui_locale(&settings.ui_language);
+
+        #[cfg(desktop)]
+        if let Err(err) = crate::i18n::apply_tray_menu(&app, &settings.ui_language) {
+            log::warn!("Failed to rebuild tray menu after language change: {}", err);
+        }
+
+        if let Err(err) = app.emit(
+            "ui:locale-changed",
+            serde_json::json!({
+                "uiLanguage": settings.ui_language.clone(),
+                "locale": resolved_locale,
+            }),
+        ) {
+            log::warn!("Failed to emit ui locale change event: {}", err);
+        }
+    }
 
     session.inner().apply_settings(
         settings.hold_threshold_ms,

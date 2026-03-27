@@ -1,8 +1,12 @@
 import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import type { UiLanguage } from '../i18n'
+import { getDefaultPrompt } from '../utils/llmPrompts'
 
 export interface AppSettings {
+    uiLanguage: UiLanguage
+
     // ASR
     asrProviderType: 'volcengine' | 'google' | 'qwen' | 'coli'
     asrAppKey: string
@@ -134,33 +138,8 @@ export interface HotwordSyncDiagnostics {
     table_name: string
 }
 
-const DEFAULT_LLM_PROMPT = `你是一个语音转写文本纠正助手。
-
-你的任务：
-- 修正语音识别文本中的识别错误、同音字错误、错别字和标点问题
-- 保持原意，不增删信息
-- 当识别结果中出现与用户词典中词汇发音相似、拼写接近或语义相关的词时，将其替换为词典中的标准形式
-- 不要更改词典中词汇的拼写、大小写或符号
-- 即便识别文本中的英文和用户词典的词汇语义相似，不要用用户词典中的词汇去替换原文中的英文
-
-用户热词词典：
-{{DICTIONARY}}
-
-输出：
-纠正后的文本或原文（如果不需要任何修改），另外不要输出任何其他说明性的内容`
-
-const DEFAULT_TRANSLATION_PROMPT = `你是一个专业翻译助手。
-
-你的任务：
-- 将用户提供的原文准确翻译成英文
-- 保持原意，不增删信息
-- 保留专有名词、数字、代码片段与格式
-- 如果原文已经是英文，只做必要润色并保持原意
-
-输出：
-只输出英文结果，不要输出解释或额外说明`
-
 const defaultSettings: AppSettings = {
+    uiLanguage: 'system',
     asrProviderType: 'volcengine',
     asrAppKey: '',
     asrAccessKey: '',
@@ -190,9 +169,9 @@ const defaultSettings: AppSettings = {
 
     enableLlmCorrection: false,
     llmProviderType: 'volcengine',
-    llmPromptTemplate: DEFAULT_LLM_PROMPT,
+    llmPromptTemplate: getDefaultPrompt('assistant', 'zh-CN'),
     enableLlmHistoryContext: false,
-    translationPromptTemplate: DEFAULT_TRANSLATION_PROMPT,
+    translationPromptTemplate: getDefaultPrompt('translation', 'zh-CN'),
     translationEnabled: true,
     translationTriggerMode: 'double_tap',
     translationTargetLanguage: 'en',

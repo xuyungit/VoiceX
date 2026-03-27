@@ -7,12 +7,14 @@ pub mod audio;
 pub mod commands;
 pub mod hotkey;
 pub mod hud;
+pub mod i18n;
 pub mod injector;
 pub mod llm;
 pub mod services;
 pub mod session;
 pub mod state;
 pub mod storage;
+pub mod ui_locale;
 
 use crate::audio::AudioService;
 use crate::commands::settings::AppSettings;
@@ -214,22 +216,12 @@ pub fn run() {
             apply_windows_tray_icon(app);
             #[cfg(desktop)]
             {
-                match tauri::menu::MenuBuilder::new(app)
-                    .text("show_main_window", "Show VoiceX")
-                    .separator()
-                    .text("quit_app", "Quit VoiceX")
-                    .build()
-                {
-                    Ok(menu) => {
-                        if let Some(tray) = app.tray_by_id("main") {
-                            if let Err(err) = tray.set_menu(Some(menu)) {
-                                log::warn!("Failed to attach tray menu: {}", err);
-                            }
-                        } else {
-                            log::warn!("Tray icon 'main' not found; tray menu not attached");
-                        }
-                    }
-                    Err(err) => log::warn!("Failed to build tray menu: {}", err),
+                let preferred_language = storage::get_settings()
+                    .map(|settings| settings.ui_language)
+                    .unwrap_or_else(|_| ui_locale::UI_LANGUAGE_SYSTEM.to_string());
+
+                if let Err(err) = i18n::apply_tray_menu(&app.handle(), &preferred_language) {
+                    log::warn!("Failed to attach tray menu: {}", err);
                 }
             }
             Ok(())
@@ -247,6 +239,7 @@ pub fn run() {
             commands::hotkey::current_hotkey,
             commands::hotkey::hotkey_permission_status,
             commands::settings::get_settings,
+            commands::settings::get_resolved_ui_locale,
             commands::settings::save_settings,
             commands::settings::probe_local_asr,
             commands::history::get_history,

@@ -2,20 +2,22 @@
 import { ref, computed, watch, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { NButton, NSelect, NInputNumber } from 'naive-ui'
+import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
 
 const settingsStore = useSettingsStore()
+const { t } = useI18n()
 
 const textInjectionMode = computed({
   get: () => settingsStore.settings.textInjectionMode,
   set: (v: 'pasteboard' | 'typing') => settingsStore.updateSetting('textInjectionMode', v)
 })
 
-const injectionOptions = [
-  { label: 'Clipboard paste', value: 'pasteboard' },
-  { label: 'Simulated typing', value: 'typing' }
-]
+const injectionOptions = computed(() => [
+  { label: t('input.pasteboard'), value: 'pasteboard' },
+  { label: t('input.typing'), value: 'typing' }
+])
 
 const translationTriggerMode = computed({
   get: () => settingsStore.settings.translationTriggerMode,
@@ -35,14 +37,14 @@ const translationEnabled = computed({
   set: (v: boolean) => settingsStore.updateSetting('translationEnabled', v)
 })
 
-const translationTriggerOptions = [
-  { label: 'Double tap hotkey', value: 'double_tap' },
-  { label: 'Off', value: 'off' }
-]
+const translationTriggerOptions = computed(() => [
+  { label: t('input.translationTriggerDoubleTap'), value: 'double_tap' },
+  { label: t('input.translationTriggerOff'), value: 'off' }
+])
 
 const isRecording = ref(false)
 const recordedKey = ref('')
-const displayHotkey = ref('点击录制')
+const displayHotkey = ref(t('input.clickToRecord'))
 
 interface DeviceOption {
   label: string
@@ -59,14 +61,14 @@ const hotkeyDisplay = computed(() => displayHotkey.value)
 watch(
   () => settingsStore.settings.hotkeyConfig,
   (config) => {
-    displayHotkey.value = formatHotkey(config) ?? '点击录制'
+    displayHotkey.value = formatHotkey(config) ?? t('input.clickToRecord')
   },
   { immediate: true }
 )
 
 async function startRecording() {
   isRecording.value = true
-  recordedKey.value = '按下热键...'
+  recordedKey.value = t('input.pressHotkey')
   try {
     const result = await invoke<{ storage: string; display: string }>('record_hotkey')
     settingsStore.updateSetting('hotkeyConfig', result.storage)
@@ -89,7 +91,7 @@ async function applyHotkey(storage: string | null) {
 
 async function clearHotkey() {
   settingsStore.updateSetting('hotkeyConfig', null)
-  displayHotkey.value = '点击录制'
+  displayHotkey.value = t('input.clickToRecord')
   await applyHotkey(null)
 }
 
@@ -154,19 +156,19 @@ onMounted(() => {
 <template>
   <div class="page settings-page">
     <div class="page-header">
-      <h1 class="page-title">Input</h1>
+      <h1 class="page-title">{{ t('input.title') }}</h1>
     </div>
 
     <div class="surface-card input-card">
       <div class="card-header">
-        <div class="card-title">Hotkeys</div>
-        <div class="card-sub">单个热键支持单击、双击与长按</div>
+        <div class="card-title">{{ t('input.hotkeys') }}</div>
+        <div class="card-sub">{{ t('input.hotkeysSub') }}</div>
       </div>
       <div class="field-list">
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Recording hotkey</div>
-            <div class="field-note">One key for both push-to-talk and hands-free.</div>
+            <div class="field-label">{{ t('input.recordingHotkey') }}</div>
+            <div class="field-note">{{ t('input.recordingHotkeyNote') }}</div>
           </div>
           <div class="field-control">
             <div class="hotkey-display" :class="{ recording: isRecording }">
@@ -174,7 +176,7 @@ onMounted(() => {
             </div>
             <div class="hotkey-actions">
               <NButton :disabled="isRecording" @click="startRecording" size="small">
-                录制
+                {{ t('input.record') }}
               </NButton>
               <NButton
                 v-if="settingsStore.settings.hotkeyConfig && !isRecording"
@@ -182,15 +184,15 @@ onMounted(() => {
                 quaternary
                 size="small"
               >
-                清除
+                {{ t('input.clear') }}
               </NButton>
             </div>
           </div>
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Translation trigger</div>
-            <div class="field-note">Single tap: Assistant hands-free, double tap: Translate to English, long press: push-to-talk.</div>
+            <div class="field-label">{{ t('input.translationTrigger') }}</div>
+            <div class="field-note">{{ t('input.translationTriggerNote') }}</div>
           </div>
           <NSelect
             v-model:value="translationTriggerMode"
@@ -202,8 +204,8 @@ onMounted(() => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Double-tap window</div>
-            <div class="field-note">Adjust if double tap feels too strict or too sensitive.</div>
+            <div class="field-label">{{ t('input.doubleTapWindow') }}</div>
+            <div class="field-note">{{ t('input.doubleTapWindowNote') }}</div>
           </div>
           <div class="field-control">
             <NInputNumber
@@ -222,25 +224,25 @@ onMounted(() => {
 
     <div class="surface-card input-card">
       <div class="card-header">
-        <div class="card-title">Microphone</div>
-        <div class="card-sub">选择录音输入设备</div>
+        <div class="card-title">{{ t('input.microphone') }}</div>
+        <div class="card-sub">{{ t('input.microphoneSub') }}</div>
       </div>
       <div class="field-list">
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Input device</div>
+            <div class="field-label">{{ t('input.inputDevice') }}</div>
           </div>
           <div class="field-control">
             <NSelect
               v-model:value="selectedDevice"
               :options="devices"
               :loading="loadingDevices"
-              placeholder="选择输入设备"
+              :placeholder="t('input.selectInputDevice')"
               class="device-select"
               size="small"
             />
             <NButton @click="refreshDevices" :disabled="loadingDevices" size="small" quaternary>
-              刷新设备
+              {{ t('input.refreshDevices') }}
             </NButton>
           </div>
         </div>
@@ -249,16 +251,14 @@ onMounted(() => {
 
     <div class="surface-card input-card">
       <div class="card-header">
-        <div class="card-title">Text Injection</div>
-        <div class="card-sub">选择文字注入方式</div>
+        <div class="card-title">{{ t('input.textInjection') }}</div>
+        <div class="card-sub">{{ t('input.textInjectionSub') }}</div>
       </div>
       <div class="field-list">
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Injection Mode</div>
-            <div class="field-note">
-              Clipboard paste is fastest but temporarily overwrites your clipboard. Simulated typing avoids touching the clipboard.
-            </div>
+            <div class="field-label">{{ t('input.injectionMode') }}</div>
+            <div class="field-note">{{ t('input.injectionModeNote') }}</div>
           </div>
           <NSelect
             v-model:value="textInjectionMode"

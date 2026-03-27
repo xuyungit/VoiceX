@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NInput, NInputNumber, NSelect, NSwitch, NButton } from 'naive-ui'
+import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 
 const settingsStore = useSettingsStore()
+const { t } = useI18n()
 
 const removeTrailingPunctuation = computed({
   get: () => settingsStore.settings.removeTrailingPunctuation,
@@ -15,11 +17,11 @@ const shortSentenceThreshold = computed({
   set: (v) => settingsStore.updateSetting('shortSentenceThreshold', v)
 })
 
-const matchModeOptions = [
-  { label: 'Exact Match', value: 'exact' },
-  { label: 'Contains', value: 'contains' },
-  { label: 'Regex', value: 'regex' }
-]
+const matchModeOptions = computed(() => [
+  { label: t('postProcessing.exactMatch'), value: 'exact' },
+  { label: t('postProcessing.contains'), value: 'contains' },
+  { label: t('postProcessing.regex'), value: 'regex' }
+])
 
 function addRule() {
   const newRule = {
@@ -43,11 +45,11 @@ function removeRule(id: string) {
 <template>
   <div class="page settings-page post-processing-page">
     <div class="page-header">
-      <h1 class="page-title">Text Post-Processing</h1>
+      <h1 class="page-title">{{ t('postProcessing.title') }}</h1>
       <div class="page-subtitle">
         <span class="subtitle-item">
-          <span class="subtitle-label">Rules</span>
-          <span class="pill">{{ settingsStore.settings.replacementRules.length }} active</span>
+          <span class="subtitle-label">{{ t('postProcessing.rules') }}</span>
+          <span class="pill">{{ t('postProcessing.activeRules', { count: settingsStore.settings.replacementRules.length }) }}</span>
         </span>
       </div>
     </div>
@@ -55,21 +57,21 @@ function removeRule(id: string) {
     <!-- Smart Punctuation -->
     <div class="surface-card">
       <div class="card-header">
-        <div class="card-title">Smart Punctuation</div>
-        <div class="card-sub">自动处理短句末尾的标点符号</div>
+        <div class="card-title">{{ t('postProcessing.smartPunctuation') }}</div>
+        <div class="card-sub">{{ t('postProcessing.smartPunctuationSub') }}</div>
       </div>
       <div class="field-list">
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Remove Trailing Punctuation</div>
-            <div class="field-note">去掉短句结尾的句号、问号等标点。</div>
+            <div class="field-label">{{ t('postProcessing.removeTrailingPunctuation') }}</div>
+            <div class="field-note">{{ t('postProcessing.removeTrailingPunctuationNote') }}</div>
           </div>
           <NSwitch v-model:value="removeTrailingPunctuation" />
         </div>
         <div class="field-row" v-if="removeTrailingPunctuation">
           <div class="field-text">
-            <div class="field-label">Short Sentence Threshold (chars)</div>
-            <div class="field-note">字符数少于此值时触发标点去除。</div>
+            <div class="field-label">{{ t('postProcessing.shortSentenceThreshold') }}</div>
+            <div class="field-note">{{ t('postProcessing.shortSentenceThresholdNote') }}</div>
           </div>
           <NInputNumber
             v-model:value="shortSentenceThreshold"
@@ -85,8 +87,8 @@ function removeRule(id: string) {
     <div class="surface-card rules-card">
       <div class="card-header section-header">
         <div>
-          <div class="card-title">Keyword Substitution</div>
-          <div class="card-sub">根据预设规则自动替换文本内容</div>
+          <div class="card-title">{{ t('postProcessing.keywordSubstitution') }}</div>
+          <div class="card-sub">{{ t('postProcessing.keywordSubstitutionSub') }}</div>
         </div>
         <NButton size="small" type="primary" secondary @click="addRule">
           <template #icon>
@@ -94,13 +96,13 @@ function removeRule(id: string) {
               <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>
             </svg>
           </template>
-          Add Rule
+          {{ t('postProcessing.addRule') }}
         </NButton>
       </div>
 
       <div class="rules-list">
         <div v-if="settingsStore.settings.replacementRules.length === 0" class="empty-state">
-          No substitution rules defined.
+          {{ t('postProcessing.noRules') }}
         </div>
         <div
           v-for="rule in settingsStore.settings.replacementRules"
@@ -110,19 +112,19 @@ function removeRule(id: string) {
           <div class="rule-main">
             <div class="rule-inputs">
               <div class="input-group">
-                <span class="input-label">If output is</span>
+                <span class="input-label">{{ t('postProcessing.ifOutputIs') }}</span>
                 <NInput
                   v-model:value="rule.keyword"
-                  placeholder="keyword"
+                  :placeholder="t('postProcessing.keywordPlaceholder')"
                   size="small"
                   class="keyword-input"
                 />
               </div>
               <div class="input-group">
-                <span class="input-label">Replace with</span>
+                <span class="input-label">{{ t('postProcessing.replaceWith') }}</span>
                 <NInput
                   v-model:value="rule.replacement"
-                  placeholder="replacement"
+                  :placeholder="t('postProcessing.replacementPlaceholder')"
                   size="small"
                   class="replacement-input"
                 />
