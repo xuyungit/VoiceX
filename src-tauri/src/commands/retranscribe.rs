@@ -22,7 +22,7 @@ fn cancel_store() -> &'static Mutex<Option<CancellationToken>> {
     RETRANSCRIBE_CANCEL.get_or_init(|| Mutex::new(None))
 }
 
-const OVERALL_TIMEOUT_SECS: u64 = 60;
+const OVERALL_TIMEOUT_SECS: u64 = 300;
 const LLM_TIMEOUT_SECS: u64 = 8;
 /// 100ms of 16kHz mono i16 = 16000 * 2 * 0.1 = 3200 bytes
 const CHUNK_BYTES: usize = 3200;
