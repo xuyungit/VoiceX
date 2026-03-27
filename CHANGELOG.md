@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-03-27
+
+### Added
+- **Gemini Audio Transcription** batch ASR provider for whole-file uploads after recording stops.
+- **Gemini Live Realtime** ASR provider with live input-audio transcription and configurable language hints.
+- **Cohere Audio Transcription** batch ASR provider with configurable model and language code.
+- **Provider comparison via re-transcription** — saved recordings can now be re-run through Gemini, Gemini Live, and Cohere in addition to the existing providers.
+- **Automated Windows release packaging** via GitHub Actions, so publishing a GitHub Release can attach Windows installers without a separate Windows development machine.
+
+### Changed
+- Expanded VoiceX from four to seven ASR backends, covering both realtime streaming and higher-quality batch transcription workflows.
+- Refreshed the English and Chinese README files to document the new ASR options, bilingual interface coverage, re-transcription workflow, and release process.
+
+### Fixed
+- Gemini Live is now exposed correctly in the re-transcription dialog so it can be selected for history-based comparisons.
+
 ## [0.7.0] - 2026-03-27
 
 ### Added
