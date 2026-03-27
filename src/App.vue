@@ -100,10 +100,6 @@ onBeforeUnmount(() => {
             </div>
             <div class="content-body">
               <div class="page-shell">
-                <div class="brand">
-                  <div class="brand-name">VoiceX</div>
-                  <div class="brand-meta text-tertiary">跨平台语音输入</div>
-                </div>
                 <router-view v-slot="{ Component }">
                   <transition name="fade" mode="out-in">
                     <component :is="Component" />
@@ -137,7 +133,7 @@ onBeforeUnmount(() => {
 }
 
 .content-header {
-  height: 40px;
+  height: 20px;
   flex-shrink: 0;
 }
 
@@ -145,28 +141,15 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  height: calc(100vh - 40px);
+  height: calc(100vh - 20px);
   padding: 0 var(--spacing-xl) var(--spacing-xl);
 }
 
 .page-shell {
   max-width: 1120px;
   margin: 0 auto;
-  padding: var(--spacing-xl) 0 var(--spacing-2xl);
+  padding: var(--spacing-sm) 0 var(--spacing-2xl);
 }
 
-.brand {
-  margin-bottom: var(--spacing-xl);
-}
 
-.brand-name {
-  font-size: var(--font-xl);
-  font-weight: 700;
-  letter-spacing: 0.01em;
-}
-
-.brand-meta {
-  margin-top: 4px;
-  font-size: var(--font-sm);
-}
 </style>
