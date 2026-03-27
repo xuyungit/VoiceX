@@ -83,6 +83,7 @@ thiserror = "1"
 rdev = { version = "0.5", features = ["unstable_grab"] }
 enigo = "0.6"
 regex = "1.12.2"
+sys-locale = "0.3"
 
 [patch.crates-io]
 rdev = { path = "vendor/rdev" }

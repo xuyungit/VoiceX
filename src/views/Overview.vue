@@ -1,26 +1,30 @@
 <script setup lang="ts">
 import { onMounted, computed } from 'vue'
 import { NSpin } from 'naive-ui'
+import { useI18n } from 'vue-i18n'
 import { useHistoryStore } from '../stores/history'
 import { useSettingsStore } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
 
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
+const { t, locale } = useI18n()
 
 const recentRecords = computed(() => historyStore.records.slice(0, 5))
 
 const hotkeyDisplay = computed(() => {
   const config = settingsStore.settings.hotkeyConfig
-  return formatHotkey(config) ?? '未设置'
+  return formatHotkey(config) ?? t('overview.unset')
 })
 
 const formatDuration = (durationMs: number) => {
   const minutes = Math.floor(durationMs / 60000)
   const hours = Math.floor(minutes / 60)
   const remaining = minutes % 60
-  if (hours > 0) return `${hours} hr ${remaining} min`
-  return `${remaining} min`
+  if (hours > 0) {
+    return t('overview.hoursMinutes', { hours, minutes: remaining })
+  }
+  return t('overview.minutesOnly', { minutes: remaining })
 }
 
 const formatCharacters = (count: number) => {
@@ -49,26 +53,26 @@ onMounted(async () => {
 
 function formatTime(timestamp: string): string {
   const date = new Date(timestamp)
-  return date.toLocaleString('en-US', {
+  return date.toLocaleString(locale.value, {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit'
-  }).replace(',', ' at')
+  })
 }
 </script>
 
 <template>
   <div class="page overview-page">
     <div class="page-header">
-      <h1 class="page-title">Overview</h1>
+      <h1 class="page-title">{{ t('overview.title') }}</h1>
       <div class="status-lines">
         <div class="meta-line">
-          <span class="meta-label">Status:</span>
-          <span class="meta-value">Idle</span>
+          <span class="meta-label">{{ t('overview.status') }}:</span>
+          <span class="meta-value">{{ t('overview.idle') }}</span>
         </div>
         <div class="meta-line">
-          <span class="meta-label">Hotkey:</span>
+          <span class="meta-label">{{ t('overview.hotkey') }}:</span>
           <span class="meta-value">{{ hotkeyDisplay }}</span>
         </div>
       </div>
@@ -83,8 +87,8 @@ function formatTime(timestamp: string): string {
         </div>
         <div class="stat-content">
           <div class="stat-value">{{ totalDuration }}</div>
-          <div class="stat-subvalue">This device: {{ localDuration }}</div>
-          <div class="stat-label">Total dictation time</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localDuration }}</div>
+          <div class="stat-label">{{ t('overview.totalDictationTime') }}</div>
         </div>
       </div>
 
@@ -94,8 +98,8 @@ function formatTime(timestamp: string): string {
         </div>
         <div class="stat-content">
           <div class="stat-value">{{ totalCharacters }}</div>
-          <div class="stat-subvalue">This device: {{ localCharacters }}</div>
-          <div class="stat-label">Total characters</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localCharacters }}</div>
+          <div class="stat-label">{{ t('overview.totalCharacters') }}</div>
         </div>
       </div>
 
@@ -107,8 +111,8 @@ function formatTime(timestamp: string): string {
         </div>
         <div class="stat-content">
           <div class="stat-value">{{ aiCalls }}</div>
-          <div class="stat-subvalue">This device: {{ localAiCalls }}</div>
-          <div class="stat-label">AI calls</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localAiCalls }}</div>
+          <div class="stat-label">{{ t('overview.aiCalls') }}</div>
         </div>
       </div>
 
@@ -119,22 +123,22 @@ function formatTime(timestamp: string): string {
           </svg>
         </div>
         <div class="stat-content">
-          <div class="stat-value">{{ averageSpeed }} chars/min</div>
-          <div class="stat-subvalue">This device: {{ localAverageSpeed }} chars/min</div>
-          <div class="stat-label">Average dictation speed</div>
+          <div class="stat-value">{{ t('overview.charactersPerMinute', { value: averageSpeed }) }}</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ t('overview.charactersPerMinute', { value: localAverageSpeed }) }}</div>
+          <div class="stat-label">{{ t('overview.averageDictationSpeed') }}</div>
         </div>
       </div>
     </div>
 
     <div class="surface-card recent-card">
-      <div class="recent-header">Recent History</div>
+      <div class="recent-header">{{ t('overview.recentHistory') }}</div>
 
       <div v-if="historyStore.isLoading" class="loading-container">
         <NSpin size="small" />
       </div>
 
       <div v-else-if="recentRecords.length === 0" class="empty-state">
-        <p class="muted">暂无记录</p>
+        <p class="muted">{{ t('overview.noRecords') }}</p>
       </div>
 
       <div v-else class="history-list">

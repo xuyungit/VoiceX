@@ -64,9 +64,9 @@ mod google {
 use google::cloud::speech::v2::speech_client::SpeechClient;
 use google::cloud::speech::v2::streaming_recognize_request::StreamingRequest;
 use google::cloud::speech::v2::{
-    ExplicitDecodingConfig, PhraseSet, RecognitionConfig, SpeechAdaptation,
-    StreamingRecognitionConfig, StreamingRecognitionFeatures, StreamingRecognizeRequest,
-    StreamingRecognizeResponse,
+    AutoDetectDecodingConfig, ExplicitDecodingConfig, PhraseSet, RecognitionConfig,
+    RecognizeRequest, SpeechAdaptation, StreamingRecognitionConfig,
+    StreamingRecognitionFeatures, StreamingRecognizeRequest, StreamingRecognizeResponse,
 };
 
 /// Get a cached gRPC channel or create a new one (eagerly connecting).
@@ -555,6 +555,181 @@ impl GoogleSttClient {
         }
 
         Ok(())
+    }
+
+    /// Perform synchronous (non-streaming) recognition on a local audio file.
+    ///
+    /// Reads the raw file bytes and sends them via the `Recognize` RPC with
+    /// `AutoDetectDecodingConfig`, which supports OGG_OPUS, WAV, FLAC, MP3, etc.
+    /// This is significantly faster than streaming for re-transcription of
+    /// existing recordings, but is limited to audio ≤60 seconds.
+    ///
+    /// Returns `Ok(transcript_text)` on success, or an `AsrError` if the
+    /// request fails (including when the audio exceeds the 60-second limit).
+    pub async fn recognize_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, AsrError> {
+        if !self.config.is_valid() {
+            return Err(AsrError::ConnectionFailed(
+                "Invalid Google STT configuration: Project ID and Service Account Key are required"
+                    .to_string(),
+            ));
+        }
+
+        let location = &self.config.google_location;
+        let language_codes = parse_google_language_codes(&self.config.google_language_code);
+
+        log::info!(
+            "Google STT Recognize (sync) starting (langs={:?}, location={})",
+            language_codes,
+            location,
+        );
+
+        let t0 = std::time::Instant::now();
+
+        // Read the raw audio file bytes (OGG/Opus — no decoding needed)
+        let audio_bytes = std::fs::read(path).map_err(|e| {
+            AsrError::ConnectionFailed(format!("Failed to read audio file: {e}"))
+        })?;
+        log::info!(
+            "Google STT Recognize: read {} bytes from {}",
+            audio_bytes.len(),
+            path.display(),
+        );
+
+        // Obtain an OAuth2 access token (cached for ~50 min)
+        let access_token = get_service_account_token(&self.config.google_api_key).await?;
+
+        // Get or create gRPC channel
+        let endpoint_url = format!("https://{location}-speech.googleapis.com");
+        let channel = get_or_create_channel(&endpoint_url).await?;
+
+        // Attach Bearer token via interceptor
+        let mut client =
+            SpeechClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
+                let val: MetadataValue<_> = format!("Bearer {}", access_token)
+                    .parse()
+                    .map_err(|_| tonic::Status::unauthenticated("Invalid access token"))?;
+                req.metadata_mut().insert("authorization", val);
+                Ok(req)
+            });
+
+        let recognizer = format!(
+            "projects/{}/locations/{}/recognizers/_",
+            self.config.google_project_id, location,
+        );
+
+        // Build speech adaptation (phrase hints) from hotwords dictionary
+        let phrase_boost = self.config.google_phrase_boost.max(0.0);
+        let adaptation = if self.config.hotwords.is_empty() {
+            None
+        } else {
+            let phrases: Vec<google::cloud::speech::v2::phrase_set::Phrase> = self
+                .config
+                .hotwords
+                .iter()
+                .take(1000)
+                .map(|word| google::cloud::speech::v2::phrase_set::Phrase {
+                    value: word.clone(),
+                    boost: 0.0,
+                })
+                .collect();
+            log::info!(
+                "Google STT Recognize: configuring {} phrase hints (boost={})",
+                phrases.len(),
+                phrase_boost
+            );
+            Some(SpeechAdaptation {
+                phrase_sets: vec![
+                    google::cloud::speech::v2::speech_adaptation::AdaptationPhraseSet {
+                        value: Some(
+                            google::cloud::speech::v2::speech_adaptation::adaptation_phrase_set::Value::InlinePhraseSet(
+                                PhraseSet {
+                                    name: String::new(),
+                                    uid: String::new(),
+                                    phrases,
+                                    boost: phrase_boost,
+                                    display_name: String::new(),
+                                    state: 0,
+                                    create_time: None,
+                                    update_time: None,
+                                    delete_time: None,
+                                    expire_time: None,
+                                    annotations: Default::default(),
+                                    etag: String::new(),
+                                    reconciling: false,
+                                    kms_key_name: String::new(),
+                                    kms_key_version_name: String::new(),
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                custom_classes: vec![],
+            })
+        };
+
+        // Build RecognizeRequest with AutoDetectDecodingConfig
+        let request = RecognizeRequest {
+            recognizer,
+            config: Some(RecognitionConfig {
+                model: "chirp_3".to_string(),
+                language_codes,
+                features: None,
+                adaptation,
+                transcript_normalization: None,
+                translation_config: None,
+                denoiser_config: None,
+                decoding_config: Some(
+                    google::cloud::speech::v2::recognition_config::DecodingConfig::AutoDecodingConfig(
+                        AutoDetectDecodingConfig {},
+                    ),
+                ),
+            }),
+            config_mask: Some(prost_types::FieldMask {
+                paths: vec!["*".to_string()],
+            }),
+            audio_source: Some(
+                google::cloud::speech::v2::recognize_request::AudioSource::Content(
+                    audio_bytes,
+                ),
+            ),
+        };
+
+        log::info!("Google STT Recognize: sending request...");
+
+        let response = client
+            .recognize(request)
+            .await
+            .map_err(|e| {
+                AsrError::ConnectionFailed(format!(
+                    "Recognize RPC failed (code={}, source={:?}): {}",
+                    e.code(),
+                    e.source(),
+                    e.message()
+                ))
+            })?;
+
+        let resp = response.into_inner();
+        let elapsed = t0.elapsed();
+
+        // Concatenate all result transcripts
+        let mut full_text = String::new();
+        for result in &resp.results {
+            if let Some(alt) = result.alternatives.first() {
+                full_text.push_str(&alt.transcript);
+            }
+        }
+
+        log::info!(
+            "Google STT Recognize completed in {:?} — {} results, text_len={}",
+            elapsed,
+            resp.results.len(),
+            full_text.chars().count(),
+        );
+
+        Ok(full_text)
     }
 }
 

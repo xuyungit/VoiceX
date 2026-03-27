@@ -1,10 +1,14 @@
 // VoiceX HUD Logic (TypeScript source)
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import zhCN from '../i18n/locales/zh-CN';
+import enUS from '../i18n/locales/en-US';
 
 const statusIcon = document.getElementById('statusIcon');
 const countdown = document.getElementById('countdown');
 const textArea = document.getElementById('textArea');
 const intentChip = document.getElementById('intentChip');
+const titleElement = document.querySelector('title');
 
 if (!statusIcon || !countdown || !textArea || !intentChip) {
     console.error('[HUD] Missing required DOM elements', {
@@ -15,17 +19,39 @@ if (!statusIcon || !countdown || !textArea || !intentChip) {
     });
 }
 
-let currentMode: 'idle' | 'push_to_talk' | 'hands_free' | 'correcting' = 'idle';
+let currentMode: 'idle' | 'push_to_talk' | 'hands_free' | 'recognizing' | 'correcting' = 'idle';
 let currentIntent: 'assistant' | 'translate_en' = 'assistant';
-let lastActiveIcon: 'mic' | 'waveform' | 'wand' = 'mic';
+let isBatchRecording = false;
+let lastActiveIcon: 'mic' | 'waveform' | 'cloud' | 'wand' = 'mic';
 let partialText = '';
 let lastNonEmptyText = '';
+let currentLocale: 'zh-CN' | 'en-US' = 'en-US';
 
 const icons: Record<string, Element | null | undefined> = {
     mic: statusIcon?.querySelector('.icon-mic') ?? null,
     waveform: statusIcon?.querySelector('.icon-waveform') ?? null,
+    cloud: statusIcon?.querySelector('.icon-cloud') ?? null,
     wand: statusIcon?.querySelector('.icon-wand') ?? null
 };
+
+const hudMessages = {
+    'zh-CN': zhCN.hud,
+    'en-US': enUS.hud
+};
+
+function t(key: keyof typeof zhCN.hud) {
+    return hudMessages[currentLocale][key];
+}
+
+function setHudLocale(locale: string | undefined) {
+    currentLocale = locale === 'zh-CN' ? 'zh-CN' : 'en-US';
+    document.documentElement.lang = currentLocale;
+    if (titleElement) {
+        titleElement.textContent = 'VoiceX HUD';
+    }
+    updateIntent(currentIntent);
+    renderTranscript();
+}
 
 function showIcon(name: keyof typeof icons) {
     Object.values(icons).forEach((icon) => icon?.classList.remove('active'));
@@ -34,20 +60,26 @@ function showIcon(name: keyof typeof icons) {
 
 function updateStatus(mode: typeof currentMode) {
     currentMode = mode;
-    document.body.classList.remove('recording', 'correcting');
+    document.body.classList.remove('recording', 'recognizing', 'correcting');
 
     switch (mode) {
         case 'push_to_talk':
             document.body.classList.add('recording');
-            showIcon('mic');
+            showIcon(isBatchRecording ? 'waveform' : 'mic');
             statusIcon?.classList.add('animating');
-            lastActiveIcon = 'mic';
+            lastActiveIcon = isBatchRecording ? 'waveform' : 'mic';
             break;
         case 'hands_free':
             document.body.classList.add('recording');
             showIcon('waveform');
             statusIcon?.classList.add('animating');
             lastActiveIcon = 'waveform';
+            break;
+        case 'recognizing':
+            document.body.classList.add('recognizing');
+            showIcon('cloud');
+            statusIcon?.classList.add('animating');
+            lastActiveIcon = 'cloud';
             break;
         case 'correcting':
             document.body.classList.add('correcting');
@@ -61,6 +93,8 @@ function updateStatus(mode: typeof currentMode) {
             statusIcon?.classList.remove('animating');
             break;
     }
+
+    renderTranscript();
 }
 
 function resetTranscript() {
@@ -72,6 +106,8 @@ function resetTranscript() {
 // Keep the visible snippet within ~2 lines to avoid CSS ellipsis cutting the tail.
 const MAX_DISPLAY_CHARS = 36;
 
+const WAVEFORM_BARS_HTML = '<div class="waveform-bars"><span></span><span></span><span></span><span></span><span></span></div>';
+
 function renderTranscript() {
     let display = partialText.trim() || lastNonEmptyText.trim();
     if (display.length > MAX_DISPLAY_CHARS) {
@@ -80,12 +116,21 @@ function renderTranscript() {
 
     if (!display) {
         textArea?.classList.add('is-placeholder');
+
+        // Batch recording: show animated waveform bars instead of text placeholder.
+        if (isBatchRecording && (currentMode === 'push_to_talk' || currentMode === 'hands_free')) {
+            textArea!.innerHTML = WAVEFORM_BARS_HTML;
+            return;
+        }
+
         const placeholder =
             currentMode === 'correcting'
-                ? '正在处理文本...'
-                : currentMode === 'push_to_talk' || currentMode === 'hands_free'
-                  ? '正在识别...'
-                  : '按下热键开始录音';
+                ? t('processingText')
+                : currentMode === 'recognizing'
+                  ? t('recognizing')
+                  : currentMode === 'push_to_talk' || currentMode === 'hands_free'
+                    ? t('recording')
+                    : t('startRecording');
         textArea!.innerHTML = `<span class="placeholder">${placeholder}</span>`;
     } else {
         textArea?.classList.remove('is-placeholder');
@@ -131,10 +176,10 @@ function updateIntent(intent?: string) {
     if (!intentChip) return;
 
     if (currentIntent === 'translate_en') {
-        intentChip.textContent = 'EN Translate';
+        intentChip.textContent = t('translateEn');
         intentChip.classList.add('translate');
     } else {
-        intentChip.textContent = 'Assistant';
+        intentChip.textContent = t('assistant');
         intentChip.classList.remove('translate');
     }
 }
@@ -150,20 +195,30 @@ async function initListeners() {
         unsubs.push(unsub);
     };
 
-    await add('state:recording_style', (event: { payload?: { style?: string } }) => {
+    await add('state:recording_style', (event: { payload?: { style?: string; batch?: boolean } }) => {
         const style = event.payload?.style;
         const wasIdle = currentMode === 'idle';
+        isBatchRecording = !!event.payload?.batch;
 
         if (style === 'push_to_talk') {
             updateStatus('push_to_talk');
         } else if (style === 'hands_free') {
             updateStatus('hands_free');
         } else {
+            isBatchRecording = false;
             updateStatus('idle');
         }
 
         if (wasIdle && (style === 'push_to_talk' || style === 'hands_free')) {
             resetTranscript();
+        }
+    });
+
+    await add('state:recognizing', (event: { payload?: { is_recognizing?: boolean } }) => {
+        if (event.payload?.is_recognizing) {
+            updateStatus('recognizing');
+        } else if (currentMode === 'recognizing') {
+            updateStatus('idle');
         }
     });
 
@@ -192,11 +247,25 @@ async function initListeners() {
         updateStatus('idle');
     });
 
+    await add<{ locale?: 'zh-CN' | 'en-US' }>('ui:locale-changed', (event) => {
+        setHudLocale(event.payload?.locale);
+    });
+
     window.addEventListener('beforeunload', () => {
         unsubs.forEach((fn) => fn && fn());
     });
 }
 
-initListeners().catch((err) => {
-    console.error('[HUD] Failed to initialize:', err);
-});
+invoke<'zh-CN' | 'en-US'>('get_resolved_ui_locale')
+    .then((locale) => {
+        setHudLocale(locale);
+    })
+    .catch((err) => {
+        console.error('[HUD] Failed to resolve locale:', err);
+        setHudLocale('en-US');
+    })
+    .finally(() => {
+        initListeners().catch((err) => {
+            console.error('[HUD] Failed to initialize:', err);
+        });
+    });

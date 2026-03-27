@@ -294,6 +294,49 @@ impl SessionController {
             SessionMessage::AudioStartFailed { reason } => {
                 self.on_audio_start_failed_state(state, reason)
             }
+            SessionMessage::BatchAsrDone {
+                text,
+                model_name,
+                batch_epoch,
+            } => {
+                if self.injection_epoch.load(Ordering::SeqCst) != batch_epoch {
+                    log::debug!(
+                        "Dropping stale batch ASR result after epoch change (epoch={}, current={})",
+                        batch_epoch,
+                        self.injection_epoch.load(Ordering::SeqCst)
+                    );
+                    return;
+                }
+                if state.session_state == HotkeySessionState::Idle
+                    && !state.is_recording
+                    && !state.is_correcting
+                {
+                    log::debug!("Dropping stale batch ASR result in idle state");
+                    return;
+                }
+                self.on_batch_asr_done_state(state, text, model_name)
+            }
+            SessionMessage::BatchAsrFailed {
+                reason,
+                batch_epoch,
+            } => {
+                if self.injection_epoch.load(Ordering::SeqCst) != batch_epoch {
+                    log::debug!(
+                        "Dropping stale batch ASR failure after epoch change (epoch={}, current={})",
+                        batch_epoch,
+                        self.injection_epoch.load(Ordering::SeqCst)
+                    );
+                    return;
+                }
+                if state.session_state == HotkeySessionState::Idle
+                    && !state.is_recording
+                    && !state.is_correcting
+                {
+                    log::debug!("Dropping stale batch ASR failure in idle state");
+                    return;
+                }
+                self.on_batch_asr_failed_state(state, reason)
+            }
             SessionMessage::AsrRefinementDone {
                 text,
                 model_name,
@@ -619,7 +662,10 @@ impl SessionController {
                 HotkeySessionState::Idle | HotkeySessionState::Finalizing => None,
                 _ => state.recording_style,
             };
-            hud.emit_recording_style(recording_style_for_hud);
+            let is_batch = crate::storage::get_settings()
+                .map(|s| crate::asr::AsrConfig::from(&s).is_batch())
+                .unwrap_or(false);
+            hud.emit_recording_style(recording_style_for_hud, is_batch);
             hud.emit_correcting(state.is_correcting);
             hud.emit_intent(state.intent);
             if state.session_state == HotkeySessionState::Finalizing {
@@ -678,16 +724,29 @@ impl SessionController {
 
     fn start_audio_capture(&self) {
         if let Some(manager) = self.audio_manager() {
-            let capture_refinement_pcm = crate::storage::get_settings()
+            let is_batch = crate::storage::get_settings()
                 .map(|settings| {
                     let config = crate::asr::AsrConfig::from(&settings);
-                    config.provider_type == crate::asr::AsrProviderType::Coli
-                        && config.coli_final_refinement_mode != crate::asr::ColiRefinementMode::Off
+                    config.is_batch()
                 })
                 .unwrap_or(false);
+            let capture_refinement_pcm = if is_batch {
+                // Batch mode always needs the full PCM buffer for post-recording recognition.
+                true
+            } else {
+                crate::storage::get_settings()
+                    .map(|settings| {
+                        let config = crate::asr::AsrConfig::from(&settings);
+                        config.provider_type == crate::asr::AsrProviderType::Coli
+                            && config.coli_final_refinement_mode
+                                != crate::asr::ColiRefinementMode::Off
+                    })
+                    .unwrap_or(false)
+            };
             log::info!(
-                "COLI_REFINE capture_buffer_enabled={}",
-                capture_refinement_pcm
+                "capture_buffer_enabled={} is_batch={}",
+                capture_refinement_pcm,
+                is_batch
             );
             match manager.start_capture(capture_refinement_pcm) {
                 Ok(handle) => {
@@ -702,11 +761,19 @@ impl SessionController {
                         path: path_str.clone(),
                     });
                     log::info!(
-                        "Audio capture started ({} Hz, {} ch)",
+                        "Audio capture started ({} Hz, {} ch, batch={})",
                         handle.sample_rate,
-                        handle.channels
+                        handle.channels,
+                        is_batch
                     );
-                    self.spawn_asr(rx, handle.sample_rate, handle.channels);
+                    if is_batch {
+                        // In batch mode we do NOT spawn a streaming ASR task.
+                        // The receiver is dropped so audio chunks are discarded;
+                        // the refinement PCM buffer captures the full recording.
+                        drop(rx);
+                    } else {
+                        self.spawn_asr(rx, handle.sample_rate, handle.channels);
+                    }
                 }
                 Err(err) => {
                     let reason = format!("Failed to start audio capture: {}", err);
@@ -825,6 +892,19 @@ impl SessionController {
                 }));
                 return;
             }
+        }
+
+        // Batch mode: no streaming ASR was running — hand off to batch recognition.
+        let is_batch = crate::storage::get_settings()
+            .map(|s| crate::asr::AsrConfig::from(&s).is_batch())
+            .unwrap_or(false);
+        if is_batch {
+            log::info!(
+                "Recording stopped (batch mode): duration_ms={:?}, starting batch ASR",
+                duration_ms,
+            );
+            self.start_batch_asr(state);
+            return;
         }
 
         // If no final result arrived but we have a transcript, promote the latest transcript to final as a fallback.

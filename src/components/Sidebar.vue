@@ -1,29 +1,31 @@
 <script setup lang="ts">
 import { useRouter, useRoute } from 'vue-router'
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 const router = useRouter()
 const route = useRoute()
+const { t } = useI18n()
 
 interface NavItem {
   path: string
   name: string
   icon: string
-  label: string
+  labelKey: string
 }
 
 const navItems: NavItem[] = [
-  { path: '/overview', name: 'overview', icon: 'chart', label: 'Overview' },
-  { path: '/history', name: 'history', icon: 'history', label: 'History' },
-  { path: '/dictionary', name: 'dictionary', icon: 'book', label: 'Dictionary' },
+  { path: '/overview', name: 'overview', icon: 'chart', labelKey: 'nav.overview' },
+  { path: '/history', name: 'history', icon: 'history', labelKey: 'nav.history' },
+  { path: '/dictionary', name: 'dictionary', icon: 'book', labelKey: 'nav.dictionary' },
   // Online hotword sync disabled for now — adds config complexity with limited benefit.
-  // { path: '/hotwords', name: 'hotwords', icon: 'sync', label: 'Hotwords' },
-  { path: '/asr-settings', name: 'asr-settings', icon: 'mic', label: 'ASR' },
-  { path: '/llm-settings', name: 'llm-settings', icon: 'brain', label: 'LLM' },
-  { path: '/input-settings', name: 'input-settings', icon: 'keyboard', label: 'Input' },
-  { path: '/sync', name: 'sync', icon: 'sync', label: 'Sync' },
-  { path: '/post-processing', name: 'post-processing', icon: 'wand', label: 'Processing' },
-  { path: '/about', name: 'about', icon: 'info', label: 'About' }
+  // { path: '/hotwords', name: 'hotwords', icon: 'sync', labelKey: 'nav.hotwords' },
+  { path: '/asr-settings', name: 'asr-settings', icon: 'mic', labelKey: 'nav.asrSettings' },
+  { path: '/llm-settings', name: 'llm-settings', icon: 'brain', labelKey: 'nav.llmSettings' },
+  { path: '/input-settings', name: 'input-settings', icon: 'keyboard', labelKey: 'nav.inputSettings' },
+  { path: '/sync', name: 'sync', icon: 'sync', labelKey: 'nav.sync' },
+  { path: '/post-processing', name: 'post-processing', icon: 'wand', labelKey: 'nav.postProcessing' },
+  { path: '/about', name: 'about', icon: 'info', labelKey: 'nav.about' }
 ]
 
 const currentPath = computed(() => route.path)
@@ -91,7 +93,7 @@ function navigateTo(path: string) {
             <path d="M7.5 5.6L10 7L8.6 4.5L10 2L7.5 3.4L5 2L6.4 4.5L5 7L7.5 5.6M19.5 15.4L17 14L18.4 16.5L17 19L19.5 17.6L22 19L20.6 16.5L22 14L19.5 15.4M22 2L19.5 3.4L17 2L18.4 4.5L17 7L19.5 5.6L22 7L20.6 4.5L22 2M13.38 12.81L4.41 21.78C4.21 21.98 3.9 21.98 3.7 21.78L2.22 20.3C2.02 20.1 2.02 19.79 2.22 19.59L11.19 10.62C11.39 10.42 11.7 10.42 11.9 10.62L13.38 12.1C13.58 12.3 13.58 12.61 13.38 12.81Z"/>
           </svg>
         </span>
-        <span class="nav-label">{{ item.label }}</span>
+        <span class="nav-label">{{ t(item.labelKey) }}</span>
       </button>
     </div>
   </nav>

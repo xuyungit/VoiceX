@@ -6,6 +6,7 @@ import {
     NMessageProvider,
     NDialogProvider
 } from 'naive-ui'
+import { i18n } from './i18n'
 import router from './router'
 import App from './App.vue'
 import './styles/main.css'
@@ -24,5 +25,6 @@ const app = createApp(App)
 app.use(createPinia())
 app.use(router)
 app.use(naive)
+app.use(i18n)
 
 app.mount('#app')

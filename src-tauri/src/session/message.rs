@@ -51,6 +51,15 @@ pub enum SessionMessage {
     AudioStartFailed {
         reason: String,
     },
+    BatchAsrDone {
+        text: String,
+        model_name: Option<String>,
+        batch_epoch: u64,
+    },
+    BatchAsrFailed {
+        reason: String,
+        batch_epoch: u64,
+    },
     AsrRefinementDone {
         text: Option<String>,
         model_name: Option<String>,

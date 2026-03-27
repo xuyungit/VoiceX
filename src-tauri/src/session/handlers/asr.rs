@@ -551,4 +551,148 @@ impl SessionController {
         self.send_message(SessionMessage::CorrectingStop);
         self.maybe_inject_final_state(state);
     }
+
+    // ── Batch ASR ───────────────────────────────────────────────────────
+
+    /// Start batch ASR on the recorded audio file after capture stops.
+    pub fn start_batch_asr(&self, state: &mut AppState) {
+        let audio_path = match state
+            .session_refinement_audio_path
+            .clone()
+            .or(state.session_audio_path.clone())
+        {
+            Some(path) => path,
+            None => {
+                log::warn!("Batch ASR skipped: no audio path available");
+                self.hide_hud_and_reset_state(state);
+                return;
+            }
+        };
+
+        let settings = match crate::storage::get_settings() {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("Batch ASR skipped, failed to load settings: {}", e);
+                self.hide_hud_and_reset_state(state);
+                return;
+            }
+        };
+        let config = AsrConfig::from(&settings);
+        if !config.is_valid() {
+            log::warn!("Batch ASR config invalid, skipping");
+            self.hide_hud_and_reset_state(state);
+            return;
+        }
+
+        // Show recognizing state in HUD.
+        if let Some(hud) = self.hud_service() {
+            hud.emit_recognizing(true);
+        }
+
+        let batch_epoch = self
+            .injection_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let controller = self.clone();
+
+        log::info!(
+            "Starting batch ASR on {} (provider={:?})",
+            audio_path.display(),
+            config.provider_type
+        );
+
+        tauri::async_runtime::spawn(async move {
+            match config.provider_type {
+                AsrProviderType::Coli => {
+                    // Use coli's file-based recognition (refine_file) in batch mode.
+                    let mut batch_config = config.clone();
+                    // Force SenseVoice for batch recognition if refinement is off.
+                    if batch_config.coli_final_refinement_mode == ColiRefinementMode::Off {
+                        batch_config.coli_final_refinement_mode = ColiRefinementMode::SenseVoice;
+                    }
+                    let client = ColiAsrClient::new(batch_config);
+                    match client.refine_file(&audio_path).await {
+                        Ok(Some((text, model_name))) => {
+                            controller.send_message(SessionMessage::BatchAsrDone {
+                                text,
+                                model_name: Some(format!("Local / coli / {}", model_name)),
+                                batch_epoch,
+                            });
+                        }
+                        Ok(None) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: "Batch ASR returned empty result".to_string(),
+                                batch_epoch,
+                            });
+                        }
+                        Err(e) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: e.to_string(),
+                                batch_epoch,
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    // Future batch providers (Gemini, Cohere, etc.) will be handled here.
+                    controller.send_message(SessionMessage::BatchAsrFailed {
+                        reason: format!(
+                            "Batch mode not supported for provider {:?}",
+                            config.provider_type
+                        ),
+                        batch_epoch,
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn on_batch_asr_done_state(
+        &self,
+        state: &mut AppState,
+        text: String,
+        model_name: Option<String>,
+    ) {
+        // Clear recognizing indicator.
+        if let Some(hud) = self.hud_service() {
+            hud.emit_recognizing(false);
+        }
+
+        let trimmed = text.trim().to_string();
+        if trimmed.is_empty() {
+            log::info!("Batch ASR returned empty result; closing HUD");
+            self.discard_session_audio_file(state, "batch_asr_empty");
+            self.discard_session_refinement_audio_file(state, "batch_asr_empty");
+            self.hide_hud_and_reset_state(state);
+            return;
+        }
+
+        log::info!(
+            "Batch ASR completed (len={}, model={})",
+            trimmed.chars().count(),
+            model_name.as_deref().unwrap_or("unknown")
+        );
+
+        state.session_final_text = trimmed.clone();
+        state.transcript_text = trimmed.clone();
+        state.last_injected_text = trimmed.clone();
+        state.has_final_result = true;
+        state.asr_stream_finished = true;
+        if let Some(name) = model_name {
+            state.session_asr_model_name = Some(name);
+        }
+        self.emit_transcript(&trimmed, true);
+        self.maybe_inject_final_state(state);
+    }
+
+    pub fn on_batch_asr_failed_state(&self, state: &mut AppState, reason: String) {
+        log::warn!("Batch ASR failed: {}", reason);
+
+        if let Some(hud) = self.hud_service() {
+            hud.emit_recognizing(false);
+        }
+
+        self.discard_session_audio_file(state, "batch_asr_failed");
+        self.discard_session_refinement_audio_file(state, "batch_asr_failed");
+        self.hide_hud_and_reset_state(state);
+    }
 }

@@ -2,9 +2,11 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { NButton, NCheckbox, NInput, NInputNumber, NSelect } from 'naive-ui'
+import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 
 const settingsStore = useSettingsStore()
+const { t } = useI18n()
 
 type LocalAsrStatus = {
   available: boolean
@@ -56,10 +58,10 @@ const asrWsUrl = computed({
   set: (v: string) => settingsStore.updateSetting('asrWsUrl', v)
 })
 
-const recognitionModeOptions = [
-  { label: 'Realtime (bigmodel_async)', value: 'realtime_async' },
-  { label: 'Nostream (bigmodel_nostream)', value: 'nostream' }
-]
+const recognitionModeOptions = computed(() => [
+  { label: t('asr.recognitionModeRealtime'), value: 'realtime_async' },
+  { label: t('asr.recognitionModeNostream'), value: 'nostream' }
+])
 
 const recognitionMode = computed({
   get: () => (settingsStore.settings.asrWsUrl.includes('nostream') ? 'nostream' : 'realtime_async'),
@@ -103,11 +105,11 @@ const googleSttPhraseBoost = computed({
   set: (v: number | null) => settingsStore.updateSetting('googleSttPhraseBoost', v ?? 0)
 })
 
-const googleEndpointingOptions = [
-  { label: 'Supershort — 出字最快，断句更激进', value: 'supershort' },
-  { label: 'Short — 较快出字，断句适中', value: 'short' },
-  { label: 'Standard — 标准断句', value: 'standard' },
-]
+const googleEndpointingOptions = computed(() => [
+  { label: t('asr.endpointingSupershort'), value: 'supershort' },
+  { label: t('asr.endpointingShort'), value: 'short' },
+  { label: t('asr.endpointingStandard'), value: 'standard' },
+])
 
 const googleLocationOptions = [
   { label: 'us (Multi-region)', value: 'us' },
@@ -162,6 +164,11 @@ const coliFinalRefinementMode = computed({
   set: (v: 'off' | 'sensevoice' | 'whisper') => settingsStore.updateSetting('coliFinalRefinementMode', v)
 })
 
+const coliRealtime = computed({
+  get: () => settingsStore.settings.coliRealtime,
+  set: (v: boolean) => settingsStore.updateSetting('coliRealtime', v)
+})
+
 const coliStatus = ref<LocalAsrStatus | null>(null)
 const coliStatusLoading = ref(false)
 const coliStatusError = ref('')
@@ -170,15 +177,15 @@ let coliStatusRefreshTimer: number | null = null
 const providerOptions = computed(() => {
   const coliDetected = coliStatus.value?.available ?? false
   const coliLabel = coliDetected
-    ? 'Local Offline ASR (coli)'
+    ? t('asr.providerColiReady')
     : coliStatusLoading.value
-      ? 'Local Offline ASR (coli) - checking...'
-      : 'Local Offline ASR (coli) - unavailable'
+      ? t('asr.providerColiChecking')
+      : t('asr.providerColiUnavailable')
 
   return [
-    { label: 'Volcengine Doubao (豆包)', value: 'volcengine' as ProviderValue },
-    { label: 'Google Cloud Speech-to-Text V2', value: 'google' as ProviderValue },
-    { label: 'Qwen Realtime ASR (通义千问)', value: 'qwen' as ProviderValue },
+    { label: t('asr.providerVolcengine'), value: 'volcengine' as ProviderValue },
+    { label: t('asr.providerGoogle'), value: 'google' as ProviderValue },
+    { label: t('asr.providerQwen'), value: 'qwen' as ProviderValue },
     {
       label: coliLabel,
       value: 'coli' as ProviderValue,
@@ -194,11 +201,11 @@ const showColiUnavailableWarning = computed(() =>
   !coliStatus.value.available
 )
 
-const coliRefinementOptions = [
-  { label: 'Off', value: 'off' },
-  { label: 'SenseVoice refine', value: 'sensevoice' },
-  { label: 'Whisper refine (English only)', value: 'whisper' },
-]
+const coliRefinementOptions = computed(() => [
+  { label: t('asr.refinementOff'), value: 'off' },
+  { label: t('asr.refinementSenseVoice'), value: 'sensevoice' },
+  { label: t('asr.refinementWhisper'), value: 'whisper' },
+])
 
 async function refreshColiStatus() {
   coliStatusLoading.value = true
@@ -214,25 +221,25 @@ async function refreshColiStatus() {
   }
 }
 
-const qwenModelOptions = [
-  { label: 'Stable - qwen3-asr-flash-realtime', value: 'qwen3-asr-flash-realtime' },
-  { label: 'Snapshot - qwen3-asr-flash-realtime-2026-02-10', value: 'qwen3-asr-flash-realtime-2026-02-10' },
-  { label: 'Snapshot - qwen3-asr-flash-realtime-2025-10-27', value: 'qwen3-asr-flash-realtime-2025-10-27' },
-]
+const qwenModelOptions = computed(() => [
+  { label: t('asr.qwenModelStable'), value: 'qwen3-asr-flash-realtime' },
+  { label: t('asr.qwenModelSnapshot1'), value: 'qwen3-asr-flash-realtime-2026-02-10' },
+  { label: t('asr.qwenModelSnapshot2'), value: 'qwen3-asr-flash-realtime-2025-10-27' },
+])
 
-const qwenWsUrlOptions = [
-  { label: 'Beijing - 中国内地', value: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' },
-  { label: 'Singapore - International', value: 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime' },
-]
+const qwenWsUrlOptions = computed(() => [
+  { label: t('asr.qwenEndpointBeijing'), value: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' },
+  { label: t('asr.qwenEndpointSingapore'), value: 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime' },
+])
 
 // Common settings
-const maxRecordingOptions = [
-  { label: 'No limit', value: 0 },
-  { label: '1 min', value: 1 },
-  { label: '5 min', value: 5 },
-  { label: '10 min', value: 10 },
-  { label: '30 min', value: 30 }
-]
+const maxRecordingOptions = computed(() => [
+  { label: t('asr.noLimit'), value: 0 },
+  { label: t('asr.oneMinute'), value: 1 },
+  { label: t('asr.fiveMinutes'), value: 5 },
+  { label: t('asr.tenMinutes'), value: 10 },
+  { label: t('asr.thirtyMinutes'), value: 30 }
+])
 
 const endWindowSize = computed({
   get: () => settingsStore.settings.endWindowSize,
@@ -272,19 +279,19 @@ watch(coliCommandPath, () => {
 <template>
   <div class="page settings-page asr-page">
     <div class="page-header">
-      <h1 class="page-title">ASR</h1>
+      <h1 class="page-title">{{ t('asr.title') }}</h1>
     </div>
 
     <!-- Provider Selection -->
     <div class="surface-card asr-card">
       <div class="card-header">
-        <div class="card-title">Provider</div>
-        <div class="card-sub">选择语音识别服务供应商</div>
+        <div class="card-title">{{ t('asr.provider') }}</div>
+        <div class="card-sub">{{ t('asr.providerSub') }}</div>
       </div>
       <div class="field-list">
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">ASR Provider</div>
+            <div class="field-label">{{ t('asr.asrProvider') }}</div>
           </div>
           <NSelect
             v-model:value="asrProviderType"
@@ -294,7 +301,7 @@ watch(coliCommandPath, () => {
           />
         </div>
         <div v-if="showColiUnavailableWarning" class="warning-box">
-          当前设置仍指向本地 `coli`，但系统没有检测到可用命令。开始录音时本地 ASR 不会工作；请安装/修正 `coli` 路径，或切换回在线 provider。
+          {{ t('asr.warningColiUnavailable') }}
         </div>
       </div>
     </div>
@@ -302,7 +309,7 @@ watch(coliCommandPath, () => {
     <!-- Volcengine Credentials -->
     <div v-if="isVolcengine" class="surface-card asr-card">
       <div class="card-header">
-        <div class="card-title">API Credentials</div>
+        <div class="card-title">{{ t('asr.apiCredentials') }}</div>
         <div class="card-sub">Volcengine 豆包 ASR 服务的访问凭证</div>
       </div>
       <div class="field-list">
@@ -336,14 +343,14 @@ watch(coliCommandPath, () => {
     <!-- Google Configuration -->
     <div v-if="isGoogle" class="surface-card asr-card">
       <div class="card-header">
-        <div class="card-title">Google Cloud Configuration</div>
-        <div class="card-sub">使用 Service Account 密钥认证，在 GCP Console → IAM → Service Accounts 中创建密钥并粘贴 JSON 内容</div>
+        <div class="card-title">{{ t('asr.googleCloudConfiguration') }}</div>
+        <div class="card-sub">{{ t('asr.googleCloudConfigurationSub') }}</div>
       </div>
       <div class="field-list">
         <div class="field-row sa-json-row">
           <div class="field-text">
-            <div class="field-label">Service Account Key</div>
-            <div class="field-note">粘贴 Service Account JSON 密钥的完整内容。</div>
+            <div class="field-label">{{ t('asr.serviceAccountKey') }}</div>
+            <div class="field-note">{{ t('asr.serviceAccountNote') }}</div>
           </div>
           <NInput
             v-model:value="googleSttApiKey"
@@ -355,15 +362,15 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Project ID</div>
-            <div class="field-note">GCP 项目 ID，可从 Service Account JSON 的 project_id 字段获取。</div>
+            <div class="field-label">{{ t('asr.projectId') }}</div>
+            <div class="field-note">{{ t('asr.projectIdNote') }}</div>
           </div>
           <NInput v-model:value="googleSttProjectId" placeholder="e.g. my-project-123456" class="field-control" />
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Location</div>
-            <div class="field-note">Chirp 3 model availability varies by region.</div>
+            <div class="field-label">{{ t('asr.location') }}</div>
+            <div class="field-note">{{ t('asr.locationNote') }}</div>
           </div>
           <NSelect
             v-model:value="googleSttLocation"
@@ -376,8 +383,8 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Language</div>
-            <div class="field-note">支持逗号分隔多个 BCP-47 语言码，例如 `cmn-Hans-CN, en-US`；填 `auto` 使用自动识别。</div>
+            <div class="field-label">{{ t('asr.language') }}</div>
+            <div class="field-note">{{ t('asr.languageNote') }}</div>
           </div>
           <NInput
             v-model:value="googleSttLanguageCode"
@@ -387,8 +394,8 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Endpointing</div>
-            <div class="field-note">Controls how quickly the model finalizes a sentence.</div>
+            <div class="field-label">{{ t('asr.endpointing') }}</div>
+            <div class="field-note">{{ t('asr.endpointingNote') }}</div>
           </div>
           <NSelect
             v-model:value="googleSttEndpointing"
@@ -399,8 +406,8 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Phrase Boost</div>
-            <div class="field-note">Google 词典偏置强度。建议先从 `8` 开始，过高可能带来误识别。</div>
+            <div class="field-label">{{ t('asr.phraseBoost') }}</div>
+            <div class="field-note">{{ t('asr.phraseBoostNote') }}</div>
           </div>
           <NInputNumber
             v-model:value="googleSttPhraseBoost"
@@ -416,15 +423,13 @@ watch(coliCommandPath, () => {
     <!-- Qwen Configuration -->
     <div v-if="isQwen" class="surface-card asr-card">
       <div class="card-header">
-        <div class="card-title">Qwen Realtime Configuration</div>
-        <div class="card-sub">
-          使用 DashScope API Key。北京与新加坡地域的 API Key 不通用；当前接入走 realtime 文本流，热词表、ASR 历史上下文、时间戳、说话人分离和 DDC 不生效，应用内词典仍可用于后续 LLM 纠错。
-        </div>
+        <div class="card-title">{{ t('asr.qwenRealtimeConfiguration') }}</div>
+        <div class="card-sub">{{ t('asr.qwenRealtimeConfigurationSub') }}</div>
       </div>
       <div class="field-list">
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">API Key</div>
+            <div class="field-label">{{ t('asr.apiCredentials') }}</div>
             <div class="field-note">填写对应地域的 DashScope API Key。</div>
           </div>
           <NInput
@@ -437,8 +442,8 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Endpoint</div>
-            <div class="field-note">北京地域适用于中国内地部署；新加坡地域适用于国际部署。</div>
+            <div class="field-label">{{ t('asr.endpoint') }}</div>
+            <div class="field-note">{{ t('asr.endpointNote') }}</div>
           </div>
           <NSelect
             v-model:value="qwenAsrWsUrl"
@@ -451,8 +456,8 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Model</div>
-            <div class="field-note">默认使用稳定版，也可以切换到快照版做对比。</div>
+            <div class="field-label">{{ t('asr.model') }}</div>
+            <div class="field-note">{{ t('asr.modelNote') }}</div>
           </div>
           <NSelect
             v-model:value="qwenAsrModel"
@@ -465,8 +470,8 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Language Hint</div>
-            <div class="field-note">例如 `zh`、`en`、`ja`。默认留空，依赖服务自动语种检测，更适合中英混说。</div>
+            <div class="field-label">{{ t('asr.languageHint') }}</div>
+            <div class="field-note">{{ t('asr.languageHintNote') }}</div>
           </div>
           <NInput
             v-model:value="qwenAsrLanguage"
@@ -479,17 +484,15 @@ watch(coliCommandPath, () => {
 
     <div v-if="isColi" class="surface-card asr-card">
       <div class="card-header">
-        <div class="card-title">Local coli Configuration</div>
-        <div class="card-sub">
-          `coli` 通过本地 CLI 跑离线识别。关闭 VAD 时，HUD 可以显示实时 partial；开启 VAD 后，通常只会在一句话结束或停顿后返回 final。
-        </div>
+        <div class="card-title">{{ t('asr.localColiConfiguration') }}</div>
+        <div class="card-sub">{{ t('asr.localColiConfigurationSub') }}</div>
       </div>
       <div class="field-list">
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Detection Status</div>
+            <div class="field-label">{{ t('asr.detectionStatus') }}</div>
             <div class="field-note">
-              {{ coliStatusError || coliStatus?.message || 'Checking local coli availability…' }}
+              {{ coliStatusError || coliStatus?.message || t('asr.checkingLocalColi') }}
             </div>
           </div>
           <div
@@ -499,30 +502,28 @@ watch(coliCommandPath, () => {
               offline: !coliStatusLoading && !coliStatus?.available
             }"
           >
-            {{ coliStatusLoading ? 'Checking…' : coliStatus?.available ? 'Detected' : 'Not Found' }}
+            {{ coliStatusLoading ? t('asr.checking') : coliStatus?.available ? t('asr.detected') : t('asr.notFound') }}
           </div>
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Command Path</div>
-            <div class="field-note">
-              留空自动探测。若 macOS 从 Finder 启动后找不到 Homebrew PATH，可手动填 `/opt/homebrew/bin/coli`。
-            </div>
+            <div class="field-label">{{ t('asr.commandPath') }}</div>
+            <div class="field-note">{{ t('asr.commandPathNote') }}</div>
           </div>
           <div class="field-control action-control">
             <NInput
               v-model:value="coliCommandPath"
-              placeholder="Leave empty to auto-detect `coli`"
+              :placeholder="t('asr.leaveEmptyToAuto')"
             />
             <NButton secondary size="small" @click="refreshColiStatus">
-              Refresh
+              {{ t('asr.refresh') }}
             </NButton>
           </div>
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Resolved Path</div>
-            <div class="field-note">VoiceX 实际会启动的 `coli` 可执行路径。</div>
+            <div class="field-label">{{ t('asr.resolvedPath') }}</div>
+            <div class="field-note">{{ t('asr.resolvedPathNote') }}</div>
           </div>
           <div class="field-value mono">
             {{ coliStatus?.resolvedPath || '—' }}
@@ -530,8 +531,8 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Model Cache</div>
-            <div class="field-note">首次运行会自动下载模型到本地缓存目录。</div>
+            <div class="field-label">{{ t('asr.modelCache') }}</div>
+            <div class="field-note">{{ t('asr.modelCacheNote') }}</div>
           </div>
           <div class="field-value mono">
             {{ coliStatus?.modelsDir || '—' }}
@@ -539,17 +540,25 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Enable VAD</div>
-            <div class="field-note">
-              开启后更像“按句分段转写”，但 HUD 通常不会实时出 partial；默认关闭，保留实时文字预览。
-            </div>
+            <div class="field-label">{{ t('asr.realtimeStreaming') }}</div>
+            <div class="field-note">{{ t('asr.realtimeStreamingNote') }}</div>
+          </div>
+          <NCheckbox v-model:checked="coliRealtime" />
+        </div>
+        <div v-if="coliRealtime" class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.enableVad') }}</div>
+            <div class="field-note">{{ t('asr.enableVadNote') }}</div>
           </div>
           <NCheckbox v-model:checked="coliUseVad" />
         </div>
-        <div v-if="!coliUseVad" class="field-row">
+        <div v-if="coliRealtime && !coliUseVad" class="warning-box">
+          {{ t('asr.warningVadOff') }}
+        </div>
+        <div v-if="coliRealtime && !coliUseVad" class="field-row">
           <div class="field-text">
-            <div class="field-label">Streaming Interval (ms)</div>
-            <div class="field-note">多久刷新一次 partial。数值越小，HUD 更新越频繁。</div>
+            <div class="field-label">{{ t('asr.streamingInterval') }}</div>
+            <div class="field-note">{{ t('asr.streamingIntervalNote') }}</div>
           </div>
           <NInputNumber
             v-model:value="coliAsrIntervalMs"
@@ -559,12 +568,10 @@ watch(coliCommandPath, () => {
             class="field-control short"
           />
         </div>
-        <div class="field-row">
+        <div v-if="coliRealtime" class="field-row">
           <div class="field-text">
-            <div class="field-label">Final Refinement</div>
-            <div class="field-note">
-              录音结束后对整段音频再跑一次离线识别。适合用更完整上下文提升最终结果，不影响前面的实时 HUD。
-            </div>
+            <div class="field-label">{{ t('asr.finalRefinement') }}</div>
+            <div class="field-note">{{ t('asr.finalRefinementNote') }}</div>
           </div>
           <NSelect
             v-model:value="coliFinalRefinementMode"
@@ -575,23 +582,21 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Installed Models</div>
-            <div class="field-note">
-              SenseVoice 用于实时识别；Whisper 可用于英文最终复核；Silero VAD 只在启用 VAD 时需要。`ffmpeg` 现在只作为环境信息展示，不再是最终复核的前置依赖。
-            </div>
+            <div class="field-label">{{ t('asr.installedModels') }}</div>
+            <div class="field-note">{{ t('asr.installedModelsNote') }}</div>
           </div>
           <div class="pill-group">
             <span class="mini-pill" :class="{ ready: coliStatus?.sensevoiceInstalled }">
-              {{ coliStatus?.sensevoiceInstalled ? 'SenseVoice ready' : 'SenseVoice pending' }}
+              {{ coliStatus?.sensevoiceInstalled ? t('asr.senseVoiceReady') : t('asr.senseVoicePending') }}
             </span>
             <span class="mini-pill" :class="{ ready: coliStatus?.whisperInstalled }">
-              {{ coliStatus?.whisperInstalled ? 'Whisper ready' : 'Whisper pending' }}
+              {{ coliStatus?.whisperInstalled ? t('asr.whisperReady') : t('asr.whisperPending') }}
             </span>
             <span class="mini-pill" :class="{ ready: coliStatus?.vadInstalled }">
-              {{ coliStatus?.vadInstalled ? 'Silero VAD ready' : 'Silero VAD pending' }}
+              {{ coliStatus?.vadInstalled ? t('asr.sileroReady') : t('asr.sileroPending') }}
             </span>
             <span class="mini-pill" :class="{ ready: coliStatus?.ffmpegAvailable }">
-              {{ coliStatus?.ffmpegAvailable ? 'ffmpeg ready' : 'ffmpeg missing' }}
+              {{ coliStatus?.ffmpegAvailable ? t('asr.ffmpegReady') : t('asr.ffmpegMissing') }}
             </span>
           </div>
         </div>
@@ -601,13 +606,13 @@ watch(coliCommandPath, () => {
     <!-- Volcengine Recognition Settings -->
     <div class="surface-card asr-card">
       <div class="card-header">
-        <div class="card-title">Recognition</div>
-        <div class="card-sub">录音时长与后处理</div>
+        <div class="card-title">{{ t('asr.recognition') }}</div>
+        <div class="card-sub">{{ t('asr.recognitionSub') }}</div>
       </div>
       <div class="field-list">
         <div v-if="isVolcengine" class="field-row">
           <div class="field-text">
-            <div class="field-label">Recognition Mode</div>
+            <div class="field-label">{{ t('asr.recognitionMode') }}</div>
           </div>
           <NSelect
             v-model:value="recognitionMode"
@@ -618,8 +623,8 @@ watch(coliCommandPath, () => {
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Max Recording Duration</div>
-            <div class="field-note">Hands-free only. Set to No limit to disable.</div>
+            <div class="field-label">{{ t('asr.maxRecordingDuration') }}</div>
+            <div class="field-note">{{ t('asr.maxRecordingDurationNote') }}</div>
           </div>
           <NSelect
             v-model:value="maxRecordingMinutes"
@@ -630,17 +635,15 @@ watch(coliCommandPath, () => {
         </div>
         <div v-if="isVolcengine" class="field-row">
           <div class="field-text">
-            <div class="field-label">Enable Semantic Smoothing (DDC)</div>
-            <div class="field-note">
-              去除口语中的停顿词、语气词和重复词，提高文本可读性。
-            </div>
+            <div class="field-label">{{ t('asr.enableSemanticSmoothing') }}</div>
+            <div class="field-note">{{ t('asr.enableSemanticSmoothingNote') }}</div>
           </div>
           <NCheckbox v-model:checked="enableDdc" />
         </div>
         <div v-if="isVolcengine" class="field-row">
           <div class="field-text">
-            <div class="field-label">WebSocket URL</div>
-            <div class="field-note">Leave URL empty to use the selected mode default.</div>
+            <div class="field-label">{{ t('asr.webSocketUrl') }}</div>
+            <div class="field-note">{{ t('asr.webSocketUrlNote') }}</div>
           </div>
           <NInput v-model:value="asrWsUrl" placeholder="wss://openspeech.bytedance.com/api/v3/..." class="field-control" />
         </div>
@@ -650,34 +653,34 @@ watch(coliCommandPath, () => {
     <!-- Volcengine Endpoint Settings -->
     <div v-if="isVolcengine" class="surface-card asr-card">
       <div class="card-header">
-        <div class="card-title">Endpoint Settings</div>
-        <div class="card-sub">VAD 与出句控制</div>
+        <div class="card-title">{{ t('asr.endpointSettings') }}</div>
+        <div class="card-sub">{{ t('asr.endpointSettingsSub') }}</div>
       </div>
       <div class="field-list">
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">End Window Size (ms)</div>
-            <div class="field-note">Leave blank to use service defaults.</div>
+            <div class="field-label">{{ t('asr.endWindowSize') }}</div>
+            <div class="field-note">{{ t('asr.useServiceDefault') }}</div>
           </div>
           <NInputNumber
             v-model:value="endWindowSize"
             :min="0"
             :max="5000"
-            placeholder="Service default"
+            :placeholder="t('asr.serviceDefault')"
             class="field-control short"
             clearable
           />
         </div>
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">Force To Speech Time (ms)</div>
-            <div class="field-note">Leave blank to use service defaults.</div>
+            <div class="field-label">{{ t('asr.forceToSpeechTime') }}</div>
+            <div class="field-note">{{ t('asr.useServiceDefault') }}</div>
           </div>
           <NInputNumber
             v-model:value="forceToSpeechTime"
             :min="0"
             :max="60000"
-            placeholder="Service default"
+            :placeholder="t('asr.serviceDefault')"
             class="field-control short"
             clearable
           />

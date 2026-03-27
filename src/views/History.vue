@@ -2,23 +2,26 @@
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { NButton, NSpin, NEmpty, NSelect, NModal, NDropdown, useDialog, type DropdownOption } from 'naive-ui'
+import { useI18n } from 'vue-i18n'
 import { useHistoryStore, type HistoryRecord } from '../stores/history'
 import { useSyncStore } from '../stores/sync'
 import { useSettingsStore } from '../stores/settings'
 import { trimTrailingPunctuation } from '../utils/text'
+import ReTranscribeDialog from '../components/ReTranscribeDialog.vue'
 
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
 const syncStore = useSyncStore()
 const dialog = useDialog()
+const { t, locale } = useI18n()
 
-const retentionOptions = [
-  { label: '永远', value: 0 },
-  { label: '365 天', value: 365 },
-  { label: '180 天', value: 180 },
-  { label: '30 天', value: 30 },
-  { label: '7 天', value: 7 }
-]
+const retentionOptions = computed(() => [
+  { label: t('common.forever'), value: 0 },
+  { label: t('common.days', { count: 365 }), value: 365 },
+  { label: t('common.days', { count: 180 }), value: 180 },
+  { label: t('common.days', { count: 30 }), value: 30 },
+  { label: t('common.days', { count: 7 }), value: 7 }
+])
 
 const textRetention = computed({
   get: () => settingsStore.settings.textRetentionDays,
@@ -42,8 +45,8 @@ const groupedRecords = computed(() => {
       date.getMonth() === today.getMonth() &&
       date.getDate() === today.getDate()
     const label = isToday
-      ? 'Today'
-      : date.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })
+      ? t('history.today')
+      : date.toLocaleDateString(locale.value, { month: 'long', day: 'numeric' })
 
     if (!map.has(label)) {
       const list: HistoryRecord[] = []
@@ -58,6 +61,8 @@ const groupedRecords = computed(() => {
 
 const detailVisible = ref(false)
 const detailRecord = ref<HistoryRecord | null>(null)
+const reTranscribeVisible = ref(false)
+const reTranscribeRecord = ref<HistoryRecord | null>(null)
 const audioPlayer = ref<HTMLAudioElement | null>(null)
 const playingId = ref<string | null>(null)
 const objectUrl = ref<string | null>(null)
@@ -89,7 +94,7 @@ async function handleDelete(record: HistoryRecord) {
 
 function formatTime(timestamp: string): string {
   const date = new Date(timestamp)
-  return date.toLocaleTimeString('en-US', {
+  return date.toLocaleTimeString(locale.value, {
     hour: '2-digit',
     minute: '2-digit'
   })
@@ -108,15 +113,15 @@ function formatDevice(record: HistoryRecord): string {
     return record.sourceDeviceName
   }
   if (!settingsStore.settings.syncEnabled) {
-    return '本机'
+    return t('common.thisDevice')
   }
   if (record.sourceDeviceId && record.sourceDeviceId === syncStore.deviceId) {
-    return '本机'
+    return t('common.thisDevice')
   }
   if (record.sourceDeviceId) {
-    return `设备 ${record.sourceDeviceId.slice(0, 6)}`
+    return t('history.devicePrefix', { id: record.sourceDeviceId.slice(0, 6) })
   }
-  return '本机'
+  return t('common.thisDevice')
 }
 
 async function togglePlayback(record: HistoryRecord) {
@@ -201,7 +206,7 @@ function canCompare(record: HistoryRecord) {
 
 function modeBadge(record: HistoryRecord): string | null {
   if (record.mode.startsWith('translate_en')) {
-    return 'EN Translate'
+    return t('history.englishTranslation')
   }
   if (record.mode.startsWith('assistant')) {
     return 'Assistant'
@@ -210,7 +215,7 @@ function modeBadge(record: HistoryRecord): string | null {
 }
 
 function compareTagLabel(record: HistoryRecord): string {
-  return isTranslateMode(record) ? '译文对比' : 'AI 纠错'
+  return isTranslateMode(record) ? t('history.compareTranslation') : t('history.aiCorrection')
 }
 
 function showCompareTag(record: HistoryRecord): boolean {
@@ -253,7 +258,7 @@ function confirmDelete(record: HistoryRecord) {
 
 function formatDateTime(timestamp: string): string {
   const date = new Date(timestamp)
-  return date.toLocaleString('zh-CN', {
+  return date.toLocaleString(locale.value, {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -266,25 +271,26 @@ function formatDateTime(timestamp: string): string {
 
 function modeLabel(record: HistoryRecord): string {
   if (record.mode.startsWith('translate_en')) {
-    return '英文翻译'
+    return t('history.englishTranslation')
   }
   if (record.mode.startsWith('assistant')) {
-    return 'Assistant 模式'
+    return t('history.assistantMode')
   }
-  return '普通转写'
+  return t('history.plainTranscription')
 }
 
-function modelLabel(value: string | null | undefined, fallback = '未记录'): string {
-  if (!value) return fallback
+function modelLabel(value: string | null | undefined, fallback?: string): string {
+  const fallbackText = fallback ?? t('common.notRecorded')
+  if (!value) return fallbackText
   const trimmed = value.trim()
-  return trimmed || fallback
+  return trimmed || fallbackText
 }
 
 function llmModelLabel(record: HistoryRecord): string {
   if (record.llmInvoked) {
     return modelLabel(record.llmModelName)
   }
-  return '无'
+  return t('common.none')
 }
 
 function resolvedOriginalText(record: HistoryRecord): string | null {
@@ -315,13 +321,19 @@ function moreOptions(record: HistoryRecord): DropdownOption[] {
 
   return [
     {
-      label: isPlaying ? '停止播放' : '播放录音',
+      label: isPlaying ? t('history.stopPlayback') : t('history.playAudio'),
       key: 'play',
       disabled: !record.audioPath,
       icon: renderIcon(isPlaying ? 'M8 5h3v14H8zm5 0h3v14h-3z' : 'M8 5.14 19 12l-11 6.86V5.14z')
     },
     {
-      label: '查看详情',
+      label: t('history.reTranscribe'),
+      key: 'retranscribe',
+      disabled: !record.audioPath,
+      icon: renderIcon('M17.65 6.35A7.96 7.96 0 0 0 12 4C7.58 4 4.01 7.58 4.01 12S7.58 20 12 20c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z')
+    },
+    {
+      label: t('history.viewDetails'),
       key: 'details',
       icon: renderIcon('M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm0 2.5L17.5 8H14V4.5zM8 13h8v2H8v-2zm0 4h8v2H8v-2zm0-8h5v2H8V9z')
     }
@@ -334,6 +346,12 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
     return
   }
 
+  if (key === 'retranscribe') {
+    reTranscribeRecord.value = record
+    reTranscribeVisible.value = true
+    return
+  }
+
   if (key === 'details') {
     openDetails(record)
   }
@@ -343,39 +361,39 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 <template>
   <div class="page history-page">
     <div class="page-header">
-      <h1 class="page-title">History</h1>
+      <h1 class="page-title">{{ t('history.title') }}</h1>
       <div class="page-subtitle">
         <span class="subtitle-item">
-          <span class="subtitle-label">文字保留</span>
-          <span class="pill">{{ textRetention === 0 ? '永远' : `${textRetention} 天` }}</span>
+          <span class="subtitle-label">{{ t('history.textRetention') }}</span>
+          <span class="pill">{{ textRetention === 0 ? t('common.forever') : t('common.days', { count: textRetention }) }}</span>
         </span>
         <span class="subtitle-item">
-          <span class="subtitle-label">录音保留</span>
-          <span class="pill">{{ audioRetention === 0 ? '永远' : `${audioRetention} 天` }}</span>
+          <span class="subtitle-label">{{ t('history.audioRetention') }}</span>
+          <span class="pill">{{ audioRetention === 0 ? t('common.forever') : t('common.days', { count: audioRetention }) }}</span>
         </span>
       </div>
     </div>
 
     <div class="surface-card retention-card">
       <div class="retention-title">
-        <div class="section-title">历史保留策略</div>
-        <div class="section-hint">文字与录音的保留期限</div>
+        <div class="section-title">{{ t('history.retentionPolicy') }}</div>
+        <div class="section-hint">{{ t('history.retentionPolicyHint') }}</div>
       </div>
       <div class="retention-body">
         <div class="retention-fields">
           <div class="retention-field">
-            <div class="retention-label">文字</div>
+            <div class="retention-label">{{ t('history.text') }}</div>
             <NSelect v-model:value="textRetention" :options="retentionOptions" size="small" class="retention-select" />
           </div>
           <div class="retention-field">
-            <div class="retention-label">语音</div>
+            <div class="retention-label">{{ t('history.audio') }}</div>
             <NSelect v-model:value="audioRetention" :options="retentionOptions" size="small" class="retention-select" />
           </div>
           <NButton size="small" quaternary class="open-folder" @click="openRecordingsFolder">
-            打开录音目录
+            {{ t('history.openRecordingsFolder') }}
           </NButton>
         </div>
-        <div class="retention-hint">达到保留期限后会自动清理本地数据</div>
+        <div class="retention-hint">{{ t('history.autoCleanupHint') }}</div>
       </div>
     </div>
 
@@ -384,7 +402,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
     </div>
 
     <div v-else-if="historyStore.records.length === 0" class="empty-container">
-      <NEmpty description="暂无历史记录" />
+      <NEmpty :description="t('history.empty')" />
     </div>
 
     <div v-else class="surface-card list-wrapper">
@@ -416,7 +434,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
               </div>
               <div class="list-actions">
                 <span class="list-meta duration-chip">{{ formatDuration(record.durationMs) }}</span>
-                <span v-if="playingId === record.id" class="pill accent">播放中</span>
+                <span v-if="playingId === record.id" class="pill accent">{{ t('history.playing') }}</span>
                 <div class="action-toolbar">
                   <NButton quaternary size="small" class="toolbar-button" aria-label="复制" @click="() => handleCopy(record)">
                     <template #icon>
@@ -471,7 +489,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
           @click="loadMore"
           quaternary
         >
-          加载更多
+          {{ t('common.loadMore') }}
         </NButton>
       </div>
     </div>
@@ -479,7 +497,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
     <NModal
       v-model:show="detailVisible"
       preset="card"
-      title="查看详情"
+      :title="t('history.detailTitle')"
       style="max-width: 720px;"
       @after-leave="closeDetails"
     >
@@ -530,13 +548,13 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
         <div class="detail-section">
           <div class="detail-header">
             <div class="detail-title">
-              最终文本
+              {{ t('history.finalText') }}
               <span v-if="showNoCorrectionTag(detailRecord)" class="tag detail-tag no-correction-tag">
-                无修正
+                {{ t('history.noCorrection') }}
               </span>
             </div>
             <NButton quaternary size="tiny" @click="handleCopy(detailRecord)">
-              复制
+              {{ t('common.copy') }}
             </NButton>
           </div>
           <div class="detail-body">
@@ -546,26 +564,31 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
         <div class="detail-section">
           <div class="detail-header">
-            <div class="detail-title">原始识别</div>
+            <div class="detail-title">{{ t('history.originalRecognition') }}</div>
             <NButton
               quaternary
               size="tiny"
               :disabled="!resolvedOriginalText(detailRecord)"
               @click="copyOriginal"
             >
-              复制
+              {{ t('common.copy') }}
             </NButton>
           </div>
           <div class="detail-body muted" v-if="resolvedOriginalText(detailRecord)">
             {{ resolvedOriginalText(detailRecord) }}
           </div>
           <div class="detail-body muted" v-else>
-            无原始文本
+            {{ t('history.noOriginalText') }}
           </div>
         </div>
 
       </div>
     </NModal>
+
+    <ReTranscribeDialog
+      v-model:show="reTranscribeVisible"
+      :record="reTranscribeRecord"
+    />
   </div>
 </template>
 

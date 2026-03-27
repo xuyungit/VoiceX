@@ -8,6 +8,7 @@ mod client;
 pub mod coli_client;
 mod config;
 pub mod google_client;
+pub mod ogg_decoder;
 mod protocol;
 pub mod qwen_client;
 pub mod volc_auth;
