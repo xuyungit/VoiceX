@@ -668,7 +668,11 @@ impl SessionController {
             hud.emit_recording_style(recording_style_for_hud, is_batch);
             hud.emit_correcting(state.is_correcting);
             hud.emit_intent(state.intent);
-            if state.session_state == HotkeySessionState::Finalizing {
+            let is_recognizing = state.session_state == HotkeySessionState::Finalizing
+                && !state.asr_stream_finished
+                && !state.is_correcting;
+            hud.emit_recognizing(is_recognizing);
+            if state.session_state == HotkeySessionState::Finalizing && state.asr_stream_finished {
                 hud.emit_recognition_stopped();
             }
         }

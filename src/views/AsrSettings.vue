@@ -20,7 +20,7 @@ type LocalAsrStatus = {
   message: string
 }
 
-type ProviderValue = 'volcengine' | 'google' | 'qwen' | 'coli'
+type ProviderValue = 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'coli'
 
 const asrProviderType = computed({
   get: () => settingsStore.settings.asrProviderType,
@@ -35,6 +35,9 @@ const asrProviderType = computed({
 const isVolcengine = computed(() => settingsStore.settings.asrProviderType === 'volcengine')
 const isGoogle = computed(() => settingsStore.settings.asrProviderType === 'google')
 const isQwen = computed(() => settingsStore.settings.asrProviderType === 'qwen')
+const isGemini = computed(() => settingsStore.settings.asrProviderType === 'gemini')
+const isGeminiLive = computed(() => settingsStore.settings.asrProviderType === 'gemini-live')
+const isCohere = computed(() => settingsStore.settings.asrProviderType === 'cohere')
 const isColi = computed(() => settingsStore.settings.asrProviderType === 'coli')
 
 // Volcengine settings
@@ -143,6 +146,50 @@ const qwenAsrLanguage = computed({
   set: (v: string) => settingsStore.updateSetting('qwenAsrLanguage', v)
 })
 
+// Gemini settings
+const geminiApiKey = computed({
+  get: () => settingsStore.settings.geminiApiKey,
+  set: (v: string) => settingsStore.updateSetting('geminiApiKey', v)
+})
+
+const geminiModel = computed({
+  get: () => settingsStore.settings.geminiModel,
+  set: (v: string) => settingsStore.updateSetting('geminiModel', v)
+})
+
+const geminiLiveModel = computed({
+  get: () => settingsStore.settings.geminiLiveModel,
+  set: (v: string) => settingsStore.updateSetting('geminiLiveModel', v)
+})
+
+const geminiLanguage = computed({
+  get: () => settingsStore.settings.geminiLanguage,
+  set: (v: 'auto' | 'zh' | 'en' | 'zh-en') => settingsStore.updateSetting('geminiLanguage', v)
+})
+
+const geminiLanguageOptions = computed(() => [
+  { label: t('asr.geminiLanguageAuto'), value: 'auto' },
+  { label: t('asr.geminiLanguageZh'), value: 'zh' },
+  { label: t('asr.geminiLanguageEn'), value: 'en' },
+  { label: t('asr.geminiLanguageZhEn'), value: 'zh-en' },
+])
+
+// Cohere settings
+const cohereApiKey = computed({
+  get: () => settingsStore.settings.cohereApiKey,
+  set: (v: string) => settingsStore.updateSetting('cohereApiKey', v)
+})
+
+const cohereModel = computed({
+  get: () => settingsStore.settings.cohereModel,
+  set: (v: string) => settingsStore.updateSetting('cohereModel', v)
+})
+
+const cohereLanguage = computed({
+  get: () => settingsStore.settings.cohereLanguage,
+  set: (v: string) => settingsStore.updateSetting('cohereLanguage', v)
+})
+
 // Local coli settings
 const coliCommandPath = computed({
   get: () => settingsStore.settings.coliCommandPath,
@@ -186,6 +233,9 @@ const providerOptions = computed(() => {
     { label: t('asr.providerVolcengine'), value: 'volcengine' as ProviderValue },
     { label: t('asr.providerGoogle'), value: 'google' as ProviderValue },
     { label: t('asr.providerQwen'), value: 'qwen' as ProviderValue },
+    { label: t('asr.providerGemini'), value: 'gemini' as ProviderValue },
+    { label: t('asr.providerGeminiLive'), value: 'gemini-live' as ProviderValue },
+    { label: t('asr.providerCohere'), value: 'cohere' as ProviderValue },
     {
       label: coliLabel,
       value: 'coli' as ProviderValue,
@@ -476,6 +526,143 @@ watch(coliCommandPath, () => {
           <NInput
             v-model:value="qwenAsrLanguage"
             placeholder="留空为自动检测"
+            class="field-control"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- Gemini Configuration -->
+    <div v-if="isGemini" class="surface-card asr-card">
+      <div class="card-header">
+        <div class="card-title">{{ t('asr.geminiConfiguration') }}</div>
+        <div class="card-sub">{{ t('asr.geminiConfigurationSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.apiCredentials') }}</div>
+            <div class="field-note">{{ t('asr.geminiApiKeyNote') }}</div>
+          </div>
+          <NInput
+            v-model:value="geminiApiKey"
+            type="password"
+            show-password-on="click"
+            placeholder="AIza..."
+            class="field-control"
+          />
+        </div>
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.model') }}</div>
+            <div class="field-note">{{ t('asr.geminiModelNote') }}</div>
+          </div>
+          <NInput
+            v-model:value="geminiModel"
+            placeholder="gemini-3.1-flash-lite-preview"
+            class="field-control"
+          />
+        </div>
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.languageHint') }}</div>
+            <div class="field-note">{{ t('asr.geminiLanguageNote') }}</div>
+          </div>
+          <NSelect
+            v-model:value="geminiLanguage"
+            :options="geminiLanguageOptions"
+            size="small"
+            class="field-control"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- Gemini Live Configuration -->
+    <div v-if="isGeminiLive" class="surface-card asr-card">
+      <div class="card-header">
+        <div class="card-title">{{ t('asr.geminiLiveConfiguration') }}</div>
+        <div class="card-sub">{{ t('asr.geminiLiveConfigurationSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.apiCredentials') }}</div>
+            <div class="field-note">{{ t('asr.geminiApiKeyNote') }}</div>
+          </div>
+          <NInput
+            v-model:value="geminiApiKey"
+            type="password"
+            show-password-on="click"
+            placeholder="AIza..."
+            class="field-control"
+          />
+        </div>
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.model') }}</div>
+            <div class="field-note">{{ t('asr.geminiLiveModelNote') }}</div>
+          </div>
+          <NInput
+            v-model:value="geminiLiveModel"
+            placeholder="gemini-3.1-flash-live-preview"
+            class="field-control"
+          />
+        </div>
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.languageHint') }}</div>
+            <div class="field-note">{{ t('asr.geminiLiveLanguageNote') }}</div>
+          </div>
+          <NSelect
+            v-model:value="geminiLanguage"
+            :options="geminiLanguageOptions"
+            size="small"
+            class="field-control"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- Cohere Configuration -->
+    <div v-if="isCohere" class="surface-card asr-card">
+      <div class="card-header">
+        <div class="card-title">{{ t('asr.cohereConfiguration') }}</div>
+        <div class="card-sub">{{ t('asr.cohereConfigurationSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.apiCredentials') }}</div>
+            <div class="field-note">{{ t('asr.cohereApiKeyNote') }}</div>
+          </div>
+          <NInput
+            v-model:value="cohereApiKey"
+            type="password"
+            show-password-on="click"
+            placeholder="Enter Cohere API key"
+            class="field-control"
+          />
+        </div>
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.model') }}</div>
+            <div class="field-note">{{ t('asr.cohereModelNote') }}</div>
+          </div>
+          <NInput
+            v-model:value="cohereModel"
+            placeholder="cohere-transcribe-03-2026"
+            class="field-control"
+          />
+        </div>
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.languageHint') }}</div>
+            <div class="field-note">{{ t('asr.cohereLanguageNote') }}</div>
+          </div>
+          <NInput
+            v-model:value="cohereLanguage"
+            placeholder="zh"
             class="field-control"
           />
         </div>

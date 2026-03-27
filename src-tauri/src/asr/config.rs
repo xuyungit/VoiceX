@@ -8,6 +8,9 @@ pub enum AsrProviderType {
     Volcengine,
     Google,
     Qwen,
+    Gemini,
+    GeminiLive,
+    Cohere,
     Coli,
 }
 
@@ -41,6 +44,17 @@ pub struct AsrConfig {
     pub qwen_model: String,
     pub qwen_ws_url: String,
     pub qwen_language: String,
+
+    // Gemini audio transcription settings
+    pub gemini_api_key: String,
+    pub gemini_model: String,
+    pub gemini_live_model: String,
+    pub gemini_language: String,
+
+    // Cohere Audio Transcription settings
+    pub cohere_api_key: String,
+    pub cohere_model: String,
+    pub cohere_language: String,
 
     // Local ASR via `coli`
     pub coli_command_path: String,
@@ -94,6 +108,13 @@ impl Default for AsrConfig {
             qwen_model: "qwen3-asr-flash-realtime".to_string(),
             qwen_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime".to_string(),
             qwen_language: "zh".to_string(),
+            gemini_api_key: String::new(),
+            gemini_model: "gemini-3.1-flash-lite-preview".to_string(),
+            gemini_live_model: "gemini-3.1-flash-live-preview".to_string(),
+            gemini_language: "auto".to_string(),
+            cohere_api_key: String::new(),
+            cohere_model: "cohere-transcribe-03-2026".to_string(),
+            cohere_language: "zh".to_string(),
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
@@ -123,6 +144,9 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
         let provider_type = match settings.asr_provider_type.as_str() {
             "google" => AsrProviderType::Google,
             "qwen" => AsrProviderType::Qwen,
+            "gemini" => AsrProviderType::Gemini,
+            "gemini-live" => AsrProviderType::GeminiLive,
+            "cohere" => AsrProviderType::Cohere,
             "coli" => AsrProviderType::Coli,
             _ => AsrProviderType::Volcengine,
         };
@@ -142,6 +166,13 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             qwen_model: settings.qwen_asr_model.clone(),
             qwen_ws_url: settings.qwen_asr_ws_url.clone(),
             qwen_language: settings.qwen_asr_language.clone(),
+            gemini_api_key: settings.gemini_api_key.clone(),
+            gemini_model: settings.gemini_model.clone(),
+            gemini_live_model: settings.gemini_live_model.clone(),
+            gemini_language: settings.gemini_language.clone(),
+            cohere_api_key: settings.cohere_api_key.clone(),
+            cohere_model: settings.cohere_model.clone(),
+            cohere_language: settings.cohere_language.clone(),
             coli_command_path: settings.coli_command_path.clone(),
             coli_use_vad: settings.coli_use_vad,
             coli_asr_interval_ms: settings.coli_asr_interval_ms,
@@ -187,7 +218,9 @@ impl AsrConfig {
     pub fn is_batch(&self) -> bool {
         match self.provider_type {
             AsrProviderType::Coli => !self.coli_realtime,
-            // Future batch providers (Gemini, Cohere, …) will match here.
+            AsrProviderType::Gemini => true,
+            AsrProviderType::GeminiLive => false,
+            AsrProviderType::Cohere => true,
             _ => false,
         }
     }
@@ -207,6 +240,17 @@ impl AsrConfig {
                 !self.qwen_api_key.is_empty()
                     && !self.qwen_model.is_empty()
                     && !self.qwen_ws_url.is_empty()
+            }
+            AsrProviderType::Gemini => {
+                !self.gemini_api_key.is_empty() && !self.gemini_model.is_empty()
+            }
+            AsrProviderType::GeminiLive => {
+                !self.gemini_api_key.is_empty() && !self.gemini_live_model.is_empty()
+            }
+            AsrProviderType::Cohere => {
+                !self.cohere_api_key.is_empty()
+                    && !self.cohere_model.is_empty()
+                    && !self.cohere_language.is_empty()
             }
             AsrProviderType::Coli => {
                 crate::asr::resolve_coli_command(&self.coli_command_path).is_some()

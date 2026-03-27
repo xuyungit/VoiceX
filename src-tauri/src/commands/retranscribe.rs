@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::asr::{
-    AsrClient, AsrConfig, AsrEvent, AsrProviderType, ColiAsrClient, ColiRefinementMode,
-    GoogleSttClient, QwenRealtimeClient,
+    AsrClient, AsrConfig, AsrEvent, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
+    ColiRefinementMode, GeminiLiveClient, GeminiTranscriptionClient, GoogleSttClient,
+    QwenRealtimeClient,
 };
 use crate::llm::{LLMClient, LLMConfig, LLMProviderType, PromptBuildOptions};
 use crate::services::history_service::HistoryService;
@@ -46,9 +47,7 @@ pub struct ReTranscribeResult {
 }
 
 #[tauri::command]
-pub async fn re_transcribe(
-    request: ReTranscribeRequest,
-) -> Result<ReTranscribeResult, String> {
+pub async fn re_transcribe(request: ReTranscribeRequest) -> Result<ReTranscribeResult, String> {
     let path = PathBuf::from(&request.audio_path);
     if !path.is_file() {
         return Err(format!("录音文件不存在: {}", path.display()));
@@ -101,6 +100,9 @@ async fn run_retranscribe(
     // --- ASR ---
     let asr_text = match config.provider_type {
         AsrProviderType::Coli => run_coli_asr(path, config).await?,
+        AsrProviderType::Gemini => run_gemini_asr(path, config).await?,
+        AsrProviderType::GeminiLive => run_streaming_asr(path, config, cancel.clone()).await?,
+        AsrProviderType::Cohere => run_cohere_asr(path, config).await?,
         AsrProviderType::Google => run_google_asr(path, config, cancel.clone()).await?,
         _ => run_streaming_asr(path, config, cancel.clone()).await?,
     };
@@ -117,8 +119,8 @@ async fn run_retranscribe(
     };
 
     // --- Model names ---
-    let asr_model_name = HistoryService::resolve_asr_model_name(settings)
-        .unwrap_or_else(|| "Unknown".to_string());
+    let asr_model_name =
+        HistoryService::resolve_asr_model_name(settings).unwrap_or_else(|| "Unknown".to_string());
 
     Ok(ReTranscribeResult {
         asr_text,
@@ -141,6 +143,22 @@ async fn run_coli_asr(path: &PathBuf, config: &mut AsrConfig) -> Result<String, 
         Ok(None) => Err("Coli ASR 返回空结果".into()),
         Err(e) => Err(format!("Coli ASR 失败: {}", e)),
     }
+}
+
+async fn run_gemini_asr(path: &PathBuf, config: &AsrConfig) -> Result<String, String> {
+    let client = GeminiTranscriptionClient::new(config.clone());
+    client
+        .transcribe_file(path)
+        .await
+        .map_err(|e| format!("Gemini ASR 失败: {}", e))
+}
+
+async fn run_cohere_asr(path: &PathBuf, config: &AsrConfig) -> Result<String, String> {
+    let client = CohereTranscriptionClient::new(config.clone());
+    client
+        .transcribe_file(path)
+        .await
+        .map_err(|e| format!("Cohere ASR 失败: {}", e))
 }
 
 /// Run ASR via Google: try sync Recognize first (fast, ≤60s), fall back to streaming.
@@ -193,6 +211,9 @@ async fn run_streaming_asr(
     let feeder_cancel = cancel.clone();
     let pacing_ms: u64 = match config.provider_type {
         AsrProviderType::Google => 0,
+        AsrProviderType::Gemini => unreachable!("Gemini should use file-based transcription"),
+        AsrProviderType::GeminiLive => 30,
+        AsrProviderType::Cohere => unreachable!("Cohere should use file-based transcription"),
         _ => 30, // ~3x real-time (each chunk = 100ms of audio)
     };
     tokio::spawn(async move {
@@ -244,6 +265,18 @@ async fn run_streaming_asr(
             client
                 .stream_session(16000, 1, rx, cancel.clone(), history, on_event)
                 .await
+        }
+        AsrProviderType::Gemini => {
+            unreachable!("Gemini should use file-based transcription")
+        }
+        AsrProviderType::GeminiLive => {
+            let client = GeminiLiveClient::new(config.clone());
+            client
+                .stream_session(16000, 1, rx, cancel.clone(), history, on_event)
+                .await
+        }
+        AsrProviderType::Cohere => {
+            unreachable!("Cohere should use file-based transcription")
         }
         AsrProviderType::Coli => {
             unreachable!("Coli should use refine_file path")

@@ -1,8 +1,8 @@
 use tokio::sync::mpsc::Receiver;
 
 use crate::asr::{
-    AsrClient, AsrConfig, AsrEvent, AsrProviderType, ColiAsrClient, GoogleSttClient,
-    QwenRealtimeClient,
+    AsrClient, AsrConfig, AsrEvent, AsrProviderType, ColiAsrClient, GeminiLiveClient,
+    GoogleSttClient, QwenRealtimeClient,
 };
 use crate::storage;
 
@@ -166,6 +166,36 @@ impl AsrManager {
                     )
                     .await
             }
+            AsrProviderType::Gemini => {
+                log::warn!("Gemini ASR is batch-only and should not enter streaming mode");
+                Ok(())
+            }
+            AsrProviderType::GeminiLive => {
+                log::info!(
+                    "Starting ASR stream [Gemini Live] ({} Hz, {} ch, model={})",
+                    sample_rate,
+                    channels,
+                    config.gemini_live_model,
+                );
+                let client = GeminiLiveClient::new(config);
+                let on_event = on_event.clone();
+                client
+                    .stream_session(
+                        sample_rate,
+                        channels,
+                        rx,
+                        cancel.clone(),
+                        history,
+                        move |evt| {
+                            (on_event)(evt);
+                        },
+                    )
+                    .await
+            }
+            AsrProviderType::Cohere => {
+                log::warn!("Cohere ASR is batch-only and should not enter streaming mode");
+                Ok(())
+            }
             AsrProviderType::Coli => {
                 let command_path = crate::asr::resolve_coli_command(&config.coli_command_path)
                     .map(|path| path.display().to_string())
@@ -195,6 +225,8 @@ impl AsrManager {
             }
         };
 
+        let had_error = result.is_err();
+
         match result {
             Err(err) => {
                 log::error!("ASR streaming failed: {}", err);
@@ -205,7 +237,7 @@ impl AsrManager {
             }
         }
 
-        if !cancel.is_cancelled() {
+        if !cancel.is_cancelled() || had_error {
             (on_finished)();
         } else {
             log::debug!("ASR stream cancelled; skipping on_finished callback");

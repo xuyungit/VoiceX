@@ -13,7 +13,7 @@ pub struct AppSettings {
     pub ui_language: String, // "system" | "zh-CN" | "en-US"
 
     // ASR settings
-    pub asr_provider_type: String, // "volcengine" | "google" | "qwen" | "coli"
+    pub asr_provider_type: String, // "volcengine" | "google" | "qwen" | "gemini" | "gemini-live" | "cohere" | "coli"
     pub asr_app_key: String,
     pub asr_access_key: String,
     pub asr_resource_id: String,
@@ -38,12 +38,23 @@ pub struct AppSettings {
     pub qwen_asr_ws_url: String,
     pub qwen_asr_language: String,
 
+    // ASR Provider: Gemini Audio Transcription
+    pub gemini_api_key: String,
+    pub gemini_model: String,
+    pub gemini_live_model: String,
+    pub gemini_language: String,
+
+    // ASR Provider: Cohere Audio Transcription
+    pub cohere_api_key: String,
+    pub cohere_model: String,
+    pub cohere_language: String,
+
     // Local ASR Provider: `coli`
     pub coli_command_path: String,
     pub coli_use_vad: bool,
     pub coli_asr_interval_ms: u32,
     pub coli_final_refinement_mode: String, // "off" | "sensevoice" | "whisper"
-    pub coli_realtime: bool, // true = streaming (default), false = batch mode
+    pub coli_realtime: bool,                // true = streaming (default), false = batch mode
 
     // LLM settings
     pub enable_llm_correction: bool,
@@ -153,6 +164,13 @@ impl Default for AppSettings {
             qwen_asr_model: "qwen3-asr-flash-realtime".to_string(),
             qwen_asr_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime".to_string(),
             qwen_asr_language: "zh".to_string(),
+            gemini_api_key: String::new(),
+            gemini_model: "gemini-3.1-flash-lite-preview".to_string(),
+            gemini_live_model: "gemini-3.1-flash-live-preview".to_string(),
+            gemini_language: "auto".to_string(),
+            cohere_api_key: String::new(),
+            cohere_model: "cohere-transcribe-03-2026".to_string(),
+            cohere_language: "zh".to_string(),
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,

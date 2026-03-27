@@ -8,7 +8,7 @@ export interface AppSettings {
     uiLanguage: UiLanguage
 
     // ASR
-    asrProviderType: 'volcengine' | 'google' | 'qwen' | 'coli'
+    asrProviderType: 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'coli'
     asrAppKey: string
     asrAccessKey: string
     asrResourceId: string
@@ -36,6 +36,13 @@ export interface AppSettings {
     qwenAsrModel: string
     qwenAsrWsUrl: string
     qwenAsrLanguage: string
+    geminiApiKey: string
+    geminiModel: string
+    geminiLiveModel: string
+    geminiLanguage: 'auto' | 'zh' | 'en' | 'zh-en'
+    cohereApiKey: string
+    cohereModel: string
+    cohereLanguage: string
 
     // LLM
     enableLlmCorrection: boolean
@@ -166,6 +173,13 @@ const defaultSettings: AppSettings = {
     qwenAsrModel: 'qwen3-asr-flash-realtime',
     qwenAsrWsUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
     qwenAsrLanguage: 'zh',
+    geminiApiKey: '',
+    geminiModel: 'gemini-3.1-flash-lite-preview',
+    geminiLiveModel: 'gemini-3.1-flash-live-preview',
+    geminiLanguage: 'auto',
+    cohereApiKey: '',
+    cohereModel: 'cohere-transcribe-03-2026',
+    cohereLanguage: 'zh',
 
     enableLlmCorrection: false,
     llmProviderType: 'volcengine',
