@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-03-27
+
+### Fixed
+- Fixed Windows local `coli` ASR startup when Node.js receives a `\\?\` verbatim path from canonicalized command discovery.
+- Fixed Windows local `coli` ASR sessions that could stay active after stdin closed, delaying finalization.
+- Suppressed transient console windows when the packaged Windows app launches local `coli` CLI processes.
+
 ## [0.6.0] - 2026-03-26
 
 ### Added

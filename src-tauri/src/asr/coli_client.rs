@@ -6,6 +6,7 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -20,6 +21,9 @@ use super::config::AsrConfig;
 use super::protocol::{AsrError, AsrEvent};
 
 const COLI_DEFAULT_INTERVAL_MS: u32 = 1000;
+const COLI_EXIT_GRACE_MS: u64 = 10_000;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 const COLI_SENSEVOICE_DIR: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17";
 const COLI_SENSEVOICE_CHECK_FILE: &str = "model.int8.onnx";
 const COLI_WHISPER_DIR: &str = "sherpa-onnx-whisper-tiny.en";
@@ -116,6 +120,8 @@ impl ColiCommandInvocation {
             command.arg(arg);
         }
         apply_runtime_path(&mut command, &self.extra_path_dirs);
+        #[cfg(target_os = "windows")]
+        command.creation_flags(CREATE_NO_WINDOW);
         command
     }
 }
@@ -275,6 +281,8 @@ impl ColiAsrClient {
         let diagnostics_enabled = self.config.enable_diagnostics;
         let on_event = Arc::new(on_event);
         let stdout_on_event = on_event.clone();
+        let saw_transcript = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_transcript_reader = saw_transcript.clone();
         let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(8)));
         let stderr_tail_reader = stderr_tail.clone();
 
@@ -299,6 +307,8 @@ impl ColiAsrClient {
                             transcript.push_partial(text)
                         };
                         if let Some(text) = combined {
+                            saw_transcript_reader
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
                             stdout_on_event(AsrEvent {
                                 text,
                                 is_final: evt.is_final,
@@ -319,6 +329,7 @@ impl ColiAsrClient {
             }
 
             if let Some(text) = transcript.flush_pending() {
+                saw_transcript_reader.store(true, std::sync::atomic::Ordering::SeqCst);
                 stdout_on_event(AsrEvent {
                     text,
                     is_final: true,
@@ -371,17 +382,36 @@ impl ColiAsrClient {
 
         drop(stdin);
 
+        let mut exit_timed_out = false;
         let exit_status = tokio::select! {
             _ = cancel.cancelled() => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 None
             }
-            status = child.wait() => Some(
-                status.map_err(|e| {
-                    AsrError::ConnectionFailed(format!("Failed waiting for `coli` to exit: {}", e))
-                })?
-            ),
+            status = tokio::time::timeout(Duration::from_millis(COLI_EXIT_GRACE_MS), child.wait()) => {
+                match status {
+                    Ok(status) => Some(
+                        status.map_err(|e| {
+                            AsrError::ConnectionFailed(format!("Failed waiting for `coli` to exit: {}", e))
+                        })?
+                    ),
+                    Err(_) => {
+                        exit_timed_out = true;
+                        log::warn!(
+                            "Timed out waiting {} ms for `coli` to exit after stdin closed; terminating process",
+                            COLI_EXIT_GRACE_MS
+                        );
+                        let _ = child.kill().await;
+                        Some(child.wait().await.map_err(|e| {
+                            AsrError::ConnectionFailed(format!(
+                                "Failed waiting for terminated `coli` to exit: {}",
+                                e
+                            ))
+                        })?)
+                    }
+                }
+            }
         };
 
         stdout_task
@@ -400,6 +430,35 @@ impl ColiAsrClient {
         if cancel.is_cancelled() {
             log::debug!("coli ASR cancelled");
             return Ok(());
+        }
+
+        if exit_timed_out {
+            let saw_transcript = saw_transcript.load(std::sync::atomic::Ordering::SeqCst);
+            let stderr_tail = render_tail(&stderr_tail);
+            if saw_transcript {
+                log::warn!(
+                    "`coli` required forced termination after EOF on Windows; proceeding with streamed transcript"
+                );
+                if !stderr_tail.is_empty() {
+                    log::warn!(
+                        "`coli` stderr tail before forced termination: {}",
+                        stderr_tail
+                    );
+                }
+                return Ok(());
+            }
+
+            return Err(AsrError::ConnectionFailed(if stderr_tail.is_empty() {
+                format!(
+                    "`coli` did not exit within {} ms after stdin closed",
+                    COLI_EXIT_GRACE_MS
+                )
+            } else {
+                format!(
+                    "`coli` did not exit within {} ms after stdin closed: {}",
+                    COLI_EXIT_GRACE_MS, stderr_tail
+                )
+            }));
         }
 
         let status = exit_status
@@ -629,10 +688,27 @@ fn looks_like_path(path: &Path) -> bool {
 
 fn existing_path(path: PathBuf) -> Option<PathBuf> {
     if path.is_file() {
-        path.canonicalize().ok().or(Some(path))
+        Some(normalize_existing_path(
+            path.canonicalize().ok().unwrap_or(path),
+        ))
     } else {
         None
     }
+}
+
+fn normalize_existing_path(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let text = path.as_os_str().to_string_lossy();
+        if let Some(stripped) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{}", stripped));
+        }
+        if let Some(stripped) = text.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+
+    path
 }
 
 fn find_in_path(command: &str) -> Option<PathBuf> {
@@ -1013,8 +1089,8 @@ fn parse_json_suffix<T: DeserializeOwned>(text: &str) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_windows_command_shim_script, parse_json_suffix, ColiFileAsrOutput,
-        ColiRefinementMode, TranscriptAccumulator,
+        extract_windows_command_shim_script, normalize_existing_path, parse_json_suffix,
+        ColiFileAsrOutput, ColiRefinementMode, TranscriptAccumulator,
     };
     use std::{fs, path::PathBuf};
 
@@ -1099,5 +1175,23 @@ mod tests {
         assert_eq!(parsed, script_path);
 
         let _ = fs::remove_dir_all(PathBuf::from(&root));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn normalizes_windows_verbatim_drive_paths() {
+        assert_eq!(
+            normalize_existing_path(PathBuf::from(r"\\?\D:\tools\coli.cmd")),
+            PathBuf::from(r"D:\tools\coli.cmd")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn normalizes_windows_verbatim_unc_paths() {
+        assert_eq!(
+            normalize_existing_path(PathBuf::from(r"\\?\UNC\server\share\coli.cmd")),
+            PathBuf::from(r"\\server\share\coli.cmd")
+        );
     }
 }
