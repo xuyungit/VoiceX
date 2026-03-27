@@ -180,7 +180,7 @@ function close() {
         <div class="result-header">
           <div class="result-title">
             原始记录
-            <span v-if="record.asrModelName" class="result-model">{{ record.asrModelName }}</span>
+            <span v-if="record.asrModelName" class="result-model">{{ record.asrModelName }}<template v-if="record.llmModelName"> + {{ record.llmModelName }}</template></span>
           </div>
           <NButton quaternary size="tiny" @click="copyText(record.text)">
             复制
