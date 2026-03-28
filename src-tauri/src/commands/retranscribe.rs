@@ -212,10 +212,10 @@ async fn run_streaming_asr(
     let pacing_ms: u64 = match config.provider_type {
         AsrProviderType::Google => 0,
         AsrProviderType::Gemini => unreachable!("Gemini should use file-based transcription"),
-        // Gemini Live is more reliable for offline replays when audio is fed at
-        // near-realtime speed, otherwise the stream may end before the first
-        // input transcription turn is emitted.
-        AsrProviderType::GeminiLive => 100,
+        // Gemini Live and Soniox are more reliable for offline replays when
+        // audio is fed at near-realtime speed, otherwise the stream may end
+        // before the server finishes processing the tail audio.
+        AsrProviderType::GeminiLive | AsrProviderType::Soniox => 100,
         AsrProviderType::Cohere => unreachable!("Cohere should use file-based transcription"),
         _ => 30, // ~3x real-time (each chunk = 100ms of audio)
     };
