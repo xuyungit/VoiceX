@@ -1,0 +1,147 @@
+.asr-card {
+  padding: var(--spacing-lg) var(--spacing-xl);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: var(--spacing-md);
+}
+
+.card-title {
+  font-size: var(--font-lg);
+  font-weight: 700;
+}
+
+.card-sub {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-xs);
+}
+
+.field-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-lg);
+}
+
+.field-row + .field-row {
+  padding-top: 4px;
+}
+
+.field-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+
+.field-label {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.field-note {
+  font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
+  max-width: 520px;
+}
+
+.field-control {
+  width: 420px;
+  max-width: 100%;
+}
+
+.field-control.short {
+  width: 200px;
+}
+
+.field-value {
+  width: 420px;
+  max-width: 100%;
+  color: var(--color-text-secondary);
+  font-size: var(--font-sm);
+  text-align: right;
+}
+
+.mono {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: var(--font-xs);
+  word-break: break-all;
+}
+
+.action-control {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.sa-json-row {
+  align-items: flex-start;
+}
+
+.status-pill {
+  min-width: 96px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  font-size: var(--font-xs);
+  font-weight: 700;
+  text-align: center;
+  color: var(--color-text-secondary);
+  background: color-mix(in srgb, var(--color-bg-secondary) 85%, transparent);
+}
+
+.status-pill.online {
+  color: #0d6b42;
+  border-color: color-mix(in srgb, #0d6b42 35%, var(--color-border));
+  background: color-mix(in srgb, #0d6b42 10%, var(--color-bg-secondary));
+}
+
+.status-pill.offline {
+  color: #9a3412;
+  border-color: color-mix(in srgb, #9a3412 35%, var(--color-border));
+  background: color-mix(in srgb, #9a3412 10%, var(--color-bg-secondary));
+}
+
+.pill-group {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+  width: 420px;
+  max-width: 100%;
+}
+
+.mini-pill {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  font-size: var(--font-xs);
+  color: var(--color-text-secondary);
+}
+
+.mini-pill.ready {
+  color: #0d6b42;
+  border-color: color-mix(in srgb, #0d6b42 35%, var(--color-border));
+  background: color-mix(in srgb, #0d6b42 10%, var(--color-bg-secondary));
+}
+
+.warning-box {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, #9a3412 35%, var(--color-border));
+  background: color-mix(in srgb, #9a3412 10%, var(--color-bg-secondary));
+  color: #9a3412;
+  font-size: var(--font-xs);
+  line-height: 1.5;
+}
