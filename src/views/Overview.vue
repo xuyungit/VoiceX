@@ -68,10 +68,6 @@ function formatTime(timestamp: string): string {
       <h1 class="page-title">{{ t('overview.title') }}</h1>
       <div class="status-lines">
         <div class="meta-line">
-          <span class="meta-label">{{ t('overview.status') }}:</span>
-          <span class="meta-value">{{ t('overview.idle') }}</span>
-        </div>
-        <div class="meta-line">
           <span class="meta-label">{{ t('overview.hotkey') }}:</span>
           <span class="meta-value">{{ hotkeyDisplay }}</span>
         </div>
