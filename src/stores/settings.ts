@@ -8,7 +8,7 @@ export interface AppSettings {
     uiLanguage: UiLanguage
 
     // ASR
-    asrProviderType: 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'coli'
+    asrProviderType: 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'soniox' | 'coli'
     asrAppKey: string
     asrAccessKey: string
     asrResourceId: string
@@ -43,6 +43,11 @@ export interface AppSettings {
     cohereApiKey: string
     cohereModel: string
     cohereLanguage: string
+
+    // ASR Provider: Soniox
+    sonioxApiKey: string
+    sonioxModel: string
+    sonioxLanguage: string
 
     // LLM
     enableLlmCorrection: boolean
@@ -180,6 +185,9 @@ const defaultSettings: AppSettings = {
     cohereApiKey: '',
     cohereModel: 'cohere-transcribe-03-2026',
     cohereLanguage: 'zh',
+    sonioxApiKey: '',
+    sonioxModel: 'stt-rt-v4',
+    sonioxLanguage: 'en',
 
     enableLlmCorrection: false,
     llmProviderType: 'volcengine',

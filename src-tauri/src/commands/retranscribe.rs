@@ -281,6 +281,12 @@ async fn run_streaming_asr(
         AsrProviderType::Cohere => {
             unreachable!("Cohere should use file-based transcription")
         }
+        AsrProviderType::Soniox => {
+            let client = crate::asr::SonioxClient::new(config.clone());
+            client
+                .stream_session(16000, 1, rx, cancel.clone(), history, on_event)
+                .await
+        }
         AsrProviderType::Coli => {
             unreachable!("Coli should use refine_file path")
         }

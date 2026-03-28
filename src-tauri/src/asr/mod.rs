@@ -14,6 +14,7 @@ pub mod google_client;
 pub mod ogg_decoder;
 mod protocol;
 pub mod qwen_client;
+pub mod soniox_client;
 pub mod volc_auth;
 
 pub use client::AsrClient;
@@ -28,3 +29,4 @@ pub use gemini_live_client::GeminiLiveClient;
 pub use google_client::GoogleSttClient;
 pub use protocol::{AsrError, AsrEvent};
 pub use qwen_client::QwenRealtimeClient;
+pub use soniox_client::SonioxClient;

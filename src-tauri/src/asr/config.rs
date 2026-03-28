@@ -11,6 +11,7 @@ pub enum AsrProviderType {
     Gemini,
     GeminiLive,
     Cohere,
+    Soniox,
     Coli,
 }
 
@@ -55,6 +56,11 @@ pub struct AsrConfig {
     pub cohere_api_key: String,
     pub cohere_model: String,
     pub cohere_language: String,
+
+    // Soniox real-time ASR settings
+    pub soniox_api_key: String,
+    pub soniox_model: String,
+    pub soniox_language: String,
 
     // Local ASR via `coli`
     pub coli_command_path: String,
@@ -115,6 +121,9 @@ impl Default for AsrConfig {
             cohere_api_key: String::new(),
             cohere_model: "cohere-transcribe-03-2026".to_string(),
             cohere_language: "zh".to_string(),
+            soniox_api_key: String::new(),
+            soniox_model: "stt-rt-v4".to_string(),
+            soniox_language: "en".to_string(),
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
@@ -147,6 +156,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             "gemini" => AsrProviderType::Gemini,
             "gemini-live" => AsrProviderType::GeminiLive,
             "cohere" => AsrProviderType::Cohere,
+            "soniox" => AsrProviderType::Soniox,
             "coli" => AsrProviderType::Coli,
             _ => AsrProviderType::Volcengine,
         };
@@ -173,6 +183,9 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             cohere_api_key: settings.cohere_api_key.clone(),
             cohere_model: settings.cohere_model.clone(),
             cohere_language: settings.cohere_language.clone(),
+            soniox_api_key: settings.soniox_api_key.clone(),
+            soniox_model: settings.soniox_model.clone(),
+            soniox_language: settings.soniox_language.clone(),
             coli_command_path: settings.coli_command_path.clone(),
             coli_use_vad: settings.coli_use_vad,
             coli_asr_interval_ms: settings.coli_asr_interval_ms,
@@ -221,6 +234,7 @@ impl AsrConfig {
             AsrProviderType::Gemini => true,
             AsrProviderType::GeminiLive => false,
             AsrProviderType::Cohere => true,
+            AsrProviderType::Soniox => false,
             _ => false,
         }
     }
@@ -252,6 +266,7 @@ impl AsrConfig {
                     && !self.cohere_model.is_empty()
                     && !self.cohere_language.is_empty()
             }
+            AsrProviderType::Soniox => !self.soniox_api_key.is_empty(),
             AsrProviderType::Coli => {
                 crate::asr::resolve_coli_command(&self.coli_command_path).is_some()
             }

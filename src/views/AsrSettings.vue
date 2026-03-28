@@ -20,7 +20,7 @@ type LocalAsrStatus = {
   message: string
 }
 
-type ProviderValue = 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'coli'
+type ProviderValue = 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'soniox' | 'coli'
 
 const asrProviderType = computed({
   get: () => settingsStore.settings.asrProviderType,
@@ -38,6 +38,7 @@ const isQwen = computed(() => settingsStore.settings.asrProviderType === 'qwen')
 const isGemini = computed(() => settingsStore.settings.asrProviderType === 'gemini')
 const isGeminiLive = computed(() => settingsStore.settings.asrProviderType === 'gemini-live')
 const isCohere = computed(() => settingsStore.settings.asrProviderType === 'cohere')
+const isSoniox = computed(() => settingsStore.settings.asrProviderType === 'soniox')
 const isColi = computed(() => settingsStore.settings.asrProviderType === 'coli')
 
 // Volcengine settings
@@ -190,6 +191,20 @@ const cohereLanguage = computed({
   set: (v: string) => settingsStore.updateSetting('cohereLanguage', v)
 })
 
+// Soniox settings
+const sonioxApiKey = computed({
+  get: () => settingsStore.settings.sonioxApiKey,
+  set: (v: string) => settingsStore.updateSetting('sonioxApiKey', v)
+})
+const sonioxModel = computed({
+  get: () => settingsStore.settings.sonioxModel,
+  set: (v: string) => settingsStore.updateSetting('sonioxModel', v)
+})
+const sonioxLanguage = computed({
+  get: () => settingsStore.settings.sonioxLanguage,
+  set: (v: string) => settingsStore.updateSetting('sonioxLanguage', v)
+})
+
 // Local coli settings
 const coliCommandPath = computed({
   get: () => settingsStore.settings.coliCommandPath,
@@ -236,6 +251,7 @@ const providerOptions = computed(() => {
     { label: t('asr.providerGemini'), value: 'gemini' as ProviderValue },
     { label: t('asr.providerGeminiLive'), value: 'gemini-live' as ProviderValue },
     { label: t('asr.providerCohere'), value: 'cohere' as ProviderValue },
+    { label: t('asr.providerSoniox'), value: 'soniox' as ProviderValue },
     {
       label: coliLabel,
       value: 'coli' as ProviderValue,
@@ -663,6 +679,51 @@ watch(coliCommandPath, () => {
           <NInput
             v-model:value="cohereLanguage"
             placeholder="zh"
+            class="field-control"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- Soniox Configuration -->
+    <div v-if="isSoniox" class="surface-card asr-card">
+      <div class="card-header">
+        <div class="card-title">{{ t('asr.sonioxConfiguration') }}</div>
+        <div class="card-sub">{{ t('asr.sonioxConfigurationSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.apiCredentials') }}</div>
+            <div class="field-note">{{ t('asr.sonioxApiKeyNote') }}</div>
+          </div>
+          <NInput
+            v-model:value="sonioxApiKey"
+            type="password"
+            show-password-on="click"
+            placeholder="Enter Soniox API key"
+            class="field-control"
+          />
+        </div>
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.model') }}</div>
+            <div class="field-note">{{ t('asr.sonioxModelNote') }}</div>
+          </div>
+          <NInput
+            v-model:value="sonioxModel"
+            placeholder="stt-rt-v4"
+            class="field-control"
+          />
+        </div>
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.languageHint') }}</div>
+            <div class="field-note">{{ t('asr.sonioxLanguageNote') }}</div>
+          </div>
+          <NInput
+            v-model:value="sonioxLanguage"
+            placeholder="en"
             class="field-control"
           />
         </div>

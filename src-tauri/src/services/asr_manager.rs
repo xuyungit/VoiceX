@@ -2,7 +2,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrProviderType, ColiAsrClient, GeminiLiveClient,
-    GoogleSttClient, QwenRealtimeClient,
+    GoogleSttClient, QwenRealtimeClient, SonioxClient,
 };
 use crate::storage;
 
@@ -195,6 +195,29 @@ impl AsrManager {
             AsrProviderType::Cohere => {
                 log::warn!("Cohere ASR is batch-only and should not enter streaming mode");
                 Ok(())
+            }
+            AsrProviderType::Soniox => {
+                log::info!(
+                    "Starting ASR stream [Soniox] ({} Hz, {} ch, model={}, lang={})",
+                    sample_rate,
+                    channels,
+                    config.soniox_model,
+                    config.soniox_language,
+                );
+                let client = SonioxClient::new(config);
+                let on_event = on_event.clone();
+                client
+                    .stream_session(
+                        sample_rate,
+                        channels,
+                        rx,
+                        cancel.clone(),
+                        history,
+                        move |evt| {
+                            (on_event)(evt);
+                        },
+                    )
+                    .await
             }
             AsrProviderType::Coli => {
                 let command_path = crate::asr::resolve_coli_command(&config.coli_command_path)

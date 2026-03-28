@@ -49,6 +49,11 @@ pub struct AppSettings {
     pub cohere_model: String,
     pub cohere_language: String,
 
+    // ASR Provider: Soniox
+    pub soniox_api_key: String,
+    pub soniox_model: String,
+    pub soniox_language: String,
+
     // Local ASR Provider: `coli`
     pub coli_command_path: String,
     pub coli_use_vad: bool,
@@ -171,6 +176,9 @@ impl Default for AppSettings {
             cohere_api_key: String::new(),
             cohere_model: "cohere-transcribe-03-2026".to_string(),
             cohere_language: "zh".to_string(),
+            soniox_api_key: String::new(),
+            soniox_model: "stt-rt-v4".to_string(),
+            soniox_language: "en".to_string(),
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
