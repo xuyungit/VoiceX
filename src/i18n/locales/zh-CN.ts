@@ -80,12 +80,11 @@ const zhCN = {
     title: '词典',
     entries: '词条',
     entriesCount: '{count} 项',
-    mode: '模式',
-    onePerLineShort: '每行一个词',
-    onePerLine: '每行一个词。',
-    sectionHint: '热词用于 ASR 和 LLM 纠错',
-    trimBlankLines: '清理空行',
-    editorPlaceholder: '在此添加热词，每行一个。例如：\nVoiceX\n语音识别\n人工智能',
+    tagTitle: '热词管理',
+    sectionHint: '添加容易被误识别的专有名词，识别引擎会优先匹配。',
+    addPlaceholder: '添加热词...',
+    inputHint: '回车添加，点 × 移除',
+    removeEntry: '移除',
     asyncHint: 'Async 模式最多使用前 100 个词条；nostream 模式最多 5000 个。'
   },
   input: {

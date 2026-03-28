@@ -80,12 +80,11 @@ const enUS = {
     title: 'Dictionary',
     entries: 'Entries',
     entriesCount: '{count} entries',
-    mode: 'Mode',
-    onePerLineShort: 'One entry per line',
-    onePerLine: 'One entry per line.',
-    sectionHint: 'Hotwords are used for ASR and LLM correction',
-    trimBlankLines: 'Trim Blank Lines',
-    editorPlaceholder: 'Add hotwords here, one per line. For example:\nVoiceX\nspeech recognition\nartificial intelligence',
+    tagTitle: 'Hotword Management',
+    sectionHint: 'Add proper nouns that are often misrecognized. The ASR engine will prioritize matching them.',
+    addPlaceholder: 'Add hotword...',
+    inputHint: 'Press Enter to add, click × to remove',
+    removeEntry: 'Remove',
     asyncHint: 'Async mode uses up to the first 100 entries; nostream mode supports up to 5000.'
   },
   input: {
