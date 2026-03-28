@@ -205,32 +205,31 @@ impl SonioxClient {
                                 let combined = format!("{}{}", final_text, non_final_part);
                                 let trimmed = combined.trim();
 
-                                if !trimmed.is_empty() {
-                                    let is_final_event =
-                                        finished || (non_final_part.is_empty() && !final_text.is_empty());
-                                    on_event_reader(AsrEvent {
-                                        text: trimmed.to_string(),
-                                        is_final: is_final_event,
-                                        prefetch: false,
-                                        definite: is_final_event,
-                                        confidence: None,
-                                    });
+                                if finished {
+                                    // Session done — emit one definitive final event
+                                    log::info!("Soniox ASR session finished");
+                                    if !trimmed.is_empty() {
+                                        on_event_reader(AsrEvent {
+                                            text: trimmed.to_string(),
+                                            is_final: true,
+                                            prefetch: false,
+                                            definite: true,
+                                            confidence: None,
+                                        });
+                                    }
+                                    return Ok(());
                                 }
-                            }
 
-                            if finished {
-                                log::info!("Soniox ASR session finished");
-                                let trimmed = final_text.trim();
+                                // Interim update — always is_final: false during session
                                 if !trimmed.is_empty() {
                                     on_event_reader(AsrEvent {
                                         text: trimmed.to_string(),
-                                        is_final: true,
+                                        is_final: false,
                                         prefetch: false,
-                                        definite: true,
+                                        definite: false,
                                         confidence: None,
                                     });
                                 }
-                                return Ok(());
                             }
                         }
                         Ok(Message::Close(frame)) => {
