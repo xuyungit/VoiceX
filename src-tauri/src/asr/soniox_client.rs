@@ -134,7 +134,13 @@ impl SonioxClient {
             // - We accumulate final tokens across responses into `final_text`.
             // - Each response's non-final tokens are the current interim tail.
             // - Display = final_text + current non-final tokens.
+            //
+            // We also keep `last_non_final` across responses because the
+            // `finished: true` response may arrive with `tokens: []`, and
+            // we need to preserve the trailing non-final text from the
+            // previous response so it isn't lost.
             let mut final_text = String::new();
+            let mut last_non_final = String::new();
 
             let result: Result<(), AsrError> = async {
                 while let Some(msg) = tokio::select! {
@@ -201,8 +207,20 @@ impl SonioxClient {
                                     }
                                 }
 
+                                // Update last_non_final only when this response has
+                                // tokens; the finished response (tokens=[]) should
+                                // NOT clear it.
+                                if !tokens.is_empty() {
+                                    last_non_final = non_final_part.clone();
+                                }
+
                                 // Display = all accumulated finals + current non-finals
-                                let combined = format!("{}{}", final_text, non_final_part);
+                                let display_non_final = if tokens.is_empty() {
+                                    &last_non_final
+                                } else {
+                                    &non_final_part
+                                };
+                                let combined = format!("{}{}", final_text, display_non_final);
                                 let trimmed = combined.trim();
 
                                 if finished {
@@ -248,7 +266,8 @@ impl SonioxClient {
                 }
 
                 // Connection closed without finished — emit accumulated text as final
-                let trimmed = final_text.trim();
+                let full = format!("{}{}", final_text, last_non_final);
+                let trimmed = full.trim();
                 if !trimmed.is_empty() {
                     on_event_reader(AsrEvent {
                         text: trimmed.to_string(),
