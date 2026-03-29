@@ -93,7 +93,6 @@ const enUS = {
     addPlaceholder: 'Add hotword...',
     inputHint: 'Press Enter to add, click × to remove',
     removeEntry: 'Remove',
-    asyncHint: 'Async mode uses up to the first 100 entries; nostream mode supports up to 5000.'
   },
   input: {
     title: 'Input',

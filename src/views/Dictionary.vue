@@ -79,10 +79,6 @@ function handleKeydown(e: KeyboardEvent) {
 
       <div class="input-hint">{{ t('dictionary.inputHint') }}</div>
     </div>
-
-    <div class="section-hint">
-      {{ t('dictionary.asyncHint') }}
-    </div>
   </div>
 </template>
 

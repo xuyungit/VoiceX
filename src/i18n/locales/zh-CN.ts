@@ -93,7 +93,6 @@ const zhCN = {
     addPlaceholder: '添加热词...',
     inputHint: '回车添加，点 × 移除',
     removeEntry: '移除',
-    asyncHint: 'Async 模式最多使用前 100 个词条；nostream 模式最多 5000 个。'
   },
   input: {
     title: '输入',
