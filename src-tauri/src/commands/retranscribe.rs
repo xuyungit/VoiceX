@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
     ColiRefinementMode, GeminiLiveClient, GeminiTranscriptionClient, GoogleSttClient,
-    QwenRealtimeClient,
+    OpenAIRealtimeClient, OpenAITranscriptionClient, QwenRealtimeClient,
 };
 use crate::llm::{LLMClient, LLMConfig, LLMProviderType, PromptBuildOptions};
 use crate::services::history_service::HistoryService;
@@ -103,6 +103,7 @@ async fn run_retranscribe(
         AsrProviderType::Gemini => run_gemini_asr(path, config).await?,
         AsrProviderType::GeminiLive => run_streaming_asr(path, config, cancel.clone()).await?,
         AsrProviderType::Cohere => run_cohere_asr(path, config).await?,
+        AsrProviderType::OpenAI => run_openai_asr(path, config).await?,
         AsrProviderType::Google => run_google_asr(path, config, cancel.clone()).await?,
         _ => run_streaming_asr(path, config, cancel.clone()).await?,
     };
@@ -159,6 +160,17 @@ async fn run_cohere_asr(path: &PathBuf, config: &AsrConfig) -> Result<String, St
         .transcribe_file(path)
         .await
         .map_err(|e| format!("Cohere ASR 失败: {}", e))
+}
+
+async fn run_openai_asr(path: &PathBuf, config: &AsrConfig) -> Result<String, String> {
+    if config.openai_asr_mode == "realtime" {
+        return run_streaming_asr(path, config, CancellationToken::new()).await;
+    }
+    let client = OpenAITranscriptionClient::new(config.clone());
+    client
+        .transcribe_file(path)
+        .await
+        .map_err(|e| format!("OpenAI ASR 失败: {}", e))
 }
 
 /// Run ASR via Google: try sync Recognize first (fast, ≤60s), fall back to streaming.
@@ -219,6 +231,8 @@ async fn run_streaming_asr(
         // Soniox needs slower pacing than 30ms but can handle ~2x real-time
         AsrProviderType::Soniox => 50,
         AsrProviderType::Cohere => unreachable!("Cohere should use file-based transcription"),
+        AsrProviderType::OpenAI if config.openai_asr_mode == "realtime" => 50,
+        AsrProviderType::OpenAI => unreachable!("OpenAI should use file-based transcription"),
         _ => 30, // ~3x real-time (each chunk = 100ms of audio)
     };
     tokio::spawn(async move {
@@ -282,6 +296,15 @@ async fn run_streaming_asr(
         }
         AsrProviderType::Cohere => {
             unreachable!("Cohere should use file-based transcription")
+        }
+        AsrProviderType::OpenAI => {
+            if config.openai_asr_mode != "realtime" {
+                unreachable!("OpenAI batch should use file-based transcription")
+            }
+            let client = OpenAIRealtimeClient::new(config.clone());
+            client
+                .stream_session(16000, 1, rx, cancel.clone(), history, on_event)
+                .await
         }
         AsrProviderType::Soniox => {
             let client = crate::asr::SonioxClient::new(config.clone());

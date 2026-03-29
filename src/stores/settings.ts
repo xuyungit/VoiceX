@@ -8,7 +8,7 @@ export interface AppSettings {
     uiLanguage: UiLanguage
 
     // ASR
-    asrProviderType: 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'soniox' | 'coli'
+    asrProviderType: 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'soniox' | 'coli'
     asrAppKey: string
     asrAccessKey: string
     asrResourceId: string
@@ -43,6 +43,13 @@ export interface AppSettings {
     cohereApiKey: string
     cohereModel: string
     cohereLanguage: string
+
+    openaiAsrApiKey: string
+    openaiAsrModel: string
+    openaiAsrBaseUrl: string
+    openaiAsrLanguage: string
+    openaiAsrPrompt: string
+    openaiAsrMode: 'batch' | 'realtime'
 
     // ASR Provider: Soniox
     sonioxApiKey: string
@@ -185,6 +192,12 @@ const defaultSettings: AppSettings = {
     cohereApiKey: '',
     cohereModel: 'cohere-transcribe-03-2026',
     cohereLanguage: 'zh',
+    openaiAsrApiKey: '',
+    openaiAsrModel: 'gpt-4o-transcribe',
+    openaiAsrBaseUrl: 'https://api.openai.com/v1',
+    openaiAsrLanguage: '',
+    openaiAsrPrompt: 'Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.',
+    openaiAsrMode: 'batch',
     sonioxApiKey: '',
     sonioxModel: 'stt-rt-v4',
     sonioxLanguage: 'en',

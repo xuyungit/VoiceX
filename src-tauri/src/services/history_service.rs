@@ -152,6 +152,10 @@ impl HistoryService {
                 Self::format_provider_model("Gemini Live", &settings.gemini_live_model)
             }
             "cohere" => Self::format_provider_model("Cohere", &settings.cohere_model),
+            "openai" if settings.openai_asr_mode == "realtime" => {
+                Self::format_provider_model("OpenAI Realtime", &settings.openai_asr_model)
+            }
+            "openai" => Self::format_provider_model("OpenAI", &settings.openai_asr_model),
             "soniox" => Self::format_provider_model("Soniox", &settings.soniox_model),
             "coli" if settings.coli_final_refinement_mode == "sensevoice" => {
                 Some("Local / coli / stream + sensevoice refine".to_string())

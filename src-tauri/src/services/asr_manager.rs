@@ -2,7 +2,7 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrProviderType, ColiAsrClient, GeminiLiveClient,
-    GoogleSttClient, QwenRealtimeClient, SonioxClient,
+    GoogleSttClient, OpenAIRealtimeClient, QwenRealtimeClient, SonioxClient,
 };
 use crate::storage;
 
@@ -195,6 +195,38 @@ impl AsrManager {
             AsrProviderType::Cohere => {
                 log::warn!("Cohere ASR is batch-only and should not enter streaming mode");
                 Ok(())
+            }
+            AsrProviderType::OpenAI => {
+                if config.openai_asr_mode != "realtime" {
+                    log::warn!("OpenAI ASR is in batch mode and should not enter streaming mode");
+                    Ok(())
+                } else {
+                    log::info!(
+                        "Starting ASR stream [OpenAI Realtime] ({} Hz, {} ch, model={}, lang={})",
+                        sample_rate,
+                        channels,
+                        config.openai_asr_model,
+                        if config.openai_asr_language.trim().is_empty() {
+                            "auto"
+                        } else {
+                            config.openai_asr_language.as_str()
+                        },
+                    );
+                    let client = OpenAIRealtimeClient::new(config);
+                    let on_event = on_event.clone();
+                    client
+                        .stream_session(
+                            sample_rate,
+                            channels,
+                            rx,
+                            cancel.clone(),
+                            history,
+                            move |evt| {
+                                (on_event)(evt);
+                            },
+                        )
+                        .await
+                }
             }
             AsrProviderType::Soniox => {
                 log::info!(

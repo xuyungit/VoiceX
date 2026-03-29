@@ -1,7 +1,7 @@
 //! ASR (Automatic Speech Recognition) module
 //!
 //! Handles communication with ASR services (Volcengine, Google Cloud Speech-to-Text,
-//! Qwen realtime ASR, Gemini and Cohere audio transcription, and local `coli` offline ASR.
+//! Qwen realtime ASR, Gemini/Cohere/OpenAI audio transcription, and local `coli` offline ASR.
 
 pub mod audio_utils;
 mod client;
@@ -12,6 +12,8 @@ pub mod gemini_client;
 pub mod gemini_live_client;
 pub mod google_client;
 pub mod ogg_decoder;
+pub mod openai_client;
+pub mod openai_realtime_client;
 mod protocol;
 pub mod qwen_client;
 pub mod soniox_client;
@@ -27,6 +29,8 @@ pub use config::{AsrConfig, AsrProviderType};
 pub use gemini_client::GeminiTranscriptionClient;
 pub use gemini_live_client::GeminiLiveClient;
 pub use google_client::GoogleSttClient;
+pub use openai_client::OpenAITranscriptionClient;
+pub use openai_realtime_client::OpenAIRealtimeClient;
 pub use protocol::{AsrError, AsrEvent};
 pub use qwen_client::QwenRealtimeClient;
 pub use soniox_client::SonioxClient;

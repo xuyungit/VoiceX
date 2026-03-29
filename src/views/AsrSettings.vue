@@ -11,13 +11,14 @@ import AsrQwenSettings from '../components/asr/AsrQwenSettings.vue'
 import AsrGeminiSettings from '../components/asr/AsrGeminiSettings.vue'
 import AsrGeminiLiveSettings from '../components/asr/AsrGeminiLiveSettings.vue'
 import AsrCohereSettings from '../components/asr/AsrCohereSettings.vue'
+import AsrOpenAISettings from '../components/asr/AsrOpenAISettings.vue'
 import AsrSonioxSettings from '../components/asr/AsrSonioxSettings.vue'
 import AsrColiSettings from '../components/asr/AsrColiSettings.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
 
-type ProviderValue = 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'soniox' | 'coli'
+type ProviderValue = 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'soniox' | 'coli'
 
 // --- Coli status probe ---
 const coliStatus = ref<LocalAsrStatus | null>(null)
@@ -70,6 +71,7 @@ const isQwen = computed(() => settingsStore.settings.asrProviderType === 'qwen')
 const isGemini = computed(() => settingsStore.settings.asrProviderType === 'gemini')
 const isGeminiLive = computed(() => settingsStore.settings.asrProviderType === 'gemini-live')
 const isCohere = computed(() => settingsStore.settings.asrProviderType === 'cohere')
+const isOpenAI = computed(() => settingsStore.settings.asrProviderType === 'openai')
 const isSoniox = computed(() => settingsStore.settings.asrProviderType === 'soniox')
 const isColi = computed(() => settingsStore.settings.asrProviderType === 'coli')
 
@@ -88,6 +90,7 @@ const providerOptions = computed(() => {
     { label: t('asr.providerGemini'), value: 'gemini' as ProviderValue },
     { label: t('asr.providerGeminiLive'), value: 'gemini-live' as ProviderValue },
     { label: t('asr.providerCohere'), value: 'cohere' as ProviderValue },
+    { label: t('asr.providerOpenAI'), value: 'openai' as ProviderValue },
     { label: t('asr.providerSoniox'), value: 'soniox' as ProviderValue },
     {
       label: coliLabel,
@@ -156,6 +159,7 @@ const maxRecordingMinutes = computed({
     <AsrGeminiSettings v-if="isGemini" />
     <AsrGeminiLiveSettings v-if="isGeminiLive" />
     <AsrCohereSettings v-if="isCohere" />
+    <AsrOpenAISettings v-if="isOpenAI" />
     <AsrSonioxSettings v-if="isSoniox" />
     <AsrColiSettings
       v-if="isColi"

@@ -11,6 +11,7 @@ pub enum AsrProviderType {
     Gemini,
     GeminiLive,
     Cohere,
+    OpenAI,
     Soniox,
     Coli,
 }
@@ -56,6 +57,14 @@ pub struct AsrConfig {
     pub cohere_api_key: String,
     pub cohere_model: String,
     pub cohere_language: String,
+
+    // OpenAI Audio Transcription settings
+    pub openai_asr_api_key: String,
+    pub openai_asr_model: String,
+    pub openai_asr_base_url: String,
+    pub openai_asr_language: String,
+    pub openai_asr_prompt: String,
+    pub openai_asr_mode: String,
 
     // Soniox real-time ASR settings
     pub soniox_api_key: String,
@@ -121,6 +130,12 @@ impl Default for AsrConfig {
             cohere_api_key: String::new(),
             cohere_model: "cohere-transcribe-03-2026".to_string(),
             cohere_language: "zh".to_string(),
+            openai_asr_api_key: String::new(),
+            openai_asr_model: "gpt-4o-transcribe".to_string(),
+            openai_asr_base_url: "https://api.openai.com/v1".to_string(),
+            openai_asr_language: String::new(),
+            openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
+            openai_asr_mode: "batch".to_string(),
             soniox_api_key: String::new(),
             soniox_model: "stt-rt-v4".to_string(),
             soniox_language: "en".to_string(),
@@ -156,6 +171,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             "gemini" => AsrProviderType::Gemini,
             "gemini-live" => AsrProviderType::GeminiLive,
             "cohere" => AsrProviderType::Cohere,
+            "openai" => AsrProviderType::OpenAI,
             "soniox" => AsrProviderType::Soniox,
             "coli" => AsrProviderType::Coli,
             _ => AsrProviderType::Volcengine,
@@ -183,6 +199,12 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             cohere_api_key: settings.cohere_api_key.clone(),
             cohere_model: settings.cohere_model.clone(),
             cohere_language: settings.cohere_language.clone(),
+            openai_asr_api_key: settings.openai_asr_api_key.clone(),
+            openai_asr_model: settings.openai_asr_model.clone(),
+            openai_asr_base_url: settings.openai_asr_base_url.clone(),
+            openai_asr_language: settings.openai_asr_language.clone(),
+            openai_asr_prompt: settings.openai_asr_prompt.clone(),
+            openai_asr_mode: settings.openai_asr_mode.clone(),
             soniox_api_key: settings.soniox_api_key.clone(),
             soniox_model: settings.soniox_model.clone(),
             soniox_language: settings.soniox_language.clone(),
@@ -234,6 +256,7 @@ impl AsrConfig {
             AsrProviderType::Gemini => true,
             AsrProviderType::GeminiLive => false,
             AsrProviderType::Cohere => true,
+            AsrProviderType::OpenAI => self.openai_asr_mode != "realtime",
             AsrProviderType::Soniox => false,
             _ => false,
         }
@@ -265,6 +288,11 @@ impl AsrConfig {
                 !self.cohere_api_key.is_empty()
                     && !self.cohere_model.is_empty()
                     && !self.cohere_language.is_empty()
+            }
+            AsrProviderType::OpenAI => {
+                !self.openai_asr_api_key.is_empty()
+                    && !self.openai_asr_model.is_empty()
+                    && !self.openai_asr_base_url.is_empty()
             }
             AsrProviderType::Soniox => !self.soniox_api_key.is_empty(),
             AsrProviderType::Coli => {

@@ -36,6 +36,7 @@ const asrProviderOptions = [
   { label: 'Gemini', value: 'gemini' },
   { label: 'Gemini Live', value: 'gemini-live' },
   { label: 'Cohere', value: 'cohere' },
+  { label: 'OpenAI', value: 'openai' },
   { label: '本地 (Coli)', value: 'coli' },
 ]
 

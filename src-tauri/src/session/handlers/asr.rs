@@ -3,7 +3,7 @@ use serde_json::json;
 use crate::{
     asr::{
         AsrConfig, AsrEvent, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
-        ColiRefinementMode, GeminiTranscriptionClient,
+        ColiRefinementMode, GeminiTranscriptionClient, OpenAITranscriptionClient,
     },
     state::{AppState, HotkeySessionState, ProcessingIntent},
 };
@@ -644,6 +644,33 @@ impl SessionController {
                                 model_name: Some(format!(
                                     "Cohere / {}",
                                     config.cohere_model.trim()
+                                )),
+                                batch_epoch,
+                            });
+                        }
+                        Ok(_) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: "Batch ASR returned empty result".to_string(),
+                                batch_epoch,
+                            });
+                        }
+                        Err(e) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: e.to_string(),
+                                batch_epoch,
+                            });
+                        }
+                    }
+                }
+                AsrProviderType::OpenAI => {
+                    let client = OpenAITranscriptionClient::new(config.clone());
+                    match client.transcribe_file(&audio_path).await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            controller.send_message(SessionMessage::BatchAsrDone {
+                                text,
+                                model_name: Some(format!(
+                                    "OpenAI / {}",
+                                    config.openai_asr_model.trim()
                                 )),
                                 batch_epoch,
                             });

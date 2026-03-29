@@ -13,7 +13,7 @@ pub struct AppSettings {
     pub ui_language: String, // "system" | "zh-CN" | "en-US"
 
     // ASR settings
-    pub asr_provider_type: String, // "volcengine" | "google" | "qwen" | "gemini" | "gemini-live" | "cohere" | "coli"
+    pub asr_provider_type: String, // "volcengine" | "google" | "qwen" | "gemini" | "gemini-live" | "cohere" | "openai" | "coli"
     pub asr_app_key: String,
     pub asr_access_key: String,
     pub asr_resource_id: String,
@@ -48,6 +48,14 @@ pub struct AppSettings {
     pub cohere_api_key: String,
     pub cohere_model: String,
     pub cohere_language: String,
+
+    // ASR Provider: OpenAI Audio Transcription
+    pub openai_asr_api_key: String,
+    pub openai_asr_model: String,
+    pub openai_asr_base_url: String,
+    pub openai_asr_language: String,
+    pub openai_asr_prompt: String,
+    pub openai_asr_mode: String, // "batch" | "realtime"
 
     // ASR Provider: Soniox
     pub soniox_api_key: String,
@@ -176,6 +184,12 @@ impl Default for AppSettings {
             cohere_api_key: String::new(),
             cohere_model: "cohere-transcribe-03-2026".to_string(),
             cohere_language: "zh".to_string(),
+            openai_asr_api_key: String::new(),
+            openai_asr_model: "gpt-4o-transcribe".to_string(),
+            openai_asr_base_url: "https://api.openai.com/v1".to_string(),
+            openai_asr_language: String::new(),
+            openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
+            openai_asr_mode: "batch".to_string(),
             soniox_api_key: String::new(),
             soniox_model: "stt-rt-v4".to_string(),
             soniox_language: "en".to_string(),
