@@ -98,9 +98,8 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     ensure_column(&conn, "usage_stats", "total_recording_count", "INTEGER DEFAULT 0")?;
     ensure_column(&conn, "device_usage_stats", "total_recording_count", "INTEGER DEFAULT 0")?;
 
-    // Backfill total_recording_count in usage_stats if it is 0 but history records exist.
-    // This runs once after the column is first added; subsequent launches see a non-zero
-    // value (or an empty history) and skip the UPDATE.
+    // Backfill total_recording_count where it is still 0 but history records exist.
+    // Global usage_stats:
     let global_count: i64 = conn
         .query_row("SELECT total_recording_count FROM usage_stats WHERE id = 1", [], |r| r.get(0))
         .unwrap_or(0);
@@ -109,6 +108,28 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
             "UPDATE usage_stats SET total_recording_count = (SELECT COUNT(*) FROM history_record) WHERE id = 1",
             [],
         ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    }
+    // Per-device usage_stats – use the same device-matching logic as
+    // get_local_usage_stats() so the backfilled count is consistent.
+    {
+        let mut stmt = conn.prepare(
+            "SELECT device_id FROM device_usage_stats WHERE total_recording_count = 0"
+        ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let device_ids: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        for did in device_ids {
+            conn.execute(
+                "UPDATE device_usage_stats SET total_recording_count = (
+                     SELECT COUNT(*) FROM history_record
+                     WHERE source_device_id = ?1 OR source_device_id IS NULL OR source_device_id = ''
+                 ) WHERE device_id = ?1",
+                params![did],
+            ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        }
     }
 
     ensure_column(&conn, "history_record", "source_device_id", "TEXT")?;
