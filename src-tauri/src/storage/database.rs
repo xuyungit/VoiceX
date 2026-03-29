@@ -501,12 +501,16 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
 
 pub fn set_usage_stats(stats: &UsageStats) -> Result<(), StorageError> {
     with_db(|conn| {
+        // When the sync server does not yet support total_recording_count it
+        // deserialises as 0 (via #[serde(default)]).  Blindly writing 0 would
+        // wipe out a locally-backfilled value, so we use MAX() to keep
+        // whichever is larger until the server starts supplying a real count.
         conn.execute(
             "UPDATE usage_stats
              SET total_duration_ms = ?1,
                  total_characters = ?2,
                  llm_correction_count = ?3,
-                 total_recording_count = ?4,
+                 total_recording_count = MAX(total_recording_count, ?4),
                  last_updated = ?5
              WHERE id = 1",
             params![
