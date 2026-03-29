@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-03-29
+
+### Added
+- **Soniox real-time ASR** — cloud streaming provider via WebSocket (`stt-rt-v4` model) with hotword support and language hints.
+- **OpenAI ASR** — dual-mode provider supporting both batch file upload (`gpt-4o-transcribe`) and WebSocket realtime streaming, with language detection and prompt-based hotword injection.
+- **Redesigned Overview page** — new status bar and reorganized stat cards for clearer at-a-glance metrics.
+- **Tag-based hotword editor** — chip UI replaces the plain textarea for managing the hotword list.
+
+### Changed
+- Expanded VoiceX from seven to nine ASR backends.
+- Sidebar navigation reorganized with grouped sections; "Dictionary" renamed to "Hotwords" across the UI.
+- HUD text truncation now uses pixel-based measurement instead of character count, improving display accuracy for CJK text.
+- ASR settings refactored into per-provider components for cleaner configuration.
+
+### Fixed
+- Soniox: trailing non-final tokens are now preserved at session end; correct model name shown in history records.
+- Statistics: robust backfill for `total_recording_count` across per-device and sync scenarios.
+- Windows CI: fixed pnpm workspace declaration, cache handling, and release workflow.
+
 ## [0.8.0] - 2026-03-27
 
 ### Added
