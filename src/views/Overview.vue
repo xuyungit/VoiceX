@@ -130,19 +130,7 @@ onMounted(async () => {
     </div>
 
     <div class="stats-grid">
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13h-1v6l5 3 .5-.84-4.5-2.66Z" />
-          </svg>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ totalDuration }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localDuration }}</div>
-          <div class="stat-label">{{ t('overview.totalDictationTime') }}</div>
-        </div>
-      </div>
-
+      <!-- Row 1: Total input characters | Total dictation time -->
       <div class="surface-card stat-card">
         <div class="stat-icon">
           <span class="glyph">Aa</span>
@@ -157,29 +145,17 @@ onMounted(async () => {
       <div class="surface-card stat-card">
         <div class="stat-icon">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
+            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13h-1v6l5 3 .5-.84-4.5-2.66Z" />
           </svg>
         </div>
         <div class="stat-content">
-          <div class="stat-value">{{ recordingCount.toLocaleString() }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localRecordingCount.toLocaleString() }}</div>
-          <div class="stat-label">{{ t('overview.recordingCount') }}</div>
+          <div class="stat-value">{{ totalDuration }}</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localDuration }}</div>
+          <div class="stat-label">{{ t('overview.totalDictationTime') }}</div>
         </div>
       </div>
 
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 2a1 1 0 0 0-.92.6l-3 7a1 1 0 0 0 1.84.8L10.38 9h3.24l.46 1.4a1 1 0 0 0 1.92-.6l-3-7A1 1 0 0 0 12 2Zm7.66 11.11-2.78-.93a1 1 0 0 0-.64 1.9l1.38.46-1.88 2.64-1.37-.46a1 1 0 1 0-.64 1.9l2.78.92a1 1 0 0 0 1.1-.38l2.5-3.5a1 1 0 0 0-.45-1.55ZM8.1 14.2l-1.38.46-1.88-2.64 1.37-.46a1 1 0 1 0-.64-1.9l-2.78.92a1 1 0 0 0-.45 1.56l2.5 3.5a1 1 0 0 0 1.1.38l2.78-.93a1 1 0 0 0-.64-1.9Z" />
-          </svg>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ aiCalls }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localAiCalls }}</div>
-          <div class="stat-label">{{ t('overview.aiCalls') }}</div>
-        </div>
-      </div>
-
+      <!-- Row 2: Average input speed | Average recording length -->
       <div class="surface-card stat-card">
         <div class="stat-icon">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -203,6 +179,33 @@ onMounted(async () => {
           <div class="stat-value">{{ avgRecordingLength }}</div>
           <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localAvgRecordingLength }}</div>
           <div class="stat-label">{{ t('overview.averageRecordingLength') }}</div>
+        </div>
+      </div>
+
+      <!-- Row 3: Recording count | AI correction count -->
+      <div class="surface-card stat-card">
+        <div class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
+          </svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value">{{ recordingCount.toLocaleString() }}</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localRecordingCount.toLocaleString() }}</div>
+          <div class="stat-label">{{ t('overview.recordingCount') }}</div>
+        </div>
+      </div>
+
+      <div class="surface-card stat-card">
+        <div class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 2a1 1 0 0 0-.92.6l-3 7a1 1 0 0 0 1.84.8L10.38 9h3.24l.46 1.4a1 1 0 0 0 1.92-.6l-3-7A1 1 0 0 0 12 2Zm7.66 11.11-2.78-.93a1 1 0 0 0-.64 1.9l1.38.46-1.88 2.64-1.37-.46a1 1 0 1 0-.64 1.9l2.78.92a1 1 0 0 0 1.1-.38l2.5-3.5a1 1 0 0 0-.45-1.55ZM8.1 14.2l-1.38.46-1.88-2.64 1.37-.46a1 1 0 1 0-.64-1.9l-2.78.92a1 1 0 0 0-.45 1.56l2.5 3.5a1 1 0 0 0 1.1.38l2.78-.93a1 1 0 0 0-.64-1.9Z" />
+          </svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value">{{ aiCalls }}</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localAiCalls }}</div>
+          <div class="stat-label">{{ t('overview.aiCalls') }}</div>
         </div>
       </div>
     </div>

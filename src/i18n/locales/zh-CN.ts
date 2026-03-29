@@ -38,9 +38,9 @@ const zhCN = {
     unset: '未设置',
     thisDevice: '本机',
     totalDictationTime: '总听写时长',
-    totalCharacters: '总字符数',
-    aiCalls: 'AI 调用次数',
-    averageDictationSpeed: '平均听写速度',
+    totalCharacters: '总输入字符数',
+    aiCalls: 'AI 纠错次数',
+    averageDictationSpeed: '平均输入速度',
     hoursMinutes: '{hours} 小时 {minutes} 分钟',
     minutesOnly: '{minutes} 分钟',
     secondsOnly: '{seconds} 秒',
@@ -51,7 +51,7 @@ const zhCN = {
     syncStatus: '同步',
     on: '开',
     off: '关',
-    recordingCount: '录音次数',
+    recordingCount: '录音启动次数',
     averageRecordingLength: '平均录音时长'
   },
   history: {
