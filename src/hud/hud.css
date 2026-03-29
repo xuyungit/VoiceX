@@ -138,13 +138,9 @@ body {
     line-height: 1.4;
     color: rgba(255, 255, 255, 0.65);
     overflow: hidden;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
     word-break: break-word;
     max-height: calc(12px * 1.4 * 2 + 2px);
-    /* exactly 2 lines */
+    /* exactly 2 lines; truncation is handled by fitText() in hud.ts */
 }
 
 .text-area.is-placeholder {

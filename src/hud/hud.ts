@@ -27,6 +27,80 @@ let partialText = '';
 let lastNonEmptyText = '';
 let currentLocale: 'zh-CN' | 'en-US' = 'en-US';
 
+// --- Pixel-based text measurement via OffscreenCanvas ---
+// Instead of a fixed character limit (MAX_DISPLAY_CHARS), we measure actual pixel
+// widths so the same logic works for CJK, Latin, and mixed text automatically.
+const HUD_FONT = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif';
+const MAX_LINES = 2;
+const ELLIPSIS = '\u2026';            // "…"
+
+let measureCtx: OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D | null = null;
+let textAreaMaxWidth = 0;             // available pixel width (updated on resize)
+
+function getMeasureCtx() {
+  if (measureCtx) return measureCtx;
+  if (typeof OffscreenCanvas !== 'undefined') {
+    measureCtx = new OffscreenCanvas(1, 1).getContext('2d');
+  } else {
+    measureCtx = document.createElement('canvas').getContext('2d');
+  }
+  if (measureCtx) measureCtx.font = HUD_FONT;
+  return measureCtx;
+}
+
+function measureText(text: string): number {
+  const ctx = getMeasureCtx();
+  return ctx ? ctx.measureText(text).width : text.length * 7; // fallback estimate
+}
+
+/** Compute the available text width from the live DOM layout (accounts for padding, border, DPI). */
+function updateTextAreaMaxWidth() {
+  if (!textArea) return;
+  // Use clientWidth which is the inner width minus scrollbar, inside padding
+  const style = getComputedStyle(textArea);
+  const pl = parseFloat(style.paddingLeft) || 0;
+  const pr = parseFloat(style.paddingRight) || 0;
+  textAreaMaxWidth = textArea.clientWidth - pl - pr;
+  if (textAreaMaxWidth <= 0) textAreaMaxWidth = 230; // safe fallback
+}
+
+/**
+ * Truncate `text` from the left so that "…" + tail fits within MAX_LINES lines
+ * at the current textAreaMaxWidth.  Returns the display string.
+ */
+function fitText(text: string): string {
+  if (!text) return text;
+  const maxW = textAreaMaxWidth || 230;
+  // Subtract a small margin per line to account for browser line-breaking overhead
+  // (word boundaries leave unused space at line ends).
+  const totalBudget = (maxW - 4) * MAX_LINES;
+
+  // Fast path: text already fits
+  if (measureText(text) <= totalBudget) return text;
+
+  const ellipsisW = measureText(ELLIPSIS);
+  const budget = totalBudget - ellipsisW;
+
+  // Binary search for the longest tail that fits
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (measureText(text.slice(-mid)) <= budget) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return lo > 0 ? ELLIPSIS + text.slice(-lo) : ELLIPSIS;
+}
+
+// Recompute available width when the window resizes (e.g. DPI change).
+window.addEventListener('resize', () => {
+  updateTextAreaMaxWidth();
+  renderTranscript();
+});
+
 const icons: Record<string, Element | null | undefined> = {
     mic: statusIcon?.querySelector('.icon-mic') ?? null,
     waveform: statusIcon?.querySelector('.icon-waveform') ?? null,
@@ -103,16 +177,11 @@ function resetTranscript() {
     renderTranscript();
 }
 
-// Keep the visible snippet within ~2 lines to avoid CSS ellipsis cutting the tail.
-const MAX_DISPLAY_CHARS = 36;
-
 const WAVEFORM_BARS_HTML = '<div class="waveform-bars"><span></span><span></span><span></span><span></span><span></span></div>';
 
 function renderTranscript() {
     let display = partialText.trim() || lastNonEmptyText.trim();
-    if (display.length > MAX_DISPLAY_CHARS) {
-        display = '...' + display.slice(-MAX_DISPLAY_CHARS);
-    }
+    display = fitText(display);
 
     if (!display) {
         textArea?.classList.add('is-placeholder');
@@ -185,6 +254,7 @@ function updateIntent(intent?: string) {
 }
 
 showIcon('mic');
+updateTextAreaMaxWidth();
 renderTranscript();
 updateIntent('assistant');
 
