@@ -3,7 +3,11 @@
 [English](./README.md) | 中文
 
 <p align="center">
-  <img src="assets/screenshot-overview.png" alt="VoiceX 概览" width="720" />
+  <img src="assets/screenshots/zh/main-window.png" alt="VoiceX 主窗口" width="720" />
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/zh/hud-window.png" alt="VoiceX HUD 窗口" width="480" />
 </p>
 
 VoiceX 是一个跨平台桌面语音输入工具，目标是把"开口说话"变成一种足够快、足够轻、可以长期使用的输入方式。

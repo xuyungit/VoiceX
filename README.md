@@ -3,7 +3,11 @@
 English | [中文](./README.zh-CN.md)
 
 <p align="center">
-  <img src="assets/screenshot-overview.png" alt="VoiceX Overview" width="720" />
+  <img src="assets/screenshots/en/main-window.png" alt="VoiceX Main Window" width="720" />
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/en/hud-window.png" alt="VoiceX HUD Window" width="480" />
 </p>
 
 VoiceX is a cross-platform desktop voice input tool that turns speaking into a fast, lightweight, and sustainable way to type.
