@@ -98,37 +98,51 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     ensure_column(&conn, "usage_stats", "total_recording_count", "INTEGER DEFAULT 0")?;
     ensure_column(&conn, "device_usage_stats", "total_recording_count", "INTEGER DEFAULT 0")?;
 
-    // Backfill total_recording_count where it is still 0 but history records exist.
-    // Global usage_stats:
-    let global_count: i64 = conn
-        .query_row("SELECT total_recording_count FROM usage_stats WHERE id = 1", [], |r| r.get(0))
-        .unwrap_or(0);
-    if global_count == 0 {
-        conn.execute(
-            "UPDATE usage_stats SET total_recording_count = (SELECT COUNT(*) FROM history_record) WHERE id = 1",
-            [],
-        ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    // Backfill total_recording_count from actual history_record rows.
+    // The cached counter may be too low if the column was added after
+    // recordings already existed and a few increment calls have since
+    // bumped it above 0.  Correct it whenever the actual count is larger.
+    {
+        let cached: i64 = conn
+            .query_row("SELECT total_recording_count FROM usage_stats WHERE id = 1", [], |r| r.get(0))
+            .unwrap_or(0);
+        let actual: i64 = conn
+            .query_row("SELECT COUNT(*) FROM history_record", [], |r| r.get(0))
+            .unwrap_or(0);
+        if actual > cached {
+            conn.execute(
+                "UPDATE usage_stats SET total_recording_count = ?1 WHERE id = 1",
+                params![actual],
+            ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        }
     }
-    // Per-device usage_stats – use the same device-matching logic as
-    // get_local_usage_stats() so the backfilled count is consistent.
+    // Per-device usage_stats – recompute total_recording_count from
+    // history_record for every cached device row where the stored count
+    // is smaller than the actual number of records (i.e. the counter
+    // missed older recordings that existed before this column was added).
     {
         let mut stmt = conn.prepare(
-            "SELECT device_id FROM device_usage_stats WHERE total_recording_count = 0"
+            "SELECT device_id, total_recording_count FROM device_usage_stats"
         ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        let device_ids: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(0))
+        let rows: Vec<(String, i64)> = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?
             .filter_map(|r| r.ok())
             .collect();
         drop(stmt);
-        for did in device_ids {
-            conn.execute(
-                "UPDATE device_usage_stats SET total_recording_count = (
-                     SELECT COUNT(*) FROM history_record
-                     WHERE source_device_id = ?1 OR source_device_id IS NULL OR source_device_id = ''
-                 ) WHERE device_id = ?1",
+        for (did, cached_count) in rows {
+            let actual_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM history_record
+                 WHERE source_device_id = ?1 OR source_device_id IS NULL OR source_device_id = ''",
                 params![did],
-            ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+                |r| r.get(0),
+            ).unwrap_or(0);
+            if actual_count > cached_count {
+                conn.execute(
+                    "UPDATE device_usage_stats SET total_recording_count = ?1 WHERE device_id = ?2",
+                    params![actual_count, did],
+                ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+            }
         }
     }
 
@@ -522,23 +536,24 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
 
 pub fn set_usage_stats(stats: &UsageStats) -> Result<(), StorageError> {
     with_db(|conn| {
-        // When the sync server does not yet support total_recording_count it
-        // deserialises as 0 (via #[serde(default)]).  Blindly writing 0 would
-        // wipe out a locally-backfilled value, so we use MAX() to keep
-        // whichever is larger until the server starts supplying a real count.
+        // total_recording_count is intentionally excluded from the server-driven
+        // overwrite.  The sync server does not yet track this field (it arrives
+        // as 0 via #[serde(default)]), so writing it here would corrupt the
+        // locally-maintained count.  The field is kept accurate by:
+        //   1. one-time backfill from history_record at DB init,
+        //   2. increment_usage_stats() on each new recording / sync event.
+        // Once the server starts supplying a real count, add it back here.
         conn.execute(
             "UPDATE usage_stats
              SET total_duration_ms = ?1,
                  total_characters = ?2,
                  llm_correction_count = ?3,
-                 total_recording_count = MAX(total_recording_count, ?4),
-                 last_updated = ?5
+                 last_updated = ?4
              WHERE id = 1",
             params![
                 stats.total_duration_ms.max(0),
                 stats.total_characters.max(0),
                 stats.llm_correction_count.max(0),
-                stats.total_recording_count.max(0),
                 Utc::now().to_rfc3339(),
             ],
         )
