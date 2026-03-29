@@ -21,8 +21,9 @@ const zhCN = {
   },
   nav: {
     overview: '概览',
+    hotwords: '热词',
     history: '历史',
-    dictionary: '词典',
+    settings: '设置',
     asrSettings: 'ASR',
     llmSettings: 'LLM',
     inputSettings: '输入',
@@ -84,7 +85,7 @@ const zhCN = {
     devicePrefix: '设备 {id}'
   },
   dictionary: {
-    title: '词典',
+    title: '热词',
     entries: '词条',
     entriesCount: '{count} 项',
     tagTitle: '热词管理',

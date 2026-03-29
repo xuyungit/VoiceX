@@ -21,8 +21,9 @@ const enUS = {
   },
   nav: {
     overview: 'Overview',
+    hotwords: 'Hotwords',
     history: 'History',
-    dictionary: 'Dictionary',
+    settings: 'Settings',
     asrSettings: 'ASR',
     llmSettings: 'LLM',
     inputSettings: 'Input',
@@ -84,7 +85,7 @@ const enUS = {
     devicePrefix: 'Device {id}'
   },
   dictionary: {
-    title: 'Dictionary',
+    title: 'Hotwords',
     entries: 'Entries',
     entriesCount: '{count} entries',
     tagTitle: 'Hotword Management',

@@ -14,18 +14,34 @@ interface NavItem {
   labelKey: string
 }
 
-const navItems: NavItem[] = [
-  { path: '/overview', name: 'overview', icon: 'chart', labelKey: 'nav.overview' },
-  { path: '/history', name: 'history', icon: 'history', labelKey: 'nav.history' },
-  { path: '/dictionary', name: 'dictionary', icon: 'book', labelKey: 'nav.dictionary' },
-  // Online hotword sync disabled for now — adds config complexity with limited benefit.
-  // { path: '/hotwords', name: 'hotwords', icon: 'sync', labelKey: 'nav.hotwords' },
-  { path: '/asr-settings', name: 'asr-settings', icon: 'mic', labelKey: 'nav.asrSettings' },
-  { path: '/llm-settings', name: 'llm-settings', icon: 'brain', labelKey: 'nav.llmSettings' },
-  { path: '/input-settings', name: 'input-settings', icon: 'keyboard', labelKey: 'nav.inputSettings' },
-  { path: '/sync', name: 'sync', icon: 'sync', labelKey: 'nav.sync' },
-  { path: '/post-processing', name: 'post-processing', icon: 'wand', labelKey: 'nav.postProcessing' },
-  { path: '/about', name: 'about', icon: 'info', labelKey: 'nav.about' }
+interface NavGroup {
+  label?: string
+  items: NavItem[]
+}
+
+const navGroups: NavGroup[] = [
+  {
+    items: [
+      { path: '/overview', name: 'overview', icon: 'chart', labelKey: 'nav.overview' },
+      { path: '/dictionary', name: 'dictionary', icon: 'book', labelKey: 'nav.hotwords' },
+      { path: '/history', name: 'history', icon: 'history', labelKey: 'nav.history' },
+    ]
+  },
+  {
+    label: 'nav.settings',
+    items: [
+      { path: '/asr-settings', name: 'asr-settings', icon: 'mic', labelKey: 'nav.asrSettings' },
+      { path: '/llm-settings', name: 'llm-settings', icon: 'brain', labelKey: 'nav.llmSettings' },
+      { path: '/input-settings', name: 'input-settings', icon: 'keyboard', labelKey: 'nav.inputSettings' },
+      { path: '/sync', name: 'sync', icon: 'sync', labelKey: 'nav.sync' },
+      { path: '/post-processing', name: 'post-processing', icon: 'wand', labelKey: 'nav.postProcessing' },
+    ]
+  },
+  {
+    items: [
+      { path: '/about', name: 'about', icon: 'info', labelKey: 'nav.about' },
+    ]
+  }
 ]
 
 const currentPath = computed(() => route.path)
@@ -48,13 +64,16 @@ function navigateTo(path: string) {
     </div>
     
     <div class="nav-items">
-      <button
-        v-for="item in navItems"
-        :key="item.path"
-        class="nav-item"
-        :class="{ active: currentPath === item.path }"
-        @click="navigateTo(item.path)"
-      >
+      <template v-for="(group, gi) in navGroups" :key="gi">
+        <div v-if="group.label" class="nav-group-label">{{ t(group.label) }}</div>
+        <div v-else-if="gi > 0" class="nav-divider" />
+        <button
+          v-for="item in group.items"
+          :key="item.path"
+          class="nav-item"
+          :class="{ active: currentPath === item.path }"
+          @click="navigateTo(item.path)"
+        >
         <span class="nav-icon">
           <!-- Chart icon -->
           <svg v-if="item.icon === 'chart'" viewBox="0 0 24 24" fill="currentColor">
@@ -95,6 +114,7 @@ function navigateTo(path: string) {
         </span>
         <span class="nav-label">{{ t(item.labelKey) }}</span>
       </button>
+      </template>
     </div>
   </nav>
 </template>
@@ -178,5 +198,20 @@ function navigateTo(path: string) {
 
 .nav-label {
   font-size: var(--font-md);
+}
+
+.nav-group-label {
+  font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: var(--spacing-md) var(--spacing-lg) var(--spacing-xs);
+  margin-top: var(--spacing-sm);
+}
+
+.nav-divider {
+  height: 1px;
+  background: var(--color-border);
+  margin: var(--spacing-sm) var(--spacing-lg);
 }
 </style>
