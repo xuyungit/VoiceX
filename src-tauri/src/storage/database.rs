@@ -97,6 +97,20 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
 
     ensure_column(&conn, "usage_stats", "total_recording_count", "INTEGER DEFAULT 0")?;
     ensure_column(&conn, "device_usage_stats", "total_recording_count", "INTEGER DEFAULT 0")?;
+
+    // Backfill total_recording_count in usage_stats if it is 0 but history records exist.
+    // This runs once after the column is first added; subsequent launches see a non-zero
+    // value (or an empty history) and skip the UPDATE.
+    let global_count: i64 = conn
+        .query_row("SELECT total_recording_count FROM usage_stats WHERE id = 1", [], |r| r.get(0))
+        .unwrap_or(0);
+    if global_count == 0 {
+        conn.execute(
+            "UPDATE usage_stats SET total_recording_count = (SELECT COUNT(*) FROM history_record) WHERE id = 1",
+            [],
+        ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    }
+
     ensure_column(&conn, "history_record", "source_device_id", "TEXT")?;
     ensure_column(&conn, "history_record", "llm_invoked", "INTEGER DEFAULT 0")?;
     ensure_column(&conn, "history_record", "asr_model_name", "TEXT")?;
