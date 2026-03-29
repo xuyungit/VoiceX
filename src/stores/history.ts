@@ -24,6 +24,7 @@ export interface UsageStats {
     totalDurationMs: number
     totalCharacters: number
     llmCorrectionCount: number
+    totalRecordingCount: number
 }
 
 export const useHistoryStore = defineStore('history', () => {
@@ -31,12 +32,14 @@ export const useHistoryStore = defineStore('history', () => {
     const stats = ref<UsageStats>({
         totalDurationMs: 0,
         totalCharacters: 0,
-        llmCorrectionCount: 0
+        llmCorrectionCount: 0,
+        totalRecordingCount: 0
     })
     const localStats = ref<UsageStats>({
         totalDurationMs: 0,
         totalCharacters: 0,
-        llmCorrectionCount: 0
+        llmCorrectionCount: 0,
+        totalRecordingCount: 0
     })
     const isLoading = ref(false)
     const hasMore = ref(true)

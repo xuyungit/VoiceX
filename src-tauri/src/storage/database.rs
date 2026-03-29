@@ -95,6 +95,8 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
         VALUES (1, 0, 'disabled');
     "#).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
+    ensure_column(&conn, "usage_stats", "total_recording_count", "INTEGER DEFAULT 0")?;
+    ensure_column(&conn, "device_usage_stats", "total_recording_count", "INTEGER DEFAULT 0")?;
     ensure_column(&conn, "history_record", "source_device_id", "TEXT")?;
     ensure_column(&conn, "history_record", "llm_invoked", "INTEGER DEFAULT 0")?;
     ensure_column(&conn, "history_record", "asr_model_name", "TEXT")?;
@@ -166,6 +168,8 @@ pub struct UsageStats {
     pub total_duration_ms: i64,
     pub total_characters: i64,
     pub llm_correction_count: i64,
+    #[serde(default)]
+    pub total_recording_count: i64,
 }
 
 /// Get history records
@@ -389,7 +393,7 @@ fn remove_audio_file_if_needed(path: &str) -> Result<(), StorageError> {
 pub fn get_usage_stats() -> Result<UsageStats, StorageError> {
     with_db(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT total_duration_ms, total_characters, llm_correction_count FROM usage_stats WHERE id = 1"
+            "SELECT total_duration_ms, total_characters, llm_correction_count, total_recording_count FROM usage_stats WHERE id = 1"
         ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
         let stats = stmt
@@ -398,6 +402,7 @@ pub fn get_usage_stats() -> Result<UsageStats, StorageError> {
                     total_duration_ms: row.get(0)?,
                     total_characters: row.get(1)?,
                     llm_correction_count: row.get(2)?,
+                    total_recording_count: row.get(3)?,
                 })
             })
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
@@ -414,13 +419,14 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
             total_duration_ms: 0,
             total_characters: 0,
             llm_correction_count: 0,
+            total_recording_count: 0,
         });
     }
 
     with_db(|conn| {
         let existing = conn
             .query_row(
-                "SELECT total_duration_ms, total_characters, llm_correction_count
+                "SELECT total_duration_ms, total_characters, llm_correction_count, total_recording_count
                  FROM device_usage_stats WHERE device_id = ?1",
                 params![trimmed],
                 |row| {
@@ -428,6 +434,7 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
                         total_duration_ms: row.get(0)?,
                         total_characters: row.get(1)?,
                         llm_correction_count: row.get(2)?,
+                        total_recording_count: row.get(3)?,
                     })
                 },
             )
@@ -443,7 +450,8 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
                 "SELECT
                     COALESCE(SUM(duration_ms), 0),
                     COALESCE(SUM(LENGTH(text)), 0),
-                    COALESCE(SUM(llm_invoked), 0)
+                    COALESCE(SUM(llm_invoked), 0),
+                    COUNT(*)
                  FROM history_record
                  WHERE source_device_id = ?1 OR source_device_id IS NULL OR source_device_id = ''",
                 params![trimmed],
@@ -452,6 +460,7 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
                         total_duration_ms: row.get(0)?,
                         total_characters: row.get(1)?,
                         llm_correction_count: row.get(2)?,
+                        total_recording_count: row.get(3)?,
                     })
                 },
             )
@@ -459,13 +468,14 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
 
         conn.execute(
             "INSERT INTO device_usage_stats
-             (device_id, total_duration_ms, total_characters, llm_correction_count, last_updated)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (device_id, total_duration_ms, total_characters, llm_correction_count, total_recording_count, last_updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 trimmed,
                 stats.total_duration_ms.max(0),
                 stats.total_characters.max(0),
                 stats.llm_correction_count.max(0),
+                stats.total_recording_count.max(0),
                 Utc::now().to_rfc3339()
             ],
         )
@@ -482,12 +492,14 @@ pub fn set_usage_stats(stats: &UsageStats) -> Result<(), StorageError> {
              SET total_duration_ms = ?1,
                  total_characters = ?2,
                  llm_correction_count = ?3,
-                 last_updated = ?4
+                 total_recording_count = ?4,
+                 last_updated = ?5
              WHERE id = 1",
             params![
                 stats.total_duration_ms.max(0),
                 stats.total_characters.max(0),
                 stats.llm_correction_count.max(0),
+                stats.total_recording_count.max(0),
                 Utc::now().to_rfc3339(),
             ],
         )
@@ -588,6 +600,7 @@ fn increment_usage_stats_conn(
          SET total_duration_ms = total_duration_ms + ?1,
              total_characters = total_characters + ?2,
              llm_correction_count = llm_correction_count + ?3,
+             total_recording_count = total_recording_count + 1,
              last_updated = ?4
          WHERE id = 1",
         params![dur, chars, llm, Utc::now().to_rfc3339()],
@@ -625,12 +638,13 @@ pub fn increment_device_usage_stats(
     with_db(|conn| {
         conn.execute(
             "INSERT INTO device_usage_stats
-             (device_id, total_duration_ms, total_characters, llm_correction_count, last_updated)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+             (device_id, total_duration_ms, total_characters, llm_correction_count, total_recording_count, last_updated)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)
              ON CONFLICT(device_id) DO UPDATE SET
                  total_duration_ms = total_duration_ms + excluded.total_duration_ms,
                  total_characters = total_characters + excluded.total_characters,
                  llm_correction_count = llm_correction_count + excluded.llm_correction_count,
+                 total_recording_count = total_recording_count + 1,
                  last_updated = excluded.last_updated",
             params![trimmed, dur, chars, llm, now],
         )
