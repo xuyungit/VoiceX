@@ -50,6 +50,7 @@ impl Default for AudioConfig {
 /// Handle returned when capture starts
 pub struct AudioCaptureHandle {
     pub receiver: Receiver<Vec<u8>>,
+    pub level_receiver: Receiver<f32>,
     pub file_path: Option<PathBuf>,
     pub sample_rate: u32,
     pub channels: u16,
@@ -81,6 +82,7 @@ unsafe impl Sync for SendableStream {}
 
 struct CaptureShared {
     tx: Mutex<Option<Sender<Vec<u8>>>>,
+    level_tx: Mutex<Option<Sender<f32>>>,
     chunker: Mutex<AudioChunker>,
     sink: Mutex<Option<OggOpusSink>>,
     wav_sink: Mutex<Option<WavSink>>,
@@ -96,6 +98,7 @@ struct CaptureShared {
 impl CaptureShared {
     fn new(
         tx: Sender<Vec<u8>>,
+        level_tx: Sender<f32>,
         chunker: AudioChunker,
         sink: Option<OggOpusSink>,
         wav_sink: Option<WavSink>,
@@ -104,6 +107,7 @@ impl CaptureShared {
     ) -> Self {
         Self {
             tx: Mutex::new(Some(tx)),
+            level_tx: Mutex::new(Some(level_tx)),
             chunker: Mutex::new(chunker),
             sink: Mutex::new(sink),
             wav_sink: Mutex::new(wav_sink),
@@ -158,6 +162,18 @@ impl CaptureShared {
         }
     }
 
+    fn dispatch_level(&self, level: f32) {
+        if !self.running.load(Ordering::SeqCst) {
+            return;
+        }
+
+        if let Ok(mut level_guard) = self.level_tx.lock() {
+            if let Some(tx) = level_guard.as_mut() {
+                let _ = tx.try_send(level.clamp(0.0, 1.0));
+            }
+        }
+    }
+
     fn increment_samples(&self, frames: usize) {
         self.samples_written
             .fetch_add(frames as u64, Ordering::SeqCst);
@@ -181,6 +197,9 @@ impl CaptureShared {
         // Now drop sender so downstream consumers see channel closure.
         if let Ok(mut tx_guard) = self.tx.lock() {
             tx_guard.take();
+        }
+        if let Ok(mut level_guard) = self.level_tx.lock() {
+            level_guard.take();
         }
 
         let sink = self.sink.lock().ok().and_then(|mut s| s.take());
@@ -497,8 +516,10 @@ impl AudioCaptureService {
         };
 
         let (tx, rx) = mpsc::channel(32);
+        let (level_tx, level_rx) = mpsc::channel(64);
         let shared = Arc::new(CaptureShared::new(
             tx,
+            level_tx,
             chunker,
             file_sink,
             wav_sink,
@@ -535,6 +556,7 @@ impl AudioCaptureService {
 
         Ok(AudioCaptureHandle {
             receiver: rx,
+            level_receiver: level_rx,
             file_path,
             sample_rate: config.sample_rate.0,
             channels: output_channels,
@@ -1007,23 +1029,24 @@ where
         mono.push(clamped);
     }
 
+    let rms = mono
+        .iter()
+        .map(|s| (*s as f32 / i16::MAX as f32).powi(2))
+        .sum::<f32>()
+        .sqrt()
+        / (mono.len() as f32).sqrt();
+
+    shared.dispatch_level(rms);
+
     // Detect first non-silent audio (~-35dB threshold)
-    if !shared.first_non_silent_logged.load(Ordering::SeqCst) {
-        let rms = mono
-            .iter()
-            .map(|s| (*s as f32 / i16::MAX as f32).powi(2))
-            .sum::<f32>()
-            .sqrt()
-            / (mono.len() as f32).sqrt();
-        if rms > 0.0175 {
-            if !shared.first_non_silent_logged.swap(true, Ordering::SeqCst) {
-                let elapsed = shared.start_instant.elapsed();
-                log::debug!(
-                    "First non-silent audio after {:.2?} (rms {:.4})",
-                    elapsed,
-                    rms
-                );
-            }
+    if !shared.first_non_silent_logged.load(Ordering::SeqCst) && rms > 0.0175 {
+        if !shared.first_non_silent_logged.swap(true, Ordering::SeqCst) {
+            let elapsed = shared.start_instant.elapsed();
+            log::debug!(
+                "First non-silent audio after {:.2?} (rms {:.4})",
+                elapsed,
+                rms
+            );
         }
     }
 

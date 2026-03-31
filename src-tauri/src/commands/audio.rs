@@ -44,13 +44,21 @@ pub fn start_audio_capture(
     audio: tauri::State<'_, AudioService>,
 ) -> Result<CaptureStartInfo, String> {
     let handle = audio.start_capture(false).map_err(|e| e.to_string())?;
+    let crate::audio::AudioCaptureHandle {
+        receiver,
+        level_receiver,
+        file_path,
+        sample_rate,
+        channels,
+    } = handle;
     // Drop the receiver for now; ASR pipeline will consume it later.
-    let _ = handle.receiver;
+    let _ = receiver;
+    let _ = level_receiver;
 
     Ok(CaptureStartInfo {
-        file_path: handle.file_path.map(|p| p.to_string_lossy().to_string()),
-        sample_rate: handle.sample_rate,
-        channels: handle.channels,
+        file_path: file_path.map(|p| p.to_string_lossy().to_string()),
+        sample_rate,
+        channels,
     })
 }
 

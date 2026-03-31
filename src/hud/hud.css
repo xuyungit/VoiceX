@@ -154,33 +154,92 @@ body {
     color: rgba(255, 255, 255, 0.35);
 }
 
-/* Waveform bars for batch recording */
+.text-area[hidden],
+.waveform-bars[hidden] {
+    display: none !important;
+}
+
 .waveform-bars {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 3px;
-    height: calc(12px * 1.4);
-    padding: 2px 0;
+    gap: 5px;
+    width: 86px;
+    height: 18px;
+    margin: 0 auto;
+    padding: 0;
 }
 
 .waveform-bars span {
     display: block;
-    width: 3px;
-    border-radius: 1.5px;
-    background: rgba(255, 255, 255, 0.5);
-    animation: waveform-bounce 1.2s ease-in-out infinite;
+    width: 6px;
+    height: 100%;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.88);
+    transform-origin: center bottom;
+    transform: scaleY(var(--bar-scale, 0.18));
+    opacity: var(--bar-opacity, 0.34);
+    will-change: transform, opacity;
+    transition: transform 70ms linear, opacity 70ms linear;
 }
 
-.waveform-bars span:nth-child(1) { height: 40%; animation-delay: 0s; }
-.waveform-bars span:nth-child(2) { height: 70%; animation-delay: 0.15s; }
-.waveform-bars span:nth-child(3) { height: 100%; animation-delay: 0.3s; }
-.waveform-bars span:nth-child(4) { height: 70%; animation-delay: 0.45s; }
-.waveform-bars span:nth-child(5) { height: 40%; animation-delay: 0.6s; }
+body.compact-batch-mode .hud-container {
+    padding: 9px 14px;
+    gap: 4px;
+    justify-content: center;
+}
 
-@keyframes waveform-bounce {
-    0%, 100% { transform: scaleY(0.4); opacity: 0.4; }
-    50% { transform: scaleY(1); opacity: 1; }
+body.compact-batch-mode .status-area {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    min-height: 20px;
+}
+
+body.compact-batch-mode .status-icon {
+    position: static;
+    width: 20px;
+    height: 20px;
+    transform: none;
+}
+
+body.compact-batch-mode .status-icon.animating {
+    animation-name: breathe-compact;
+}
+
+body.compact-batch-mode .countdown,
+body.compact-batch-mode .intent-chip {
+    display: none;
+}
+
+body.batch-recognizing-mode .hud-container {
+    justify-content: center;
+}
+
+body.compact-batch-mode .waveform-bars {
+    margin-top: 4px;
+}
+
+body.compact-batch-mode.recognizing .status-icon,
+body.compact-batch-mode.correcting .status-icon,
+body.compact-batch-mode.recording .status-icon {
+    color: rgba(255, 255, 255, 0.86);
+}
+
+@keyframes breathe-compact {
+
+    0%,
+    100% {
+        opacity: 0.4;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 1;
+        transform: scale(1.08);
+    }
 }
 
 /* States */

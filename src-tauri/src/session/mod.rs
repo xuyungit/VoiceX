@@ -70,6 +70,7 @@ pub struct SessionController {
     coordinator_tx: Arc<Mutex<Option<UnboundedSender<SessionMessage>>>>,
     hold_timer: Arc<Mutex<Option<JoinHandle<()>>>>,
     asr_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    audio_level_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     asr_cancel_token: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     asr_final_timeout: Arc<Mutex<Option<JoinHandle<()>>>>,
     injection_epoch: Arc<AtomicU64>,
@@ -470,12 +471,16 @@ impl SessionController {
 
     pub(crate) fn show_hud(&self) {
         if let Some(hud) = self.hud_service() {
-            hud.show();
+            let is_batch = crate::storage::get_settings()
+                .map(|s| crate::asr::AsrConfig::from(&s).is_batch())
+                .unwrap_or(false);
+            hud.show(is_batch);
         }
         self.set_escape_swallowing(true);
     }
 
     pub(crate) fn hide_hud(&self) {
+        self.cancel_audio_level_task();
         if let Some(hud) = self.hud_service() {
             hud.hide();
         }
@@ -631,6 +636,39 @@ impl SessionController {
         }
     }
 
+    fn spawn_audio_level_bridge(&self, mut rx: tokio::sync::mpsc::Receiver<f32>) {
+        self.cancel_audio_level_task();
+
+        let controller = self.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            while let Some(level) = rx.recv().await {
+                if let Some(hud) = controller.hud_service() {
+                    hud.emit_audio_level(level);
+                }
+            }
+
+            if let Some(hud) = controller.hud_service() {
+                hud.emit_audio_level(0.0);
+            }
+        });
+
+        if let Ok(mut guard) = self.audio_level_task.lock() {
+            *guard = Some(handle);
+        }
+    }
+
+    fn cancel_audio_level_task(&self) {
+        if let Ok(mut guard) = self.audio_level_task.lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+
+        if let Some(hud) = self.hud_service() {
+            hud.emit_audio_level(0.0);
+        }
+    }
+
     fn schedule_finalize_cleanup(&self) {
         self.cancel_auto_hide();
 
@@ -754,20 +792,24 @@ impl SessionController {
             );
             match manager.start_capture(capture_refinement_pcm) {
                 Ok(handle) => {
-                    let rx = handle.receiver;
-                    let path_str = handle
-                        .file_path
-                        .as_ref()
-                        .map(|p| p.to_string_lossy().to_string());
+                    let crate::audio::AudioCaptureHandle {
+                        receiver: rx,
+                        level_receiver: level_rx,
+                        file_path,
+                        sample_rate,
+                        channels,
+                    } = handle;
+                    let path_str = file_path.as_ref().map(|p| p.to_string_lossy().to_string());
+                    self.spawn_audio_level_bridge(level_rx);
                     self.send_message(SessionMessage::AudioStarted {
-                        sample_rate: handle.sample_rate,
-                        channels: handle.channels,
+                        sample_rate,
+                        channels,
                         path: path_str.clone(),
                     });
                     log::info!(
                         "Audio capture started ({} Hz, {} ch, batch={})",
-                        handle.sample_rate,
-                        handle.channels,
+                        sample_rate,
+                        channels,
                         is_batch
                     );
                     if is_batch {
@@ -776,7 +818,7 @@ impl SessionController {
                         // the refinement PCM buffer captures the full recording.
                         drop(rx);
                     } else {
-                        self.spawn_asr(rx, handle.sample_rate, handle.channels);
+                        self.spawn_asr(rx, sample_rate, channels);
                     }
                 }
                 Err(err) => {
@@ -979,6 +1021,7 @@ impl SessionController {
         self.cancel_hands_free_timeout();
         self.cancel_auto_hide();
         self.abort_asr_task();
+        self.cancel_audio_level_task();
 
         self.discard_session_audio_file(state, "audio_start_failed");
         self.discard_session_refinement_audio_file(state, "audio_start_failed");
@@ -999,6 +1042,7 @@ impl Default for SessionController {
             coordinator_tx: Arc::new(Mutex::new(None)),
             hold_timer: Arc::new(Mutex::new(None)),
             asr_task: Arc::new(Mutex::new(None)),
+            audio_level_task: Arc::new(Mutex::new(None)),
             asr_cancel_token: Arc::new(Mutex::new(None)),
             asr_final_timeout: Arc::new(Mutex::new(None)),
             injection_epoch: Arc::new(AtomicU64::new(0)),

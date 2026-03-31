@@ -234,6 +234,7 @@ pub fn run() {
             commands::audio::get_recordings_dir,
             commands::audio::open_recordings_dir,
             commands::build_info::get_build_info,
+            commands::hud::set_hud_content_bounds,
             commands::hotkey::record_hotkey,
             commands::hotkey::apply_hotkey_config,
             commands::hotkey::current_hotkey,
