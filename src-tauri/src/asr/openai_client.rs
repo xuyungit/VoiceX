@@ -64,12 +64,13 @@ impl OpenAITranscriptionClient {
             .part("file", file_part);
 
         if !self.config.openai_asr_language.trim().is_empty() {
-            form = form.text("language", self.config.openai_asr_language.trim().to_string());
+            form = form.text(
+                "language",
+                self.config.openai_asr_language.trim().to_string(),
+            );
         }
-        let prompt = build_transcription_prompt(
-            self.config.openai_asr_prompt.trim(),
-            &self.config.hotwords,
-        );
+        let prompt =
+            build_transcription_prompt(self.config.openai_asr_prompt.trim(), &self.config.hotwords);
         if !prompt.is_empty() {
             form = form.text("prompt", prompt);
         }

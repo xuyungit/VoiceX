@@ -95,8 +95,18 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
         VALUES (1, 0, 'disabled');
     "#).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
-    ensure_column(&conn, "usage_stats", "total_recording_count", "INTEGER DEFAULT 0")?;
-    ensure_column(&conn, "device_usage_stats", "total_recording_count", "INTEGER DEFAULT 0")?;
+    ensure_column(
+        &conn,
+        "usage_stats",
+        "total_recording_count",
+        "INTEGER DEFAULT 0",
+    )?;
+    ensure_column(
+        &conn,
+        "device_usage_stats",
+        "total_recording_count",
+        "INTEGER DEFAULT 0",
+    )?;
 
     // Backfill total_recording_count from actual history_record rows.
     // The cached counter may be too low if the column was added after
@@ -104,7 +114,11 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     // bumped it above 0.  Correct it whenever the actual count is larger.
     {
         let cached: i64 = conn
-            .query_row("SELECT total_recording_count FROM usage_stats WHERE id = 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT total_recording_count FROM usage_stats WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         let actual: i64 = conn
             .query_row("SELECT COUNT(*) FROM history_record", [], |r| r.get(0))
@@ -113,7 +127,8 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
             conn.execute(
                 "UPDATE usage_stats SET total_recording_count = ?1 WHERE id = 1",
                 params![actual],
-            ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+            )
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         }
     }
     // Per-device usage_stats – recompute total_recording_count from
@@ -121,27 +136,32 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     // is smaller than the actual number of records (i.e. the counter
     // missed older recordings that existed before this column was added).
     {
-        let mut stmt = conn.prepare(
-            "SELECT device_id, total_recording_count FROM device_usage_stats"
-        ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT device_id, total_recording_count FROM device_usage_stats")
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         let rows: Vec<(String, i64)> = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?
             .filter_map(|r| r.ok())
             .collect();
         drop(stmt);
         for (did, cached_count) in rows {
-            let actual_count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM history_record
+            let actual_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM history_record
                  WHERE source_device_id = ?1 OR source_device_id IS NULL OR source_device_id = ''",
-                params![did],
-                |r| r.get(0),
-            ).unwrap_or(0);
+                    params![did],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
             if actual_count > cached_count {
                 conn.execute(
                     "UPDATE device_usage_stats SET total_recording_count = ?1 WHERE device_id = ?2",
                     params![actual_count, did],
-                ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+                )
+                .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
             }
         }
     }
