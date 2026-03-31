@@ -341,8 +341,15 @@ impl SessionController {
                 return;
             }
             controller.emit_transcript(&final_text, true);
-            crate::services::text_injection_service::TextInjectionService::new()
-                .inject_background_guarded(mode, final_text.clone(), cancel_flag.clone());
+            let inject_handle =
+                crate::services::text_injection_service::TextInjectionService::new()
+                    .inject_background_guarded(mode, final_text.clone(), cancel_flag.clone());
+            // Wait for the blocking injection to complete before signalling InjectDone.
+            // This prevents a new injection from starting while the previous one is
+            // still writing to the clipboard or typing characters.
+            if let Some(handle) = inject_handle {
+                let _ = handle.await;
+            }
             if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
                 log::info!("Injection skipped: cancelled before InjectDone");
                 return;

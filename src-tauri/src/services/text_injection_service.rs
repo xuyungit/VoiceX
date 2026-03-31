@@ -1,6 +1,6 @@
 use tauri::async_runtime;
 
-use crate::injector::{TextInjectionMode, TextInjector};
+use crate::injector::{inject_serialized, TextInjectionMode};
 
 /// Handles text injection off the main async tasks to avoid blocking.
 #[derive(Clone, Default)]
@@ -18,33 +18,32 @@ impl TextInjectionService {
         }
 
         async_runtime::spawn_blocking(move || {
-            let injector = TextInjector::with_mode(mode);
-            if let Err(err) = injector.inject(&text) {
+            if let Err(err) = inject_serialized(mode, &text) {
                 log::warn!("Text injection failed: {}", err);
             }
         });
     }
 
-    /// Fire-and-forget text injection with a guard flag; returns the guard so callers can keep it alive.
+    /// Inject text in a blocking thread with a cancellation guard.
+    /// Returns a JoinHandle so callers can await completion.
     pub fn inject_background_guarded(
         &self,
         mode: TextInjectionMode,
         text: String,
         cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) {
+    ) -> Option<tauri::async_runtime::JoinHandle<()>> {
         if text.is_empty() {
-            return;
+            return None;
         }
 
-        async_runtime::spawn_blocking(move || {
+        Some(async_runtime::spawn_blocking(move || {
             if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
                 log::info!("Injection skipped: cancelled before start");
                 return;
             }
-            let injector = TextInjector::with_mode(mode);
-            if let Err(err) = injector.inject(&text) {
+            if let Err(err) = inject_serialized(mode, &text) {
                 log::warn!("Text injection failed: {}", err);
             }
-        });
+        }))
     }
 }

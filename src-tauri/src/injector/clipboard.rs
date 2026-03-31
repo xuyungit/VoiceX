@@ -12,6 +12,49 @@ use std::time::Duration;
 /// Typing is slower but avoids clipboard sync issues; use clipboard for long text.
 const TYPING_MODE_MAX_CHARS: usize = 500;
 
+/// Split a str into sub-slices of at most `max_chars` Unicode scalar values.
+///
+/// Additionally, a chunk boundary is forced **before** any `\n` character so
+/// that newlines always land at the start of a chunk.  This is critical on
+/// macOS where `CGEventKeyboardSetUnicodeString` mishandles strings that
+/// contain `\n` in the middle — the target application drops the trailing
+/// characters of such a chunk and flushes them later in the wrong order.
+/// Enigo already has a workaround for *leading* `\n` (it prepends a
+/// zero-width space), so placing `\n` at chunk boundaries lets that
+/// workaround kick in.
+fn text_chunks(s: &str, max_chars: usize) -> Vec<&str> {
+    assert!(max_chars > 0);
+    let mut chunks = Vec::new();
+    let mut chunk_start = 0; // byte offset
+    let mut count = 0; // chars in current chunk
+
+    for (byte_idx, ch) in s.char_indices() {
+        // Force a break *before* any newline so it becomes the first char of
+        // the next chunk (where enigo's leading-newline workaround handles it).
+        if ch == '\n' && count > 0 {
+            chunks.push(&s[chunk_start..byte_idx]);
+            chunk_start = byte_idx;
+            count = 0;
+        }
+
+        count += 1;
+
+        if count >= max_chars {
+            let end = byte_idx + ch.len_utf8();
+            chunks.push(&s[chunk_start..end]);
+            chunk_start = end;
+            count = 0;
+        }
+    }
+
+    // Remaining tail
+    if chunk_start < s.len() {
+        chunks.push(&s[chunk_start..]);
+    }
+
+    chunks
+}
+
 /// Text injection mode
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TextInjectionMode {
@@ -177,18 +220,40 @@ impl TextInjector {
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            // Use enigo 0.6's text() method which properly handles all Unicode chars
-            // including Chinese punctuation via SendInput with KEYEVENTF_UNICODE.
-            let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
-                InjectorError::TypingError(format!("Failed to create Enigo: {}", e))
-            })?;
-            enigo
-                .text(text)
-                .map_err(|e| InjectorError::TypingError(format!("Failed to type text: {}", e)))?;
+            // enigo's fast_text() on macOS splits text into 20-char chunks and posts
+            // them all to the HID event queue back-to-back with NO inter-chunk delay
+            // (the accumulated sleep only happens at Enigo::drop).  Target apps that
+            // cannot keep up with the burst of keyboard events will drop or reorder
+            // characters.
+            //
+            // Fix: feed enigo in small chunks ourselves and sleep between them so the
+            // target app has time to process each batch of characters.
+            const CHUNK_SIZE: usize = 20; // matches CGEventKeyboardSetUnicodeString limit
+            const INTER_CHUNK_DELAY: Duration = Duration::from_millis(5);
+
+            let chunks = text_chunks(text, CHUNK_SIZE);
             log::debug!(
-                "Injected {} characters via simulated typing (SendInput)",
-                char_count
+                "Injecting {} characters via simulated typing ({} chunks of ≤{})",
+                char_count,
+                chunks.len(),
+                CHUNK_SIZE
             );
+
+            for (i, chunk) in chunks.iter().enumerate() {
+                let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
+                    InjectorError::TypingError(format!("Failed to create Enigo: {}", e))
+                })?;
+                enigo.text(chunk).map_err(|e| {
+                    InjectorError::TypingError(format!("Failed to type text chunk: {}", e))
+                })?;
+                // enigo is dropped here, which triggers its internal sleep for
+                // pending events.  Add an extra delay between chunks to give the
+                // target application time to process the input.
+                if i + 1 < chunks.len() {
+                    thread::sleep(INTER_CHUNK_DELAY);
+                }
+            }
+
             Ok(())
         }
 
