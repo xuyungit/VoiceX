@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD;
@@ -16,8 +16,8 @@ use tokio_tungstenite::{
 
 use super::audio_utils::{downmix_to_mono, resample_to_24k};
 use super::config::AsrConfig;
-use super::protocol::{AsrError, AsrEvent};
 use super::openai_client::build_transcription_prompt;
+use super::protocol::{AsrError, AsrEvent};
 
 const OPENAI_SESSION_READY_WAIT_MS: u64 = 1500;
 const OPENAI_COMPLETION_WAIT_MS: u64 = 10_000;
@@ -74,10 +74,7 @@ impl OpenAIRealtimeClient {
                 HeaderValue::from_str(&format!("Bearer {}", client_secret))
                     .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?,
             );
-            headers.insert(
-                "OpenAI-Beta",
-                HeaderValue::from_static("realtime=v1"),
-            );
+            headers.insert("OpenAI-Beta", HeaderValue::from_static("realtime=v1"));
         }
 
         let (ws_stream, _) = connect_async(req)
@@ -328,8 +325,11 @@ impl OpenAIRealtimeClient {
             );
         }
 
-        match tokio::time::timeout(Duration::from_millis(OPENAI_COMPLETION_WAIT_MS), reader_handle)
-            .await
+        match tokio::time::timeout(
+            Duration::from_millis(OPENAI_COMPLETION_WAIT_MS),
+            reader_handle,
+        )
+        .await
         {
             Ok(Ok(result)) => result,
             Ok(Err(e)) => Err(AsrError::ConnectionFailed(format!(
@@ -396,8 +396,7 @@ impl OpenAIRealtimeClient {
             .map(ToOwned::to_owned)
             .ok_or_else(|| {
                 AsrError::ProtocolError(
-                    "OpenAI Realtime transcription session missing client_secret.value"
-                        .to_string(),
+                    "OpenAI Realtime transcription session missing client_secret.value".to_string(),
                 )
             })
     }
@@ -474,8 +473,8 @@ fn handle_runtime_payload(
             .ok()
             .and_then(|guard| *guard)
             .is_some();
-        let benign_empty_commit = finalizing
-            && reason.contains("Error committing input audio buffer: buffer too small");
+        let benign_empty_commit =
+            finalizing && reason.contains("Error committing input audio buffer: buffer too small");
         if benign_empty_commit {
             if let Ok(mut guard) = pending_audio_bytes.lock() {
                 *guard = 0;

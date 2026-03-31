@@ -307,8 +307,7 @@ impl ColiAsrClient {
                             transcript.push_partial(text)
                         };
                         if let Some(text) = combined {
-                            saw_transcript_reader
-                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                            saw_transcript_reader.store(true, std::sync::atomic::Ordering::SeqCst);
                             stdout_on_event(AsrEvent {
                                 text,
                                 is_final: evt.is_final,

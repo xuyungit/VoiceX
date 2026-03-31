@@ -14,6 +14,11 @@ pub struct HudService {
     hide_timer: std::sync::Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
+const STREAM_HUD_WIDTH: f64 = 256.0;
+const STREAM_HUD_HEIGHT: f64 = 100.0;
+const BATCH_HUD_WIDTH: f64 = 204.0;
+const BATCH_HUD_HEIGHT: f64 = 78.0;
+
 impl HudService {
     pub fn new(app_handle: AppHandle) -> Self {
         Self {
@@ -22,11 +27,13 @@ impl HudService {
         }
     }
 
-    pub fn show(&self) {
+    pub fn show(&self, is_batch: bool) {
         // Recreate/position in case display changed.
         if let Err(err) = hud::create_hud_window(&self.app_handle) {
             log::warn!("Failed to create HUD window: {}", err);
         }
+        self.emit_presentation_mode(is_batch);
+        self.sync_bounds(is_batch);
         hud::show_hud(&self.app_handle);
     }
 
@@ -91,6 +98,22 @@ impl HudService {
         );
     }
 
+    pub fn emit_presentation_mode(&self, is_batch: bool) {
+        let payload = json!({
+            "mode": if is_batch { "batch" } else { "stream" }
+        });
+        let _ = self.app_handle.emit_to("hud", "state:hud_presentation", payload);
+    }
+
+    pub fn sync_bounds(&self, is_batch: bool) {
+        let (width, height) = if is_batch {
+            (BATCH_HUD_WIDTH, BATCH_HUD_HEIGHT)
+        } else {
+            (STREAM_HUD_WIDTH, STREAM_HUD_HEIGHT)
+        };
+        let _ = hud::set_hud_content_bounds(&self.app_handle, width, height);
+    }
+
     pub fn emit_correcting(&self, is_correcting: bool) {
         let _ = self.app_handle.emit(
             "state:correcting",
@@ -109,6 +132,13 @@ impl HudService {
         let _ = self.app_handle.emit("recognition:stopped", json!({}));
     }
 
+    pub fn emit_audio_level(&self, level: f32) {
+        let payload = json!({
+            "level": level.clamp(0.0, 1.0)
+        });
+        let _ = self.app_handle.emit_to("hud", "state:audio_level", payload);
+    }
+
     pub fn emit_intent(&self, intent: ProcessingIntent) {
         let _ = self
             .app_handle
@@ -123,9 +153,9 @@ impl HudService {
     /// Reset HUD-visible state to a neutral baseline.
     pub fn reset_display(&self) {
         self.emit_countdown(None);
-        self.emit_recording_style(None, false);
         self.emit_correcting(false);
         self.emit_intent(ProcessingIntent::Assistant);
         self.emit_transcript("", false);
+        self.emit_audio_level(0.0);
     }
 }

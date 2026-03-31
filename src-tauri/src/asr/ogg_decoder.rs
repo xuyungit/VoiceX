@@ -20,8 +20,8 @@ const MAX_FRAME_SAMPLES: usize = 5760;
 /// Reads the OpusHead header to determine the encoded sample rate and channel
 /// count, then decodes all audio packets using `audiopus::coder::Decoder`.
 pub fn decode_ogg_opus_to_pcm16k(path: &Path) -> Result<Vec<u8>, String> {
-    let file =
-        File::open(path).map_err(|e| format!("Failed to open audio file {}: {}", path.display(), e))?;
+    let file = File::open(path)
+        .map_err(|e| format!("Failed to open audio file {}: {}", path.display(), e))?;
     let mut reader = PacketReader::new(file);
 
     // --- Packet 0: OpusHead ---

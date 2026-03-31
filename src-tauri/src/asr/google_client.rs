@@ -65,8 +65,8 @@ use google::cloud::speech::v2::speech_client::SpeechClient;
 use google::cloud::speech::v2::streaming_recognize_request::StreamingRequest;
 use google::cloud::speech::v2::{
     AutoDetectDecodingConfig, ExplicitDecodingConfig, PhraseSet, RecognitionConfig,
-    RecognizeRequest, SpeechAdaptation, StreamingRecognitionConfig,
-    StreamingRecognitionFeatures, StreamingRecognizeRequest, StreamingRecognizeResponse,
+    RecognizeRequest, SpeechAdaptation, StreamingRecognitionConfig, StreamingRecognitionFeatures,
+    StreamingRecognizeRequest, StreamingRecognizeResponse,
 };
 
 /// Get a cached gRPC channel or create a new one (eagerly connecting).
@@ -566,10 +566,7 @@ impl GoogleSttClient {
     ///
     /// Returns `Ok(transcript_text)` on success, or an `AsrError` if the
     /// request fails (including when the audio exceeds the 60-second limit).
-    pub async fn recognize_file(
-        &self,
-        path: &std::path::Path,
-    ) -> Result<String, AsrError> {
+    pub async fn recognize_file(&self, path: &std::path::Path) -> Result<String, AsrError> {
         if !self.config.is_valid() {
             return Err(AsrError::ConnectionFailed(
                 "Invalid Google STT configuration: Project ID and Service Account Key are required"
@@ -589,9 +586,8 @@ impl GoogleSttClient {
         let t0 = std::time::Instant::now();
 
         // Read the raw audio file bytes (OGG/Opus — no decoding needed)
-        let audio_bytes = std::fs::read(path).map_err(|e| {
-            AsrError::ConnectionFailed(format!("Failed to read audio file: {e}"))
-        })?;
+        let audio_bytes = std::fs::read(path)
+            .map_err(|e| AsrError::ConnectionFailed(format!("Failed to read audio file: {e}")))?;
         log::info!(
             "Google STT Recognize: read {} bytes from {}",
             audio_bytes.len(),
@@ -699,17 +695,14 @@ impl GoogleSttClient {
 
         log::info!("Google STT Recognize: sending request...");
 
-        let response = client
-            .recognize(request)
-            .await
-            .map_err(|e| {
-                AsrError::ConnectionFailed(format!(
-                    "Recognize RPC failed (code={}, source={:?}): {}",
-                    e.code(),
-                    e.source(),
-                    e.message()
-                ))
-            })?;
+        let response = client.recognize(request).await.map_err(|e| {
+            AsrError::ConnectionFailed(format!(
+                "Recognize RPC failed (code={}, source={:?}): {}",
+                e.code(),
+                e.source(),
+                e.message()
+            ))
+        })?;
 
         let resp = response.into_inner();
         let elapsed = t0.elapsed();

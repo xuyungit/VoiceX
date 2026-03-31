@@ -467,9 +467,7 @@ fn handle_runtime_payload(
 fn parse_json_message(msg: Message, stage: &str) -> Result<Value, AsrError> {
     match msg {
         Message::Text(text) => serde_json::from_str(&text).map_err(|e| {
-            AsrError::ProtocolError(format!(
-                "Invalid Gemini Live {stage} JSON text event: {e}"
-            ))
+            AsrError::ProtocolError(format!("Invalid Gemini Live {stage} JSON text event: {e}"))
         }),
         Message::Binary(bin) => {
             let text = String::from_utf8(bin).map_err(|e| {
@@ -536,7 +534,9 @@ fn summarize_runtime_payload(payload: &Value) -> String {
         .map(|parts| {
             parts
                 .iter()
-                .filter(|part| part.get("inlineData").is_some() || part.get("inline_data").is_some())
+                .filter(|part| {
+                    part.get("inlineData").is_some() || part.get("inline_data").is_some()
+                })
                 .count()
         })
         .unwrap_or(0);
@@ -692,7 +692,10 @@ mod tests {
     fn accumulates_multiple_partials_within_same_turn() {
         let mut accumulator = GeminiTranscriptAccumulator::default();
 
-        assert_eq!(accumulator.push_partial("前面一句").as_deref(), Some("前面一句"));
+        assert_eq!(
+            accumulator.push_partial("前面一句").as_deref(),
+            Some("前面一句")
+        );
         assert_eq!(
             accumulator.push_partial("后面一句").as_deref(),
             Some("前面一句 后面一句")
@@ -707,7 +710,10 @@ mod tests {
     fn preserves_growing_partial_without_duplication() {
         let mut accumulator = GeminiTranscriptAccumulator::default();
 
-        assert_eq!(accumulator.push_partial("前面一句").as_deref(), Some("前面一句"));
+        assert_eq!(
+            accumulator.push_partial("前面一句").as_deref(),
+            Some("前面一句")
+        );
         assert_eq!(
             accumulator.push_partial("前面一句 后面一句").as_deref(),
             Some("前面一句后面一句")
