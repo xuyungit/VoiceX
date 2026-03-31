@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] - 2026-03-31
+
+### Added
+- **Real RMS-driven batch HUD waveform** — batch recording HUD now reacts to live input level instead of using a fake placeholder animation.
+- **Compact batch HUD presentation** — batch mode now uses a narrower waveform-focused layout instead of reusing the wide streaming text window.
+- **macOS text injection notes** — documented the newline-related typing-mode limitations and the current fallback strategy.
+
+### Changed
+- HUD presentation is now explicitly separated between `stream` and `batch` modes so batch processing can stay in a compact status-only flow.
+- macOS multiline typing injection now falls back to pasteboard mode to avoid newline-triggered IME and text ordering issues.
+
+### Fixed
+- Fixed intermittent HUD flicker where a larger frame could flash briefly during HUD reuse and batch stage transitions on high-DPI displays.
+- Fixed batch HUD stage transitions so batch recognition/correction no longer bounce back through the streaming text presentation.
+- Improved macOS typing-mode reliability for multiline text injection.
+
 ## [0.9.0] - 2026-03-29
 
 ### Added
