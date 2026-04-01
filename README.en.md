@@ -10,21 +10,18 @@ English | [中文](./README.md)
   <img src="assets/screenshots/en/hud-window.png" alt="VoiceX HUD Window" width="480" />
 </p>
 
-VoiceX is a cross-platform desktop voice input tool that turns speaking into a fast, lightweight, and sustainable way to type.
-
-Rather than simply converting speech to text, VoiceX connects the entire input pipeline into a complete loop — start recording, get real-time feedback, recognize speech, optionally correct or translate the result, inject text into the active application, and keep a searchable history.
+VoiceX is a cross-platform desktop voice input tool. Its overall pipeline is: record audio, provide real-time feedback, recognize speech, optionally correct or translate the result, inject text into the active application, and save or sync the history. The core workflow is similar to other modern voice input tools, but VoiceX still makes its own product choices and trade-offs.
 
 ## Highlights
 
+- **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
+- **Multiple ASR backends** — switch between nine cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
 - **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status without interrupting your workflow.
-- **Multiple ASR backends** — switch between nine cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
 - **Smart text injection** — recognized text is pasted into the active app via clipboard (with automatic backup/restore) or simulated typing, seamlessly.
 - **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with audio playback and re-transcription.
-- **Full bilingual interface** — complete `zh-CN` / `en-US` localization across the app shell, settings, history, HUD overlay, tray menu, and built-in default prompts.
 - **Cross-device sync** — a self-hosted sync server keeps history in sync across your machines.
-- **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
 
 ## Interaction Modes
 
@@ -52,9 +49,9 @@ Hold threshold and double-tap window are configurable. Press **Escape** at any t
 | OpenAI ASR | Cloud batch / streaming (WebSocket) | `gpt-4o-transcribe`; dual-mode — batch file upload or realtime WebSocket streaming with VAD |
 | [Coli](https://www.npmjs.com/package/@marswave/coli) | Local offline | SenseVoice / Whisper based; installed separately via npm |
 
-Streaming backends send audio in 100 ms Opus-encoded chunks for low latency. Batch backends upload the finished recording only after capture stops, which is useful for higher-quality offline transcription and comparison.
+At the moment, Doubao, Qwen, Soniox, and Coli are the recommended options. Still, results vary from person to person: pronunciation, wording, and domain-specific vocabulary all affect the final experience.
 
-> **Note:** Cloud ASR services require API keys from their respective providers. For Volcengine, you only need an **App Key** and **Access Key** — all other parameters have sensible defaults. Coli must be [installed separately](https://www.npmjs.com/package/@marswave/coli) (`npm i -g @marswave/coli`) before use.
+> **Note:** Cloud ASR services require API keys from their respective providers. Coli must be [installed separately](https://www.npmjs.com/package/@marswave/coli) (`npm i -g @marswave/coli`) before use.
 
 ## LLM Integration
 
@@ -101,7 +98,7 @@ Features:
 
 ## Cross-Device Sync
 
-A lightweight self-hosted sync server (`sync-server/`) keeps text history in sync across machines. Audio files are stored locally only.
+Memory will likely remain a long-term theme in the AI era. If you use voice input across multiple computers, keeping all input history in one place makes it easier to turn that history into searchable, reusable memory over time. VoiceX supports a lightweight self-hosted sync server (`sync-server/`) to keep text history consistent across devices. Audio files are stored locally only. Running the sync service requires one server reachable by your devices, but resource usage is low.
 
 - Token + shared-secret authentication.
 - Real-time sync status (live / connecting / reconnecting / blocked).
@@ -177,30 +174,6 @@ On Windows, no code-signing is needed for local development. Build directly with
 ```powershell
 .\scripts\Build-VoiceX.ps1
 ```
-
-### Release Flow
-
-You do not need a separate Windows development machine just to produce release installers. GitHub Actions can build Tauri apps on a native Windows runner and upload the generated installer back to the same GitHub Release automatically.
-
-This repository includes `.github/workflows/windows-release.yml`, which triggers when a GitHub Release is published. The workflow checks out the tagged commit, builds the Windows bundles on `windows-latest`, and attaches them to that release.
-
-For a dry run, you can trigger the same workflow manually from the GitHub Actions page with an existing tag. In manual mode it can either upload the bundles as a short-lived Actions artifact, or upload them directly to an existing GitHub Release for that tag if you explicitly enable that option.
-
-Recommended flow:
-
-1. Bump the app version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
-2. Build your macOS package locally if you still want to sign or verify it on your Mac.
-3. Push the tag/commit to GitHub and optionally run a manual Windows build test for that tag from the Actions page.
-4. Publish the GitHub Release for that tag when you are ready.
-5. Wait for the `windows-release` workflow to finish; the Windows installer assets will be added automatically.
-
-The workflow only accepts tags whose commit is already contained in the `main` branch history, which helps prevent accidental Windows release builds from side branches.
-
-If you later add Apple Developer signing credentials to GitHub Actions, the same pattern can be extended to build macOS release artifacts in CI as well.
-
-### LLM Benchmark Tool (optional)
-
-`tools/llm-bench/` provides a benchmark for evaluating LLM correction quality on ASR output. Copy `config.example.toml` to `config.toml` and fill in your API keys before use.
 
 ## Project Structure
 

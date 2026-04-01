@@ -10,21 +10,18 @@
   <img src="assets/screenshots/zh/hud-window.png" alt="VoiceX HUD 窗口" width="480" />
 </p>
 
-VoiceX 是一个跨平台桌面语音输入工具，目标是把"开口说话"变成一种足够快、足够轻、可以长期使用的输入方式。
-
-它关注的不是单纯把语音转成文字，而是把整条输入链路串成完整闭环：开始录音、实时反馈、识别、按需纠正或翻译、把文本送进当前应用、再把历史保留下来。
+VoiceX 是一个跨平台桌面语音输入工具。整体处理链路为：录音、实时反馈、识别、按需纠正或翻译、把文本送进当前应用、保存并同步历史记录。它和当下流行的语音输入工具在核心流程上类似，但也有一些自身的特点，以及对功能边界的取舍。
 
 ## 亮点
 
+- **跨平台** — 同时支持 macOS 和 Windows，使用平台原生热键捕获、托盘图标和文本注入。
+- **多 ASR 后端** — 在九种云端和本地语音识别引擎间自由切换，兼顾准确率、延迟、语种覆盖和隐私。
 - **一键多用** — 单个全局热键驱动三种交互模式：轻点启动免提听写、长按进入按住说话、双击触发翻译。
 - **实时 HUD 浮层** — 轻量置顶窗口，实时显示转写文本、录音模式、倒计时和处理状态，不打断当前工作流。
-- **多 ASR 后端** — 在九种云端和本地语音识别引擎间自由切换，兼顾准确率、延迟、语种覆盖和隐私。
 - **LLM 后处理** — 可选将 ASR 输出交给大模型做纠错、翻译或润色，支持自定义 prompt 模板和词典上下文注入。
 - **智能文本注入** — 识别结果通过剪贴板粘贴（自动备份/恢复原内容）或模拟键入送入当前应用，无缝衔接。
 - **历史记录与统计** — 每次听写保留完整元数据（时长、设备、ASR/LLM 模型、原文 vs. 纠正文本），按日期浏览，并支持录音回放与重新转录。
-- **完整双语界面** — 整个应用壳层、设置页、历史记录、HUD 浮层、托盘菜单和内置默认 prompt 都支持 `zh-CN` / `en-US` 双语。
 - **跨设备同步** — 自建同步服务器，在多台设备间保持历史一致。
-- **跨平台** — 同时支持 macOS 和 Windows，使用平台原生热键捕获、托盘图标和文本注入。
 
 ## 交互模式
 
@@ -52,9 +49,9 @@ VoiceX 通过一个可配置的全局热键映射三种不同意图：
 | OpenAI ASR | 云端批量 / 流式 (WebSocket) | `gpt-4o-transcribe`；双模式——批量文件上传或实时 WebSocket 流式识别（含 VAD） |
 | [Coli](https://www.npmjs.com/package/@marswave/coli) | 本地离线 | 基于 SenseVoice / Whisper，需通过 npm 单独安装 |
 
-流式后端以 100 ms Opus 编码分片发送音频，保证低延迟；批量后端则会在录音结束后上传整段音频，更适合离线对比和高质量重转录。
+目前推荐豆包、通义千问、Soniox 和 Coli，但每个人的体验可能会有差异，发音习惯、用词和使用领域都会影响最终效果。
 
-> **提示：** 云端 ASR 服务需要到对应平台申请 API Key。火山引擎只需填写 **App Key** 和 **Access Key**，其余参数均有合理默认值。Coli 需要事先通过 npm 全局安装（`npm i -g @marswave/coli`），详见 [Coli 文档](https://www.npmjs.com/package/@marswave/coli)。
+> **提示：** 云端 ASR 服务需要到对应平台申请 API Key。Coli 需要事先通过 npm 全局安装（`npm i -g @marswave/coli`），详见 [Coli 文档](https://www.npmjs.com/package/@marswave/coli)。
 
 ## LLM 集成
 
@@ -101,7 +98,7 @@ VoiceX 可选将 ASR 输出交给 LLM 做纠错或翻译。支持的提供商：
 
 ## 跨设备同步
 
-轻量自建同步服务器（`sync-server/`），跨设备保持文本历史一致。录音文件仅保存在本地。
+记忆会是 AI 时代的长期主题。如果你在多台电脑上都使用语音输入，那么把输入历史集中管理，会更方便未来沉淀为可检索、可复用的记忆。VoiceX 支持轻量自建同步服务器（`sync-server/`），跨设备保持文本历史一致。录音文件仅保存在本地。部署同步服务需要一台可被各终端访问的服务器，但资源占用不高。
 
 - Token + 共享密钥认证。
 - 实时同步状态（已连接 / 连接中 / 重连中 / 配置缺失）。
@@ -177,30 +174,6 @@ Windows 上本地开发不需要代码签名，直接用 PowerShell 构建即可
 ```powershell
 .\scripts\Build-VoiceX.ps1
 ```
-
-### Release 发布流程
-
-如果只是为了产出 Windows 安装包，其实不需要再准备一台 Windows 开发机。GitHub Actions 可以直接在原生的 Windows runner 上构建 Tauri 应用，并把生成的安装包自动回传到同一个 GitHub Release。
-
-仓库里现在包含 `.github/workflows/windows-release.yml`。当你发布一个 GitHub Release 时，这个 workflow 会自动检出对应 tag，在 `windows-latest` 上构建 Windows bundle，然后把产物附加回该 release。
-
-如果想先试跑一次，也可以在 GitHub 的 Actions 页面手动触发这个 workflow，并填一个已经存在的 tag。手动模式既可以只把结果作为短期保留的 Actions artifact 上传，也可以在你显式开启时，直接把构建好的 Windows 安装包补传到这个 tag 对应的现有 release。
-
-推荐流程：
-
-1. 先同步更新 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 里的版本号。
-2. 如果你仍然希望在本机签名或验证 macOS 安装包，就继续在 Mac 本地构建 macOS 版本。
-3. 把代码和 tag 推到 GitHub；如果想先验证 Windows 构建，可以先去 Actions 页面手动跑一次。
-4. 准备正式发布时，再为这个 tag 发布 GitHub Release。
-5. 等待 `windows-release` workflow 跑完，Windows 安装包会自动出现在这个 release 的附件里。
-
-这个 workflow 只接受已经包含在 `main` 分支历史里的 tag，对侧分支或实验分支误打的 tag 会直接拦下来，避免误触发正式的 Windows 发布构建。
-
-如果后面你把 Apple Developer 的签名凭据也放进 GitHub Actions，这套方式还可以继续扩展成自动构建 macOS release 产物。
-
-### LLM 基准测试工具（可选）
-
-`tools/llm-bench/` 提供了一个用于评估不同 LLM 对语音识别文本纠正能力的基准工具。使用前需从 `config.example.toml` 创建本地 `config.toml` 并填入 API Key。
 
 ## 项目结构
 
