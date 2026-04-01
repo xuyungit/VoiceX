@@ -155,32 +155,46 @@ body {
 }
 
 .text-area[hidden],
-.waveform-bars[hidden] {
+.waveform-bars[hidden],
+.waveform-hybrid[hidden] {
     display: none !important;
 }
 
 .waveform-bars {
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 5px;
-    width: 86px;
-    height: 18px;
+    justify-content: space-between;
+    gap: 2px;
+    width: min(calc(100% - 18px), 252px);
+    height: 22px;
     margin: 0 auto;
     padding: 0;
 }
 
 .waveform-bars span {
     display: block;
-    width: 6px;
+    flex: 1 1 0;
+    min-width: 3px;
+    max-width: 6px;
     height: 100%;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.88);
-    transform-origin: center bottom;
-    transform: scaleY(var(--bar-scale, 0.18));
-    opacity: var(--bar-opacity, 0.34);
-    will-change: transform, opacity;
-    transition: transform 70ms linear, opacity 70ms linear;
+    background: linear-gradient(180deg,
+            rgba(255, 255, 255, 0.42) 0%,
+            rgba(255, 255, 255, 0.96) 45%,
+            rgba(117, 199, 255, 0.92) 100%);
+    box-shadow: 0 0 12px rgba(117, 199, 255, calc(var(--bar-glow, 0.2) * 0.32));
+    transform-origin: center center;
+    transform: scaleY(var(--bar-scale, 0.16));
+    opacity: var(--bar-opacity, 0.18);
+    will-change: transform, opacity, box-shadow;
+    transition: transform 70ms linear, opacity 70ms linear, box-shadow 90ms linear;
+}
+
+.waveform-hybrid {
+    display: block;
+    width: min(calc(100% - 18px), 252px);
+    height: 26px;
+    margin: 0 auto;
 }
 
 body.compact-batch-mode .hud-container {

@@ -4,6 +4,7 @@
 //! recordings to disk.
 
 use std::{
+    f32::consts::TAU,
     fs::File,
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -29,6 +30,8 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use super::{device::AudioInputDeviceManager, AudioChunker};
 
+const AUDIO_VIZ_BAND_EDGES: [f32; 9] = [120.0, 220.0, 400.0, 700.0, 1200.0, 2000.0, 3200.0, 4800.0, 7200.0];
+
 /// Audio capture configuration
 #[derive(Debug, Clone)]
 pub struct AudioConfig {
@@ -50,10 +53,16 @@ impl Default for AudioConfig {
 /// Handle returned when capture starts
 pub struct AudioCaptureHandle {
     pub receiver: Receiver<Vec<u8>>,
-    pub level_receiver: Receiver<f32>,
+    pub viz_receiver: Receiver<AudioVisualizationFrame>,
     pub file_path: Option<PathBuf>,
     pub sample_rate: u32,
     pub channels: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioVisualizationFrame {
+    pub level: f32,
+    pub bands: Vec<f32>,
 }
 
 /// Summary returned when capture stops
@@ -82,7 +91,7 @@ unsafe impl Sync for SendableStream {}
 
 struct CaptureShared {
     tx: Mutex<Option<Sender<Vec<u8>>>>,
-    level_tx: Mutex<Option<Sender<f32>>>,
+    viz_tx: Mutex<Option<Sender<AudioVisualizationFrame>>>,
     chunker: Mutex<AudioChunker>,
     sink: Mutex<Option<OggOpusSink>>,
     wav_sink: Mutex<Option<WavSink>>,
@@ -98,7 +107,7 @@ struct CaptureShared {
 impl CaptureShared {
     fn new(
         tx: Sender<Vec<u8>>,
-        level_tx: Sender<f32>,
+        viz_tx: Sender<AudioVisualizationFrame>,
         chunker: AudioChunker,
         sink: Option<OggOpusSink>,
         wav_sink: Option<WavSink>,
@@ -107,7 +116,7 @@ impl CaptureShared {
     ) -> Self {
         Self {
             tx: Mutex::new(Some(tx)),
-            level_tx: Mutex::new(Some(level_tx)),
+            viz_tx: Mutex::new(Some(viz_tx)),
             chunker: Mutex::new(chunker),
             sink: Mutex::new(sink),
             wav_sink: Mutex::new(wav_sink),
@@ -162,14 +171,17 @@ impl CaptureShared {
         }
     }
 
-    fn dispatch_level(&self, level: f32) {
+    fn dispatch_visualization(&self, level: f32, bands: &[f32]) {
         if !self.running.load(Ordering::SeqCst) {
             return;
         }
 
-        if let Ok(mut level_guard) = self.level_tx.lock() {
-            if let Some(tx) = level_guard.as_mut() {
-                let _ = tx.try_send(level.clamp(0.0, 1.0));
+        if let Ok(mut viz_guard) = self.viz_tx.lock() {
+            if let Some(tx) = viz_guard.as_mut() {
+                let _ = tx.try_send(AudioVisualizationFrame {
+                    level: level.clamp(0.0, 1.0),
+                    bands: bands.to_vec(),
+                });
             }
         }
     }
@@ -198,8 +210,8 @@ impl CaptureShared {
         if let Ok(mut tx_guard) = self.tx.lock() {
             tx_guard.take();
         }
-        if let Ok(mut level_guard) = self.level_tx.lock() {
-            level_guard.take();
+        if let Ok(mut viz_guard) = self.viz_tx.lock() {
+            viz_guard.take();
         }
 
         let sink = self.sink.lock().ok().and_then(|mut s| s.take());
@@ -516,10 +528,10 @@ impl AudioCaptureService {
         };
 
         let (tx, rx) = mpsc::channel(32);
-        let (level_tx, level_rx) = mpsc::channel(64);
+        let (viz_tx, viz_rx) = mpsc::channel(64);
         let shared = Arc::new(CaptureShared::new(
             tx,
-            level_tx,
+            viz_tx,
             chunker,
             file_sink,
             wav_sink,
@@ -556,7 +568,7 @@ impl AudioCaptureService {
 
         Ok(AudioCaptureHandle {
             receiver: rx,
-            level_receiver: level_rx,
+            viz_receiver: viz_rx,
             file_path,
             sample_rate: config.sample_rate.0,
             channels: output_channels,
@@ -1036,7 +1048,8 @@ where
         .sqrt()
         / (mono.len() as f32).sqrt();
 
-    shared.dispatch_level(rms);
+    let bands = compute_visualization_bands(&mono, shared.sample_rate, rms);
+    shared.dispatch_visualization(rms, &bands);
 
     // Detect first non-silent audio (~-35dB threshold)
     if !shared.first_non_silent_logged.load(Ordering::SeqCst) && rms > 0.0175 {
@@ -1058,6 +1071,93 @@ where
     }
 
     shared.dispatch(&bytes);
+}
+
+fn compute_visualization_bands(samples: &[i16], sample_rate: u32, level: f32) -> [f32; 8] {
+    let mut bands = [0.0; 8];
+    if samples.len() < 32 || sample_rate == 0 {
+        return bands;
+    }
+
+    let max_samples = 256usize;
+    let step = (samples.len() / max_samples).max(1);
+    let mut frame = Vec::with_capacity(samples.len().div_ceil(step).min(max_samples));
+    for sample in samples.iter().step_by(step).take(max_samples) {
+        frame.push(*sample as f32 / i16::MAX as f32);
+    }
+
+    let n = frame.len();
+    if n < 32 {
+        return bands;
+    }
+
+    let denom = (n.saturating_sub(1)).max(1) as f32;
+    for (index, value) in frame.iter_mut().enumerate() {
+        let window = 0.5 - 0.5 * (TAU * index as f32 / denom).cos();
+        *value *= window;
+    }
+
+    let bin_hz = sample_rate as f32 / n as f32;
+    let nyquist = sample_rate as f32 * 0.5;
+    let mut band_magnitudes = [0.0f32; 8];
+    let mut max_magnitude = 1e-6f32;
+
+    for (band_index, magnitude) in band_magnitudes.iter_mut().enumerate() {
+        let low_hz = AUDIO_VIZ_BAND_EDGES[band_index].min(nyquist * 0.98);
+        let high_hz = AUDIO_VIZ_BAND_EDGES[band_index + 1].min(nyquist * 0.98);
+        if high_hz <= low_hz {
+            continue;
+        }
+
+        let start_bin = ((low_hz / bin_hz).floor() as usize).clamp(1, n / 2);
+        let end_bin = ((high_hz / bin_hz).ceil() as usize).clamp(start_bin, n / 2);
+        let span = end_bin.saturating_sub(start_bin) + 1;
+        let sample_bins = span.min(4);
+        let bin_step = (span / sample_bins).max(1);
+        let mut power_sum = 0.0f32;
+        let mut count = 0usize;
+        let mut bin = start_bin;
+
+        while bin <= end_bin {
+            let (re, im) = dft_bin(&frame, bin);
+            power_sum += re * re + im * im;
+            count += 1;
+            if bin == end_bin {
+                break;
+            }
+            bin = (bin + bin_step).min(end_bin);
+        }
+
+        if count == 0 {
+            continue;
+        }
+
+        *magnitude = (power_sum / count as f32).sqrt();
+        max_magnitude = max_magnitude.max(*magnitude);
+    }
+
+    let loudness = level.clamp(0.0, 1.0).powf(0.65);
+    for (index, output) in bands.iter_mut().enumerate() {
+        let normalized = (band_magnitudes[index] / max_magnitude).clamp(0.0, 1.0);
+        let shaped = normalized.powf(0.75);
+        *output = (shaped * (0.18 + loudness * 0.82)).clamp(0.0, 1.0);
+    }
+
+    bands
+}
+
+fn dft_bin(samples: &[f32], bin: usize) -> (f32, f32) {
+    let n = samples.len() as f32;
+    let mut re = 0.0f32;
+    let mut im = 0.0f32;
+
+    for (index, sample) in samples.iter().enumerate() {
+        let phase = TAU * bin as f32 * index as f32 / n;
+        re += *sample * phase.cos();
+        im -= *sample * phase.sin();
+    }
+
+    (re / n, im / n)
 }
 
 impl Default for AudioCaptureService {

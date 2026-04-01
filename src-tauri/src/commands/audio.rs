@@ -46,14 +46,14 @@ pub fn start_audio_capture(
     let handle = audio.start_capture(false).map_err(|e| e.to_string())?;
     let crate::audio::AudioCaptureHandle {
         receiver,
-        level_receiver,
+        viz_receiver,
         file_path,
         sample_rate,
         channels,
     } = handle;
     // Drop the receiver for now; ASR pipeline will consume it later.
     let _ = receiver;
-    let _ = level_receiver;
+    let _ = viz_receiver;
 
     Ok(CaptureStartInfo {
         file_path: file_path.map(|p| p.to_string_lossy().to_string()),

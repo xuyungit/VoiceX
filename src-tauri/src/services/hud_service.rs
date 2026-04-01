@@ -139,6 +139,15 @@ impl HudService {
         let _ = self.app_handle.emit_to("hud", "state:audio_level", payload);
     }
 
+    pub fn emit_audio_spectrum(&self, bands: &[f32]) {
+        let payload = json!({
+            "bands": bands
+        });
+        let _ = self
+            .app_handle
+            .emit_to("hud", "state:audio_spectrum", payload);
+    }
+
     pub fn emit_intent(&self, intent: ProcessingIntent) {
         let _ = self
             .app_handle
@@ -157,5 +166,6 @@ impl HudService {
         self.emit_intent(ProcessingIntent::Assistant);
         self.emit_transcript("", false);
         self.emit_audio_level(0.0);
+        self.emit_audio_spectrum(&[]);
     }
 }

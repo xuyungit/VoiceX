@@ -636,19 +636,24 @@ impl SessionController {
         }
     }
 
-    fn spawn_audio_level_bridge(&self, mut rx: tokio::sync::mpsc::Receiver<f32>) {
+    fn spawn_audio_level_bridge(
+        &self,
+        mut rx: tokio::sync::mpsc::Receiver<crate::audio::AudioVisualizationFrame>,
+    ) {
         self.cancel_audio_level_task();
 
         let controller = self.clone();
         let handle = tauri::async_runtime::spawn(async move {
-            while let Some(level) = rx.recv().await {
+            while let Some(frame) = rx.recv().await {
                 if let Some(hud) = controller.hud_service() {
-                    hud.emit_audio_level(level);
+                    hud.emit_audio_level(frame.level);
+                    hud.emit_audio_spectrum(&frame.bands);
                 }
             }
 
             if let Some(hud) = controller.hud_service() {
                 hud.emit_audio_level(0.0);
+                hud.emit_audio_spectrum(&[]);
             }
         });
 
@@ -666,6 +671,7 @@ impl SessionController {
 
         if let Some(hud) = self.hud_service() {
             hud.emit_audio_level(0.0);
+            hud.emit_audio_spectrum(&[]);
         }
     }
 
@@ -794,7 +800,7 @@ impl SessionController {
                 Ok(handle) => {
                     let crate::audio::AudioCaptureHandle {
                         receiver: rx,
-                        level_receiver: level_rx,
+                        viz_receiver: level_rx,
                         file_path,
                         sample_rate,
                         channels,
