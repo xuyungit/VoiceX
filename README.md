@@ -1,226 +1,226 @@
 # VoiceX
 
-English | [中文](./README.zh-CN.md)
+[English](./README.en.md) | 中文
 
 <p align="center">
-  <img src="assets/screenshots/en/main-window.png" alt="VoiceX Main Window" width="720" />
+  <img src="assets/screenshots/zh/main-window.png" alt="VoiceX 主窗口" width="720" />
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/en/hud-window.png" alt="VoiceX HUD Window" width="480" />
+  <img src="assets/screenshots/zh/hud-window.png" alt="VoiceX HUD 窗口" width="480" />
 </p>
 
-VoiceX is a cross-platform desktop voice input tool that turns speaking into a fast, lightweight, and sustainable way to type.
+VoiceX 是一个跨平台桌面语音输入工具，目标是把"开口说话"变成一种足够快、足够轻、可以长期使用的输入方式。
 
-Rather than simply converting speech to text, VoiceX connects the entire input pipeline into a complete loop — start recording, get real-time feedback, recognize speech, optionally correct or translate the result, inject text into the active application, and keep a searchable history.
+它关注的不是单纯把语音转成文字，而是把整条输入链路串成完整闭环：开始录音、实时反馈、识别、按需纠正或翻译、把文本送进当前应用、再把历史保留下来。
 
-## Highlights
+## 亮点
 
-- **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
-- **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status without interrupting your workflow.
-- **Multiple ASR backends** — switch between nine cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
-- **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
-- **Smart text injection** — recognized text is pasted into the active app via clipboard (with automatic backup/restore) or simulated typing, seamlessly.
-- **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with audio playback and re-transcription.
-- **Full bilingual interface** — complete `zh-CN` / `en-US` localization across the app shell, settings, history, HUD overlay, tray menu, and built-in default prompts.
-- **Cross-device sync** — a self-hosted sync server keeps history in sync across your machines.
-- **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
+- **一键多用** — 单个全局热键驱动三种交互模式：轻点启动免提听写、长按进入按住说话、双击触发翻译。
+- **实时 HUD 浮层** — 轻量置顶窗口，实时显示转写文本、录音模式、倒计时和处理状态，不打断当前工作流。
+- **多 ASR 后端** — 在九种云端和本地语音识别引擎间自由切换，兼顾准确率、延迟、语种覆盖和隐私。
+- **LLM 后处理** — 可选将 ASR 输出交给大模型做纠错、翻译或润色，支持自定义 prompt 模板和词典上下文注入。
+- **智能文本注入** — 识别结果通过剪贴板粘贴（自动备份/恢复原内容）或模拟键入送入当前应用，无缝衔接。
+- **历史记录与统计** — 每次听写保留完整元数据（时长、设备、ASR/LLM 模型、原文 vs. 纠正文本），按日期浏览，并支持录音回放与重新转录。
+- **完整双语界面** — 整个应用壳层、设置页、历史记录、HUD 浮层、托盘菜单和内置默认 prompt 都支持 `zh-CN` / `en-US` 双语。
+- **跨设备同步** — 自建同步服务器，在多台设备间保持历史一致。
+- **跨平台** — 同时支持 macOS 和 Windows，使用平台原生热键捕获、托盘图标和文本注入。
 
-## Interaction Modes
+## 交互模式
 
-VoiceX maps three distinct intents to a single configurable hotkey:
+VoiceX 通过一个可配置的全局热键映射三种不同意图：
 
-| Gesture | Mode | Behavior |
+| 手势 | 模式 | 行为 |
 |---|---|---|
-| **Tap** (press & release) | Hands-free | Records until silence timeout or max duration; you can keep talking without holding anything. |
-| **Hold** (press & hold) | Push-to-talk | Records while the hotkey is held; releases to finalize. |
-| **Double-tap** | Translate | Like hands-free, but the result is translated to English via LLM (opt-in). |
+| **轻点**（按下即松） | 免提听写 | 持续录音直到静音超时或最大时长，无需一直按住。 |
+| **长按**（按住不放） | 按住说话 | 按住期间录音，松开即结束。 |
+| **双击** | 翻译 | 与免提听写相同，但结果通过 LLM 翻译为英文（需开启）。 |
 
-Hold threshold and double-tap window are configurable. Press **Escape** at any time to cancel and discard.
+长按阈值和双击窗口均可调。录音期间按 **Escape** 可随时取消并丢弃。
 
-## ASR Backends
+## ASR 后端
 
-| Provider | Type | Notes |
+| 提供商 | 类型 | 说明 |
 |---|---|---|
-| Volcengine (Doubao Speech) | Cloud streaming (WebSocket) | Optimized for Chinese; hot-word boosting, ITN, punctuation, DDC |
-| Google Cloud Speech-to-Text V2 | Cloud streaming (gRPC) | Multi-language, phrase boost, configurable endpointing |
-| Qwen (DashScope Realtime ASR) | Cloud streaming (WebSocket) | Alibaba Cloud; `qwen3-asr-flash-realtime` model |
-| Gemini Audio Transcription | Cloud batch file upload | `gemini-3.1-flash-lite-preview`; starts after recording stops; supports auto / zh / en / zh+en hints |
-| Gemini Live Realtime | Cloud streaming (WebSocket) | `gemini-3.1-flash-live-preview`; realtime input-audio transcription with language hints |
-| Cohere Audio Transcription | Cloud batch file upload | `cohere-transcribe-03-2026`; whole-file transcription with explicit ISO-639-1 language hint |
-| Soniox Realtime | Cloud streaming (WebSocket) | `stt-rt-v4`; token-based streaming with hotword support and language hints |
-| OpenAI ASR | Cloud batch / streaming (WebSocket) | `gpt-4o-transcribe`; dual-mode — batch file upload or realtime WebSocket streaming with VAD |
-| [Coli](https://www.npmjs.com/package/@marswave/coli) | Local offline | SenseVoice / Whisper based; installed separately via npm |
+| 火山引擎（豆包语音） | 云端流式 (WebSocket) | 中文优化；支持热词增强、ITN、标点、DDC |
+| Google Cloud Speech-to-Text V2 | 云端流式 (gRPC) | 多语种，Phrase Boost，可配置端点检测 |
+| 通义千问（DashScope 实时 ASR） | 云端流式 (WebSocket) | 阿里云；`qwen3-asr-flash-realtime` 模型 |
+| Gemini Audio Transcription | 云端批量文件识别 | `gemini-3.1-flash-lite-preview`；录音结束后上传整段音频；支持自动 / 中文 / English / 中英混合提示 |
+| Gemini Live Realtime | 云端流式 (WebSocket) | `gemini-3.1-flash-live-preview`；基于输入音频转写的实时识别，可附带语言提示 |
+| Cohere Audio Transcription | 云端批量文件识别 | `cohere-transcribe-03-2026`；整段音频上传识别，需显式指定 ISO-639-1 语言码 |
+| Soniox Realtime | 云端流式 (WebSocket) | `stt-rt-v4`；基于 token 的流式识别，支持热词和语言提示 |
+| OpenAI ASR | 云端批量 / 流式 (WebSocket) | `gpt-4o-transcribe`；双模式——批量文件上传或实时 WebSocket 流式识别（含 VAD） |
+| [Coli](https://www.npmjs.com/package/@marswave/coli) | 本地离线 | 基于 SenseVoice / Whisper，需通过 npm 单独安装 |
 
-Streaming backends send audio in 100 ms Opus-encoded chunks for low latency. Batch backends upload the finished recording only after capture stops, which is useful for higher-quality offline transcription and comparison.
+流式后端以 100 ms Opus 编码分片发送音频，保证低延迟；批量后端则会在录音结束后上传整段音频，更适合离线对比和高质量重转录。
 
-> **Note:** Cloud ASR services require API keys from their respective providers. For Volcengine, you only need an **App Key** and **Access Key** — all other parameters have sensible defaults. Coli must be [installed separately](https://www.npmjs.com/package/@marswave/coli) (`npm i -g @marswave/coli`) before use.
+> **提示：** 云端 ASR 服务需要到对应平台申请 API Key。火山引擎只需填写 **App Key** 和 **Access Key**，其余参数均有合理默认值。Coli 需要事先通过 npm 全局安装（`npm i -g @marswave/coli`），详见 [Coli 文档](https://www.npmjs.com/package/@marswave/coli)。
 
-## LLM Integration
+## LLM 集成
 
-VoiceX can optionally pass ASR output through an LLM for correction or translation. Supported providers:
+VoiceX 可选将 ASR 输出交给 LLM 做纠错或翻译。支持的提供商：
 
-| Provider | Default Model |
+| 提供商 | 默认模型 |
 |---|---|
-| Volcengine (Doubao) | `doubao-seed-2-0-mini-260215` |
-| OpenAI (or compatible) | `gpt-4o-mini` |
-| Qwen (DashScope) | `qwen3.5-flash` |
-| Custom | Any OpenAI-compatible endpoint |
+| 火山引擎（豆包） | `doubao-seed-2-0-mini-260215` |
+| OpenAI（或兼容接口） | `gpt-4o-mini` |
+| 通义千问（DashScope） | `qwen3.5-flash` |
+| 自定义 | 任何 OpenAI 兼容端点 |
 
-> **Note:** Each LLM provider requires an API key from the respective platform. Configure your chosen provider in **Settings → LLM**.
+> **提示：** 每个 LLM 提供商都需要到对应平台申请 API Key，在 **设置 → LLM** 中配置即可。
 
-Features:
-- **ASR correction** — fix recognition errors using dictionary context and customizable prompts.
-- **Translation** — translate dictation to English, triggered by double-tap gesture.
-- **Prompt templates** — full control over correction and translation prompts, with `{{DICTIONARY}}` placeholder for hot-word injection.
+能力：
+- **ASR 纠错** — 结合词典上下文和可自定义 prompt 修正识别错误。
+- **翻译** — 将听写内容翻译为英文，由双击手势触发。
+- **Prompt 模板** — 完全自定义纠错和翻译 prompt，支持 `{{DICTIONARY}}` 占位符注入热词。
 
-## Dictionary & Hot-Words
+## 词典与热词
 
-- Maintain a plain-text word list (one per line) that is sent to the ASR engine as hot-words and injected into LLM prompts.
-- **Keyword substitution rules** — define custom find-and-replace rules (exact, contains, or regex) to post-process recognized text.
-- **Online hot-word sync** — optionally sync your word list with Volcengine's hot-word platform (requires AK/SK).
+- 维护纯文本词表（每行一个），同时作为 ASR 热词和 LLM prompt 上下文注入。
+- **关键词替换规则** — 定义自定义查找替换规则（精确、包含或正则），对识别结果做后处理。
+- **在线热词同步** — 可选与火山引擎热词平台双向同步（需配置 AK/SK）。
 
-## Post-Processing
+## 后处理
 
-- **Smart punctuation cleanup** — auto-remove trailing punctuation from short sentences (configurable threshold).
-- **Keyword substitution** — regex/exact/contains replacement rules applied before text injection.
+- **智能标点清理** — 短句自动去除末尾标点（阈值可配置）。
+- **关键词替换** — 正则/精确/包含替换规则，在文本注入前执行。
 
-## History & Statistics
+## 历史记录与统计
 
-- Full history grouped by date, with per-record audio playback, copy, and detail view.
-- Side-by-side comparison of original ASR output vs. LLM-corrected text.
-- Re-transcribe any saved recording with a different ASR backend and optional LLM correction to compare providers on the same audio.
-- Configurable retention policies for text and audio (7 / 30 / 180 / 365 days, or forever).
-- Overview dashboard: total duration, character count, AI correction calls, average dictation speed — aggregated per device.
+- 全量历史按日期分组，每条记录支持录音回放、复制和详情查看。
+- 原始 ASR 输出与 LLM 纠正结果的并排对比。
+- 可对任意历史录音重新转录，切换不同 ASR 后端并按需叠加 LLM 纠错，方便做同音频对比。
+- 可配置文本和录音的保留策略（7 / 30 / 180 / 365 天或永久保留）。
+- 概览仪表盘：总时长、字符数、AI 纠正次数、平均听写速度——按设备汇总。
 
-## Localization
+## 本地化
 
-- Full `zh-CN` and `en-US` coverage across the main UI, HUD overlay, tray menu, and default prompt templates.
-- System / Chinese / English interface switcher, with automatic OS locale fallback when `system` is selected.
-- Localized history, settings, diagnostics, and provider descriptions, so the bilingual experience is consistent end to end.
+- 主界面、HUD 浮层、托盘菜单和默认 prompt 模板都完整覆盖 `zh-CN` 与 `en-US`。
+- 支持系统 / 中文 / English 三档界面切换；选择 `system` 时会自动跟随系统语言。
+- 设置、历史、诊断信息和 provider 说明都做了双语处理，整体体验保持一致。
 
-## Cross-Device Sync
+## 跨设备同步
 
-A lightweight self-hosted sync server (`sync-server/`) keeps text history in sync across machines. Audio files are stored locally only.
+轻量自建同步服务器（`sync-server/`），跨设备保持文本历史一致。录音文件仅保存在本地。
 
-- Token + shared-secret authentication.
-- Real-time sync status (live / connecting / reconnecting / blocked).
-- See [sync-server/README.md](./sync-server/README.md) for setup.
+- Token + 共享密钥认证。
+- 实时同步状态（已连接 / 连接中 / 重连中 / 配置缺失）。
+- 详见 [sync-server/README.md](./sync-server/README.md)。
 
-## Tech Stack
+## 技术栈
 
-| Layer | Technology |
+| 层 | 技术 |
 |---|---|
-| Frontend | Vue 3 · TypeScript · Naive UI · Vite |
-| Desktop shell | Tauri 2 (Rust) |
-| Audio capture | cpal · Opus (OggOpus) · 16 kHz mono |
-| Sync server | Rust · Axum · SQLite |
+| 前端 | Vue 3 · TypeScript · Naive UI · Vite |
+| 桌面壳 | Tauri 2 (Rust) |
+| 音频采集 | cpal · Opus (OggOpus) · 16 kHz 单声道 |
+| 同步服务端 | Rust · Axum · SQLite |
 
-## Development
+## 开发
 
-### Prerequisites
+### 前置条件
 
 - [Node.js](https://nodejs.org/) (LTS)
 - [pnpm](https://pnpm.io/)
 - [Rust](https://rustup.rs/) (stable)
-- Tauri 2 system dependencies: [Tauri Prerequisites](https://v2.tauri.app/start/prerequisites/)
+- Tauri 2 系统依赖：参考 [Tauri Prerequisites](https://v2.tauri.app/start/prerequisites/)
 
-### Getting Started
+### 开始
 
 ```bash
-# Install JS dependencies
+# 安装 JS 依赖
 pnpm install
 
-# Start the web dev server
+# 启动 Web 开发环境
 pnpm dev
 
-# Start the desktop dev environment (Tauri)
+# 启动桌面开发环境（含 Tauri）
 pnpm tauri dev
 
-# Production build
+# 构建生产版本
 pnpm build
 pnpm tauri build
 ```
 
-### macOS Permissions
+### macOS 权限要求
 
-VoiceX requires the following three macOS permissions to function properly — global hotkey capture needs Accessibility and Input Monitoring, and audio recording needs Microphone access:
+VoiceX 需要以下三项 macOS 权限才能正常工作——全局热键捕获依赖辅助功能和输入监控，录音依赖麦克风权限：
 
-| Permission | Purpose |
+| 权限 | 用途 |
 |---|---|
-| **Accessibility** | Intercept global hotkey events and inject text into other apps |
-| **Input Monitoring** | Capture keyboard events system-wide for hotkey detection |
-| **Microphone** | Record audio for speech recognition |
+| **辅助功能 (Accessibility)** | 拦截全局热键事件，向其他应用注入文本 |
+| **输入监控 (Input Monitoring)** | 在系统范围内捕获键盘事件以检测热键 |
+| **麦克风 (Microphone)** | 录音用于语音识别 |
 
-Grant these in **System Settings → Privacy & Security** when prompted on first launch.
+首次启动时系统会弹出授权提示，在 **系统设置 → 隐私与安全性** 中授予即可。
 
-### macOS Local Signing (recommended)
+### macOS 本地签名（推荐）
 
-Without code signing, macOS treats each new build as a different app, which means you have to **re-grant all three permissions above every time you recompile**. By signing builds with a persistent local certificate, macOS recognizes the app identity across rebuilds and your permission grants carry over.
+如果不进行代码签名，macOS 会将每次编译的新版本视为不同应用，导致**每次重新编译后都需要重新授予上述三项权限**。通过本地自签名证书签名构建产物，macOS 能跨编译识别应用身份，权限授予持续有效。
 
 ```bash
-# One-time setup: create a local code-signing identity in your Keychain
+# 一次性操作：在钥匙串中创建本地代码签名身份
 pnpm mac:setup-signing
 
-# Build, sign, and install to /Applications
+# 构建、签名并安装到 /Applications
 pnpm mac:build-local
 ```
 
-`mac:setup-signing` generates a self-signed certificate named "VoiceX Local Code Signing" and imports it into your login keychain (only needed once). `mac:build-local` builds a release, signs it with that identity, and installs to `/Applications` with quarantine flags removed.
+`mac:setup-signing` 生成名为 "VoiceX Local Code Signing" 的自签名证书并导入到登录钥匙串（只需执行一次）。`mac:build-local` 构建 Release 版本，用该证书签名，然后安装到 `/Applications` 并移除隔离标记。
 
-> This is only needed for local development builds. CI/CD or distribution builds should use a proper Apple Developer certificate.
+> 仅用于本地开发构建。CI/CD 或分发构建应使用正式的 Apple 开发者证书。
 
-### Windows Build
+### Windows 构建
 
-On Windows, no code-signing is needed for local development. Build directly with PowerShell:
+Windows 上本地开发不需要代码签名，直接用 PowerShell 构建即可：
 
 ```powershell
 .\scripts\Build-VoiceX.ps1
 ```
 
-### Release Flow
+### Release 发布流程
 
-You do not need a separate Windows development machine just to produce release installers. GitHub Actions can build Tauri apps on a native Windows runner and upload the generated installer back to the same GitHub Release automatically.
+如果只是为了产出 Windows 安装包，其实不需要再准备一台 Windows 开发机。GitHub Actions 可以直接在原生的 Windows runner 上构建 Tauri 应用，并把生成的安装包自动回传到同一个 GitHub Release。
 
-This repository includes `.github/workflows/windows-release.yml`, which triggers when a GitHub Release is published. The workflow checks out the tagged commit, builds the Windows bundles on `windows-latest`, and attaches them to that release.
+仓库里现在包含 `.github/workflows/windows-release.yml`。当你发布一个 GitHub Release 时，这个 workflow 会自动检出对应 tag，在 `windows-latest` 上构建 Windows bundle，然后把产物附加回该 release。
 
-For a dry run, you can trigger the same workflow manually from the GitHub Actions page with an existing tag. In manual mode it can either upload the bundles as a short-lived Actions artifact, or upload them directly to an existing GitHub Release for that tag if you explicitly enable that option.
+如果想先试跑一次，也可以在 GitHub 的 Actions 页面手动触发这个 workflow，并填一个已经存在的 tag。手动模式既可以只把结果作为短期保留的 Actions artifact 上传，也可以在你显式开启时，直接把构建好的 Windows 安装包补传到这个 tag 对应的现有 release。
 
-Recommended flow:
+推荐流程：
 
-1. Bump the app version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
-2. Build your macOS package locally if you still want to sign or verify it on your Mac.
-3. Push the tag/commit to GitHub and optionally run a manual Windows build test for that tag from the Actions page.
-4. Publish the GitHub Release for that tag when you are ready.
-5. Wait for the `windows-release` workflow to finish; the Windows installer assets will be added automatically.
+1. 先同步更新 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 里的版本号。
+2. 如果你仍然希望在本机签名或验证 macOS 安装包，就继续在 Mac 本地构建 macOS 版本。
+3. 把代码和 tag 推到 GitHub；如果想先验证 Windows 构建，可以先去 Actions 页面手动跑一次。
+4. 准备正式发布时，再为这个 tag 发布 GitHub Release。
+5. 等待 `windows-release` workflow 跑完，Windows 安装包会自动出现在这个 release 的附件里。
 
-The workflow only accepts tags whose commit is already contained in the `main` branch history, which helps prevent accidental Windows release builds from side branches.
+这个 workflow 只接受已经包含在 `main` 分支历史里的 tag，对侧分支或实验分支误打的 tag 会直接拦下来，避免误触发正式的 Windows 发布构建。
 
-If you later add Apple Developer signing credentials to GitHub Actions, the same pattern can be extended to build macOS release artifacts in CI as well.
+如果后面你把 Apple Developer 的签名凭据也放进 GitHub Actions，这套方式还可以继续扩展成自动构建 macOS release 产物。
 
-### LLM Benchmark Tool (optional)
+### LLM 基准测试工具（可选）
 
-`tools/llm-bench/` provides a benchmark for evaluating LLM correction quality on ASR output. Copy `config.example.toml` to `config.toml` and fill in your API keys before use.
+`tools/llm-bench/` 提供了一个用于评估不同 LLM 对语音识别文本纠正能力的基准工具。使用前需从 `config.example.toml` 创建本地 `config.toml` 并填入 API Key。
 
-## Project Structure
+## 项目结构
 
 ```
-src/                 # Vue 3 frontend
-  components/        #   Shared UI components
-  views/             #   Route pages (Overview, History, Dictionary, Settings, About)
-  stores/            #   Pinia state management
-  hud/               #   Lightweight HUD overlay
-src-tauri/           # Tauri (Rust) desktop shell
-  src/               #   Tauri commands & core logic
-  proto/             #   gRPC proto definitions (Google Cloud Speech)
-  vendor/            #   Vendored dependencies (audiopus_sys, rdev)
-sync-server/         # Self-hosted history sync server
-tools/llm-bench/     # LLM correction benchmark
-scripts/             # Build & signing helper scripts
+src/                 # Vue 3 前端
+  components/        #   共享 UI 组件
+  views/             #   路由页面 (Overview, History, Dictionary, Settings, About)
+  stores/            #   Pinia 状态管理
+  hud/               #   轻量 HUD 覆盖层
+src-tauri/           # Tauri (Rust) 桌面壳
+  src/               #   Tauri commands & 核心逻辑
+  proto/             #   gRPC proto 定义 (Google Cloud Speech)
+  vendor/            #   Vendored 依赖 (audiopus_sys, rdev)
+sync-server/         # 自建历史同步服务端
+tools/llm-bench/     # LLM 纠正能力基准测试
+scripts/             # 构建与签名辅助脚本
 ```
 
 ## License
 
-This project is licensed under the [MIT License](./LICENSE).
+本项目基于 [MIT License](./LICENSE) 开源。
 
-Third-party component licenses are listed in [THIRD_PARTY_LICENSES](./THIRD_PARTY_LICENSES).
+项目包含的第三方组件的许可信息详见 [THIRD_PARTY_LICENSES](./THIRD_PARTY_LICENSES)。

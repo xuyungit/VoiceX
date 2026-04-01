@@ -1,6 +1,6 @@
 # VoiceX
 
-[English](./README.md) | 中文
+[English](./README.en.md) | 中文
 
 <p align="center">
   <img src="assets/screenshots/zh/main-window.png" alt="VoiceX 主窗口" width="720" />
