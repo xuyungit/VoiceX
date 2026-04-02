@@ -9,7 +9,7 @@
 //! - Session ends when response contains `"finished": true`
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -21,6 +21,10 @@ use super::config::AsrConfig;
 use super::protocol::{AsrError, AsrEvent, AsrPhase};
 
 const SONIOX_DEFAULT_WS_URL: &str = "wss://stt-rt.soniox.com/transcribe-websocket";
+const SONIOX_MIN_COMPLETION_WAIT_MS: u64 = 15_000;
+const SONIOX_COMPLETION_SLACK_MS: u64 = 10_000;
+const SONIOX_MAX_COMPLETION_WAIT_MS: u64 = 180_000;
+const SONIOX_PCM16_MONO_BYTES_PER_MS: u64 = 32;
 
 pub struct SonioxClient {
     config: AsrConfig,
@@ -340,6 +344,8 @@ impl SonioxClient {
         let mut audio_rx = audio_rx;
         let mut writer_error: Option<AsrError> = None;
         let mut sent_audio_chunks: u32 = 0;
+        let mut audio_byte_count: u64 = 0;
+        let stream_started_at = Instant::now();
         while let Some(chunk) = tokio::select! {
             _ = cancel.cancelled() => None,
             _ = writer_cancel.cancelled() => None,
@@ -360,6 +366,7 @@ impl SonioxClient {
             } else {
                 pcm
             };
+            let mono_len = mono.len() as u64;
 
             if let Err(e) = ws_write.send(Message::Binary(mono)).await {
                 log::debug!("Soniox ASR audio send stopped: {e}");
@@ -371,6 +378,7 @@ impl SonioxClient {
             }
 
             sent_audio_chunks = sent_audio_chunks.saturating_add(1);
+            audio_byte_count = audio_byte_count.saturating_add(mono_len);
             if injected_fault == Some(SonioxFaultMode::DropAfterFirstAudio)
                 && sent_audio_chunks >= 1
             {
@@ -423,6 +431,15 @@ impl SonioxClient {
             .in_phase(AsrPhase::Finalizing));
         }
 
+        let stream_elapsed_ms = stream_started_at.elapsed().as_millis() as u64;
+        let completion_wait_ms = soniox_completion_wait_ms(audio_byte_count, stream_elapsed_ms);
+        log::info!(
+            "Soniox ASR waiting for session finish (audio_ms={}, send_elapsed_ms={}, wait_ms={})",
+            audio_byte_count / SONIOX_PCM16_MONO_BYTES_PER_MS,
+            stream_elapsed_ms,
+            completion_wait_ms,
+        );
+
         if injected_fault == Some(SonioxFaultMode::FinalTimeout) {
             return Err(AsrError::ConnectionFailed(
                 "Injected Soniox fault: finalizing timed out".to_string(),
@@ -431,7 +448,7 @@ impl SonioxClient {
         }
 
         // Wait for reader to finish
-        match tokio::time::timeout(Duration::from_millis(15_000), reader_handle).await {
+        match tokio::time::timeout(Duration::from_millis(completion_wait_ms), reader_handle).await {
             Ok(Ok(result)) => result,
             Ok(Err(e)) => Err(AsrError::ConnectionFailed(format!(
                 "Soniox ASR reader task failed: {e}"
@@ -440,12 +457,24 @@ impl SonioxClient {
             Err(_) => {
                 let _ = ws_write.close().await;
                 Err(AsrError::ConnectionFailed(
-                    "Soniox ASR timed out waiting for session finish".to_string(),
+                    format!(
+                        "Soniox ASR timed out waiting for session finish after {} ms",
+                        completion_wait_ms
+                    ),
                 )
                 .in_phase(AsrPhase::Finalizing))
             }
         }
     }
+}
+
+fn soniox_completion_wait_ms(audio_byte_count: u64, stream_elapsed_ms: u64) -> u64 {
+    let audio_duration_ms = audio_byte_count / SONIOX_PCM16_MONO_BYTES_PER_MS;
+    let backlog_ms = audio_duration_ms.saturating_sub(stream_elapsed_ms);
+
+    backlog_ms
+        .saturating_add(SONIOX_COMPLETION_SLACK_MS)
+        .clamp(SONIOX_MIN_COMPLETION_WAIT_MS, SONIOX_MAX_COMPLETION_WAIT_MS)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -516,7 +545,7 @@ fn resolve_soniox_ws_url() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::SonioxFaultMode;
+    use super::{soniox_completion_wait_ms, SonioxFaultMode};
 
     #[test]
     fn parses_fault_aliases() {
@@ -532,6 +561,22 @@ mod tests {
             SonioxFaultMode::from_str("bad_gateway"),
             Some(SonioxFaultMode::ServerError502)
         );
+    }
+
+    #[test]
+    fn completion_wait_scales_with_backlog() {
+        let audio_ms = 56_500u64;
+        let audio_bytes = audio_ms * 32;
+
+        assert_eq!(soniox_completion_wait_ms(audio_bytes, 28_250), 38_250);
+    }
+
+    #[test]
+    fn completion_wait_stays_at_floor_for_near_realtime_streams() {
+        let audio_ms = 56_500u64;
+        let audio_bytes = audio_ms * 32;
+
+        assert_eq!(soniox_completion_wait_ms(audio_bytes, 54_000), 15_000);
     }
 }
 

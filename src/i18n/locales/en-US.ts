@@ -321,6 +321,7 @@ const enUS = {
     providerCohere: 'Cohere Audio Transcription',
     providerOpenAI: 'OpenAI Audio Transcription',
     providerSoniox: 'Soniox Real-Time STT',
+    providerColi: 'Local Offline ASR (coli)',
     providerColiReady: 'Local Offline ASR (coli)',
     providerColiChecking: 'Local Offline ASR (coli) - checking...',
     providerColiUnavailable: 'Local Offline ASR (coli) - unavailable',

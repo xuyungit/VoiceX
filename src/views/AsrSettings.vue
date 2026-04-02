@@ -5,6 +5,7 @@ import { NButton, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import type { LocalAsrStatus } from '../types/asr'
+import { buildAsrProviderOptions, type AsrProviderValue as ProviderValue } from '../utils/providerOptions'
 import AsrVolcengineSettings from '../components/asr/AsrVolcengineSettings.vue'
 import AsrGoogleSettings from '../components/asr/AsrGoogleSettings.vue'
 import AsrQwenSettings from '../components/asr/AsrQwenSettings.vue'
@@ -17,9 +18,6 @@ import AsrColiSettings from '../components/asr/AsrColiSettings.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
-
-type ProviderValue = 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'soniox' | 'coli'
-
 interface AsrProviderProbeResult {
   provider: string
   ok: boolean
@@ -107,21 +105,10 @@ const providerOptions = computed(() => {
       ? t('asr.providerColiChecking')
       : t('asr.providerColiUnavailable')
 
-  return [
-    { label: t('asr.providerVolcengine'), value: 'volcengine' as ProviderValue },
-    { label: t('asr.providerGoogle'), value: 'google' as ProviderValue },
-    { label: t('asr.providerQwen'), value: 'qwen' as ProviderValue },
-    { label: t('asr.providerGemini'), value: 'gemini' as ProviderValue },
-    { label: t('asr.providerGeminiLive'), value: 'gemini-live' as ProviderValue },
-    { label: t('asr.providerCohere'), value: 'cohere' as ProviderValue },
-    { label: t('asr.providerOpenAI'), value: 'openai' as ProviderValue },
-    { label: t('asr.providerSoniox'), value: 'soniox' as ProviderValue },
-    {
-      label: coliLabel,
-      value: 'coli' as ProviderValue,
-      disabled: !coliDetected && settingsStore.settings.asrProviderType !== 'coli'
-    }
-  ]
+  return buildAsrProviderOptions(t, {
+    coliLabel,
+    coliDisabled: !coliDetected && settingsStore.settings.asrProviderType !== 'coli'
+  })
 })
 
 const showColiUnavailableWarning = computed(() =>

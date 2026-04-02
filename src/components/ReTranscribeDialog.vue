@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { NButton, NModal, NSelect, NSwitch, NSpin } from 'naive-ui'
+import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import type { HistoryRecord } from '../stores/history'
+import { buildAsrProviderOptions, buildLlmProviderOptions } from '../utils/providerOptions'
 
 const props = defineProps<{
   show: boolean
@@ -15,6 +17,7 @@ const emit = defineEmits<{
 }>()
 
 const settingsStore = useSettingsStore()
+const { t } = useI18n()
 
 const asrProvider = ref(settingsStore.settings.asrProviderType)
 const enableLlm = ref(settingsStore.settings.enableLlmCorrection)
@@ -29,23 +32,8 @@ const result = ref<{
   llmModelName: string | null
 } | null>(null)
 
-const asrProviderOptions = [
-  { label: '火山引擎', value: 'volcengine' },
-  { label: 'Google', value: 'google' },
-  { label: 'Qwen', value: 'qwen' },
-  { label: 'Gemini', value: 'gemini' },
-  { label: 'Gemini Live', value: 'gemini-live' },
-  { label: 'Cohere', value: 'cohere' },
-  { label: 'OpenAI', value: 'openai' },
-  { label: '本地 (Coli)', value: 'coli' },
-]
-
-const llmProviderOptions = [
-  { label: '火山引擎 (Doubao)', value: 'volcengine' },
-  { label: 'OpenAI', value: 'openai' },
-  { label: 'Qwen', value: 'qwen' },
-  { label: '自定义', value: 'custom' },
-]
+const asrProviderOptions = computed(() => buildAsrProviderOptions(t))
+const llmProviderOptions = computed(() => buildLlmProviderOptions(t))
 
 // Reset state when dialog opens
 watch(() => props.show, (visible) => {

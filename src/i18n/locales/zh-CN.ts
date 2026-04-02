@@ -321,6 +321,7 @@ const zhCN = {
     providerCohere: 'Cohere Audio Transcription',
     providerOpenAI: 'OpenAI Audio Transcription',
     providerSoniox: 'Soniox Real-Time STT',
+    providerColi: '本地离线 ASR (coli)',
     providerColiReady: '本地离线 ASR (coli)',
     providerColiChecking: '本地离线 ASR (coli) - 检查中...',
     providerColiUnavailable: '本地离线 ASR (coli) - 不可用',

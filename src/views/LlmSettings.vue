@@ -5,16 +5,12 @@ import { useI18n } from 'vue-i18n'
 import type { ResolvedLocale } from '../i18n'
 import { useSettingsStore, type AppSettings } from '../stores/settings'
 import { getDefaultPrompt } from '../utils/llmPrompts'
+import { buildLlmProviderOptions } from '../utils/providerOptions'
 
 const settingsStore = useSettingsStore()
 const { t, locale } = useI18n()
 
-const providerOptions = computed(() => [
-  { label: t('llm.providerVolcengine'), value: 'volcengine' },
-  { label: t('llm.providerOpenAI'), value: 'openai' },
-  { label: t('llm.providerQwen'), value: 'qwen' },
-  { label: t('llm.providerCustom'), value: 'custom' }
-])
+const providerOptions = computed(() => buildLlmProviderOptions(t))
 
 const reasoningEffortOptions = computed(() => [
   { label: t('llm.low'), value: 'low' },
