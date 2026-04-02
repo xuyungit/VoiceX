@@ -28,6 +28,14 @@ interface AsrProviderProbeResult {
   errorMessage: string | null
 }
 
+interface SonioxDebugHarnessStatus {
+  wsOverride: string | null
+  faultMode: string | null
+  mockRunning: boolean
+  mockUrl: string | null
+  mockScenario: string | null
+}
+
 // --- Coli status probe ---
 const coliStatus = ref<LocalAsrStatus | null>(null)
 const coliStatusLoading = ref(false)
@@ -60,6 +68,7 @@ watch(() => settingsStore.settings.coliCommandPath, () => {
 
 onMounted(() => {
   refreshColiStatus()
+  refreshSonioxDebugStatus()
 })
 
 // --- Provider selection ---
@@ -82,6 +91,13 @@ const isCohere = computed(() => settingsStore.settings.asrProviderType === 'cohe
 const isOpenAI = computed(() => settingsStore.settings.asrProviderType === 'openai')
 const isSoniox = computed(() => settingsStore.settings.asrProviderType === 'soniox')
 const isColi = computed(() => settingsStore.settings.asrProviderType === 'coli')
+const diagnosticsEnabled = computed(() => settingsStore.settings.enableDiagnostics)
+
+watch([diagnosticsEnabled, isSoniox], ([enabled, soniox]) => {
+  if (enabled && soniox) {
+    refreshSonioxDebugStatus()
+  }
+})
 
 const providerOptions = computed(() => {
   const coliDetected = coliStatus.value?.available ?? false
@@ -122,6 +138,33 @@ const probeAudioLoading = ref(false)
 const isProbeAudioPlaying = ref(false)
 const probeAudioPlayer = ref<HTMLAudioElement | null>(null)
 const probeAudioUrl = ref<string | null>(null)
+const sonioxDebugLoading = ref(false)
+const sonioxDebugStatus = ref<SonioxDebugHarnessStatus | null>(null)
+const sonioxDebugError = ref('')
+const sonioxMockScenario = ref('server_error_502')
+const sonioxFaultMode = ref<string | null>('server_error_502')
+
+const sonioxMockScenarioOptions = computed(() => [
+  { label: t('asr.sonioxDebugScenarioHappyPath'), value: 'happy_path' },
+  { label: t('asr.sonioxDebugScenario401'), value: 'server_error_401' },
+  { label: t('asr.sonioxDebugScenario429'), value: 'server_error_429' },
+  { label: t('asr.sonioxDebugScenario502'), value: 'server_error_502' },
+  { label: t('asr.sonioxDebugScenarioCloseHandshake'), value: 'close_after_handshake' },
+  { label: t('asr.sonioxDebugScenarioCloseFirstAudio'), value: 'close_after_first_audio' },
+  { label: t('asr.sonioxDebugScenarioPartialClose'), value: 'partial_then_close' },
+  { label: t('asr.sonioxDebugScenarioStallFinalizing'), value: 'stall_finalizing' }
+])
+
+const sonioxFaultModeOptions = computed(() => [
+  { label: t('asr.sonioxDebugFaultNone'), value: 'none' },
+  { label: t('asr.sonioxDebugFaultConnectFail'), value: 'connect_fail' },
+  { label: t('asr.sonioxDebugFaultHandshakeFail'), value: 'handshake_fail' },
+  { label: t('asr.sonioxDebugFault401'), value: 'server_error_401' },
+  { label: t('asr.sonioxDebugFault429'), value: 'server_error_429' },
+  { label: t('asr.sonioxDebugFault502'), value: 'server_error_502' },
+  { label: t('asr.sonioxDebugFaultCloseFirstAudio'), value: 'close_after_first_audio' },
+  { label: t('asr.sonioxDebugFaultFinalTimeout'), value: 'final_timeout' }
+])
 
 async function runProviderProbe() {
   providerProbeLoading.value = true
@@ -180,6 +223,79 @@ function stopProbeAudioPlayback() {
   if (probeAudioUrl.value) {
     URL.revokeObjectURL(probeAudioUrl.value)
     probeAudioUrl.value = null
+  }
+}
+
+async function refreshSonioxDebugStatus() {
+  if (!diagnosticsEnabled.value) {
+    sonioxDebugStatus.value = null
+    sonioxDebugError.value = ''
+    return
+  }
+
+  try {
+    sonioxDebugStatus.value = await invoke<SonioxDebugHarnessStatus>('get_soniox_debug_harness_status')
+    sonioxDebugError.value = ''
+    sonioxFaultMode.value = sonioxDebugStatus.value.faultMode ?? 'none'
+    if (sonioxDebugStatus.value.mockScenario) {
+      sonioxMockScenario.value = sonioxDebugStatus.value.mockScenario
+    }
+  } catch (error) {
+    sonioxDebugError.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function startSonioxMockServer() {
+  sonioxDebugLoading.value = true
+  try {
+    sonioxDebugStatus.value = await invoke<SonioxDebugHarnessStatus>('start_soniox_debug_mock_server', {
+      scenario: sonioxMockScenario.value
+    })
+    sonioxDebugError.value = ''
+    sonioxFaultMode.value = sonioxDebugStatus.value.faultMode ?? 'none'
+  } catch (error) {
+    sonioxDebugError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    sonioxDebugLoading.value = false
+  }
+}
+
+async function stopSonioxMockServer() {
+  sonioxDebugLoading.value = true
+  try {
+    sonioxDebugStatus.value = await invoke<SonioxDebugHarnessStatus>('stop_soniox_debug_mock_server')
+    sonioxDebugError.value = ''
+  } catch (error) {
+    sonioxDebugError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    sonioxDebugLoading.value = false
+  }
+}
+
+async function applySonioxFaultMode() {
+  sonioxDebugLoading.value = true
+  try {
+    sonioxDebugStatus.value = await invoke<SonioxDebugHarnessStatus>('set_soniox_debug_fault_mode', {
+      faultMode: sonioxFaultMode.value === 'none' ? null : sonioxFaultMode.value
+    })
+    sonioxDebugError.value = ''
+  } catch (error) {
+    sonioxDebugError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    sonioxDebugLoading.value = false
+  }
+}
+
+async function clearSonioxDebugOverrides() {
+  sonioxDebugLoading.value = true
+  try {
+    sonioxDebugStatus.value = await invoke<SonioxDebugHarnessStatus>('clear_soniox_debug_overrides')
+    sonioxDebugError.value = ''
+    sonioxFaultMode.value = 'none'
+  } catch (error) {
+    sonioxDebugError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    sonioxDebugLoading.value = false
   }
 }
 
@@ -244,6 +360,91 @@ const maxRecordingMinutes = computed({
       :coli-status-error="coliStatusError"
       @refresh="refreshColiStatus"
     />
+
+    <div v-if="isSoniox && diagnosticsEnabled" class="surface-card asr-card">
+      <div class="card-header">
+        <div class="card-title">{{ t('asr.sonioxDebugTitle') }}</div>
+        <div class="card-sub">{{ t('asr.sonioxDebugSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row align-start">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.sonioxDebugMockServer') }}</div>
+            <div class="field-note">{{ t('asr.sonioxDebugMockServerNote') }}</div>
+          </div>
+          <div class="debug-actions">
+            <NSelect
+              v-model:value="sonioxMockScenario"
+              :options="sonioxMockScenarioOptions"
+              size="small"
+              class="field-control debug-select"
+            />
+            <NButton
+              :loading="sonioxDebugLoading"
+              size="small"
+              @click="startSonioxMockServer"
+            >
+              {{ t('asr.sonioxDebugStartMock') }}
+            </NButton>
+            <NButton
+              :loading="sonioxDebugLoading"
+              size="small"
+              @click="stopSonioxMockServer"
+            >
+              {{ t('asr.sonioxDebugStopMock') }}
+            </NButton>
+          </div>
+        </div>
+
+        <div class="field-row align-start">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.sonioxDebugFaultMode') }}</div>
+            <div class="field-note">{{ t('asr.sonioxDebugFaultModeNote') }}</div>
+          </div>
+          <div class="debug-actions">
+            <NSelect
+              v-model:value="sonioxFaultMode"
+              :options="sonioxFaultModeOptions"
+              size="small"
+              class="field-control debug-select"
+            />
+            <NButton
+              :loading="sonioxDebugLoading"
+              size="small"
+              @click="applySonioxFaultMode"
+            >
+              {{ t('asr.sonioxDebugApplyFault') }}
+            </NButton>
+            <NButton
+              :loading="sonioxDebugLoading"
+              size="small"
+              @click="clearSonioxDebugOverrides"
+            >
+              {{ t('asr.sonioxDebugClear') }}
+            </NButton>
+          </div>
+        </div>
+
+        <div v-if="sonioxDebugStatus" class="probe-result" :class="{ ok: sonioxDebugStatus.mockRunning || !!sonioxDebugStatus.faultMode }">
+          <div class="probe-line">
+            <span>{{ t('asr.sonioxDebugActiveMock') }}</span>
+            <strong>{{ sonioxDebugStatus.mockScenario || t('asr.sonioxDebugInactive') }}</strong>
+          </div>
+          <div class="probe-line">
+            <span>{{ t('asr.sonioxDebugMockUrl') }}</span>
+            <strong>{{ sonioxDebugStatus.mockUrl || t('asr.sonioxDebugInactive') }}</strong>
+          </div>
+          <div class="probe-line">
+            <span>{{ t('asr.sonioxDebugActiveFault') }}</span>
+            <strong>{{ sonioxDebugStatus.faultMode || t('asr.sonioxDebugInactive') }}</strong>
+          </div>
+        </div>
+
+        <div v-if="sonioxDebugError" class="warning-box">
+          {{ sonioxDebugError }}
+        </div>
+      </div>
+    </div>
 
     <div class="surface-card asr-card">
       <div class="card-header">
@@ -347,6 +548,17 @@ const maxRecordingMinutes = computed({
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.debug-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.debug-select {
+  min-width: 240px;
 }
 
 .probe-result.ok {

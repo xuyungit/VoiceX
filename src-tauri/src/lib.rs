@@ -18,7 +18,7 @@ pub mod ui_locale;
 
 use crate::audio::AudioService;
 use crate::commands::settings::AppSettings;
-use crate::services::sync_service::SyncService;
+use crate::services::{asr_debug_service::AsrDebugService, sync_service::SyncService};
 use hotkey::{HotkeyConfiguration, HotkeyManager};
 use session::{SessionController, SessionCoordinator};
 use tauri::Manager;
@@ -103,6 +103,8 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let sync_service: tauri::State<'_, SyncService> = app.state();
     sync_service.init_with_handle(app.handle());
+    let asr_debug_service: tauri::State<'_, AsrDebugService> = app.state();
+    asr_debug_service.install_global();
     // Prepare HUD window ahead of time
     if let Err(err) = hud::create_hud_window(&app.handle()) {
         log::warn!("Failed to create HUD window: {}", err);
@@ -169,6 +171,7 @@ pub fn run() {
             }
         }))
         .manage(audio::AudioService::default())
+        .manage(AsrDebugService::default())
         .manage(HotkeyManager::default())
         .manage(SessionController::default())
         .manage(SyncService::default())
@@ -245,6 +248,11 @@ pub fn run() {
             commands::settings::probe_local_asr,
             commands::settings::probe_current_asr_provider,
             commands::settings::load_provider_probe_audio,
+            commands::settings::get_soniox_debug_harness_status,
+            commands::settings::start_soniox_debug_mock_server,
+            commands::settings::stop_soniox_debug_mock_server,
+            commands::settings::set_soniox_debug_fault_mode,
+            commands::settings::clear_soniox_debug_overrides,
             commands::history::get_history,
             commands::history::delete_history_record,
             commands::history::get_usage_stats,

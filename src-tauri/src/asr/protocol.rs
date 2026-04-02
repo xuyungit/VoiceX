@@ -5,6 +5,8 @@ use std::io::Read;
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 
+use super::config::AsrProviderType;
+
 /// ASR recognition event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrEvent {
@@ -34,6 +36,260 @@ pub enum AsrError {
 
     #[error("Compression failed: {0}")]
     CompressionFailed(String),
+
+    #[error("{source}")]
+    Contextual {
+        phase: AsrPhase,
+        #[source]
+        source: Box<AsrError>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsrPhase {
+    Connect,
+    Handshake,
+    Streaming,
+    Finalizing,
+}
+
+impl AsrPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Handshake => "handshake",
+            Self::Streaming => "streaming",
+            Self::Finalizing => "finalizing",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsrFailureKind {
+    Auth,
+    Config,
+    RateLimited,
+    ProviderUnavailable,
+    NetworkTransient,
+    Protocol,
+    Unsupported,
+    Unknown,
+}
+
+impl AsrFailureKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auth => "auth",
+            Self::Config => "config",
+            Self::RateLimited => "rate_limited",
+            Self::ProviderUnavailable => "provider_unavailable",
+            Self::NetworkTransient => "network_transient",
+            Self::Protocol => "protocol",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AsrFailure {
+    pub provider: AsrProviderType,
+    pub phase: AsrPhase,
+    pub kind: AsrFailureKind,
+    pub technical_message: String,
+    pub display_message: String,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+}
+
+impl AsrError {
+    pub fn in_phase(self, phase: AsrPhase) -> Self {
+        Self::Contextual {
+            phase,
+            source: Box::new(self),
+        }
+    }
+
+    pub fn phase(&self) -> Option<AsrPhase> {
+        match self {
+            Self::Contextual { phase, .. } => Some(*phase),
+            _ => None,
+        }
+    }
+
+    pub fn root_cause(&self) -> &AsrError {
+        match self {
+            Self::Contextual { source, .. } => source.root_cause(),
+            other => other,
+        }
+    }
+
+    pub fn root_message(&self) -> String {
+        match self.root_cause() {
+            Self::NotConnected => "Not connected to ASR service".to_string(),
+            Self::ConnectionFailed(message)
+            | Self::ServerError(message)
+            | Self::ProtocolError(message)
+            | Self::CompressionFailed(message) => message.clone(),
+            Self::Contextual { .. } => unreachable!("root_cause strips contextual wrappers"),
+        }
+    }
+}
+
+impl AsrFailure {
+    pub fn from_error(provider: AsrProviderType, error: &AsrError) -> Self {
+        let phase = error.phase().unwrap_or(AsrPhase::Streaming);
+        let technical_message = error.root_message();
+        let lower = technical_message.to_lowercase();
+
+        let (kind, retryable, retry_after_ms) = classify_failure(error.root_cause(), &lower);
+        let display_message = build_display_message(provider, phase, kind);
+
+        Self {
+            provider,
+            phase,
+            kind,
+            technical_message,
+            display_message,
+            retryable,
+            retry_after_ms,
+        }
+    }
+}
+
+fn classify_failure(error: &AsrError, lower: &str) -> (AsrFailureKind, bool, Option<u64>) {
+    match error {
+        AsrError::NotConnected => (AsrFailureKind::NetworkTransient, true, None),
+        AsrError::CompressionFailed(_) | AsrError::ProtocolError(_) => {
+            (AsrFailureKind::Protocol, false, None)
+        }
+        AsrError::ConnectionFailed(_) => classify_message(lower, true),
+        AsrError::ServerError(_) => classify_message(lower, false),
+        AsrError::Contextual { .. } => unreachable!("root cause should not be contextual"),
+    }
+}
+
+fn classify_message(
+    lower: &str,
+    assume_network_for_connection_errors: bool,
+) -> (AsrFailureKind, bool, Option<u64>) {
+    if contains_any(
+        lower,
+        &[
+            "401",
+            "403",
+            "unauthorized",
+            "forbidden",
+            "invalid api key",
+            "authentication",
+            "auth failed",
+        ],
+    ) {
+        return (AsrFailureKind::Auth, false, None);
+    }
+
+    if contains_any(
+        lower,
+        &[
+            "invalid configuration",
+            "config invalid",
+            "configuration is required",
+            "missing ",
+            "project id and service account key are required",
+            "api key is required",
+            "invalid service account json",
+        ],
+    ) {
+        return (AsrFailureKind::Config, false, None);
+    }
+
+    if contains_any(lower, &["429", "rate limit", "too many requests", "quota"]) {
+        return (AsrFailureKind::RateLimited, true, None);
+    }
+
+    if contains_any(
+        lower,
+        &[
+            "502",
+            "503",
+            "504",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+        ],
+    ) {
+        return (AsrFailureKind::ProviderUnavailable, true, None);
+    }
+
+    if contains_any(
+        lower,
+        &[
+            "timeout",
+            "timed out",
+            "connection reset",
+            "broken pipe",
+            "unexpected eof",
+            "temporarily unavailable",
+            "dns",
+            "tls",
+            "websocket connect",
+            "read failed",
+            "send failed",
+            "closed by server",
+            "connect:",
+            "connect ",
+        ],
+    ) || assume_network_for_connection_errors
+    {
+        return (AsrFailureKind::NetworkTransient, true, None);
+    }
+
+    if contains_any(lower, &["not supported", "unsupported"]) {
+        return (AsrFailureKind::Unsupported, false, None);
+    }
+
+    (AsrFailureKind::Unknown, false, None)
+}
+
+fn build_display_message(
+    provider: AsrProviderType,
+    phase: AsrPhase,
+    kind: AsrFailureKind,
+) -> String {
+    let provider_name = provider.display_name();
+
+    match kind {
+        AsrFailureKind::Auth => format!("{provider_name} 认证失败，请检查 API Key 和相关配置。"),
+        AsrFailureKind::Config => format!("{provider_name} 配置无效，请检查设置后重试。"),
+        AsrFailureKind::RateLimited => format!("{provider_name} 当前请求过多，请稍后再试。"),
+        AsrFailureKind::ProviderUnavailable => match phase {
+            AsrPhase::Connect | AsrPhase::Handshake => {
+                format!("{provider_name} 当前服务不可用，无法启动识别。")
+            }
+            AsrPhase::Streaming | AsrPhase::Finalizing => {
+                format!("{provider_name} 当前服务异常，识别已中断。")
+            }
+        },
+        AsrFailureKind::NetworkTransient => match phase {
+            AsrPhase::Connect | AsrPhase::Handshake => {
+                format!("{provider_name} 连接失败，无法启动识别。")
+            }
+            AsrPhase::Streaming | AsrPhase::Finalizing => {
+                format!("{provider_name} 连接中断，识别已停止。")
+            }
+        },
+        AsrFailureKind::Protocol => {
+            format!("{provider_name} 返回了无法处理的响应，请稍后重试。")
+        }
+        AsrFailureKind::Unsupported => {
+            format!("{provider_name} 当前不支持这项识别能力。")
+        }
+        AsrFailureKind::Unknown => format!("{provider_name} 识别失败，请稍后重试。"),
+    }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 /// Parsed server error frame payload.

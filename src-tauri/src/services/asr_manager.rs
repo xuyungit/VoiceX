@@ -1,7 +1,7 @@
 use tokio::sync::mpsc::Receiver;
 
 use crate::asr::{
-    AsrClient, AsrConfig, AsrEvent, AsrProviderType, ColiAsrClient, GeminiLiveClient,
+    AsrClient, AsrConfig, AsrEvent, AsrFailure, AsrProviderType, ColiAsrClient, GeminiLiveClient,
     GoogleSttClient, OpenAIRealtimeClient, QwenRealtimeClient, SonioxClient,
 };
 use crate::storage;
@@ -21,7 +21,7 @@ impl AsrManager {
         rx: Receiver<Vec<u8>>,
         cancel: tokio_util::sync::CancellationToken,
         on_event: impl Fn(AsrEvent) + Send + Sync + 'static,
-        on_finished: impl Fn(Option<String>) + Send + Sync + 'static,
+        on_finished: impl Fn(Option<AsrFailure>) + Send + Sync + 'static,
     ) {
         let settings = match storage::get_settings() {
             Ok(s) => s,
@@ -83,7 +83,8 @@ impl AsrManager {
         let on_event = std::sync::Arc::new(on_event);
         let on_finished = std::sync::Arc::new(on_finished);
 
-        let result = match config.provider_type {
+        let provider = config.provider_type;
+        let result = match provider {
             AsrProviderType::Volcengine => {
                 let ws_url = config.ws_url.clone();
                 log::info!(
@@ -282,10 +283,17 @@ impl AsrManager {
 
         let finish_error = match result {
             Err(err) => {
-                let message = err.to_string();
-                log::error!("ASR streaming failed: {}", message);
+                let failure = AsrFailure::from_error(provider, &err);
+                log::error!(
+                    "ASR streaming failed: provider={} phase={} kind={} retryable={} message={}",
+                    provider.display_name(),
+                    failure.phase.as_str(),
+                    failure.kind.as_str(),
+                    failure.retryable,
+                    failure.technical_message,
+                );
                 cancel.cancel();
-                Some(message)
+                Some(failure)
             }
             Ok(()) => {
                 log::info!("ASR stream completed");

@@ -7,6 +7,7 @@ mod utils;
 pub use message::{CancelReason, SessionMessage};
 
 use std::{
+    collections::VecDeque,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -35,6 +36,78 @@ const MIN_RECORDING_MS: u64 = 500;
 const COUNTDOWN_THRESHOLD_SECS: u64 = 30;
 const MIN_CORRECTION_CHARS: usize = 5;
 const ASR_FINAL_WAIT_MS: u64 = 15_000;
+const ASR_STARTUP_RETRY_MAX_ATTEMPTS: u32 = 3;
+const ASR_RECONNECT_MAX_ATTEMPTS: u32 = 2;
+const ASR_AUDIO_REPLAY_MAX_CHUNKS: usize = 600;
+const ASR_REPLAY_OVERLAP_CHUNKS: usize = 5;
+
+#[derive(Clone, Default)]
+struct AsrAudioBridge {
+    inner: Arc<Mutex<AsrAudioBridgeInner>>,
+}
+
+#[derive(Default)]
+struct AsrAudioBridgeInner {
+    current_tx: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    replay_buffer: VecDeque<Vec<u8>>,
+    closed: bool,
+}
+
+impl AsrAudioBridge {
+    fn push_chunk(&self, chunk: Vec<u8>) {
+        let mut inner = match self.inner.lock() {
+            Ok(inner) => inner,
+            Err(_) => return,
+        };
+
+        inner.replay_buffer.push_back(chunk.clone());
+        while inner.replay_buffer.len() > ASR_AUDIO_REPLAY_MAX_CHUNKS {
+            inner.replay_buffer.pop_front();
+        }
+
+        if let Some(tx) = inner.current_tx.as_mut() {
+            if tx.try_send(chunk).is_err() {
+                log::debug!("ASR audio bridge dropped a live chunk while forwarding");
+            }
+        }
+    }
+
+    fn attach_stream(&self) -> tokio::sync::mpsc::Receiver<Vec<u8>> {
+        let mut inner = self.inner.lock().expect("asr audio bridge lock");
+        let capacity = (inner.replay_buffer.len() + 64).clamp(64, 1024);
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
+        for chunk in &inner.replay_buffer {
+            let _ = tx.try_send(chunk.clone());
+        }
+        if inner.closed {
+            drop(tx);
+            inner.current_tx = None;
+        } else {
+            inner.current_tx = Some(tx);
+        }
+        rx
+    }
+
+    fn close(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.closed = true;
+            inner.current_tx = None;
+        }
+    }
+
+    fn clear_replay_buffer(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            if inner.replay_buffer.len() <= ASR_REPLAY_OVERLAP_CHUNKS {
+                return;
+            }
+            let split_at = inner
+                .replay_buffer
+                .len()
+                .saturating_sub(ASR_REPLAY_OVERLAP_CHUNKS);
+            inner.replay_buffer.drain(..split_at);
+        }
+    }
+}
 
 /// Serializes session actions onto a single async task and owns AppState (actor style).
 #[derive(Clone)]
@@ -71,6 +144,8 @@ pub struct SessionController {
     coordinator_tx: Arc<Mutex<Option<UnboundedSender<SessionMessage>>>>,
     hold_timer: Arc<Mutex<Option<JoinHandle<()>>>>,
     asr_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    asr_audio_bridge: Arc<Mutex<Option<AsrAudioBridge>>>,
+    asr_audio_bridge_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     audio_level_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     asr_cancel_token: Arc<Mutex<Option<tokio_util::sync::CancellationToken>>>,
     asr_final_timeout: Arc<Mutex<Option<JoinHandle<()>>>>,
@@ -288,6 +363,8 @@ impl SessionController {
                 &translation_trigger_mode,
                 double_tap_window_ms,
             ),
+            SessionMessage::RetryAsrStartup => self.on_retry_asr_startup_state(state),
+            SessionMessage::RetryAsrReconnect => self.on_retry_asr_reconnect_state(state),
             SessionMessage::AudioStarted {
                 sample_rate,
                 channels,
@@ -499,6 +576,7 @@ impl SessionController {
     pub(crate) fn hide_hud_and_reset_state(&self, state: &mut AppState) {
         self.cancel_auto_hide();
         self.cancel_asr_final_timeout();
+        self.stop_asr_audio_bridge();
         // If an audio file is still referenced in state, it was never persisted to the
         // database (e.g. ASR returned no result).  Delete it so it doesn't become an orphan.
         self.discard_session_audio_file(state, "session_reset");
@@ -645,6 +723,54 @@ impl SessionController {
         }
     }
 
+    fn stop_asr_audio_bridge(&self) {
+        if let Ok(mut guard) = self.asr_audio_bridge.lock() {
+            if let Some(bridge) = guard.take() {
+                bridge.close();
+            }
+        }
+        if let Ok(mut guard) = self.asr_audio_bridge_task.lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+    }
+
+    fn start_asr_audio_bridge(&self, mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        self.stop_asr_audio_bridge();
+        let bridge = AsrAudioBridge::default();
+        let bridge_for_task = bridge.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            while let Some(chunk) = rx.recv().await {
+                bridge_for_task.push_chunk(chunk);
+            }
+            bridge_for_task.close();
+        });
+
+        if let Ok(mut guard) = self.asr_audio_bridge.lock() {
+            *guard = Some(bridge);
+        }
+        if let Ok(mut guard) = self.asr_audio_bridge_task.lock() {
+            *guard = Some(handle);
+        }
+    }
+
+    fn take_asr_attempt_receiver(&self) -> Option<tokio::sync::mpsc::Receiver<Vec<u8>>> {
+        self.asr_audio_bridge
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().cloned())
+            .map(|bridge| bridge.attach_stream())
+    }
+
+    fn mark_asr_replay_checkpoint(&self) {
+        if let Ok(guard) = self.asr_audio_bridge.lock() {
+            if let Some(bridge) = guard.as_ref() {
+                bridge.clear_replay_buffer();
+            }
+        }
+    }
+
     fn spawn_audio_level_bridge(
         &self,
         mut rx: tokio::sync::mpsc::Receiver<crate::audio::AudioVisualizationFrame>,
@@ -754,10 +880,85 @@ impl SessionController {
         }
     }
 
+    fn clear_asr_error(&self) {
+        if let Some(hud) = self.hud_service() {
+            hud.emit_error(None);
+        }
+    }
+
     fn emit_countdown(&self, seconds: Option<u32>) {
         if let Some(hud) = self.hud_service() {
             hud.emit_countdown(seconds);
         }
+    }
+
+    fn schedule_asr_startup_retry(&self, retry_count: u32) {
+        let delay_ms = match retry_count {
+            1 => 300,
+            2 => 1_000,
+            _ => 2_000,
+        };
+        let controller = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            controller.send_message(SessionMessage::RetryAsrStartup);
+        });
+    }
+
+    fn schedule_asr_reconnect_retry(&self, retry_count: u32) {
+        let delay_ms = match retry_count {
+            1 => 300,
+            _ => 1_000,
+        };
+        let controller = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            controller.send_message(SessionMessage::RetryAsrReconnect);
+        });
+    }
+
+    fn on_retry_asr_startup_state(&self, state: &mut AppState) {
+        if state.terminal_error_message.is_some()
+            || state.asr_received_event
+            || state.asr_stream_finished
+            || state.session_state == HotkeySessionState::Idle
+        {
+            return;
+        }
+
+        let (sample_rate, channels) = match (state.session_sample_rate, state.session_channels) {
+            (Some(sample_rate), Some(channels)) => (sample_rate, channels),
+            _ => return,
+        };
+
+        log::info!(
+            "Retrying ASR startup (attempt {}/{})",
+            state.asr_startup_retry_count + 1,
+            ASR_STARTUP_RETRY_MAX_ATTEMPTS
+        );
+        self.spawn_asr(sample_rate, channels);
+    }
+
+    fn on_retry_asr_reconnect_state(&self, state: &mut AppState) {
+        if state.terminal_error_message.is_some()
+            || state.asr_stream_finished
+            || state.session_state == HotkeySessionState::Idle
+            || !state.asr_reconnect_in_progress
+        {
+            return;
+        }
+
+        let (sample_rate, channels) = match (state.session_sample_rate, state.session_channels) {
+            (Some(sample_rate), Some(channels)) => (sample_rate, channels),
+            _ => return,
+        };
+
+        log::info!(
+            "Retrying ASR reconnect (attempt {}/{})",
+            state.asr_reconnect_retry_count + 1,
+            ASR_RECONNECT_MAX_ATTEMPTS
+        );
+        self.spawn_asr(sample_rate, channels);
     }
 
     fn set_escape_swallowing(&self, enabled: bool) {
@@ -779,6 +980,7 @@ impl SessionController {
         self.cancel_auto_hide();
         // Stop ASR task immediately to avoid stale events/stream-finished driving injection.
         self.abort_asr_task();
+        self.stop_asr_audio_bridge();
 
         // Stop capture/asr first so downstream callbacks won't emit into a stale state.
         if state.is_recording {
@@ -850,7 +1052,8 @@ impl SessionController {
                         // the refinement PCM buffer captures the full recording.
                         drop(rx);
                     } else {
-                        self.spawn_asr(rx, sample_rate, channels);
+                        self.start_asr_audio_bridge(rx);
+                        self.spawn_asr(sample_rate, channels);
                     }
                 }
                 Err(err) => {
@@ -944,12 +1147,14 @@ impl SessionController {
     fn handle_audio_started_state(
         &self,
         state: &mut AppState,
-        _sample_rate: u32,
-        _channels: u16,
+        sample_rate: u32,
+        channels: u16,
         path: Option<String>,
     ) {
         state.session_audio_path = path.map(|p| p.into());
         state.session_start = Some(Instant::now());
+        state.session_sample_rate = Some(sample_rate);
+        state.session_channels = Some(channels);
     }
 
     fn handle_audio_stopped_state(
@@ -1060,6 +1265,7 @@ impl SessionController {
         }
 
         self.cancel_audio_level_task();
+        self.stop_asr_audio_bridge();
         self.discard_session_audio_file(state, "asr_stream_failed");
         self.discard_session_refinement_audio_file(state, "asr_stream_failed");
         self.hide_hud_and_reset_state(state);
@@ -1076,6 +1282,7 @@ impl SessionController {
         self.cancel_hands_free_timeout();
         self.cancel_auto_hide();
         self.abort_asr_task();
+        self.stop_asr_audio_bridge();
         self.cancel_audio_level_task();
 
         self.discard_session_audio_file(state, "audio_start_failed");
@@ -1094,6 +1301,7 @@ impl SessionController {
         log::warn!("Audio stop failed; resetting session: {}", combined_reason);
 
         state.terminal_error_message = Some(combined_reason.clone());
+        state.terminal_asr_failure = None;
         self.emit_asr_error(&combined_reason);
         self.cancel_audio_level_task();
         self.schedule_error_cleanup();
@@ -1110,6 +1318,8 @@ impl Default for SessionController {
             coordinator_tx: Arc::new(Mutex::new(None)),
             hold_timer: Arc::new(Mutex::new(None)),
             asr_task: Arc::new(Mutex::new(None)),
+            asr_audio_bridge: Arc::new(Mutex::new(None)),
+            asr_audio_bridge_task: Arc::new(Mutex::new(None)),
             audio_level_task: Arc::new(Mutex::new(None)),
             asr_cancel_token: Arc::new(Mutex::new(None)),
             asr_final_timeout: Arc::new(Mutex::new(None)),

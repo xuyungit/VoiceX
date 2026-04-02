@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::{
     asr::{
-        AsrConfig, AsrEvent, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
+        AsrConfig, AsrEvent, AsrFailure, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
         ColiRefinementMode, GeminiTranscriptionClient, OpenAITranscriptionClient,
     },
     state::{AppState, HotkeySessionState, ProcessingIntent},
@@ -14,8 +14,28 @@ use crate::session::SessionMessage;
 
 impl SessionController {
     pub fn handle_asr_event_state(&self, state: &mut AppState, evt: AsrEvent) {
+        if !state.asr_received_event {
+            state.asr_received_event = true;
+        }
+        if state.asr_startup_retry_count > 0 || state.asr_reconnect_in_progress {
+            self.clear_asr_error();
+            state.asr_startup_retry_count = 0;
+            state.asr_reconnect_retry_count = 0;
+        }
+
+        let prefix = if state.asr_reconnect_in_progress {
+            state.asr_reconnect_prefix_text.as_str()
+        } else {
+            ""
+        };
+        let merged_text = if prefix.is_empty() {
+            evt.text.clone()
+        } else {
+            format!("{}{}", prefix, evt.text)
+        };
+
         if evt.is_final {
-            let final_changed = evt.text.trim() != state.last_injected_text.trim();
+            let final_changed = merged_text.trim() != state.last_injected_text.trim();
             // If a new final arrives while injection is in progress, cancel the in-flight one.
             if state.injection_in_progress {
                 self.injection_epoch
@@ -29,40 +49,41 @@ impl SessionController {
             }
 
             state.final_version = state.final_version.saturating_add(1);
-            state.session_final_text = evt.text.clone();
-            state.transcript_text = evt.text.clone();
-            state.last_injected_text = evt.text.clone();
+            state.session_final_text = merged_text.clone();
+            state.transcript_text = merged_text.clone();
+            state.last_injected_text = merged_text.clone();
             state.has_final_result = true;
+            state.asr_reconnect_in_progress = false;
             // NOTE: do NOT set asr_stream_finished here — Google STT sends multiple
             // is_final events per stream. The stream is only truly finished when
             // on_asr_stream_finished_state is called via AsrStreamFinished message.
             self.cancel_asr_final_timeout();
+            self.mark_asr_replay_checkpoint();
             log::info!(
                 "ASR final received (len={}, definite={}, prefetch={})",
-                evt.text.chars().count(),
+                merged_text.chars().count(),
                 evt.definite,
                 evt.prefetch
             );
-            log::debug!("ASR final preview: {}", preview(&evt.text));
+            log::debug!("ASR final preview: {}", preview(&merged_text));
 
             // Treat ASR final as the end of recognition and proceed to injection.
             self.maybe_inject_final_state(state);
         } else {
-            state.transcript_text = evt.text.clone();
+            state.transcript_text = merged_text.clone();
             log::debug!(
                 "ASR partial (len={}): {}",
-                evt.text.chars().count(),
-                preview(&evt.text)
+                merged_text.chars().count(),
+                preview(&merged_text)
             );
         }
     }
 
-    pub fn spawn_asr(
-        &self,
-        rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-        sample_rate: u32,
-        channels: u16,
-    ) {
+    pub fn spawn_asr(&self, sample_rate: u32, channels: u16) {
+        let Some(rx) = self.take_asr_attempt_receiver() else {
+            log::warn!("ASR spawn skipped: audio bridge not available");
+            return;
+        };
         let controller = self.clone();
         if let Ok(mut guard) = self.asr_task.lock() {
             if let Some(handle) = guard.take() {
@@ -136,6 +157,8 @@ impl SessionController {
     pub fn on_asr_stream_finished_state(&self, state: &mut AppState) {
         state.is_recording = false;
         state.asr_stream_finished = true;
+        state.asr_reconnect_in_progress = false;
+        state.asr_reconnect_retry_count = 0;
         self.cancel_asr_final_timeout();
 
         // Fallback: use latest transcript as final if none arrived yet
@@ -161,15 +184,61 @@ impl SessionController {
         self.maybe_inject_final_state(state);
     }
 
-    pub fn on_asr_stream_failed_state(&self, state: &mut AppState, reason: String) {
-        log::warn!("ASR stream failed: {}", reason);
-        state.terminal_error_message = Some(reason.clone());
+    pub fn on_asr_stream_failed_state(&self, state: &mut AppState, failure: AsrFailure) {
+        log::warn!(
+            "ASR stream failed: provider={} phase={} kind={} retryable={} message={}",
+            failure.provider.display_name(),
+            failure.phase.as_str(),
+            failure.kind.as_str(),
+            failure.retryable,
+            failure.technical_message
+        );
+        if self.should_retry_asr_startup_failure(state, &failure) {
+            state.asr_startup_retry_count = state.asr_startup_retry_count.saturating_add(1);
+            state.terminal_asr_failure = Some(failure.clone());
+            self.cancel_asr_final_timeout();
+            let retry_message = format!(
+                "{} 当前服务异常，正在重试 ({}/{})…",
+                failure.provider.display_name(),
+                state.asr_startup_retry_count,
+                super::super::ASR_STARTUP_RETRY_MAX_ATTEMPTS
+            );
+            self.emit_asr_error(&retry_message);
+            self.schedule_asr_startup_retry(state.asr_startup_retry_count);
+            return;
+        }
+
+        if self.should_retry_asr_reconnect_failure(state, &failure) {
+            state.asr_reconnect_retry_count = state.asr_reconnect_retry_count.saturating_add(1);
+            state.asr_reconnect_in_progress = true;
+            state.asr_reconnect_prefix_text = if state.has_final_result {
+                state.session_final_text.clone()
+            } else {
+                String::new()
+            };
+            state.transcript_text = state.asr_reconnect_prefix_text.clone();
+            state.terminal_asr_failure = Some(failure.clone());
+            self.cancel_asr_final_timeout();
+            let retry_message = format!(
+                "{} 连接中断，正在重试 ({}/{})…",
+                failure.provider.display_name(),
+                state.asr_reconnect_retry_count,
+                super::super::ASR_RECONNECT_MAX_ATTEMPTS
+            );
+            self.emit_asr_error(&retry_message);
+            self.schedule_asr_reconnect_retry(state.asr_reconnect_retry_count);
+            return;
+        }
+
+        state.terminal_error_message = Some(failure.display_message.clone());
+        state.terminal_asr_failure = Some(failure.clone());
         state.has_final_result = false;
         state.asr_stream_finished = true;
+        state.asr_reconnect_in_progress = false;
         self.cancel_asr_final_timeout();
         self.cancel_hands_free_timeout();
         self.cancel_auto_hide();
-        self.emit_asr_error(&reason);
+        self.emit_asr_error(&failure.display_message);
 
         if state.is_recording {
             self.stop_audio_capture("asr_stream_failed");
@@ -177,6 +246,43 @@ impl SessionController {
             self.cancel_audio_level_task();
             self.schedule_error_cleanup();
         }
+    }
+
+    fn should_retry_asr_startup_failure(&self, state: &AppState, failure: &AsrFailure) -> bool {
+        if !failure.retryable {
+            return false;
+        }
+        if state.terminal_error_message.is_some()
+            || state.asr_received_event
+            || state.has_final_result
+            || state.asr_stream_finished
+        {
+            return false;
+        }
+        if !matches!(
+            failure.phase,
+            crate::asr::AsrPhase::Connect | crate::asr::AsrPhase::Handshake
+        ) {
+            return false;
+        }
+        state.asr_startup_retry_count < super::super::ASR_STARTUP_RETRY_MAX_ATTEMPTS
+    }
+
+    fn should_retry_asr_reconnect_failure(&self, state: &AppState, failure: &AsrFailure) -> bool {
+        if !failure.retryable || state.terminal_error_message.is_some() || state.asr_stream_finished
+        {
+            return false;
+        }
+        if state.session_state == HotkeySessionState::Idle {
+            return false;
+        }
+        if !state.asr_received_event {
+            return false;
+        }
+        if state.asr_reconnect_retry_count >= super::super::ASR_RECONNECT_MAX_ATTEMPTS {
+            return false;
+        }
+        true
     }
 
     pub fn maybe_inject_final_state(&self, state: &mut AppState) {

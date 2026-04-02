@@ -31,6 +31,6 @@ pub use gemini_live_client::GeminiLiveClient;
 pub use google_client::GoogleSttClient;
 pub use openai_client::OpenAITranscriptionClient;
 pub use openai_realtime_client::OpenAIRealtimeClient;
-pub use protocol::{AsrError, AsrEvent};
+pub use protocol::{AsrError, AsrEvent, AsrFailure, AsrFailureKind, AsrPhase};
 pub use qwen_client::QwenRealtimeClient;
 pub use soniox_client::SonioxClient;

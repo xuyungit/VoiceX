@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// ASR provider type
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AsrProviderType {
     Volcengine,
     Google,
@@ -19,6 +19,22 @@ pub enum AsrProviderType {
 impl Default for AsrProviderType {
     fn default() -> Self {
         Self::Volcengine
+    }
+}
+
+impl AsrProviderType {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Volcengine => "Volcengine",
+            Self::Google => "Google STT",
+            Self::Qwen => "Qwen ASR",
+            Self::Gemini => "Gemini",
+            Self::GeminiLive => "Gemini Live",
+            Self::Cohere => "Cohere",
+            Self::OpenAI => "OpenAI Realtime",
+            Self::Soniox => "Soniox",
+            Self::Coli => "coli",
+        }
     }
 }
 

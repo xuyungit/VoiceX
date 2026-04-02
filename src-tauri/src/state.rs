@@ -1,5 +1,6 @@
 //! Application state machine
 
+use crate::asr::AsrFailure;
 use crate::injector::TextInjectionMode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -87,10 +88,13 @@ pub struct AppState {
     pub(crate) session_audio_path: Option<PathBuf>,
     pub(crate) session_refinement_audio_path: Option<PathBuf>,
     pub(crate) session_duration_ms: Option<u64>,
+    pub(crate) session_sample_rate: Option<u32>,
+    pub(crate) session_channels: Option<u16>,
     pub(crate) session_final_text: String,
     pub(crate) session_asr_model_name: Option<String>,
     pub(crate) session_llm_model_name: Option<String>,
     pub(crate) terminal_error_message: Option<String>,
+    pub(crate) terminal_asr_failure: Option<AsrFailure>,
 
     // Control flags
     is_hotkey_down: bool,
@@ -108,6 +112,11 @@ pub struct AppState {
     pub(crate) final_version: u64,
     pub(crate) injection_in_progress: bool,
     pub(crate) asr_stream_finished: bool,
+    pub(crate) asr_received_event: bool,
+    pub(crate) asr_startup_retry_count: u32,
+    pub(crate) asr_reconnect_retry_count: u32,
+    pub(crate) asr_reconnect_in_progress: bool,
+    pub(crate) asr_reconnect_prefix_text: String,
     pub(crate) asr_refinement_in_progress: bool,
     pub(crate) asr_refinement_done: bool,
 
@@ -140,10 +149,13 @@ impl AppState {
             session_audio_path: None,
             session_refinement_audio_path: None,
             session_duration_ms: None,
+            session_sample_rate: None,
+            session_channels: None,
             session_final_text: String::new(),
             session_asr_model_name: None,
             session_llm_model_name: None,
             terminal_error_message: None,
+            terminal_asr_failure: None,
             is_hotkey_down: false,
             hands_free_stop_armed: false,
             did_receive_audio: false,
@@ -157,6 +169,11 @@ impl AppState {
             final_version: 0,
             injection_in_progress: false,
             asr_stream_finished: false,
+            asr_received_event: false,
+            asr_startup_retry_count: 0,
+            asr_reconnect_retry_count: 0,
+            asr_reconnect_in_progress: false,
+            asr_reconnect_prefix_text: String::new(),
             asr_refinement_in_progress: false,
             asr_refinement_done: false,
             remove_trailing_punctuation: true,
@@ -198,15 +215,23 @@ impl AppState {
                 self.session_audio_path = None;
                 self.session_refinement_audio_path = None;
                 self.session_duration_ms = None;
+                self.session_sample_rate = None;
+                self.session_channels = None;
                 self.session_final_text.clear();
                 self.transcript_text.clear();
                 self.terminal_error_message = None;
+                self.terminal_asr_failure = None;
                 self.max_recording_countdown = None;
                 self.final_injected = false;
                 self.has_final_result = false;
                 self.last_injected_text.clear();
                 self.double_tap_upgrade_deadline = None;
                 self.pending_translation_upgrade = false;
+                self.asr_received_event = false;
+                self.asr_startup_retry_count = 0;
+                self.asr_reconnect_retry_count = 0;
+                self.asr_reconnect_in_progress = false;
+                self.asr_reconnect_prefix_text.clear();
                 self.asr_refinement_in_progress = false;
                 self.asr_refinement_done = false;
                 // TODO: Start recording and schedule hold threshold check
@@ -349,10 +374,13 @@ impl AppState {
         self.session_audio_path = None;
         self.session_refinement_audio_path = None;
         self.session_duration_ms = None;
+        self.session_sample_rate = None;
+        self.session_channels = None;
         self.session_final_text.clear();
         self.session_asr_model_name = None;
         self.session_llm_model_name = None;
         self.terminal_error_message = None;
+        self.terminal_asr_failure = None;
         self.is_hotkey_down = false;
         self.hands_free_stop_armed = false;
         self.did_receive_audio = false;
@@ -363,6 +391,11 @@ impl AppState {
         self.final_version = 0;
         self.injection_in_progress = false;
         self.asr_stream_finished = false;
+        self.asr_received_event = false;
+        self.asr_startup_retry_count = 0;
+        self.asr_reconnect_retry_count = 0;
+        self.asr_reconnect_in_progress = false;
+        self.asr_reconnect_prefix_text.clear();
         self.asr_refinement_in_progress = false;
         self.asr_refinement_done = false;
         self.gesture_press_started_at = None;

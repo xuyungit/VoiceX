@@ -7,7 +7,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::time::timeout;
 
-use crate::services::sync_service::SyncService;
+use crate::services::{
+    asr_debug_service::{AsrDebugService, SonioxDebugHarnessStatus, SonioxMockScenario},
+    sync_service::SyncService,
+};
 use crate::session::SessionController;
 
 /// Application settings
@@ -481,4 +484,44 @@ pub async fn probe_current_asr_provider() -> Result<AsrProviderProbeResult, Stri
 #[tauri::command]
 pub fn load_provider_probe_audio() -> Result<Vec<u8>, String> {
     Ok(PROVIDER_PROBE_AUDIO_BYTES.to_vec())
+}
+
+#[tauri::command]
+pub fn get_soniox_debug_harness_status(
+    debug: State<'_, AsrDebugService>,
+) -> Result<SonioxDebugHarnessStatus, String> {
+    Ok(debug.status())
+}
+
+#[tauri::command]
+pub async fn start_soniox_debug_mock_server(
+    scenario: String,
+    debug: State<'_, AsrDebugService>,
+) -> Result<SonioxDebugHarnessStatus, String> {
+    let scenario = SonioxMockScenario::from_str(&scenario)
+        .ok_or_else(|| format!("Unsupported Soniox mock scenario: {}", scenario))?;
+    debug.start_soniox_mock_server(scenario).await
+}
+
+#[tauri::command]
+pub async fn stop_soniox_debug_mock_server(
+    debug: State<'_, AsrDebugService>,
+) -> Result<SonioxDebugHarnessStatus, String> {
+    debug.stop_mock_server().await
+}
+
+#[tauri::command]
+pub fn set_soniox_debug_fault_mode(
+    fault_mode: Option<String>,
+    debug: State<'_, AsrDebugService>,
+) -> Result<SonioxDebugHarnessStatus, String> {
+    debug.set_soniox_fault_mode(fault_mode)?;
+    Ok(debug.status())
+}
+
+#[tauri::command]
+pub async fn clear_soniox_debug_overrides(
+    debug: State<'_, AsrDebugService>,
+) -> Result<SonioxDebugHarnessStatus, String> {
+    debug.clear_soniox_debug_overrides().await
 }

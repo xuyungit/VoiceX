@@ -1,5 +1,5 @@
 use crate::{
-    asr::AsrEvent,
+    asr::{AsrEvent, AsrFailure},
     state::{ProcessingIntent, RecordingStyle},
 };
 
@@ -24,7 +24,7 @@ pub enum SessionMessage {
     ErrorDisplayDone,
     AsrEvent(AsrEvent),
     AsrStreamFinished {
-        error: Option<String>,
+        error: Option<AsrFailure>,
     },
     CorrectingStart,
     CorrectingStop,
@@ -41,6 +41,8 @@ pub enum SessionMessage {
         double_tap_window_ms: u32,
     },
     AsrFinalTimeout,
+    RetryAsrStartup,
+    RetryAsrReconnect,
     AudioStarted {
         sample_rate: u32,
         channels: u16,

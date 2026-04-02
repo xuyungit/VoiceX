@@ -1,3 +1,4 @@
+pub mod asr_debug_service;
 pub mod asr_manager;
 pub mod audio_manager;
 pub mod countdown_service;

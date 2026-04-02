@@ -18,7 +18,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::audio_utils::resample_to_16k;
 use super::config::AsrConfig;
-use super::protocol::{AsrError, AsrEvent};
+use super::protocol::{AsrError, AsrEvent, AsrPhase};
+
+const SONIOX_DEFAULT_WS_URL: &str = "wss://stt-rt.soniox.com/transcribe-websocket";
 
 pub struct SonioxClient {
     config: AsrConfig,
@@ -42,29 +44,50 @@ impl SonioxClient {
         F: Fn(AsrEvent) + Send + Sync + 'static,
     {
         if !self.config.is_valid() {
-            return Err(AsrError::ConnectionFailed(
-                "Invalid Soniox ASR configuration".to_string(),
-            ));
+            return Err(
+                AsrError::ConnectionFailed("Invalid Soniox ASR configuration".to_string())
+                    .in_phase(AsrPhase::Connect),
+            );
         }
 
         let stream_rate: u32 = 16_000;
         let diagnostics_enabled = self.config.enable_diagnostics;
+        let ws_url = resolve_soniox_ws_url();
+        let injected_fault = SonioxFaultMode::from_env();
+
+        if let Some(fault) = injected_fault {
+            log::warn!("SONIOX_FAULT active: {}", fault.as_str());
+        }
 
         log::info!(
-            "Soniox ASR connecting (capture {} Hz -> stream {} Hz, {} ch, model={}, lang={:?})",
+            "Soniox ASR connecting (capture {} Hz -> stream {} Hz, {} ch, model={}, lang={:?}, ws={})",
             sample_rate,
             stream_rate,
             channels,
             self.config.soniox_model,
             self.config.soniox_language,
+            ws_url,
         );
 
-        let ws_url = "wss://stt-rt.soniox.com/transcribe-websocket";
+        if injected_fault == Some(SonioxFaultMode::ConnectFail) {
+            return Err(AsrError::ConnectionFailed(
+                "Injected Soniox fault: connect failure".to_string(),
+            )
+            .in_phase(AsrPhase::Connect));
+        }
 
-        let (ws_stream, _) = connect_async(ws_url)
-            .await
-            .map_err(|e| AsrError::ConnectionFailed(format!("Soniox WebSocket connect: {e}")))?;
+        let (ws_stream, _) = connect_async(&ws_url).await.map_err(|e| {
+            AsrError::ConnectionFailed(format!("Soniox WebSocket connect: {e}"))
+                .in_phase(AsrPhase::Connect)
+        })?;
         let (mut ws_write, mut ws_read) = ws_stream.split();
+
+        if injected_fault == Some(SonioxFaultMode::HandshakeFail) {
+            return Err(AsrError::ConnectionFailed(
+                "Injected Soniox fault: handshake failure".to_string(),
+            )
+            .in_phase(AsrPhase::Handshake));
+        }
 
         // Build initial configuration message
         // Ref: https://soniox.com/docs/stt/api-reference/websocket-api
@@ -115,7 +138,18 @@ impl SonioxClient {
             .await
             .map_err(|e| {
                 AsrError::ConnectionFailed(format!("Failed to send Soniox config: {e}"))
+                    .in_phase(AsrPhase::Handshake)
             })?;
+
+        if let Some(fault) = injected_fault {
+            if let Some(status) = fault.injected_server_status() {
+                return Err(AsrError::ServerError(format!(
+                    "Injected Soniox fault {}: simulated provider response",
+                    status
+                ))
+                .in_phase(AsrPhase::Handshake));
+            }
+        }
 
         // Use a CancellationToken so the reader can tell the writer to stop
         // when the server closes the connection or sends an error.
@@ -155,6 +189,7 @@ impl SonioxClient {
 
                             let payload: Value = serde_json::from_str(&text).map_err(|e| {
                                 AsrError::ProtocolError(format!("Invalid Soniox JSON: {e}"))
+                                    .in_phase(AsrPhase::Streaming)
                             })?;
 
                             // Check for error (error_code is a number per API spec)
@@ -171,7 +206,8 @@ impl SonioxClient {
                                 return Err(AsrError::ServerError(format!(
                                     "Soniox error {}: {}",
                                     code, error_msg
-                                )));
+                                ))
+                                .in_phase(AsrPhase::Streaming));
                             }
 
                             let finished = payload
@@ -251,8 +287,11 @@ impl SonioxClient {
                             }
                         }
                         Ok(Message::Close(frame)) => {
-                            log::debug!("Soniox ASR WebSocket closed by server: {:?}", frame);
-                            break;
+                            return Err(AsrError::ConnectionFailed(format!(
+                                "Soniox ASR WebSocket closed by server before finish: {:?}",
+                                frame
+                            ))
+                            .in_phase(AsrPhase::Streaming));
                         }
                         Ok(other) => {
                             log::debug!("Soniox ASR received non-text frame: {:?}", other);
@@ -260,7 +299,8 @@ impl SonioxClient {
                         Err(e) => {
                             return Err(AsrError::ConnectionFailed(format!(
                                 "Soniox ASR WebSocket read failed: {e}"
-                            )));
+                            ))
+                            .in_phase(AsrPhase::Streaming));
                         }
                     }
                 }
@@ -298,7 +338,8 @@ impl SonioxClient {
         }
 
         let mut audio_rx = audio_rx;
-        let mut send_error = false;
+        let mut writer_error: Option<AsrError> = None;
+        let mut sent_audio_chunks: u32 = 0;
         while let Some(chunk) = tokio::select! {
             _ = cancel.cancelled() => None,
             _ = writer_cancel.cancelled() => None,
@@ -322,17 +363,53 @@ impl SonioxClient {
 
             if let Err(e) = ws_write.send(Message::Binary(mono)).await {
                 log::debug!("Soniox ASR audio send stopped: {e}");
-                send_error = true;
+                writer_error = Some(
+                    AsrError::ConnectionFailed(format!("Soniox ASR audio send failed: {e}"))
+                        .in_phase(AsrPhase::Streaming),
+                );
+                break;
+            }
+
+            sent_audio_chunks = sent_audio_chunks.saturating_add(1);
+            if injected_fault == Some(SonioxFaultMode::DropAfterFirstAudio)
+                && sent_audio_chunks >= 1
+            {
+                writer_error = Some(
+                    AsrError::ConnectionFailed(
+                        "Injected Soniox fault: connection dropped after first audio chunk"
+                            .to_string(),
+                    )
+                    .in_phase(AsrPhase::Streaming),
+                );
                 break;
             }
         }
 
-        // If cancelled or reader signalled stop, just clean up
-        if cancel.is_cancelled() || writer_cancel.is_cancelled() || send_error {
+        if let Some(err) = writer_error {
             let _ = ws_write.close().await;
             let _ = tokio::time::timeout(Duration::from_millis(2000), reader_handle).await;
-            // If reader had an error, propagate it
+            return Err(err);
+        }
+
+        if cancel.is_cancelled() {
+            let _ = ws_write.close().await;
+            let _ = tokio::time::timeout(Duration::from_millis(2000), reader_handle).await;
             return Ok(());
+        }
+
+        if writer_cancel.is_cancelled() {
+            let _ = ws_write.close().await;
+            return match tokio::time::timeout(Duration::from_millis(2_000), reader_handle).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => Err(AsrError::ConnectionFailed(format!(
+                    "Soniox ASR reader task failed: {e}"
+                ))
+                .in_phase(AsrPhase::Streaming)),
+                Err(_) => Err(AsrError::ConnectionFailed(
+                    "Soniox ASR reader did not finish after stream cancellation".to_string(),
+                )
+                .in_phase(AsrPhase::Streaming)),
+            };
         }
 
         // Signal end-of-audio
@@ -340,8 +417,17 @@ impl SonioxClient {
             log::info!("SONIOX_DIAG sending end-of-audio");
         }
         if let Err(e) = ws_write.send(Message::Text(String::new())).await {
-            log::warn!("Soniox ASR failed to send end-of-audio: {e}");
-            // Still wait for reader — it may have results
+            return Err(AsrError::ConnectionFailed(format!(
+                "Soniox ASR failed to send end-of-audio: {e}"
+            ))
+            .in_phase(AsrPhase::Finalizing));
+        }
+
+        if injected_fault == Some(SonioxFaultMode::FinalTimeout) {
+            return Err(AsrError::ConnectionFailed(
+                "Injected Soniox fault: finalizing timed out".to_string(),
+            )
+            .in_phase(AsrPhase::Finalizing));
         }
 
         // Wait for reader to finish
@@ -349,13 +435,103 @@ impl SonioxClient {
             Ok(Ok(result)) => result,
             Ok(Err(e)) => Err(AsrError::ConnectionFailed(format!(
                 "Soniox ASR reader task failed: {e}"
-            ))),
+            ))
+            .in_phase(AsrPhase::Finalizing)),
             Err(_) => {
-                log::warn!("Soniox ASR timed out waiting for session finish");
                 let _ = ws_write.close().await;
-                Ok(())
+                Err(AsrError::ConnectionFailed(
+                    "Soniox ASR timed out waiting for session finish".to_string(),
+                )
+                .in_phase(AsrPhase::Finalizing))
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SonioxFaultMode {
+    ConnectFail,
+    HandshakeFail,
+    ServerError401,
+    ServerError429,
+    ServerError502,
+    DropAfterFirstAudio,
+    FinalTimeout,
+}
+
+impl SonioxFaultMode {
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" => None,
+            "connect_fail" => Some(Self::ConnectFail),
+            "handshake_fail" => Some(Self::HandshakeFail),
+            "server_error_401" | "auth_fail" => Some(Self::ServerError401),
+            "server_error_429" | "rate_limit" => Some(Self::ServerError429),
+            "server_error_502" | "bad_gateway" => Some(Self::ServerError502),
+            "close_after_first_audio" | "drop_after_first_audio" => Some(Self::DropAfterFirstAudio),
+            "final_timeout" | "stall_finalizing" => Some(Self::FinalTimeout),
+            _ => None,
+        }
+    }
+
+    fn from_env() -> Option<Self> {
+        crate::services::asr_debug_service::AsrDebugService::soniox_fault_mode()
+            .and_then(|value| Self::from_str(&value))
+            .or_else(|| {
+                std::env::var("VOICEX_SONIOX_FAULT")
+                    .ok()
+                    .and_then(|value| Self::from_str(&value))
+            })
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::ConnectFail => "connect_fail",
+            Self::HandshakeFail => "handshake_fail",
+            Self::ServerError401 => "server_error_401",
+            Self::ServerError429 => "server_error_429",
+            Self::ServerError502 => "server_error_502",
+            Self::DropAfterFirstAudio => "drop_after_first_audio",
+            Self::FinalTimeout => "final_timeout",
+        }
+    }
+
+    fn injected_server_status(&self) -> Option<u16> {
+        match self {
+            Self::ServerError401 => Some(401),
+            Self::ServerError429 => Some(429),
+            Self::ServerError502 => Some(502),
+            _ => None,
+        }
+    }
+}
+
+fn resolve_soniox_ws_url() -> String {
+    crate::services::asr_debug_service::AsrDebugService::soniox_ws_override()
+        .or_else(|| std::env::var("VOICEX_SONIOX_WS_URL").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| SONIOX_DEFAULT_WS_URL.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SonioxFaultMode;
+
+    #[test]
+    fn parses_fault_aliases() {
+        assert_eq!(
+            SonioxFaultMode::from_str("close_after_first_audio"),
+            Some(SonioxFaultMode::DropAfterFirstAudio)
+        );
+        assert_eq!(
+            SonioxFaultMode::from_str("stall_finalizing"),
+            Some(SonioxFaultMode::FinalTimeout)
+        );
+        assert_eq!(
+            SonioxFaultMode::from_str("bad_gateway"),
+            Some(SonioxFaultMode::ServerError502)
+        );
     }
 }
 
