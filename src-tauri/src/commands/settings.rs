@@ -1,7 +1,11 @@
 //! Settings-related commands
 
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
+use tokio::time::timeout;
 
 use crate::services::sync_service::SyncService;
 use crate::session::SessionController;
@@ -151,6 +155,16 @@ pub struct ReplacementRule {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsrProviderProbeResult {
+    pub provider: String,
+    pub ok: bool,
+    pub recognition_time_ms: Option<u64>,
+    pub recognition_result: String,
+    pub error_message: Option<String>,
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -192,7 +206,7 @@ impl Default for AppSettings {
             openai_asr_mode: "batch".to_string(),
             soniox_api_key: String::new(),
             soniox_model: "stt-rt-v4".to_string(),
-            soniox_language: "en".to_string(),
+            soniox_language: String::new(),
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
@@ -258,6 +272,114 @@ impl Default for AppSettings {
             enable_diagnostics: false,
         }
     }
+}
+
+const PROVIDER_PROBE_AUDIO_BYTES: &[u8] = include_bytes!("../../provider-probe.ogg");
+const PROVIDER_PROBE_TIMEOUT_SECS: u64 = 90;
+
+fn probe_provider_name(provider: &crate::asr::AsrProviderType) -> &'static str {
+    match provider {
+        crate::asr::AsrProviderType::Volcengine => "Volcengine Doubao",
+        crate::asr::AsrProviderType::Google => "Google Cloud Speech-to-Text V2",
+        crate::asr::AsrProviderType::Qwen => "Qwen Realtime ASR",
+        crate::asr::AsrProviderType::Gemini => "Gemini Audio Transcription",
+        crate::asr::AsrProviderType::GeminiLive => "Gemini Live Realtime",
+        crate::asr::AsrProviderType::Cohere => "Cohere Audio Transcription",
+        crate::asr::AsrProviderType::OpenAI => "OpenAI Audio Transcription",
+        crate::asr::AsrProviderType::Soniox => "Soniox Real-Time STT",
+        crate::asr::AsrProviderType::Coli => "Local Offline ASR (coli)",
+    }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn write_provider_probe_audio() -> Result<PathBuf, String> {
+    let path = std::env::temp_dir().join(format!(
+        "voicex-provider-probe-{}.ogg",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&path, PROVIDER_PROBE_AUDIO_BYTES)
+        .map_err(|err| format!("Failed to prepare provider probe audio: {}", err))?;
+    Ok(path)
+}
+
+async fn probe_current_provider_impl(
+    config: crate::asr::AsrConfig,
+) -> Result<AsrProviderProbeResult, String> {
+    let provider = config.provider_type.clone();
+    let provider_name = probe_provider_name(&provider).to_string();
+    let mut config = config;
+
+    if !config.is_valid() {
+        return Ok(AsrProviderProbeResult {
+            provider: provider_name,
+            ok: false,
+            recognition_time_ms: None,
+            recognition_result: String::new(),
+            error_message: Some(
+                "Current provider configuration is incomplete or invalid.".to_string(),
+            ),
+        });
+    }
+
+    let audio_path = write_provider_probe_audio()?;
+    let started_at = Instant::now();
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    let probe = timeout(
+        Duration::from_secs(PROVIDER_PROBE_TIMEOUT_SECS),
+        crate::commands::retranscribe::transcribe_with_config(&audio_path, &mut config, cancel),
+    )
+    .await;
+
+    let _ = std::fs::remove_file(&audio_path);
+    let recognition_time_ms = Some(elapsed_ms(started_at));
+
+    let result = match probe {
+        Ok(Ok(text)) => {
+            let trimmed = text.trim().to_string();
+            if trimmed.is_empty() {
+                AsrProviderProbeResult {
+                    provider: provider_name,
+                    ok: false,
+                    recognition_time_ms,
+                    recognition_result: String::new(),
+                    error_message: Some(
+                        "The provider returned an empty transcription result.".to_string(),
+                    ),
+                }
+            } else {
+                AsrProviderProbeResult {
+                    provider: provider_name,
+                    ok: true,
+                    recognition_time_ms,
+                    recognition_result: trimmed,
+                    error_message: None,
+                }
+            }
+        }
+        Ok(Err(err)) => AsrProviderProbeResult {
+            provider: provider_name,
+            ok: false,
+            recognition_time_ms,
+            recognition_result: String::new(),
+            error_message: Some(err),
+        },
+        Err(_) => AsrProviderProbeResult {
+            provider: provider_name,
+            ok: false,
+            recognition_time_ms,
+            recognition_result: String::new(),
+            error_message: Some(format!(
+                "Provider test timed out after {} seconds.",
+                PROVIDER_PROBE_TIMEOUT_SECS
+            )),
+        },
+    };
+
+    Ok(result)
 }
 
 /// Get current settings
@@ -347,4 +469,16 @@ pub async fn probe_local_asr(
     command_path: Option<String>,
 ) -> Result<crate::asr::ColiAsrStatus, String> {
     Ok(crate::asr::probe_coli_status(command_path.as_deref()))
+}
+
+#[tauri::command]
+pub async fn probe_current_asr_provider() -> Result<AsrProviderProbeResult, String> {
+    let settings = crate::storage::get_settings().map_err(|err| err.to_string())?;
+    let config = crate::asr::AsrConfig::from(&settings);
+    probe_current_provider_impl(config).await
+}
+
+#[tauri::command]
+pub fn load_provider_probe_audio() -> Result<Vec<u8>, String> {
+    Ok(PROVIDER_PROBE_AUDIO_BYTES.to_vec())
 }

@@ -52,11 +52,7 @@ fn reposition_hud_window(window: &tauri::WebviewWindow) -> Result<(), HudError> 
         .scale_factor()
         .map_err(|e| HudError::SizeFailed(e.to_string()))?;
     let logical_size = size.to_logical::<f64>(scale);
-    position_hud_window(
-        window,
-        logical_size.width,
-        logical_size.height,
-    )
+    position_hud_window(window, logical_size.width, logical_size.height)
 }
 
 fn position_hud_window(
@@ -103,8 +99,7 @@ fn position_hud_window(
             .outer_position()
             .map_err(|e| HudError::PositionFailed(e.to_string()))?
             .to_logical::<f64>(scale);
-        let position_changed =
-            (current_pos.x - x).abs() > 0.5 || (current_pos.y - y).abs() > 0.5;
+        let position_changed = (current_pos.x - x).abs() > 0.5 || (current_pos.y - y).abs() > 0.5;
 
         if position_changed {
             window

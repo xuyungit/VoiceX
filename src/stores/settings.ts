@@ -200,7 +200,7 @@ const defaultSettings: AppSettings = {
     openaiAsrMode: 'batch',
     sonioxApiKey: '',
     sonioxModel: 'stt-rt-v4',
-    sonioxLanguage: 'en',
+    sonioxLanguage: '',
 
     enableLlmCorrection: false,
     llmProviderType: 'volcengine',

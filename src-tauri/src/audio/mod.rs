@@ -9,8 +9,8 @@ mod device;
 use std::{path::PathBuf, sync::Mutex};
 
 pub use capture::{
-    AudioCaptureError, AudioCaptureHandle, AudioCaptureService, AudioConfig,
-    AudioRecordingResult, AudioVisualizationFrame,
+    AudioCaptureError, AudioCaptureHandle, AudioCaptureService, AudioConfig, AudioRecordingResult,
+    AudioVisualizationFrame,
 };
 pub use chunker::AudioChunker;
 pub use device::{AudioDevice, AudioInputDeviceManager};

@@ -98,15 +98,7 @@ async fn run_retranscribe(
     cancel: CancellationToken,
 ) -> Result<ReTranscribeResult, String> {
     // --- ASR ---
-    let asr_text = match config.provider_type {
-        AsrProviderType::Coli => run_coli_asr(path, config).await?,
-        AsrProviderType::Gemini => run_gemini_asr(path, config).await?,
-        AsrProviderType::GeminiLive => run_streaming_asr(path, config, cancel.clone()).await?,
-        AsrProviderType::Cohere => run_cohere_asr(path, config).await?,
-        AsrProviderType::OpenAI => run_openai_asr(path, config).await?,
-        AsrProviderType::Google => run_google_asr(path, config, cancel.clone()).await?,
-        _ => run_streaming_asr(path, config, cancel.clone()).await?,
-    };
+    let asr_text = transcribe_with_config(path, config, cancel.clone()).await?;
 
     if asr_text.trim().is_empty() {
         return Err("ASR 未能识别出任何文本，请检查录音质量或尝试其他模型".into());
@@ -129,6 +121,22 @@ async fn run_retranscribe(
         asr_model_name,
         llm_model_name,
     })
+}
+
+pub async fn transcribe_with_config(
+    path: &PathBuf,
+    config: &mut AsrConfig,
+    cancel: CancellationToken,
+) -> Result<String, String> {
+    match config.provider_type {
+        AsrProviderType::Coli => run_coli_asr(path, config).await,
+        AsrProviderType::Gemini => run_gemini_asr(path, config).await,
+        AsrProviderType::GeminiLive => run_streaming_asr(path, config, cancel).await,
+        AsrProviderType::Cohere => run_cohere_asr(path, config).await,
+        AsrProviderType::OpenAI => run_openai_asr(path, config).await,
+        AsrProviderType::Google => run_google_asr(path, config, cancel).await,
+        _ => run_streaming_asr(path, config, cancel).await,
+    }
 }
 
 /// Run ASR via Coli's file-based recognition.

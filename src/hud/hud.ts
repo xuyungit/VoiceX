@@ -46,7 +46,8 @@ let currentMode:
   | "push_to_talk"
   | "hands_free"
   | "recognizing"
-  | "correcting" = "idle";
+  | "correcting"
+  | "error" = "idle";
 let currentIntent: "assistant" | "translate_en" = "assistant";
 let hudPresentation: "stream" | "batch" = "stream";
 let lastActiveIcon: "mic" | "waveform" | "cloud" | "wand" = "mic";
@@ -206,7 +207,7 @@ function setBatchLayoutMode(batchWaveMode: boolean, compactBatchMode: boolean) {
 
 function updateStatus(mode: typeof currentMode) {
   currentMode = mode;
-  document.body.classList.remove("recording", "recognizing", "correcting");
+  document.body.classList.remove("recording", "recognizing", "correcting", "error");
 
   switch (mode) {
     case "push_to_talk":
@@ -232,6 +233,11 @@ function updateStatus(mode: typeof currentMode) {
       showIcon("wand");
       statusIcon?.classList.add("animating");
       lastActiveIcon = "wand";
+      break;
+    case "error":
+      document.body.classList.add("error");
+      showIcon(lastActiveIcon);
+      statusIcon?.classList.remove("animating");
       break;
     case "idle":
     default:
@@ -568,8 +574,9 @@ function handleAudioSpectrumUpdate(bands: number[] | undefined) {
 
 function renderTranscript() {
   const rawText = partialText.trim() || lastNonEmptyText.trim();
+  const showError = currentMode === "error";
   const batchWaveMode = isBatchWaveMode();
-  const compactBatchMode = isCompactBatchMode();
+  const compactBatchMode = isCompactBatchMode() && !showError;
 
   setBatchLayoutMode(batchWaveMode, compactBatchMode);
 
@@ -592,6 +599,8 @@ function renderTranscript() {
     const placeholder =
       currentMode === "correcting"
         ? t("processingText")
+        : currentMode === "error"
+          ? t("error")
         : currentMode === "recognizing"
           ? t("recognizing")
           : currentMode === "push_to_talk" || currentMode === "hands_free"
@@ -632,6 +641,25 @@ function handleTranscriptUpdate(text: string | undefined, _isFinal: boolean) {
   if (trimmed) {
     lastNonEmptyText = trimmed;
   }
+  renderTranscript();
+}
+
+function handleErrorUpdate(message: string | undefined) {
+  const trimmed = (message || "").trim();
+
+  if (!trimmed) {
+    if (currentMode === "error") {
+      updateStatus("idle");
+    }
+    partialText = "";
+    lastNonEmptyText = "";
+    renderTranscript();
+    return;
+  }
+
+  partialText = trimmed;
+  lastNonEmptyText = trimmed;
+  updateStatus("error");
   renderTranscript();
 }
 
@@ -723,6 +751,10 @@ async function initListeners() {
 
   await add("state:intent", (event: { payload?: { intent?: string } }) => {
     updateIntent(event.payload?.intent);
+  });
+
+  await add("state:error", (event: { payload?: { message?: string } }) => {
+    handleErrorUpdate(event.payload?.message);
   });
 
   await add(

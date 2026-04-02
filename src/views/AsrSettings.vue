@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NSelect } from 'naive-ui'
+import { NButton, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import type { LocalAsrStatus } from '../types/asr'
@@ -19,6 +19,14 @@ const settingsStore = useSettingsStore()
 const { t } = useI18n()
 
 type ProviderValue = 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'soniox' | 'coli'
+
+interface AsrProviderProbeResult {
+  provider: string
+  ok: boolean
+  recognitionTimeMs: number | null
+  recognitionResult: string
+  errorMessage: string | null
+}
 
 // --- Coli status probe ---
 const coliStatus = ref<LocalAsrStatus | null>(null)
@@ -107,6 +115,74 @@ const showColiUnavailableWarning = computed(() =>
   !coliStatus.value.available
 )
 
+const providerProbeLoading = ref(false)
+const providerProbeResult = ref<AsrProviderProbeResult | null>(null)
+const providerProbeError = ref('')
+const probeAudioLoading = ref(false)
+const isProbeAudioPlaying = ref(false)
+const probeAudioPlayer = ref<HTMLAudioElement | null>(null)
+const probeAudioUrl = ref<string | null>(null)
+
+async function runProviderProbe() {
+  providerProbeLoading.value = true
+  providerProbeError.value = ''
+  try {
+    await settingsStore.forceSaveSettings()
+    providerProbeResult.value = await invoke<AsrProviderProbeResult>('probe_current_asr_provider')
+  } catch (error) {
+    providerProbeResult.value = null
+    providerProbeError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    providerProbeLoading.value = false
+  }
+}
+
+async function toggleProbeAudioPlayback() {
+  if (isProbeAudioPlaying.value) {
+    stopProbeAudioPlayback()
+    return
+  }
+
+  probeAudioLoading.value = true
+  try {
+    stopProbeAudioPlayback()
+    const bytes = await invoke<number[]>('load_provider_probe_audio')
+    const buffer = new Uint8Array(bytes)
+    const url = URL.createObjectURL(new Blob([buffer], { type: 'audio/ogg' }))
+    probeAudioUrl.value = url
+
+    const audio = new Audio(url)
+    probeAudioPlayer.value = audio
+    audio.onended = () => {
+      stopProbeAudioPlayback()
+    }
+    audio.onerror = () => {
+      stopProbeAudioPlayback()
+    }
+
+    await audio.play()
+    isProbeAudioPlaying.value = true
+  } catch (error) {
+    stopProbeAudioPlayback()
+    providerProbeError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    probeAudioLoading.value = false
+  }
+}
+
+function stopProbeAudioPlayback() {
+  if (probeAudioPlayer.value) {
+    probeAudioPlayer.value.pause()
+    probeAudioPlayer.value.currentTime = 0
+    probeAudioPlayer.value = null
+  }
+  isProbeAudioPlaying.value = false
+  if (probeAudioUrl.value) {
+    URL.revokeObjectURL(probeAudioUrl.value)
+    probeAudioUrl.value = null
+  }
+}
+
 // --- Common settings ---
 const maxRecordingOptions = computed(() => [
   { label: t('asr.noLimit'), value: 0 },
@@ -169,6 +245,62 @@ const maxRecordingMinutes = computed({
       @refresh="refreshColiStatus"
     />
 
+    <div class="surface-card asr-card">
+      <div class="card-header">
+        <div class="card-title">{{ t('asr.providerProbe') }}</div>
+        <div class="card-sub">{{ t('asr.providerProbeSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row align-start">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.providerProbeButton') }}</div>
+            <div class="field-note">{{ t('asr.providerProbeNote') }}</div>
+          </div>
+          <div class="probe-actions">
+            <NButton
+              :loading="probeAudioLoading"
+              size="small"
+              @click="toggleProbeAudioPlayback"
+            >
+              {{ isProbeAudioPlaying ? t('asr.providerProbeStopAudio') : t('asr.providerProbePlayAudio') }}
+            </NButton>
+            <NButton
+              :loading="providerProbeLoading"
+              type="primary"
+              secondary
+              size="small"
+              @click="runProviderProbe"
+            >
+              {{ t('asr.providerProbeButton') }}
+            </NButton>
+          </div>
+        </div>
+
+        <div v-if="providerProbeResult" class="probe-result" :class="{ ok: providerProbeResult.ok, error: !providerProbeResult.ok }">
+          <div class="probe-line">
+            <span>{{ t('asr.providerProbeStatus') }}</span>
+            <strong>{{ providerProbeResult.ok ? t('asr.providerProbeStatusOk') : t('asr.providerProbeStatusFailed') }}</strong>
+          </div>
+          <div v-if="providerProbeResult.recognitionTimeMs !== null" class="probe-line">
+            <span>{{ t('asr.providerProbeLatency') }}</span>
+            <strong>{{ providerProbeResult.recognitionTimeMs }} ms</strong>
+          </div>
+          <div class="probe-result-label">{{ t('asr.providerProbeTranscript') }}</div>
+          <div class="probe-message">
+            {{ providerProbeResult.recognitionResult || t('asr.providerProbeTranscriptEmpty') }}
+          </div>
+        </div>
+
+        <div v-if="providerProbeResult?.errorMessage" class="warning-box">
+          {{ providerProbeResult.errorMessage }}
+        </div>
+
+        <div v-if="providerProbeError" class="warning-box">
+          {{ providerProbeError }}
+        </div>
+      </div>
+    </div>
+
     <!-- Common Recording Settings -->
     <div class="surface-card asr-card">
       <div class="card-header">
@@ -200,5 +332,57 @@ const maxRecordingMinutes = computed({
   width: 100%;
   max-width: 1120px;
   padding-bottom: var(--spacing-2xl);
+}
+
+.probe-result {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  display: grid;
+  gap: 8px;
+}
+
+.probe-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.probe-result.ok {
+  border-color: rgba(74, 222, 128, 0.28);
+  background: rgba(74, 222, 128, 0.08);
+}
+
+.probe-result.error {
+  border-color: rgba(248, 113, 113, 0.28);
+  background: rgba(248, 113, 113, 0.08);
+}
+
+.probe-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.probe-line strong {
+  color: var(--text-primary);
+  text-align: right;
+  word-break: break-all;
+}
+
+.probe-result-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.probe-message {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  word-break: break-word;
 }
 </style>

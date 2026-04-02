@@ -156,6 +156,23 @@ async fn get_service_account_token(sa_json: &str) -> Result<String, AsrError> {
     Ok(token)
 }
 
+pub async fn probe_connection(config: &AsrConfig) -> Result<String, AsrError> {
+    if config.google_project_id.trim().is_empty() || config.google_api_key.trim().is_empty() {
+        return Err(AsrError::ConnectionFailed(
+            "Invalid Google STT configuration: Project ID and Service Account Key are required"
+                .to_string(),
+        ));
+    }
+
+    let _access_token = get_service_account_token(&config.google_api_key).await?;
+    let endpoint_url = format!(
+        "https://{}-speech.googleapis.com",
+        config.google_location.trim()
+    );
+    let _channel = get_or_create_channel(&endpoint_url).await?;
+    Ok(endpoint_url)
+}
+
 /// Sign a JWT with the SA private key and exchange it for an access token.
 async fn exchange_sa_jwt(sa_json: &str) -> Result<String, AsrError> {
     let creds: serde_json::Value = serde_json::from_str(sa_json)

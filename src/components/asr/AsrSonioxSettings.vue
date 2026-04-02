@@ -55,7 +55,7 @@ const sonioxLanguage = computed({
           <div class="field-label">{{ t('asr.languageHint') }}</div>
           <div class="field-note">{{ t('asr.sonioxLanguageNote') }}</div>
         </div>
-        <NInput v-model:value="sonioxLanguage" placeholder="en" class="field-control" />
+        <NInput v-model:value="sonioxLanguage" placeholder="zh, en" class="field-control" />
       </div>
     </div>
   </div>

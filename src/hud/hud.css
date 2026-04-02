@@ -269,6 +269,14 @@ body.correcting .status-icon {
     color: #a78bfa;
 }
 
+body.error .status-icon {
+    color: #f87171;
+}
+
+body.error .text-area {
+    color: rgba(254, 202, 202, 0.96);
+}
+
 /* Light theme support (for future) */
 @media (prefers-color-scheme: light) {
     body.light-theme .hud-container {

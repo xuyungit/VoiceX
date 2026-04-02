@@ -102,7 +102,9 @@ impl HudService {
         let payload = json!({
             "mode": if is_batch { "batch" } else { "stream" }
         });
-        let _ = self.app_handle.emit_to("hud", "state:hud_presentation", payload);
+        let _ = self
+            .app_handle
+            .emit_to("hud", "state:hud_presentation", payload);
     }
 
     pub fn sync_bounds(&self, is_batch: bool) {
@@ -159,11 +161,20 @@ impl HudService {
         let _ = self.app_handle.emit_to("hud", event_name, payload);
     }
 
+    pub fn emit_error(&self, message: Option<&str>) {
+        let payload = json!({
+            "message": message,
+        });
+        let _ = self.app_handle.emit("state:error", payload.clone());
+        let _ = self.app_handle.emit_to("hud", "state:error", payload);
+    }
+
     /// Reset HUD-visible state to a neutral baseline.
     pub fn reset_display(&self) {
         self.emit_countdown(None);
         self.emit_correcting(false);
         self.emit_intent(ProcessingIntent::Assistant);
+        self.emit_error(None);
         self.emit_transcript("", false);
         self.emit_audio_level(0.0);
         self.emit_audio_spectrum(&[]);

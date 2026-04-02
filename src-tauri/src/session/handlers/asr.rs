@@ -120,9 +120,9 @@ impl SessionController {
                                 hud_for_recognition
                                     .emit_recognition(event_name, recognition_payload);
                             },
-                            move || {
+                            move |error| {
                                 controller_for_finish
-                                    .send_message(SessionMessage::AsrStreamFinished);
+                                    .send_message(SessionMessage::AsrStreamFinished { error });
                             },
                         )
                         .await;
@@ -159,6 +159,24 @@ impl SessionController {
         }
 
         self.maybe_inject_final_state(state);
+    }
+
+    pub fn on_asr_stream_failed_state(&self, state: &mut AppState, reason: String) {
+        log::warn!("ASR stream failed: {}", reason);
+        state.terminal_error_message = Some(reason.clone());
+        state.has_final_result = false;
+        state.asr_stream_finished = true;
+        self.cancel_asr_final_timeout();
+        self.cancel_hands_free_timeout();
+        self.cancel_auto_hide();
+        self.emit_asr_error(&reason);
+
+        if state.is_recording {
+            self.stop_audio_capture("asr_stream_failed");
+        } else {
+            self.cancel_audio_level_task();
+            self.schedule_error_cleanup();
+        }
     }
 
     pub fn maybe_inject_final_state(&self, state: &mut AppState) {

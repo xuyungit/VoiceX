@@ -21,7 +21,7 @@ impl AsrManager {
         rx: Receiver<Vec<u8>>,
         cancel: tokio_util::sync::CancellationToken,
         on_event: impl Fn(AsrEvent) + Send + Sync + 'static,
-        on_finished: impl Fn() + Send + Sync + 'static,
+        on_finished: impl Fn(Option<String>) + Send + Sync + 'static,
     ) {
         let settings = match storage::get_settings() {
             Ok(s) => s,
@@ -280,20 +280,21 @@ impl AsrManager {
             }
         };
 
-        let had_error = result.is_err();
-
-        match result {
+        let finish_error = match result {
             Err(err) => {
-                log::error!("ASR streaming failed: {}", err);
+                let message = err.to_string();
+                log::error!("ASR streaming failed: {}", message);
                 cancel.cancel();
+                Some(message)
             }
             Ok(()) => {
                 log::info!("ASR stream completed");
+                None
             }
-        }
+        };
 
-        if !cancel.is_cancelled() || had_error {
-            (on_finished)();
+        if !cancel.is_cancelled() || finish_error.is_some() {
+            (on_finished)(finish_error);
         } else {
             log::debug!("ASR stream cancelled; skipping on_finished callback");
         }

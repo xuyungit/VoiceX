@@ -21,8 +21,11 @@ pub enum SessionMessage {
     HandsFreeCountdownTick(u32),
     HandsFreeTimeout,
     FinalizeHideReady,
+    ErrorDisplayDone,
     AsrEvent(AsrEvent),
-    AsrStreamFinished,
+    AsrStreamFinished {
+        error: Option<String>,
+    },
     CorrectingStart,
     CorrectingStop,
     ApplySettings {
@@ -49,6 +52,9 @@ pub enum SessionMessage {
         duration_ms: Option<u64>,
     },
     AudioStartFailed {
+        reason: String,
+    },
+    AudioStopFailed {
         reason: String,
     },
     BatchAsrDone {

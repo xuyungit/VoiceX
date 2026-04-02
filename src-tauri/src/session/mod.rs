@@ -30,6 +30,7 @@ use crate::{
 };
 
 const FINALIZE_HIDE_DELAY_MS: u64 = 1200;
+const ERROR_HIDE_DELAY_MS: u64 = 2500;
 const MIN_RECORDING_MS: u64 = 500;
 const COUNTDOWN_THRESHOLD_SECS: u64 = 30;
 const MIN_CORRECTION_CHARS: usize = 5;
@@ -235,6 +236,7 @@ impl SessionController {
             }
             SessionMessage::HandsFreeTimeout => self.on_hands_free_timeout_state(state),
             SessionMessage::FinalizeHideReady => self.on_finalize_hide_ready_state(state),
+            SessionMessage::ErrorDisplayDone => self.on_error_display_done_state(state),
             SessionMessage::AsrFinalTimeout => self.on_asr_final_timeout(state),
             SessionMessage::AsrEvent(evt) => {
                 if state.session_state == HotkeySessionState::Idle
@@ -246,7 +248,7 @@ impl SessionController {
                 }
                 self.handle_asr_event_state(state, evt)
             }
-            SessionMessage::AsrStreamFinished => {
+            SessionMessage::AsrStreamFinished { error } => {
                 if state.session_state == HotkeySessionState::Idle
                     && !state.is_recording
                     && !state.is_correcting
@@ -254,7 +256,11 @@ impl SessionController {
                     log::debug!("Dropping stale ASR stream-finished after cancel");
                     return;
                 }
-                self.on_asr_stream_finished_state(state)
+                if let Some(reason) = error {
+                    self.on_asr_stream_failed_state(state, reason);
+                } else {
+                    self.on_asr_stream_finished_state(state)
+                }
             }
             SessionMessage::CorrectingStart => self.on_correcting_start(state),
             SessionMessage::CorrectingStop => self.on_correcting_stop(state),
@@ -294,6 +300,9 @@ impl SessionController {
             } => self.handle_audio_stopped_state(state, path, refinement_path, duration_ms),
             SessionMessage::AudioStartFailed { reason } => {
                 self.on_audio_start_failed_state(state, reason)
+            }
+            SessionMessage::AudioStopFailed { reason } => {
+                self.on_audio_stop_failed_state(state, reason)
             }
             SessionMessage::BatchAsrDone {
                 text,
@@ -686,6 +695,17 @@ impl SessionController {
         }
     }
 
+    fn schedule_error_cleanup(&self) {
+        self.cancel_auto_hide();
+
+        let controller = self.clone();
+        if let Some(hud) = self.hud_service() {
+            hud.schedule_hide(ERROR_HIDE_DELAY_MS, move || {
+                controller.send_message(SessionMessage::ErrorDisplayDone);
+            });
+        }
+    }
+
     pub(crate) fn cancel_auto_hide(&self) {
         if let Some(hud) = self.hud_service() {
             hud.cancel_hide();
@@ -725,6 +745,12 @@ impl SessionController {
     fn emit_transcript(&self, text: &str, is_final: bool) {
         if let Some(hud) = self.hud_service() {
             hud.emit_transcript(text, is_final);
+        }
+    }
+
+    fn emit_asr_error(&self, message: &str) {
+        if let Some(hud) = self.hud_service() {
+            hud.emit_error(Some(message));
         }
     }
 
@@ -886,10 +912,16 @@ impl SessionController {
                 }
                 Err(err) => {
                     log::error!("Failed to stop audio capture (reason: {}): {}", reason, err);
+                    self.send_message(SessionMessage::AudioStopFailed {
+                        reason: err.to_string(),
+                    });
                 }
             }
         } else {
             log::error!("Audio manager not initialized; cannot stop capture");
+            self.send_message(SessionMessage::AudioStopFailed {
+                reason: "Audio manager not initialized; cannot stop capture".to_string(),
+            });
         }
     }
 
@@ -931,6 +963,12 @@ impl SessionController {
         state.session_refinement_audio_path = refinement_path.as_ref().map(|p| p.into());
         state.session_duration_ms = duration_ms;
         state.session_start = None;
+
+        if state.terminal_error_message.is_some() {
+            log::info!("Audio capture stopped after ASR failure; skipping transcription pipeline");
+            self.schedule_error_cleanup();
+            return;
+        }
 
         if let Some(ms) = duration_ms {
             if ms < MIN_RECORDING_MS {
@@ -1016,6 +1054,17 @@ impl SessionController {
         }
     }
 
+    fn on_error_display_done_state(&self, state: &mut AppState) {
+        if state.terminal_error_message.is_none() {
+            return;
+        }
+
+        self.cancel_audio_level_task();
+        self.discard_session_audio_file(state, "asr_stream_failed");
+        self.discard_session_refinement_audio_file(state, "asr_stream_failed");
+        self.hide_hud_and_reset_state(state);
+    }
+
     fn on_audio_start_failed_state(&self, state: &mut AppState, reason: String) {
         log::warn!("Audio start failed; resetting session: {}", reason);
 
@@ -1035,6 +1084,19 @@ impl SessionController {
         state.reset();
         self.emit_state_from(state);
         self.set_escape_swallowing(false);
+    }
+
+    fn on_audio_stop_failed_state(&self, state: &mut AppState, reason: String) {
+        let combined_reason = match state.terminal_error_message.as_deref() {
+            Some(existing) => format!("{}\n{}", existing, reason),
+            None => reason,
+        };
+        log::warn!("Audio stop failed; resetting session: {}", combined_reason);
+
+        state.terminal_error_message = Some(combined_reason.clone());
+        self.emit_asr_error(&combined_reason);
+        self.cancel_audio_level_task();
+        self.schedule_error_cleanup();
     }
 }
 

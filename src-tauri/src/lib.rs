@@ -243,6 +243,8 @@ pub fn run() {
             commands::settings::get_resolved_ui_locale,
             commands::settings::save_settings,
             commands::settings::probe_local_asr,
+            commands::settings::probe_current_asr_provider,
+            commands::settings::load_provider_probe_audio,
             commands::history::get_history,
             commands::history::delete_history_record,
             commands::history::get_usage_stats,

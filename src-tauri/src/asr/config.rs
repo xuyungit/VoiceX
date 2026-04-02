@@ -138,7 +138,7 @@ impl Default for AsrConfig {
             openai_asr_mode: "batch".to_string(),
             soniox_api_key: String::new(),
             soniox_model: "stt-rt-v4".to_string(),
-            soniox_language: "en".to_string(),
+            soniox_language: String::new(),
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,

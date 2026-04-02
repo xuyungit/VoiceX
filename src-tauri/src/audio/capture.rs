@@ -30,7 +30,9 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use super::{device::AudioInputDeviceManager, AudioChunker};
 
-const AUDIO_VIZ_BAND_EDGES: [f32; 9] = [120.0, 220.0, 400.0, 700.0, 1200.0, 2000.0, 3200.0, 4800.0, 7200.0];
+const AUDIO_VIZ_BAND_EDGES: [f32; 9] = [
+    120.0, 220.0, 400.0, 700.0, 1200.0, 2000.0, 3200.0, 4800.0, 7200.0,
+];
 
 /// Audio capture configuration
 #[derive(Debug, Clone)]
