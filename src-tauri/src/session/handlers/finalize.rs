@@ -111,6 +111,11 @@ impl SessionController {
                 self.schedule_finalize_cleanup();
                 return;
             }
+            if state.asr_refinement_in_progress {
+                log::info!("Finalize hide deferred; ASR refinement still in progress");
+                self.schedule_finalize_cleanup();
+                return;
+            }
             if state.is_correcting {
                 log::info!("Finalize hide deferred; correction still active");
                 self.schedule_finalize_cleanup();

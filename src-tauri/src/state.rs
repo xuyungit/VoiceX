@@ -1,6 +1,6 @@
 //! Application state machine
 
-use crate::asr::AsrFailure;
+use crate::asr::{AsrFailure, AsrProviderType};
 use crate::injector::TextInjectionMode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -119,6 +119,7 @@ pub struct AppState {
     pub(crate) asr_reconnect_prefix_text: String,
     pub(crate) asr_refinement_in_progress: bool,
     pub(crate) asr_refinement_done: bool,
+    pub(crate) active_asr_refinement_provider: Option<AsrProviderType>,
 
     // Post-processing
     pub(crate) remove_trailing_punctuation: bool,
@@ -176,6 +177,7 @@ impl AppState {
             asr_reconnect_prefix_text: String::new(),
             asr_refinement_in_progress: false,
             asr_refinement_done: false,
+            active_asr_refinement_provider: None,
             remove_trailing_punctuation: true,
             short_sentence_threshold: 5,
             replacement_rules: Vec::new(),
@@ -234,6 +236,7 @@ impl AppState {
                 self.asr_reconnect_prefix_text.clear();
                 self.asr_refinement_in_progress = false;
                 self.asr_refinement_done = false;
+                self.active_asr_refinement_provider = None;
                 // TODO: Start recording and schedule hold threshold check
             }
             HotkeySessionState::HandsFree => {
@@ -398,6 +401,7 @@ impl AppState {
         self.asr_reconnect_prefix_text.clear();
         self.asr_refinement_in_progress = false;
         self.asr_refinement_done = false;
+        self.active_asr_refinement_provider = None;
         self.gesture_press_started_at = None;
         self.double_tap_upgrade_deadline = None;
         self.pending_translation_upgrade = false;

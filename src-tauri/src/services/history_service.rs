@@ -156,6 +156,21 @@ impl HistoryService {
                 Self::format_provider_model("OpenAI Realtime", &settings.openai_asr_model)
             }
             "openai" => Self::format_provider_model("OpenAI", &settings.openai_asr_model),
+            "elevenlabs"
+                if settings.elevenlabs_recognition_mode == "realtime"
+                    && settings.elevenlabs_post_recording_refine == "batch_refine" =>
+            {
+                Self::elevenlabs_realtime_batch_refine_model_name(
+                    &settings.elevenlabs_realtime_model,
+                    &settings.elevenlabs_batch_model,
+                )
+            }
+            "elevenlabs" if settings.elevenlabs_recognition_mode == "batch" => {
+                Self::elevenlabs_batch_model_name(&settings.elevenlabs_batch_model)
+            }
+            "elevenlabs" => {
+                Self::elevenlabs_realtime_model_name(&settings.elevenlabs_realtime_model)
+            }
             "soniox" => Self::format_provider_model("Soniox", &settings.soniox_model),
             "coli" if settings.coli_final_refinement_mode == "sensevoice" => {
                 Some("Local / coli / stream + sensevoice refine".to_string())
@@ -168,6 +183,31 @@ impl HistoryService {
         };
 
         snapshot.and_then(Self::normalize_snapshot)
+    }
+
+    pub fn elevenlabs_realtime_model_name(model: &str) -> Option<String> {
+        Some(format!(
+            "ElevenLabs / {}",
+            Self::normalize_model_or_default(model, "scribe_v2_realtime")
+        ))
+    }
+
+    pub fn elevenlabs_batch_model_name(model: &str) -> Option<String> {
+        Some(format!(
+            "ElevenLabs / {}",
+            Self::normalize_model_or_default(model, "scribe_v2")
+        ))
+    }
+
+    pub fn elevenlabs_realtime_batch_refine_model_name(
+        realtime_model: &str,
+        batch_model: &str,
+    ) -> Option<String> {
+        Some(format!(
+            "ElevenLabs / {} + batch refine({})",
+            Self::normalize_model_or_default(realtime_model, "scribe_v2_realtime"),
+            Self::normalize_model_or_default(batch_model, "scribe_v2")
+        ))
     }
 
     pub fn resolve_llm_model_name(settings: &AppSettings) -> Option<String> {
@@ -189,12 +229,21 @@ impl HistoryService {
         }
     }
 
-    fn format_provider_model(provider: &str, model: &str) -> Option<String> {
+    pub fn format_provider_model(provider: &str, model: &str) -> Option<String> {
         let model = model.trim();
         if model.is_empty() {
             Some(provider.to_string())
         } else {
             Some(format!("{} / {}", provider, model))
+        }
+    }
+
+    fn normalize_model_or_default(model: &str, default_model: &str) -> String {
+        let trimmed = model.trim();
+        if trimmed.is_empty() {
+            default_model.to_string()
+        } else {
+            trimmed.to_string()
         }
     }
 
@@ -205,5 +254,42 @@ impl HistoryService {
         } else {
             Some(trimmed.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HistoryService;
+    use crate::commands::settings::AppSettings;
+
+    #[test]
+    fn elevenlabs_refine_snapshot_uses_defaults_when_models_are_empty() {
+        assert_eq!(
+            HistoryService::elevenlabs_realtime_batch_refine_model_name(" ", ""),
+            Some("ElevenLabs / scribe_v2_realtime + batch refine(scribe_v2)".to_string())
+        );
+    }
+
+    #[test]
+    fn elevenlabs_realtime_snapshot_uses_default_model() {
+        assert_eq!(
+            HistoryService::elevenlabs_realtime_model_name(" "),
+            Some("ElevenLabs / scribe_v2_realtime".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_asr_model_name_for_elevenlabs_refine_uses_shared_helper() {
+        let mut settings = AppSettings::default();
+        settings.asr_provider_type = "elevenlabs".to_string();
+        settings.elevenlabs_recognition_mode = "realtime".to_string();
+        settings.elevenlabs_post_recording_refine = "batch_refine".to_string();
+        settings.elevenlabs_realtime_model = "scribe_v2_realtime".to_string();
+        settings.elevenlabs_batch_model = "scribe_v2".to_string();
+
+        assert_eq!(
+            HistoryService::resolve_asr_model_name(&settings).as_deref(),
+            Some("ElevenLabs / scribe_v2_realtime + batch refine(scribe_v2)")
+        );
     }
 }

@@ -8,7 +8,7 @@ export interface AppSettings {
     uiLanguage: UiLanguage
 
     // ASR
-    asrProviderType: 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'soniox' | 'coli'
+    asrProviderType: 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'coli'
     asrAppKey: string
     asrAccessKey: string
     asrResourceId: string
@@ -50,6 +50,15 @@ export interface AppSettings {
     openaiAsrLanguage: string
     openaiAsrPrompt: string
     openaiAsrMode: 'batch' | 'realtime'
+
+    // ASR Provider: ElevenLabs
+    elevenlabsApiKey: string
+    elevenlabsRecognitionMode: 'realtime' | 'batch'
+    elevenlabsPostRecordingRefine: 'off' | 'batch_refine'
+    elevenlabsRealtimeModel: string
+    elevenlabsBatchModel: string
+    elevenlabsLanguage: string
+    elevenlabsEnableKeyterms: boolean
 
     // ASR Provider: Soniox
     sonioxApiKey: string
@@ -198,6 +207,13 @@ const defaultSettings: AppSettings = {
     openaiAsrLanguage: '',
     openaiAsrPrompt: 'Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.',
     openaiAsrMode: 'batch',
+    elevenlabsApiKey: '',
+    elevenlabsRecognitionMode: 'realtime',
+    elevenlabsPostRecordingRefine: 'off',
+    elevenlabsRealtimeModel: 'scribe_v2_realtime',
+    elevenlabsBatchModel: 'scribe_v2',
+    elevenlabsLanguage: '',
+    elevenlabsEnableKeyterms: true,
     sonioxApiKey: '',
     sonioxModel: 'stt-rt-v4',
     sonioxLanguage: '',

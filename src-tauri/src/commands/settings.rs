@@ -20,7 +20,7 @@ pub struct AppSettings {
     pub ui_language: String, // "system" | "zh-CN" | "en-US"
 
     // ASR settings
-    pub asr_provider_type: String, // "volcengine" | "google" | "qwen" | "gemini" | "gemini-live" | "cohere" | "openai" | "coli"
+    pub asr_provider_type: String, // "volcengine" | "google" | "qwen" | "gemini" | "gemini-live" | "cohere" | "openai" | "elevenlabs" | "soniox" | "coli"
     pub asr_app_key: String,
     pub asr_access_key: String,
     pub asr_resource_id: String,
@@ -63,6 +63,15 @@ pub struct AppSettings {
     pub openai_asr_language: String,
     pub openai_asr_prompt: String,
     pub openai_asr_mode: String, // "batch" | "realtime"
+
+    // ASR Provider: ElevenLabs Speech-to-Text
+    pub elevenlabs_api_key: String,
+    pub elevenlabs_recognition_mode: String,       // "realtime" | "batch"
+    pub elevenlabs_post_recording_refine: String,  // "off" | "batch_refine"
+    pub elevenlabs_realtime_model: String,
+    pub elevenlabs_batch_model: String,
+    pub elevenlabs_language: String,
+    pub elevenlabs_enable_keyterms: bool,
 
     // ASR Provider: Soniox
     pub soniox_api_key: String,
@@ -207,6 +216,13 @@ impl Default for AppSettings {
             openai_asr_language: String::new(),
             openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
             openai_asr_mode: "batch".to_string(),
+            elevenlabs_api_key: String::new(),
+            elevenlabs_recognition_mode: "realtime".to_string(),
+            elevenlabs_post_recording_refine: "off".to_string(),
+            elevenlabs_realtime_model: "scribe_v2_realtime".to_string(),
+            elevenlabs_batch_model: "scribe_v2".to_string(),
+            elevenlabs_language: String::new(),
+            elevenlabs_enable_keyterms: true,
             soniox_api_key: String::new(),
             soniox_model: "stt-rt-v4".to_string(),
             soniox_language: String::new(),
@@ -289,6 +305,7 @@ fn probe_provider_name(provider: &crate::asr::AsrProviderType) -> &'static str {
         crate::asr::AsrProviderType::GeminiLive => "Gemini Live Realtime",
         crate::asr::AsrProviderType::Cohere => "Cohere Audio Transcription",
         crate::asr::AsrProviderType::OpenAI => "OpenAI Audio Transcription",
+        crate::asr::AsrProviderType::ElevenLabs => "ElevenLabs Speech to Text",
         crate::asr::AsrProviderType::Soniox => "Soniox Real-Time STT",
         crate::asr::AsrProviderType::Coli => "Local Offline ASR (coli)",
     }
@@ -296,6 +313,24 @@ fn probe_provider_name(provider: &crate::asr::AsrProviderType) -> &'static str {
 
 fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn normalize_elevenlabs_settings(settings: &mut AppSettings) {
+    let recognition_mode = match settings.elevenlabs_recognition_mode.as_str() {
+        "batch" => "batch",
+        _ => "realtime",
+    };
+    settings.elevenlabs_recognition_mode = recognition_mode.to_string();
+
+    let refine_mode = match settings.elevenlabs_post_recording_refine.as_str() {
+        "batch_refine" => "batch_refine",
+        _ => "off",
+    };
+    settings.elevenlabs_post_recording_refine = if recognition_mode == "batch" {
+        "off".to_string()
+    } else {
+        refine_mode.to_string()
+    };
 }
 
 fn write_provider_probe_audio() -> Result<PathBuf, String> {
@@ -415,6 +450,7 @@ pub fn save_settings(
     let current_settings = crate::storage::get_settings().map_err(|e| e.to_string())?;
     settings.ui_language = crate::ui_locale::normalize_ui_language(&settings.ui_language);
 
+    normalize_elevenlabs_settings(&mut settings);
     let text_changed = settings.dictionary_text != current_settings.dictionary_text;
     let ui_language_changed = settings.ui_language != current_settings.ui_language;
     if text_changed {
