@@ -1,7 +1,8 @@
 use tokio::sync::mpsc::Receiver;
 
 use crate::asr::{
-    AsrClient, AsrConfig, AsrEvent, AsrFailure, AsrProviderType, ColiAsrClient, GeminiLiveClient,
+    AsrClient, AsrConfig, AsrEvent, AsrFailure, AsrProviderType,
+    ColiAsrClient, ElevenLabsRecognitionMode, ElevenLabsRealtimeClient, GeminiLiveClient,
     GoogleSttClient, OpenAIRealtimeClient, QwenRealtimeClient, SonioxClient,
 };
 use crate::storage;
@@ -214,6 +215,38 @@ impl AsrManager {
                         },
                     );
                     let client = OpenAIRealtimeClient::new(config);
+                    let on_event = on_event.clone();
+                    client
+                        .stream_session(
+                            sample_rate,
+                            channels,
+                            rx,
+                            cancel.clone(),
+                            history,
+                            move |evt| {
+                                (on_event)(evt);
+                            },
+                        )
+                        .await
+                }
+            }
+            AsrProviderType::ElevenLabs => {
+                if config.elevenlabs_recognition_mode != ElevenLabsRecognitionMode::Realtime {
+                    log::warn!("ElevenLabs ASR is in batch mode and should not enter streaming mode");
+                    Ok(())
+                } else {
+                    log::info!(
+                        "Starting ASR stream [ElevenLabs Realtime] ({} Hz, {} ch, model={}, lang={})",
+                        sample_rate,
+                        channels,
+                        config.elevenlabs_realtime_model,
+                        if config.elevenlabs_language.trim().is_empty() {
+                            "auto"
+                        } else {
+                            config.elevenlabs_language.as_str()
+                        },
+                    );
+                    let client = ElevenLabsRealtimeClient::new(config);
                     let on_event = on_event.clone();
                     client
                         .stream_session(

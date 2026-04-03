@@ -13,6 +13,7 @@ import AsrGeminiSettings from '../components/asr/AsrGeminiSettings.vue'
 import AsrGeminiLiveSettings from '../components/asr/AsrGeminiLiveSettings.vue'
 import AsrCohereSettings from '../components/asr/AsrCohereSettings.vue'
 import AsrOpenAISettings from '../components/asr/AsrOpenAISettings.vue'
+import AsrElevenLabsSettings from '../components/asr/AsrElevenLabsSettings.vue'
 import AsrSonioxSettings from '../components/asr/AsrSonioxSettings.vue'
 import AsrColiSettings from '../components/asr/AsrColiSettings.vue'
 
@@ -87,6 +88,7 @@ const isGemini = computed(() => settingsStore.settings.asrProviderType === 'gemi
 const isGeminiLive = computed(() => settingsStore.settings.asrProviderType === 'gemini-live')
 const isCohere = computed(() => settingsStore.settings.asrProviderType === 'cohere')
 const isOpenAI = computed(() => settingsStore.settings.asrProviderType === 'openai')
+const isElevenLabs = computed(() => settingsStore.settings.asrProviderType === 'elevenlabs')
 const isSoniox = computed(() => settingsStore.settings.asrProviderType === 'soniox')
 const isColi = computed(() => settingsStore.settings.asrProviderType === 'coli')
 const diagnosticsEnabled = computed(() => settingsStore.settings.enableDiagnostics)
@@ -339,6 +341,7 @@ const maxRecordingMinutes = computed({
     <AsrGeminiLiveSettings v-if="isGeminiLive" />
     <AsrCohereSettings v-if="isCohere" />
     <AsrOpenAISettings v-if="isOpenAI" />
+    <AsrElevenLabsSettings v-if="isElevenLabs" />
     <AsrSonioxSettings v-if="isSoniox" />
     <AsrColiSettings
       v-if="isColi"

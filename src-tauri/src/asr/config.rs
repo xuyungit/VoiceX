@@ -12,6 +12,7 @@ pub enum AsrProviderType {
     GeminiLive,
     Cohere,
     OpenAI,
+    ElevenLabs,
     Soniox,
     Coli,
 }
@@ -32,10 +33,74 @@ impl AsrProviderType {
             Self::GeminiLive => "Gemini Live",
             Self::Cohere => "Cohere",
             Self::OpenAI => "OpenAI Realtime",
+            Self::ElevenLabs => "ElevenLabs",
             Self::Soniox => "Soniox",
             Self::Coli => "coli",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ElevenLabsRecognitionMode {
+    Realtime,
+    Batch,
+}
+
+impl Default for ElevenLabsRecognitionMode {
+    fn default() -> Self {
+        Self::Realtime
+    }
+}
+
+impl ElevenLabsRecognitionMode {
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "batch" => Self::Batch,
+            _ => Self::Realtime,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Realtime => "realtime",
+            Self::Batch => "batch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ElevenLabsPostRecordingRefine {
+    Off,
+    BatchRefine,
+}
+
+impl Default for ElevenLabsPostRecordingRefine {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+impl ElevenLabsPostRecordingRefine {
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "batch_refine" => Self::BatchRefine,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::BatchRefine => "batch_refine",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsrProviderCapabilities {
+    pub supports_realtime: bool,
+    pub supports_batch: bool,
+    pub supports_post_recording_batch_refine: bool,
 }
 
 /// ASR service configuration
@@ -81,6 +146,15 @@ pub struct AsrConfig {
     pub openai_asr_language: String,
     pub openai_asr_prompt: String,
     pub openai_asr_mode: String,
+
+    // ElevenLabs Speech-to-Text settings
+    pub elevenlabs_api_key: String,
+    pub elevenlabs_recognition_mode: ElevenLabsRecognitionMode,
+    pub elevenlabs_post_recording_refine: ElevenLabsPostRecordingRefine,
+    pub elevenlabs_realtime_model: String,
+    pub elevenlabs_batch_model: String,
+    pub elevenlabs_language: String,
+    pub elevenlabs_enable_keyterms: bool,
 
     // Soniox real-time ASR settings
     pub soniox_api_key: String,
@@ -152,6 +226,13 @@ impl Default for AsrConfig {
             openai_asr_language: String::new(),
             openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
             openai_asr_mode: "batch".to_string(),
+            elevenlabs_api_key: String::new(),
+            elevenlabs_recognition_mode: ElevenLabsRecognitionMode::Realtime,
+            elevenlabs_post_recording_refine: ElevenLabsPostRecordingRefine::Off,
+            elevenlabs_realtime_model: "scribe_v2_realtime".to_string(),
+            elevenlabs_batch_model: "scribe_v2".to_string(),
+            elevenlabs_language: String::new(),
+            elevenlabs_enable_keyterms: true,
             soniox_api_key: String::new(),
             soniox_model: "stt-rt-v4".to_string(),
             soniox_language: String::new(),
@@ -188,11 +269,12 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             "gemini-live" => AsrProviderType::GeminiLive,
             "cohere" => AsrProviderType::Cohere,
             "openai" => AsrProviderType::OpenAI,
+            "elevenlabs" => AsrProviderType::ElevenLabs,
             "soniox" => AsrProviderType::Soniox,
             "coli" => AsrProviderType::Coli,
             _ => AsrProviderType::Volcengine,
         };
-        Self {
+        let mut config = Self {
             provider_type,
             ws_url: settings.asr_ws_url.clone(),
             app_key: settings.asr_app_key.clone(),
@@ -221,6 +303,17 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             openai_asr_language: settings.openai_asr_language.clone(),
             openai_asr_prompt: settings.openai_asr_prompt.clone(),
             openai_asr_mode: settings.openai_asr_mode.clone(),
+            elevenlabs_api_key: settings.elevenlabs_api_key.clone(),
+            elevenlabs_recognition_mode: ElevenLabsRecognitionMode::from_str(
+                &settings.elevenlabs_recognition_mode,
+            ),
+            elevenlabs_post_recording_refine: ElevenLabsPostRecordingRefine::from_str(
+                &settings.elevenlabs_post_recording_refine,
+            ),
+            elevenlabs_realtime_model: settings.elevenlabs_realtime_model.clone(),
+            elevenlabs_batch_model: settings.elevenlabs_batch_model.clone(),
+            elevenlabs_language: settings.elevenlabs_language.clone(),
+            elevenlabs_enable_keyterms: settings.elevenlabs_enable_keyterms,
             soniox_api_key: settings.soniox_api_key.clone(),
             soniox_model: settings.soniox_model.clone(),
             soniox_language: settings.soniox_language.clone(),
@@ -259,11 +352,83 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             },
             enable_context: settings.enable_asr_context,
             enable_diagnostics: settings.enable_diagnostics,
-        }
+        };
+        config.normalize_provider_settings();
+        config
     }
 }
 
 impl AsrConfig {
+    fn normalize_provider_settings(&mut self) {
+        if self.provider_type == AsrProviderType::ElevenLabs
+            && self.elevenlabs_recognition_mode == ElevenLabsRecognitionMode::Batch
+        {
+            self.elevenlabs_post_recording_refine = ElevenLabsPostRecordingRefine::Off;
+        }
+    }
+
+    pub fn capabilities(&self) -> AsrProviderCapabilities {
+        match self.provider_type {
+            AsrProviderType::Volcengine => AsrProviderCapabilities {
+                supports_realtime: true,
+                supports_batch: false,
+                supports_post_recording_batch_refine: false,
+            },
+            AsrProviderType::Google => AsrProviderCapabilities {
+                supports_realtime: true,
+                supports_batch: false,
+                supports_post_recording_batch_refine: false,
+            },
+            AsrProviderType::Qwen => AsrProviderCapabilities {
+                supports_realtime: true,
+                supports_batch: false,
+                supports_post_recording_batch_refine: false,
+            },
+            AsrProviderType::Gemini => AsrProviderCapabilities {
+                supports_realtime: false,
+                supports_batch: true,
+                supports_post_recording_batch_refine: false,
+            },
+            AsrProviderType::GeminiLive => AsrProviderCapabilities {
+                supports_realtime: true,
+                supports_batch: false,
+                supports_post_recording_batch_refine: false,
+            },
+            AsrProviderType::Cohere => AsrProviderCapabilities {
+                supports_realtime: false,
+                supports_batch: true,
+                supports_post_recording_batch_refine: false,
+            },
+            AsrProviderType::OpenAI => AsrProviderCapabilities {
+                supports_realtime: true,
+                supports_batch: true,
+                supports_post_recording_batch_refine: false,
+            },
+            AsrProviderType::ElevenLabs => AsrProviderCapabilities {
+                supports_realtime: true,
+                supports_batch: true,
+                supports_post_recording_batch_refine: true,
+            },
+            AsrProviderType::Soniox => AsrProviderCapabilities {
+                supports_realtime: true,
+                supports_batch: false,
+                supports_post_recording_batch_refine: false,
+            },
+            AsrProviderType::Coli => AsrProviderCapabilities {
+                supports_realtime: true,
+                supports_batch: true,
+                supports_post_recording_batch_refine: false,
+            },
+        }
+    }
+
+    pub fn post_recording_batch_refine_enabled(&self) -> bool {
+        self.capabilities().supports_post_recording_batch_refine
+            && self.elevenlabs_recognition_mode == ElevenLabsRecognitionMode::Realtime
+            && self.elevenlabs_post_recording_refine
+                == ElevenLabsPostRecordingRefine::BatchRefine
+    }
+
     /// Returns true when the provider does not support streaming and requires
     /// the complete audio file before recognition can start.
     pub fn is_batch(&self) -> bool {
@@ -273,6 +438,9 @@ impl AsrConfig {
             AsrProviderType::GeminiLive => false,
             AsrProviderType::Cohere => true,
             AsrProviderType::OpenAI => self.openai_asr_mode != "realtime",
+            AsrProviderType::ElevenLabs => {
+                self.elevenlabs_recognition_mode == ElevenLabsRecognitionMode::Batch
+            }
             AsrProviderType::Soniox => false,
             _ => false,
         }
@@ -309,6 +477,19 @@ impl AsrConfig {
                 !self.openai_asr_api_key.is_empty()
                     && !self.openai_asr_model.is_empty()
                     && !self.openai_asr_base_url.is_empty()
+            }
+            AsrProviderType::ElevenLabs => {
+                !self.elevenlabs_api_key.trim().is_empty()
+                    && match self.elevenlabs_recognition_mode {
+                        ElevenLabsRecognitionMode::Realtime => {
+                            !self.elevenlabs_realtime_model.trim().is_empty()
+                                && (!self.post_recording_batch_refine_enabled()
+                                    || !self.elevenlabs_batch_model.trim().is_empty())
+                        }
+                        ElevenLabsRecognitionMode::Batch => {
+                            !self.elevenlabs_batch_model.trim().is_empty()
+                        }
+                    }
             }
             AsrProviderType::Soniox => !self.soniox_api_key.is_empty(),
             AsrProviderType::Coli => {

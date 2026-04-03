@@ -1,9 +1,11 @@
 use serde_json::json;
+use std::path::PathBuf;
 
 use crate::{
     asr::{
         AsrConfig, AsrEvent, AsrFailure, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
-        ColiRefinementMode, GeminiTranscriptionClient, OpenAITranscriptionClient,
+        ColiRefinementMode, ElevenLabsTranscriptionClient, GeminiTranscriptionClient,
+        OpenAITranscriptionClient,
     },
     state::{AppState, HotkeySessionState, ProcessingIntent},
 };
@@ -299,11 +301,15 @@ impl SessionController {
             return;
         }
         if self.should_defer_injection_until_asr_finished(state) {
-            log::info!("Inject defer: waiting for ASR stream to finish before local refinement");
+            log::info!("Inject defer: waiting for ASR stream to finish before post-recording refinement");
             return;
         }
         if self.should_run_coli_refinement(state) && !state.asr_refinement_done {
             self.start_coli_refinement(state);
+            return;
+        }
+        if self.should_run_elevenlabs_batch_refinement(state) && !state.asr_refinement_done {
+            self.start_elevenlabs_batch_refinement(state);
             return;
         }
         if !state.has_final_result {
@@ -525,6 +531,25 @@ impl SessionController {
             && config.coli_final_refinement_mode != ColiRefinementMode::Off
     }
 
+    fn should_run_elevenlabs_batch_refinement(&self, state: &AppState) -> bool {
+        if state.is_recording || !state.asr_stream_finished {
+            return false;
+        }
+
+        let settings = match crate::storage::get_settings() {
+            Ok(settings) => settings,
+            Err(err) => {
+                log::warn!(
+                    "ElevenLabs batch refine skipped, failed to load settings: {}",
+                    err
+                );
+                return false;
+            }
+        };
+        let config = AsrConfig::from(&settings);
+        config.post_recording_batch_refine_enabled()
+    }
+
     fn should_defer_injection_until_asr_finished(&self, state: &AppState) -> bool {
         if state.is_recording || state.asr_stream_finished || state.asr_refinement_done {
             return false;
@@ -541,8 +566,9 @@ impl SessionController {
             }
         };
         let config = AsrConfig::from(&settings);
-        config.provider_type == AsrProviderType::Coli
-            && config.coli_final_refinement_mode != ColiRefinementMode::Off
+        (config.provider_type == AsrProviderType::Coli
+            && config.coli_final_refinement_mode != ColiRefinementMode::Off)
+            || config.post_recording_batch_refine_enabled()
     }
 
     fn start_coli_refinement(&self, state: &mut AppState) {
@@ -583,6 +609,7 @@ impl SessionController {
         }
 
         state.asr_refinement_in_progress = true;
+        state.active_asr_refinement_provider = Some(AsrProviderType::Coli);
         self.send_message(SessionMessage::CorrectingStart);
         if !state.session_final_text.trim().is_empty() {
             self.emit_transcript(&state.session_final_text, true);
@@ -631,39 +658,177 @@ impl SessionController {
         });
     }
 
+    fn start_elevenlabs_batch_refinement(&self, state: &mut AppState) {
+        let settings = match crate::storage::get_settings() {
+            Ok(settings) => settings,
+            Err(err) => {
+                log::warn!(
+                    "ElevenLabs batch refine skipped, failed to load settings: {}",
+                    err
+                );
+                state.active_asr_refinement_provider = Some(AsrProviderType::ElevenLabs);
+                self.on_asr_refinement_failed_state(state, err.to_string());
+                return;
+            }
+        };
+        let config = AsrConfig::from(&settings);
+        if !config.post_recording_batch_refine_enabled() {
+            log::info!("ELEVENLABS_REFINE skipped reason=mode_off");
+            state.asr_refinement_done = true;
+            self.maybe_inject_final_state(state);
+            return;
+        }
+
+        let audio_path = match elevenlabs_batch_refine_audio_path(state) {
+            Some(path) => path,
+            None => {
+                log::warn!("ELEVENLABS_REFINE skipped reason=no_audio_path");
+                state.active_asr_refinement_provider = Some(AsrProviderType::ElevenLabs);
+                self.on_asr_refinement_failed_state(
+                    state,
+                    "ElevenLabs batch refine audio file is missing".to_string(),
+                );
+                return;
+            }
+        };
+
+        state.asr_refinement_in_progress = true;
+        state.active_asr_refinement_provider = Some(AsrProviderType::ElevenLabs);
+        state.session_asr_model_name =
+            crate::services::history_service::HistoryService::elevenlabs_realtime_model_name(
+                &config.elevenlabs_realtime_model,
+            );
+        self.send_message(SessionMessage::CorrectingStart);
+        if !state.session_final_text.trim().is_empty() {
+            self.emit_transcript(&state.session_final_text, true);
+        }
+
+        let model_name =
+            crate::services::history_service::HistoryService::elevenlabs_realtime_batch_refine_model_name(
+                &config.elevenlabs_realtime_model,
+                &config.elevenlabs_batch_model,
+            );
+        log::info!(
+            "Starting ElevenLabs batch refine with model={} on {}",
+            model_name.as_deref().unwrap_or("unknown"),
+            audio_path.display()
+        );
+        log::info!(
+            "ELEVENLABS_REFINE start model={} audio_path={} stream_final_len={}",
+            model_name.as_deref().unwrap_or("unknown"),
+            audio_path.display(),
+            state.session_final_text.chars().count()
+        );
+
+        let controller = self.clone();
+        let refinement_epoch = self
+            .injection_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        tauri::async_runtime::spawn(async move {
+            let client = ElevenLabsTranscriptionClient::new(config.clone());
+            match client.transcribe_file(&audio_path).await {
+                Ok(text) => {
+                    let refined = text.trim().to_string();
+                    if refined.is_empty() {
+                        controller.send_message(SessionMessage::AsrRefinementFailed {
+                            reason: "ElevenLabs batch refine returned empty result".to_string(),
+                            refinement_epoch,
+                        });
+                    } else {
+                        controller.send_message(SessionMessage::AsrRefinementDone {
+                            text: Some(refined),
+                            model_name,
+                            refinement_epoch,
+                        });
+                    }
+                }
+                Err(err) => controller.send_message(SessionMessage::AsrRefinementFailed {
+                    reason: err.to_string(),
+                    refinement_epoch,
+                }),
+            }
+        });
+    }
+
     pub fn on_asr_refinement_done_state(
         &self,
         state: &mut AppState,
         text: Option<String>,
         model_name: Option<String>,
     ) {
+        let refinement_provider = state.active_asr_refinement_provider.take();
         state.asr_refinement_in_progress = false;
         state.asr_refinement_done = true;
 
         match text.map(|text| text.trim().to_string()) {
             Some(refined) if !refined.is_empty() => {
-                log::info!(
-                    "ASR refinement completed (len={}, model={})",
-                    refined.chars().count(),
-                    model_name.as_deref().unwrap_or("unknown")
-                );
-                log::info!(
-                    "COLI_REFINE success model={} refined_len={} stream_replaced=true",
-                    model_name.as_deref().unwrap_or("unknown"),
-                    refined.chars().count()
-                );
+                match refinement_provider {
+                    Some(AsrProviderType::Coli) => {
+                        log::info!(
+                            "ASR refinement completed (len={}, model={})",
+                            refined.chars().count(),
+                            model_name.as_deref().unwrap_or("unknown")
+                        );
+                        log::info!(
+                            "COLI_REFINE success model={} refined_len={} stream_replaced=true",
+                            model_name.as_deref().unwrap_or("unknown"),
+                            refined.chars().count()
+                        );
+                    }
+                    Some(AsrProviderType::ElevenLabs) => {
+                        log::info!(
+                            "ElevenLabs batch refine completed (len={}, model={})",
+                            refined.chars().count(),
+                            model_name.as_deref().unwrap_or("unknown")
+                        );
+                        log::info!(
+                            "ELEVENLABS_REFINE success model={} refined_len={} stream_replaced=true",
+                            model_name.as_deref().unwrap_or("unknown"),
+                            refined.chars().count()
+                        );
+                    }
+                    _ => {
+                        log::info!(
+                            "ASR refinement completed (len={}, model={})",
+                            refined.chars().count(),
+                            model_name.as_deref().unwrap_or("unknown")
+                        );
+                    }
+                }
                 state.session_final_text = refined.clone();
                 state.transcript_text = refined.clone();
                 state.last_injected_text = refined.clone();
                 state.has_final_result = true;
                 if let Some(model_name) = model_name {
-                    state.session_asr_model_name = Some(format!("Local / coli / {}", model_name));
+                    state.session_asr_model_name = Some(match refinement_provider {
+                        Some(AsrProviderType::Coli) => {
+                            format!("Local / coli / {}", model_name)
+                        }
+                        _ => model_name,
+                    });
                 }
                 self.emit_transcript(&refined, true);
             }
             _ => {
-                log::info!("ASR refinement completed with empty result; keeping streaming final");
-                log::info!("COLI_REFINE empty_result keeping_stream_final=true");
+                match refinement_provider {
+                    Some(AsrProviderType::Coli) => {
+                        log::info!(
+                            "ASR refinement completed with empty result; keeping streaming final"
+                        );
+                        log::info!("COLI_REFINE empty_result keeping_stream_final=true");
+                    }
+                    Some(AsrProviderType::ElevenLabs) => {
+                        log::info!(
+                            "ElevenLabs batch refine completed with empty result; keeping streaming final"
+                        );
+                        log::info!("ELEVENLABS_REFINE empty_result keeping_stream_final=true");
+                    }
+                    _ => {
+                        log::info!(
+                            "ASR refinement completed with empty result; keeping streaming final"
+                        );
+                    }
+                }
             }
         }
 
@@ -672,14 +837,57 @@ impl SessionController {
     }
 
     pub fn on_asr_refinement_failed_state(&self, state: &mut AppState, reason: String) {
-        log::warn!(
-            "ASR refinement failed; falling back to streaming final: {}",
-            reason
-        );
-        log::warn!(
-            "COLI_REFINE failed fallback_to_streaming=true reason={}",
-            reason
-        );
+        let refinement_provider = state.active_asr_refinement_provider.take();
+        match refinement_provider {
+            Some(AsrProviderType::Coli) => {
+                log::warn!(
+                    "ASR refinement failed; falling back to streaming final: {}",
+                    reason
+                );
+                log::warn!(
+                    "COLI_REFINE failed fallback_to_streaming=true reason={}",
+                    reason
+                );
+            }
+            Some(AsrProviderType::ElevenLabs) => {
+                log::warn!(
+                    "ElevenLabs batch refine failed; falling back to streaming final: {}",
+                    reason
+                );
+                log::warn!(
+                    "ELEVENLABS_REFINE failed fallback_to_streaming={} reason={}",
+                    has_stream_fallback_result(state),
+                    reason
+                );
+                if has_stream_fallback_result(state) {
+                    state.session_asr_model_name = crate::storage::get_settings()
+                        .ok()
+                        .and_then(|settings| {
+                            crate::services::history_service::HistoryService::elevenlabs_realtime_model_name(
+                                &settings.elevenlabs_realtime_model,
+                            )
+                        });
+                }
+                let message = elevenlabs_refine_failure_message(state);
+                self.emit_asr_error(message);
+                if should_surface_terminal_elevenlabs_refine_failure(state) {
+                    state.asr_refinement_in_progress = false;
+                    state.asr_refinement_done = true;
+                    state.terminal_error_message = Some(message.to_string());
+                    state.terminal_asr_failure = None;
+                    self.send_message(SessionMessage::CorrectingStop);
+                    self.cancel_audio_level_task();
+                    self.schedule_error_cleanup();
+                    return;
+                }
+            }
+            _ => {
+                log::warn!(
+                    "ASR refinement failed; falling back to streaming final: {}",
+                    reason
+                );
+            }
+        }
         state.asr_refinement_in_progress = false;
         state.asr_refinement_done = true;
         self.send_message(SessionMessage::CorrectingStop);
@@ -698,7 +906,7 @@ impl SessionController {
             Some(path) => path,
             None => {
                 log::warn!("Batch ASR skipped: no audio path available");
-                self.hide_hud_and_reset_state(state);
+                self.fail_batch_asr_state(state, "批量识别失败：录音文件缺失".to_string());
                 return;
             }
         };
@@ -707,14 +915,20 @@ impl SessionController {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Batch ASR skipped, failed to load settings: {}", e);
-                self.hide_hud_and_reset_state(state);
+                self.fail_batch_asr_state(
+                    state,
+                    format!("批量识别失败：无法加载设置 ({})", e),
+                );
                 return;
             }
         };
         let config = AsrConfig::from(&settings);
         if !config.is_valid() {
             log::warn!("Batch ASR config invalid, skipping");
-            self.hide_hud_and_reset_state(state);
+            self.fail_batch_asr_state(
+                state,
+                "批量识别失败：当前 ASR 服务配置不完整".to_string(),
+            );
             return;
         }
 
@@ -820,6 +1034,33 @@ impl SessionController {
                         }
                     }
                 }
+                AsrProviderType::ElevenLabs => {
+                    let client = ElevenLabsTranscriptionClient::new(config.clone());
+                    match client.transcribe_file(&audio_path).await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            controller.send_message(SessionMessage::BatchAsrDone {
+                                text,
+                                model_name: Some(format!(
+                                    "ElevenLabs / {}",
+                                    config.elevenlabs_batch_model.trim()
+                                )),
+                                batch_epoch,
+                            });
+                        }
+                        Ok(_) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: "Batch ASR returned empty result".to_string(),
+                                batch_epoch,
+                            });
+                        }
+                        Err(e) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: e.to_string(),
+                                batch_epoch,
+                            });
+                        }
+                    }
+                }
                 AsrProviderType::Gemini => {
                     let client = GeminiTranscriptionClient::new(config.clone());
                     match client.transcribe_file(&audio_path).await {
@@ -873,10 +1114,8 @@ impl SessionController {
 
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() {
-            log::info!("Batch ASR returned empty result; closing HUD");
-            self.discard_session_audio_file(state, "batch_asr_empty");
-            self.discard_session_refinement_audio_file(state, "batch_asr_empty");
-            self.hide_hud_and_reset_state(state);
+            log::info!("Batch ASR returned empty result; surfacing visible failure");
+            self.fail_batch_asr_state(state, "批量识别失败：服务返回空结果".to_string());
             return;
         }
 
@@ -905,8 +1144,109 @@ impl SessionController {
             hud.emit_recognizing(false);
         }
 
-        self.discard_session_audio_file(state, "batch_asr_failed");
-        self.discard_session_refinement_audio_file(state, "batch_asr_failed");
-        self.hide_hud_and_reset_state(state);
+        self.fail_batch_asr_state(state, format_batch_asr_failure_message(reason.as_str()));
     }
+
+    fn fail_batch_asr_state(&self, state: &mut AppState, message: String) {
+        state.terminal_error_message = Some(message.clone());
+        state.terminal_asr_failure = None;
+        state.has_final_result = false;
+        state.asr_stream_finished = true;
+        self.emit_asr_error(&message);
+        self.cancel_audio_level_task();
+        self.schedule_error_cleanup();
+    }
+}
+
+fn elevenlabs_batch_refine_audio_path(state: &AppState) -> Option<PathBuf> {
+    match state.session_audio_path.clone() {
+        Some(path) if path.is_file() => Some(path),
+        _ => None,
+    }
+}
+
+fn has_stream_fallback_result(state: &AppState) -> bool {
+    state.has_final_result && !state.session_final_text.trim().is_empty()
+}
+
+fn should_surface_terminal_elevenlabs_refine_failure(state: &AppState) -> bool {
+    !has_stream_fallback_result(state)
+}
+
+fn elevenlabs_refine_failure_message(state: &AppState) -> &'static str {
+    if has_stream_fallback_result(state) {
+        "ElevenLabs 精修失败，已保留实时结果"
+    } else {
+        "ElevenLabs 精修失败，且未保留到实时结果"
+    }
+}
+
+fn format_batch_asr_failure_message(reason: &str) -> String {
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        "批量识别失败".to_string()
+    } else {
+        format!("批量识别失败：{}", trimmed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        elevenlabs_refine_failure_message, format_batch_asr_failure_message,
+        should_surface_terminal_elevenlabs_refine_failure,
+    };
+    use crate::state::AppState;
+
+    #[test]
+    fn elevenlabs_refine_failure_message_mentions_stream_fallback_when_available() {
+        let mut state = AppState::new();
+        state.has_final_result = true;
+        state.session_final_text = "hello world".to_string();
+
+        assert_eq!(
+            elevenlabs_refine_failure_message(&state),
+            "ElevenLabs 精修失败，已保留实时结果"
+        );
+    }
+
+    #[test]
+    fn elevenlabs_refine_failure_message_mentions_missing_fallback_when_no_final() {
+        let state = AppState::new();
+
+        assert_eq!(
+            elevenlabs_refine_failure_message(&state),
+            "ElevenLabs 精修失败，且未保留到实时结果"
+        );
+    }
+
+    #[test]
+    fn elevenlabs_refine_failure_without_stream_result_is_terminal() {
+        let state = AppState::new();
+
+        assert!(should_surface_terminal_elevenlabs_refine_failure(&state));
+    }
+
+    #[test]
+    fn elevenlabs_refine_failure_with_stream_result_is_not_terminal() {
+        let mut state = AppState::new();
+        state.has_final_result = true;
+        state.session_final_text = "fallback".to_string();
+
+        assert!(!should_surface_terminal_elevenlabs_refine_failure(&state));
+    }
+
+    #[test]
+    fn batch_failure_message_formats_reason() {
+        assert_eq!(
+            format_batch_asr_failure_message("quota exceeded"),
+            "批量识别失败：quota exceeded"
+        );
+    }
+
+    #[test]
+    fn batch_failure_message_handles_empty_reason() {
+        assert_eq!(format_batch_asr_failure_message("  "), "批量识别失败");
+    }
+
 }

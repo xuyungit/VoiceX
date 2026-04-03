@@ -181,6 +181,9 @@ fn classify_message(
             "unauthorized",
             "forbidden",
             "invalid api key",
+            "invalid_api_key",
+            "missing_api_key",
+            "auth_error",
             "authentication",
             "auth failed",
         ],
@@ -198,12 +201,36 @@ fn classify_message(
             "project id and service account key are required",
             "api key is required",
             "invalid service account json",
+            "input_error",
+            "chunk_size_exceeded",
+            "insufficient_audio_activity",
+            "session_time_limit_exceeded",
         ],
     ) {
         return (AsrFailureKind::Config, false, None);
     }
 
-    if contains_any(lower, &["429", "rate limit", "too many requests", "quota"]) {
+    if contains_any(
+        lower,
+        &[
+            "429",
+            "rate limit",
+            "rate_limit_exceeded",
+            "concurrent_limit_exceeded",
+            "too many requests",
+            "quota",
+            "quota_exceeded",
+            "rate_limited",
+            "commit_throttled",
+            "queue_overflow",
+            "resource_exhausted",
+            "insufficient credits",
+            "insufficient_credits",
+            "payment required",
+            "payment_required",
+            "system_busy",
+        ],
+    ) {
         return (AsrFailureKind::RateLimited, true, None);
     }
 
@@ -214,6 +241,7 @@ fn classify_message(
             "503",
             "504",
             "service unavailable",
+            "service_unavailable",
             "bad gateway",
             "gateway timeout",
         ],

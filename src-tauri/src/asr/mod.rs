@@ -1,12 +1,15 @@
 //! ASR (Automatic Speech Recognition) module
 //!
 //! Handles communication with ASR services (Volcengine, Google Cloud Speech-to-Text,
-//! Qwen realtime ASR, Gemini/Cohere/OpenAI audio transcription, and local `coli` offline ASR.
+//! Qwen realtime ASR, Gemini/Cohere/OpenAI/ElevenLabs audio transcription, and local `coli`
+//! offline ASR.
 
 pub mod audio_utils;
 mod client;
 pub mod cohere_client;
 pub mod coli_client;
+pub mod elevenlabs_client;
+pub mod elevenlabs_realtime_client;
 mod config;
 pub mod gemini_client;
 pub mod gemini_live_client;
@@ -25,7 +28,12 @@ pub use coli_client::{
     is_ffmpeg_available, probe_coli_status, resolve_coli_command, ColiAsrClient, ColiAsrStatus,
     ColiRefinementMode,
 };
-pub use config::{AsrConfig, AsrProviderType};
+pub use elevenlabs_client::ElevenLabsTranscriptionClient;
+pub use elevenlabs_realtime_client::ElevenLabsRealtimeClient;
+pub use config::{
+    AsrConfig, AsrProviderCapabilities, AsrProviderType, ElevenLabsPostRecordingRefine,
+    ElevenLabsRecognitionMode,
+};
 pub use gemini_client::GeminiTranscriptionClient;
 pub use gemini_live_client::GeminiLiveClient;
 pub use google_client::GoogleSttClient;
