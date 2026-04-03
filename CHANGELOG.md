@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.2] - 2026-04-04
+
+### Added
+- **ElevenLabs Speech-to-Text** — new ASR provider with realtime streaming, batch transcription, and optional post-recording batch refine flow.
+- **ElevenLabs re-transcription and provider probe support** — saved recordings and provider checks can now exercise the ElevenLabs pipeline directly.
+
+### Changed
+- Expanded VoiceX from nine to ten ASR backends.
+- Updated the settings UI and provider documentation to reflect ElevenLabs mode selection, model selection, language hints, and keyterm support.
+
+### Fixed
+- Improved failure handling for ElevenLabs batch and refine flows so errors stay visible and do not silently collapse the recording lifecycle.
+- Disabling diagnostics now clears Soniox debug overrides immediately, preventing stale fault injection or mock-server state from leaking into later sessions.
+
 ## [0.9.1] - 2026-03-31
 
 ### Added
