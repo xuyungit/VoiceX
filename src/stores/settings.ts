@@ -337,6 +337,18 @@ export const useSettingsStore = defineStore('settings', () => {
         }
     }, { deep: true })
 
+    watch(
+        () => settings.value.enableDiagnostics,
+        (enabled, previous) => {
+            if (isLoading.value || enabled || previous === undefined) {
+                return
+            }
+            invoke('clear_soniox_debug_overrides').catch((error) => {
+                console.error('Failed to clear Soniox debug overrides:', error)
+            })
+        }
+    )
+
     // Update a single setting
     function updateSetting<K extends keyof AppSettings>(key: K, value: AppSettings[K]) {
         settings.value[key] = value

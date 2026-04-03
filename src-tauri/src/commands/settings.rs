@@ -446,11 +446,12 @@ pub fn save_settings(
     app: AppHandle,
     session: State<'_, SessionController>,
     sync: State<'_, SyncService>,
+    debug: State<'_, AsrDebugService>,
 ) -> Result<(), String> {
     let current_settings = crate::storage::get_settings().map_err(|e| e.to_string())?;
     settings.ui_language = crate::ui_locale::normalize_ui_language(&settings.ui_language);
-
     normalize_elevenlabs_settings(&mut settings);
+
     let text_changed = settings.dictionary_text != current_settings.dictionary_text;
     let ui_language_changed = settings.ui_language != current_settings.ui_language;
     if text_changed {
@@ -465,6 +466,10 @@ pub fn save_settings(
     }
 
     crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+
+    if !settings.enable_diagnostics {
+        debug.clear_soniox_debug_overrides_now()?;
+    }
 
     if ui_language_changed {
         let resolved_locale = crate::ui_locale::resolve_ui_locale(&settings.ui_language);

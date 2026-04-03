@@ -139,6 +139,22 @@ impl AsrDebugService {
         Ok(())
     }
 
+    pub fn clear_soniox_debug_overrides_now(&self) -> Result<(), String> {
+        let handle = {
+            let mut inner = self.inner.lock().map_err(|_| "asr debug lock poisoned")?;
+            inner.soniox_fault_mode = None;
+            inner.soniox_ws_override = None;
+            inner.mock_server.take()
+        };
+
+        if let Some(mock) = handle {
+            mock.cancel.cancel();
+            mock.task.abort();
+        }
+
+        Ok(())
+    }
+
     pub async fn start_soniox_mock_server(
         &self,
         scenario: SonioxMockScenario,
@@ -212,11 +228,8 @@ impl AsrDebugService {
     }
 
     pub async fn clear_soniox_debug_overrides(&self) -> Result<SonioxDebugHarnessStatus, String> {
-        {
-            let mut inner = self.inner.lock().map_err(|_| "asr debug lock poisoned")?;
-            inner.soniox_fault_mode = None;
-        }
-        self.stop_mock_server().await
+        self.clear_soniox_debug_overrides_now()?;
+        Ok(self.status())
     }
 }
 

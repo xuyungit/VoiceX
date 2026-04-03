@@ -456,12 +456,10 @@ impl SonioxClient {
             .in_phase(AsrPhase::Finalizing)),
             Err(_) => {
                 let _ = ws_write.close().await;
-                Err(AsrError::ConnectionFailed(
-                    format!(
-                        "Soniox ASR timed out waiting for session finish after {} ms",
-                        completion_wait_ms
-                    ),
-                )
+                Err(AsrError::ConnectionFailed(format!(
+                    "Soniox ASR timed out waiting for session finish after {} ms",
+                    completion_wait_ms
+                ))
                 .in_phase(AsrPhase::Finalizing))
             }
         }

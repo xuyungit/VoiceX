@@ -105,6 +105,9 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     sync_service.init_with_handle(app.handle());
     let asr_debug_service: tauri::State<'_, AsrDebugService> = app.state();
     asr_debug_service.install_global();
+    if !persisted_settings.enable_diagnostics {
+        asr_debug_service.clear_soniox_debug_overrides_now()?;
+    }
     // Prepare HUD window ahead of time
     if let Err(err) = hud::create_hud_window(&app.handle()) {
         log::warn!("Failed to create HUD window: {}", err);
