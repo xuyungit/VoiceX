@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import {
+  buildBatchCapableRecognitionModeOptions,
+  buildPostRecordingBatchRefineOptions,
+} from '../../utils/providerOptions'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -10,6 +14,16 @@ const { t } = useI18n()
 const qwenAsrApiKey = computed({
   get: () => settingsStore.settings.qwenAsrApiKey,
   set: (v: string) => settingsStore.updateSetting('qwenAsrApiKey', v)
+})
+
+const qwenAsrRecognitionMode = computed({
+  get: () => settingsStore.settings.qwenAsrRecognitionMode,
+  set: (value: 'realtime' | 'batch') => {
+    settingsStore.updateSetting('qwenAsrRecognitionMode', value)
+    if (value === 'batch') {
+      settingsStore.updateSetting('qwenAsrPostRecordingRefine', false)
+    }
+  }
 })
 
 const qwenAsrModel = computed({
@@ -22,9 +36,25 @@ const qwenAsrWsUrl = computed({
   set: (v: string) => settingsStore.updateSetting('qwenAsrWsUrl', v)
 })
 
+const qwenAsrBatchModel = computed({
+  get: () => settingsStore.settings.qwenAsrBatchModel,
+  set: (v: string) => settingsStore.updateSetting('qwenAsrBatchModel', v)
+})
+
 const qwenAsrLanguage = computed({
   get: () => settingsStore.settings.qwenAsrLanguage,
   set: (v: string) => settingsStore.updateSetting('qwenAsrLanguage', v)
+})
+
+const qwenAsrPostRecordingRefine = computed({
+  get: (): 'off' | 'batch_refine' =>
+    settingsStore.settings.qwenAsrPostRecordingRefine ? 'batch_refine' : 'off',
+  set: (value: 'off' | 'batch_refine') => {
+    settingsStore.updateSetting(
+      'qwenAsrPostRecordingRefine',
+      qwenAsrRecognitionMode.value === 'realtime' && value === 'batch_refine'
+    )
+  }
 })
 
 const qwenModelOptions = computed(() => [
@@ -33,10 +63,25 @@ const qwenModelOptions = computed(() => [
   { label: t('asr.qwenModelSnapshot2'), value: 'qwen3-asr-flash-realtime-2025-10-27' },
 ])
 
+const qwenBatchModelOptions = computed(() => [
+  { label: t('asr.qwenBatchModelStable'), value: 'qwen3-asr-flash' },
+  { label: t('asr.qwenBatchModelSnapshot1'), value: 'qwen3-asr-flash-2025-09-08' },
+])
+
 const qwenWsUrlOptions = computed(() => [
   { label: t('asr.qwenEndpointBeijing'), value: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' },
   { label: t('asr.qwenEndpointSingapore'), value: 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime' },
 ])
+
+const recognitionModeOptions = computed(() => buildBatchCapableRecognitionModeOptions(t))
+const postRecordingRefineOptions = computed(() => buildPostRecordingBatchRefineOptions(t))
+const batchRefineDisabled = computed(() => qwenAsrRecognitionMode.value === 'batch')
+
+watch(qwenAsrRecognitionMode, (value) => {
+  if (value === 'batch' && qwenAsrPostRecordingRefine.value !== 'off') {
+    settingsStore.updateSetting('qwenAsrPostRecordingRefine', false)
+  }
+})
 </script>
 
 <template>
@@ -56,6 +101,18 @@ const qwenWsUrlOptions = computed(() => [
           type="password"
           show-password-on="click"
           placeholder="sk-..."
+          class="field-control"
+        />
+      </div>
+      <div class="field-row">
+        <div class="field-text">
+          <div class="field-label">{{ t('asr.recognitionMode') }}</div>
+          <div class="field-note">{{ t('asr.qwenRecognitionModeNote') }}</div>
+        </div>
+        <NSelect
+          v-model:value="qwenAsrRecognitionMode"
+          :options="recognitionModeOptions"
+          size="small"
           class="field-control"
         />
       </div>
@@ -95,6 +152,33 @@ const qwenWsUrlOptions = computed(() => [
         <NInput
           v-model:value="qwenAsrLanguage"
           placeholder="留空为自动检测"
+          class="field-control"
+        />
+      </div>
+      <div class="field-row">
+        <div class="field-text">
+          <div class="field-label">{{ t('asr.postRecordingRefine') }}</div>
+          <div class="field-note">{{ t('asr.qwenPostRecordingRefineNote') }}</div>
+        </div>
+        <NSelect
+          v-model:value="qwenAsrPostRecordingRefine"
+          :options="postRecordingRefineOptions"
+          :disabled="batchRefineDisabled"
+          size="small"
+          class="field-control"
+        />
+      </div>
+      <div class="field-row">
+        <div class="field-text">
+          <div class="field-label">{{ t('asr.qwenBatchModel') }}</div>
+          <div class="field-note">{{ t('asr.qwenBatchModelNote') }}</div>
+        </div>
+        <NSelect
+          v-model:value="qwenAsrBatchModel"
+          :options="qwenBatchModelOptions"
+          filterable
+          tag
+          size="small"
           class="field-control"
         />
       </div>

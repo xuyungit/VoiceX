@@ -8,9 +8,9 @@ pub mod audio_utils;
 mod client;
 pub mod cohere_client;
 pub mod coli_client;
+mod config;
 pub mod elevenlabs_client;
 pub mod elevenlabs_realtime_client;
-mod config;
 pub mod gemini_client;
 pub mod gemini_live_client;
 pub mod google_client;
@@ -19,6 +19,7 @@ pub mod openai_client;
 pub mod openai_realtime_client;
 mod protocol;
 pub mod qwen_client;
+pub mod qwen_transcription_client;
 pub mod soniox_client;
 pub mod volc_auth;
 
@@ -28,12 +29,12 @@ pub use coli_client::{
     is_ffmpeg_available, probe_coli_status, resolve_coli_command, ColiAsrClient, ColiAsrStatus,
     ColiRefinementMode,
 };
-pub use elevenlabs_client::ElevenLabsTranscriptionClient;
-pub use elevenlabs_realtime_client::ElevenLabsRealtimeClient;
 pub use config::{
     AsrConfig, AsrProviderCapabilities, AsrProviderType, ElevenLabsPostRecordingRefine,
-    ElevenLabsRecognitionMode,
+    ElevenLabsRecognitionMode, QwenRecognitionMode,
 };
+pub use elevenlabs_client::ElevenLabsTranscriptionClient;
+pub use elevenlabs_realtime_client::ElevenLabsRealtimeClient;
 pub use gemini_client::GeminiTranscriptionClient;
 pub use gemini_live_client::GeminiLiveClient;
 pub use google_client::GoogleSttClient;
@@ -41,4 +42,5 @@ pub use openai_client::OpenAITranscriptionClient;
 pub use openai_realtime_client::OpenAIRealtimeClient;
 pub use protocol::{AsrError, AsrEvent, AsrFailure, AsrFailureKind, AsrPhase};
 pub use qwen_client::QwenRealtimeClient;
+pub use qwen_transcription_client::QwenTranscriptionClient;
 pub use soniox_client::SonioxClient;

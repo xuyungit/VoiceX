@@ -5,7 +5,7 @@ use crate::{
     asr::{
         AsrConfig, AsrEvent, AsrFailure, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
         ColiRefinementMode, ElevenLabsTranscriptionClient, GeminiTranscriptionClient,
-        OpenAITranscriptionClient,
+        OpenAITranscriptionClient, QwenTranscriptionClient,
     },
     state::{AppState, HotkeySessionState, ProcessingIntent},
 };
@@ -177,7 +177,9 @@ impl SessionController {
             "ASR stream finished (has_final={}, len={}, refinement_mode_active={})",
             has_final,
             final_text_len,
-            self.should_run_coli_refinement(state),
+            self.should_run_coli_refinement(state)
+                || self.should_run_elevenlabs_batch_refinement(state)
+                || self.should_run_qwen_batch_refinement(state),
         );
         if !final_text_prev.is_empty() {
             log::debug!("ASR final preview: {}", final_text_prev);
@@ -301,7 +303,9 @@ impl SessionController {
             return;
         }
         if self.should_defer_injection_until_asr_finished(state) {
-            log::info!("Inject defer: waiting for ASR stream to finish before post-recording refinement");
+            log::info!(
+                "Inject defer: waiting for ASR stream to finish before post-recording refinement"
+            );
             return;
         }
         if self.should_run_coli_refinement(state) && !state.asr_refinement_done {
@@ -310,6 +314,10 @@ impl SessionController {
         }
         if self.should_run_elevenlabs_batch_refinement(state) && !state.asr_refinement_done {
             self.start_elevenlabs_batch_refinement(state);
+            return;
+        }
+        if self.should_run_qwen_batch_refinement(state) && !state.asr_refinement_done {
+            self.start_qwen_batch_refinement(state);
             return;
         }
         if !state.has_final_result {
@@ -698,7 +706,7 @@ impl SessionController {
             crate::services::history_service::HistoryService::elevenlabs_realtime_model_name(
                 &config.elevenlabs_realtime_model,
             );
-        self.send_message(SessionMessage::CorrectingStart);
+        self.emit_state_from(state);
         if !state.session_final_text.trim().is_empty() {
             self.emit_transcript(&state.session_final_text, true);
         }
@@ -732,6 +740,119 @@ impl SessionController {
                     if refined.is_empty() {
                         controller.send_message(SessionMessage::AsrRefinementFailed {
                             reason: "ElevenLabs batch refine returned empty result".to_string(),
+                            refinement_epoch,
+                        });
+                    } else {
+                        controller.send_message(SessionMessage::AsrRefinementDone {
+                            text: Some(refined),
+                            model_name,
+                            refinement_epoch,
+                        });
+                    }
+                }
+                Err(err) => controller.send_message(SessionMessage::AsrRefinementFailed {
+                    reason: err.to_string(),
+                    refinement_epoch,
+                }),
+            }
+        });
+    }
+
+    fn should_run_qwen_batch_refinement(&self, state: &AppState) -> bool {
+        if state.is_recording || !state.asr_stream_finished {
+            return false;
+        }
+
+        let settings = match crate::storage::get_settings() {
+            Ok(settings) => settings,
+            Err(err) => {
+                log::warn!(
+                    "Qwen batch refine skipped, failed to load settings: {}",
+                    err
+                );
+                return false;
+            }
+        };
+        let config = AsrConfig::from(&settings);
+        config.provider_type == AsrProviderType::Qwen
+            && config.post_recording_batch_refine_enabled()
+    }
+
+    fn start_qwen_batch_refinement(&self, state: &mut AppState) {
+        let settings = match crate::storage::get_settings() {
+            Ok(settings) => settings,
+            Err(err) => {
+                log::warn!(
+                    "Qwen batch refine skipped, failed to load settings: {}",
+                    err
+                );
+                state.active_asr_refinement_provider = Some(AsrProviderType::Qwen);
+                self.on_asr_refinement_failed_state(state, err.to_string());
+                return;
+            }
+        };
+        let config = AsrConfig::from(&settings);
+        if !config.post_recording_batch_refine_enabled() {
+            log::info!("QWEN_REFINE skipped reason=mode_off");
+            state.asr_refinement_done = true;
+            self.maybe_inject_final_state(state);
+            return;
+        }
+
+        let audio_path = match qwen_batch_refine_audio_path(state) {
+            Some(path) => path,
+            None => {
+                log::warn!("QWEN_REFINE skipped reason=no_audio_path");
+                state.active_asr_refinement_provider = Some(AsrProviderType::Qwen);
+                self.on_asr_refinement_failed_state(
+                    state,
+                    "Qwen batch refine audio file is missing".to_string(),
+                );
+                return;
+            }
+        };
+
+        state.asr_refinement_in_progress = true;
+        state.active_asr_refinement_provider = Some(AsrProviderType::Qwen);
+        state.session_asr_model_name =
+            crate::services::history_service::HistoryService::format_provider_model(
+                "Qwen",
+                &config.qwen_model,
+            );
+        self.emit_state_from(state);
+        if !state.session_final_text.trim().is_empty() {
+            self.emit_transcript(&state.session_final_text, true);
+        }
+
+        let model_name =
+            crate::services::history_service::HistoryService::qwen_realtime_batch_refine_model_name(
+                &config.qwen_model,
+                &config.qwen_batch_model,
+            );
+        log::info!(
+            "Starting Qwen batch refine with model={} on {}",
+            model_name.as_deref().unwrap_or("unknown"),
+            audio_path.display()
+        );
+        log::info!(
+            "QWEN_REFINE start model={} audio_path={} stream_final_len={}",
+            model_name.as_deref().unwrap_or("unknown"),
+            audio_path.display(),
+            state.session_final_text.chars().count()
+        );
+
+        let controller = self.clone();
+        let refinement_epoch = self
+            .injection_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
+        tauri::async_runtime::spawn(async move {
+            let client = QwenTranscriptionClient::new(config.clone());
+            match client.transcribe_file(&audio_path).await {
+                Ok(text) => {
+                    let refined = text.trim().to_string();
+                    if refined.is_empty() {
+                        controller.send_message(SessionMessage::AsrRefinementFailed {
+                            reason: "Qwen batch refine returned empty result".to_string(),
                             refinement_epoch,
                         });
                     } else {
@@ -787,6 +908,18 @@ impl SessionController {
                             refined.chars().count()
                         );
                     }
+                    Some(AsrProviderType::Qwen) => {
+                        log::info!(
+                            "Qwen batch refine completed (len={}, model={})",
+                            refined.chars().count(),
+                            model_name.as_deref().unwrap_or("unknown")
+                        );
+                        log::info!(
+                            "QWEN_REFINE success model={} refined_len={} stream_replaced=true",
+                            model_name.as_deref().unwrap_or("unknown"),
+                            refined.chars().count()
+                        );
+                    }
                     _ => {
                         log::info!(
                             "ASR refinement completed (len={}, model={})",
@@ -809,30 +942,41 @@ impl SessionController {
                 }
                 self.emit_transcript(&refined, true);
             }
-            _ => {
-                match refinement_provider {
-                    Some(AsrProviderType::Coli) => {
-                        log::info!(
-                            "ASR refinement completed with empty result; keeping streaming final"
-                        );
-                        log::info!("COLI_REFINE empty_result keeping_stream_final=true");
-                    }
-                    Some(AsrProviderType::ElevenLabs) => {
-                        log::info!(
+            _ => match refinement_provider {
+                Some(AsrProviderType::Coli) => {
+                    log::info!(
+                        "ASR refinement completed with empty result; keeping streaming final"
+                    );
+                    log::info!("COLI_REFINE empty_result keeping_stream_final=true");
+                }
+                Some(AsrProviderType::ElevenLabs) => {
+                    log::info!(
                             "ElevenLabs batch refine completed with empty result; keeping streaming final"
                         );
-                        log::info!("ELEVENLABS_REFINE empty_result keeping_stream_final=true");
-                    }
-                    _ => {
-                        log::info!(
-                            "ASR refinement completed with empty result; keeping streaming final"
-                        );
-                    }
+                    log::info!("ELEVENLABS_REFINE empty_result keeping_stream_final=true");
                 }
-            }
+                Some(AsrProviderType::Qwen) => {
+                    log::info!(
+                        "Qwen batch refine completed with empty result; keeping streaming final"
+                    );
+                    log::info!("QWEN_REFINE empty_result keeping_stream_final=true");
+                }
+                _ => {
+                    log::info!(
+                        "ASR refinement completed with empty result; keeping streaming final"
+                    );
+                }
+            },
         }
 
-        self.send_message(SessionMessage::CorrectingStop);
+        if matches!(
+            refinement_provider,
+            Some(AsrProviderType::ElevenLabs) | Some(AsrProviderType::Qwen)
+        ) {
+            self.emit_state_from(state);
+        } else {
+            self.send_message(SessionMessage::CorrectingStop);
+        }
         self.maybe_inject_final_state(state);
     }
 
@@ -875,7 +1019,39 @@ impl SessionController {
                     state.asr_refinement_done = true;
                     state.terminal_error_message = Some(message.to_string());
                     state.terminal_asr_failure = None;
-                    self.send_message(SessionMessage::CorrectingStop);
+                    self.emit_state_from(state);
+                    self.cancel_audio_level_task();
+                    self.schedule_error_cleanup();
+                    return;
+                }
+            }
+            Some(AsrProviderType::Qwen) => {
+                log::warn!(
+                    "Qwen batch refine failed; falling back to streaming final: {}",
+                    reason
+                );
+                log::warn!(
+                    "QWEN_REFINE failed fallback_to_streaming={} reason={}",
+                    has_stream_fallback_result(state),
+                    reason
+                );
+                if has_stream_fallback_result(state) {
+                    state.session_asr_model_name =
+                        crate::storage::get_settings().ok().and_then(|settings| {
+                            crate::services::history_service::HistoryService::format_provider_model(
+                                "Qwen",
+                                &settings.qwen_asr_model,
+                            )
+                        });
+                }
+                let message = qwen_refine_failure_message(state);
+                self.emit_asr_error(message);
+                if should_surface_terminal_qwen_refine_failure(state) {
+                    state.asr_refinement_in_progress = false;
+                    state.asr_refinement_done = true;
+                    state.terminal_error_message = Some(message.to_string());
+                    state.terminal_asr_failure = None;
+                    self.emit_state_from(state);
                     self.cancel_audio_level_task();
                     self.schedule_error_cleanup();
                     return;
@@ -890,7 +1066,14 @@ impl SessionController {
         }
         state.asr_refinement_in_progress = false;
         state.asr_refinement_done = true;
-        self.send_message(SessionMessage::CorrectingStop);
+        if matches!(
+            refinement_provider,
+            Some(AsrProviderType::ElevenLabs) | Some(AsrProviderType::Qwen)
+        ) {
+            self.emit_state_from(state);
+        } else {
+            self.send_message(SessionMessage::CorrectingStop);
+        }
         self.maybe_inject_final_state(state);
     }
 
@@ -915,20 +1098,14 @@ impl SessionController {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Batch ASR skipped, failed to load settings: {}", e);
-                self.fail_batch_asr_state(
-                    state,
-                    format!("批量识别失败：无法加载设置 ({})", e),
-                );
+                self.fail_batch_asr_state(state, format!("批量识别失败：无法加载设置 ({})", e));
                 return;
             }
         };
         let config = AsrConfig::from(&settings);
         if !config.is_valid() {
             log::warn!("Batch ASR config invalid, skipping");
-            self.fail_batch_asr_state(
-                state,
-                "批量识别失败：当前 ASR 服务配置不完整".to_string(),
-            );
+            self.fail_batch_asr_state(state, "批量识别失败：当前 ASR 服务配置不完整".to_string());
             return;
         }
 
@@ -1061,6 +1238,32 @@ impl SessionController {
                         }
                     }
                 }
+                AsrProviderType::Qwen => {
+                    let client = QwenTranscriptionClient::new(config.clone());
+                    match client.transcribe_file(&audio_path).await {
+                        Ok(text) if !text.trim().is_empty() => {
+                            controller.send_message(SessionMessage::BatchAsrDone {
+                                text,
+                                model_name: crate::services::history_service::HistoryService::qwen_batch_model_name(
+                                    &config.qwen_batch_model,
+                                ),
+                                batch_epoch,
+                            });
+                        }
+                        Ok(_) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: "Batch ASR returned empty result".to_string(),
+                                batch_epoch,
+                            });
+                        }
+                        Err(e) => {
+                            controller.send_message(SessionMessage::BatchAsrFailed {
+                                reason: e.to_string(),
+                                batch_epoch,
+                            });
+                        }
+                    }
+                }
                 AsrProviderType::Gemini => {
                     let client = GeminiTranscriptionClient::new(config.clone());
                     match client.transcribe_file(&audio_path).await {
@@ -1165,6 +1368,13 @@ fn elevenlabs_batch_refine_audio_path(state: &AppState) -> Option<PathBuf> {
     }
 }
 
+fn qwen_batch_refine_audio_path(state: &AppState) -> Option<PathBuf> {
+    match state.session_audio_path.clone() {
+        Some(path) if path.is_file() => Some(path),
+        _ => None,
+    }
+}
+
 fn has_stream_fallback_result(state: &AppState) -> bool {
     state.has_final_result && !state.session_final_text.trim().is_empty()
 }
@@ -1181,6 +1391,18 @@ fn elevenlabs_refine_failure_message(state: &AppState) -> &'static str {
     }
 }
 
+fn should_surface_terminal_qwen_refine_failure(state: &AppState) -> bool {
+    !has_stream_fallback_result(state)
+}
+
+fn qwen_refine_failure_message(state: &AppState) -> &'static str {
+    if has_stream_fallback_result(state) {
+        "Qwen 精修失败，已保留实时结果"
+    } else {
+        "Qwen 精修失败，且未保留到实时结果"
+    }
+}
+
 fn format_batch_asr_failure_message(reason: &str) -> String {
     let trimmed = reason.trim();
     if trimmed.is_empty() {
@@ -1194,7 +1416,8 @@ fn format_batch_asr_failure_message(reason: &str) -> String {
 mod tests {
     use super::{
         elevenlabs_refine_failure_message, format_batch_asr_failure_message,
-        should_surface_terminal_elevenlabs_refine_failure,
+        qwen_refine_failure_message, should_surface_terminal_elevenlabs_refine_failure,
+        should_surface_terminal_qwen_refine_failure,
     };
     use crate::state::AppState;
 
@@ -1237,6 +1460,25 @@ mod tests {
     }
 
     #[test]
+    fn qwen_refine_failure_message_mentions_stream_fallback_when_available() {
+        let mut state = AppState::new();
+        state.has_final_result = true;
+        state.session_final_text = "hello world".to_string();
+
+        assert_eq!(
+            qwen_refine_failure_message(&state),
+            "Qwen 精修失败，已保留实时结果"
+        );
+    }
+
+    #[test]
+    fn qwen_refine_failure_without_stream_result_is_terminal() {
+        let state = AppState::new();
+
+        assert!(should_surface_terminal_qwen_refine_failure(&state));
+    }
+
+    #[test]
     fn batch_failure_message_formats_reason() {
         assert_eq!(
             format_batch_asr_failure_message("quota exceeded"),
@@ -1248,5 +1490,4 @@ mod tests {
     fn batch_failure_message_handles_empty_reason() {
         assert_eq!(format_batch_asr_failure_message("  "), "批量识别失败");
     }
-
 }

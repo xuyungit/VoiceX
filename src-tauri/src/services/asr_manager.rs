@@ -1,9 +1,9 @@
 use tokio::sync::mpsc::Receiver;
 
 use crate::asr::{
-    AsrClient, AsrConfig, AsrEvent, AsrFailure, AsrProviderType,
-    ColiAsrClient, ElevenLabsRecognitionMode, ElevenLabsRealtimeClient, GeminiLiveClient,
-    GoogleSttClient, OpenAIRealtimeClient, QwenRealtimeClient, SonioxClient,
+    AsrClient, AsrConfig, AsrEvent, AsrFailure, AsrProviderType, ColiAsrClient,
+    ElevenLabsRealtimeClient, ElevenLabsRecognitionMode, GeminiLiveClient, GoogleSttClient,
+    OpenAIRealtimeClient, QwenRealtimeClient, QwenRecognitionMode, SonioxClient,
 };
 use crate::storage;
 
@@ -135,38 +135,43 @@ impl AsrManager {
                     .await
             }
             AsrProviderType::Qwen => {
-                log::info!(
-                    "Starting ASR stream [Qwen] (ws: {}, {} Hz, {} ch, model={}, lang={})",
-                    config.qwen_ws_url,
-                    sample_rate,
-                    channels,
-                    config.qwen_model,
-                    if config.qwen_language.trim().is_empty() {
-                        "auto"
-                    } else {
-                        config.qwen_language.as_str()
-                    },
-                );
-                if !config.hotwords.is_empty() {
+                if config.qwen_recognition_mode != QwenRecognitionMode::Realtime {
+                    log::warn!("Qwen ASR is in batch mode and should not enter streaming mode");
+                    Ok(())
+                } else {
                     log::info!(
-                        "Qwen ASR: sending {} hotwords via corpus.text context biasing",
-                        config.hotwords.len()
-                    );
-                }
-                let client = QwenRealtimeClient::new(config);
-                let on_event = on_event.clone();
-                client
-                    .stream_session(
+                        "Starting ASR stream [Qwen] (ws: {}, {} Hz, {} ch, model={}, lang={})",
+                        config.qwen_ws_url,
                         sample_rate,
                         channels,
-                        rx,
-                        cancel.clone(),
-                        history,
-                        move |evt| {
-                            (on_event)(evt);
+                        config.qwen_model,
+                        if config.qwen_language.trim().is_empty() {
+                            "auto"
+                        } else {
+                            config.qwen_language.as_str()
                         },
-                    )
-                    .await
+                    );
+                    if !config.hotwords.is_empty() {
+                        log::info!(
+                            "Qwen ASR: sending {} hotwords via corpus.text context biasing",
+                            config.hotwords.len()
+                        );
+                    }
+                    let client = QwenRealtimeClient::new(config);
+                    let on_event = on_event.clone();
+                    client
+                        .stream_session(
+                            sample_rate,
+                            channels,
+                            rx,
+                            cancel.clone(),
+                            history,
+                            move |evt| {
+                                (on_event)(evt);
+                            },
+                        )
+                        .await
+                }
             }
             AsrProviderType::Gemini => {
                 log::warn!("Gemini ASR is batch-only and should not enter streaming mode");
@@ -232,7 +237,9 @@ impl AsrManager {
             }
             AsrProviderType::ElevenLabs => {
                 if config.elevenlabs_recognition_mode != ElevenLabsRecognitionMode::Realtime {
-                    log::warn!("ElevenLabs ASR is in batch mode and should not enter streaming mode");
+                    log::warn!(
+                        "ElevenLabs ASR is in batch mode and should not enter streaming mode"
+                    );
                     Ok(())
                 } else {
                     log::info!(

@@ -41,9 +41,12 @@ pub struct AppSettings {
 
     // ASR Provider: Qwen Realtime ASR
     pub qwen_asr_api_key: String,
+    pub qwen_asr_recognition_mode: String, // "realtime" | "batch"
     pub qwen_asr_model: String,
+    pub qwen_asr_batch_model: String,
     pub qwen_asr_ws_url: String,
     pub qwen_asr_language: String,
+    pub qwen_asr_post_recording_refine: bool,
 
     // ASR Provider: Gemini Audio Transcription
     pub gemini_api_key: String,
@@ -66,8 +69,8 @@ pub struct AppSettings {
 
     // ASR Provider: ElevenLabs Speech-to-Text
     pub elevenlabs_api_key: String,
-    pub elevenlabs_recognition_mode: String,       // "realtime" | "batch"
-    pub elevenlabs_post_recording_refine: String,  // "off" | "batch_refine"
+    pub elevenlabs_recognition_mode: String, // "realtime" | "batch"
+    pub elevenlabs_post_recording_refine: String, // "off" | "batch_refine"
     pub elevenlabs_realtime_model: String,
     pub elevenlabs_batch_model: String,
     pub elevenlabs_language: String,
@@ -200,9 +203,12 @@ impl Default for AppSettings {
             google_stt_phrase_boost: 8.0,
 
             qwen_asr_api_key: String::new(),
+            qwen_asr_recognition_mode: "realtime".to_string(),
             qwen_asr_model: "qwen3-asr-flash-realtime".to_string(),
+            qwen_asr_batch_model: "qwen3-asr-flash".to_string(),
             qwen_asr_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime".to_string(),
-            qwen_asr_language: "zh".to_string(),
+            qwen_asr_language: String::new(),
+            qwen_asr_post_recording_refine: false,
             gemini_api_key: String::new(),
             gemini_model: "gemini-3.1-flash-lite-preview".to_string(),
             gemini_live_model: "gemini-3.1-flash-live-preview".to_string(),
@@ -333,6 +339,18 @@ fn normalize_elevenlabs_settings(settings: &mut AppSettings) {
     };
 }
 
+fn normalize_qwen_settings(settings: &mut AppSettings) {
+    let recognition_mode = match settings.qwen_asr_recognition_mode.as_str() {
+        "batch" => "batch",
+        _ => "realtime",
+    };
+    settings.qwen_asr_recognition_mode = recognition_mode.to_string();
+
+    if recognition_mode == "batch" {
+        settings.qwen_asr_post_recording_refine = false;
+    }
+}
+
 fn write_provider_probe_audio() -> Result<PathBuf, String> {
     let path = std::env::temp_dir().join(format!(
         "voicex-provider-probe-{}.ogg",
@@ -450,6 +468,7 @@ pub fn save_settings(
 ) -> Result<(), String> {
     let current_settings = crate::storage::get_settings().map_err(|e| e.to_string())?;
     settings.ui_language = crate::ui_locale::normalize_ui_language(&settings.ui_language);
+    normalize_qwen_settings(&mut settings);
     normalize_elevenlabs_settings(&mut settings);
 
     let text_changed = settings.dictionary_text != current_settings.dictionary_text;

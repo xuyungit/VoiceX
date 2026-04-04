@@ -858,9 +858,15 @@ impl SessionController {
             hud.emit_recording_style(recording_style_for_hud, is_batch);
             hud.emit_correcting(state.is_correcting);
             hud.emit_intent(state.intent);
+            let is_post_recording_batch_refine = state.asr_refinement_in_progress
+                && matches!(
+                    state.active_asr_refinement_provider,
+                    Some(crate::asr::AsrProviderType::ElevenLabs)
+                        | Some(crate::asr::AsrProviderType::Qwen)
+                );
             let is_recognizing = state.session_state == HotkeySessionState::Finalizing
-                && !state.asr_stream_finished
-                && !state.is_correcting;
+                && ((!state.asr_stream_finished && !state.is_correcting)
+                    || is_post_recording_batch_refine);
             hud.emit_recognizing(is_recognizing);
             if state.session_state == HotkeySessionState::Finalizing && state.asr_stream_finished {
                 hud.emit_recognition_stopped();

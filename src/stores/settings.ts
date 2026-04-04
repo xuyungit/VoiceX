@@ -33,9 +33,12 @@ export interface AppSettings {
 
     // ASR Provider: Qwen Realtime ASR
     qwenAsrApiKey: string
+    qwenAsrRecognitionMode: 'realtime' | 'batch'
     qwenAsrModel: string
+    qwenAsrBatchModel: string
     qwenAsrWsUrl: string
     qwenAsrLanguage: string
+    qwenAsrPostRecordingRefine: boolean
     geminiApiKey: string
     geminiModel: string
     geminiLiveModel: string
@@ -191,9 +194,12 @@ const defaultSettings: AppSettings = {
     googleSttPhraseBoost: 8,
 
     qwenAsrApiKey: '',
+    qwenAsrRecognitionMode: 'realtime',
     qwenAsrModel: 'qwen3-asr-flash-realtime',
+    qwenAsrBatchModel: 'qwen3-asr-flash',
     qwenAsrWsUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
-    qwenAsrLanguage: 'zh',
+    qwenAsrLanguage: '',
+    qwenAsrPostRecordingRefine: false,
     geminiApiKey: '',
     geminiModel: 'gemini-3.1-flash-lite-preview',
     geminiLiveModel: 'gemini-3.1-flash-live-preview',

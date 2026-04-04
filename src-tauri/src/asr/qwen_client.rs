@@ -85,11 +85,7 @@ impl QwenRealtimeClient {
 
         // Build corpus text for filtering the phantom echo item that Qwen
         // generates from silence at session start (see corpus_echo filter below).
-        let corpus_for_filter = if self.config.hotwords.is_empty() {
-            String::new()
-        } else {
-            self.config.hotwords.join(", ")
-        };
+        let corpus_for_filter = build_corpus_text(&self.config.hotwords);
 
         let on_event = Arc::new(on_event);
         let on_event_reader = on_event.clone();
@@ -153,6 +149,8 @@ impl QwenRealtimeClient {
                                 }
                             }
                             "conversation.item.input_audio_transcription.completed" => {
+                                let completed_text =
+                                    extract_text(&payload, &["transcript", "text", "stash"]);
                                 // Detect phantom corpus echo: duration=0 means no real
                                 // audio was transcribed — the server hallucinated the
                                 // corpus.text content from initial silence.
@@ -162,19 +160,25 @@ impl QwenRealtimeClient {
                                         .and_then(|u| u.get("duration"))
                                         .and_then(Value::as_u64)
                                         .unwrap_or(1);
+                                    let is_echo = completed_text
+                                        .as_deref()
+                                        .map(|text| {
+                                            should_filter_corpus_echo(text, &corpus_for_filter)
+                                        })
+                                        .unwrap_or(false);
                                     corpus_echo_stripped = true;
-                                    if duration == 0 {
+                                    if duration == 0 || is_echo {
                                         transcript = TranscriptAccumulator::default();
                                         log::info!(
-                                            "Qwen ASR: filtered corpus echo (usage.duration=0)"
+                                            "Qwen ASR: filtered corpus echo (usage.duration={}, matched_corpus={})",
+                                            duration,
+                                            is_echo
                                         );
                                         continue;
                                     }
                                 }
 
-                                if let Some(text) =
-                                    extract_text(&payload, &["transcript", "text", "stash"])
-                                {
+                                if let Some(text) = completed_text {
                                     if let Some(combined) = transcript.push_final(&text) {
                                         on_event_reader(AsrEvent {
                                             text: combined,
@@ -197,6 +201,10 @@ impl QwenRealtimeClient {
                                 if let Some(text) =
                                     extract_text(&payload, &["transcript", "text", "stash"])
                                 {
+                                    if should_filter_corpus_echo(&text, &corpus_for_filter) {
+                                        log::info!("Qwen ASR: filtered session.finish corpus echo");
+                                        break;
+                                    }
                                     if let Some(combined) = transcript.finish_with_text(&text) {
                                         on_event_reader(AsrEvent {
                                             text: combined,
@@ -451,9 +459,10 @@ fn build_session_update(sample_rate: u32, language: &str, hotwords: &[String]) -
     }
 
     // Qwen3-ASR supports context biasing via corpus.text (max 10,000 tokens).
+    // Use this conservatively: large dictionaries are more likely to be echoed back.
     // See: https://www.alibabacloud.com/help/en/model-studio/qwen-asr-realtime-client-events
-    if !hotwords.is_empty() {
-        let corpus_text = hotwords.join(", ");
+    let corpus_text = build_corpus_text(hotwords);
+    if !corpus_text.is_empty() {
         let mut corpus = serde_json::Map::new();
         corpus.insert("text".to_string(), Value::String(corpus_text));
         transcription.insert("corpus".to_string(), Value::Object(corpus));
@@ -476,6 +485,25 @@ fn build_session_update(sample_rate: u32, language: &str, hotwords: &[String]) -
     })
 }
 
+pub(crate) fn build_corpus_text(hotwords: &[String]) -> String {
+    const MAX_HOTWORDS: usize = 64;
+    const MAX_CORPUS_CHARS: usize = 1_000;
+
+    let mut hotword_lines: Vec<&str> = hotwords
+        .iter()
+        .map(|word| word.trim())
+        .filter(|word| !word.is_empty())
+        .take(MAX_HOTWORDS)
+        .collect();
+    hotword_lines.dedup();
+
+    let mut corpus_text = hotword_lines.join(", ");
+    if corpus_text.chars().count() > MAX_CORPUS_CHARS {
+        corpus_text = corpus_text.chars().take(MAX_CORPUS_CHARS).collect();
+    }
+    corpus_text
+}
+
 /// Strip all punctuation and whitespace for fuzzy corpus echo comparison.
 /// The server may reformat corpus text (remove separators, switch to
 /// full-width punctuation, insert periods), so we compare content only.
@@ -495,7 +523,23 @@ fn is_corpus_echo_partial(text: &str, corpus: &str) -> bool {
     c.starts_with(&t)
 }
 
-#[cfg(test)]
+pub(crate) fn should_filter_corpus_echo(text: &str, corpus: &str) -> bool {
+    !corpus.is_empty() && corpus_looks_like_bias_list(corpus) && is_corpus_echo(text, corpus)
+}
+
+fn corpus_looks_like_bias_list(corpus: &str) -> bool {
+    corpus
+        .split(',')
+        .filter(|part| !part.trim().is_empty())
+        .count()
+        > 1
+        || corpus
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+            > 1
+}
+
 fn is_corpus_echo(text: &str, corpus: &str) -> bool {
     if corpus.is_empty() {
         return false;
@@ -550,8 +594,8 @@ fn extract_error_message(payload: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_session_update, build_ws_url, extract_partial_text, is_corpus_echo,
-        is_corpus_echo_partial, TranscriptAccumulator,
+        build_corpus_text, build_session_update, build_ws_url, extract_partial_text,
+        is_corpus_echo, is_corpus_echo_partial, should_filter_corpus_echo, TranscriptAccumulator,
     };
     use serde_json::json;
 
@@ -598,6 +642,23 @@ mod tests {
             .as_str()
             .unwrap();
         assert_eq!(corpus_text, "VoiceX, 阿里巴巴, 语音识别");
+    }
+
+    #[test]
+    fn test_build_corpus_text_truncates_and_deduplicates_hotwords() {
+        let hotwords = vec![
+            "VoiceX".to_string(),
+            "VoiceX".to_string(),
+            "Qwen".to_string(),
+        ];
+
+        assert_eq!(build_corpus_text(&hotwords), "VoiceX, Qwen");
+    }
+
+    #[test]
+    fn test_should_filter_corpus_echo_only_for_multi_term_lists() {
+        assert!(should_filter_corpus_echo("VoiceX, Qwen", "VoiceX, Qwen"));
+        assert!(!should_filter_corpus_echo("VoiceX", "VoiceX"));
     }
 
     #[test]

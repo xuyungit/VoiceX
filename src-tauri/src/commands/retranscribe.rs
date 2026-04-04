@@ -9,9 +9,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
-    ColiRefinementMode, ElevenLabsRecognitionMode, ElevenLabsRealtimeClient,
+    ColiRefinementMode, ElevenLabsRealtimeClient, ElevenLabsRecognitionMode,
     ElevenLabsTranscriptionClient, GeminiLiveClient, GeminiTranscriptionClient, GoogleSttClient,
-    OpenAIRealtimeClient, OpenAITranscriptionClient, QwenRealtimeClient,
+    OpenAIRealtimeClient, OpenAITranscriptionClient, QwenRealtimeClient, QwenRecognitionMode,
+    QwenTranscriptionClient,
 };
 use crate::llm::{LLMClient, LLMConfig, LLMProviderType, PromptBuildOptions};
 use crate::services::history_service::HistoryService;
@@ -149,6 +150,7 @@ async fn transcribe_with_config_detailed(
 ) -> Result<AsrTranscriptionOutcome, String> {
     match config.provider_type {
         AsrProviderType::Coli => run_coli_asr(path, config).await,
+        AsrProviderType::Qwen => run_qwen_asr(path, config).await,
         AsrProviderType::Gemini => run_gemini_asr(path, config).await,
         AsrProviderType::GeminiLive => run_streaming_asr(path, config, cancel).await,
         AsrProviderType::Cohere => run_cohere_asr(path, config).await,
@@ -159,8 +161,75 @@ async fn transcribe_with_config_detailed(
     }
 }
 
+async fn run_qwen_asr(
+    path: &PathBuf,
+    config: &AsrConfig,
+) -> Result<AsrTranscriptionOutcome, String> {
+    if config.qwen_recognition_mode == QwenRecognitionMode::Batch {
+        let client = QwenTranscriptionClient::new(config.clone());
+        let text = client
+            .transcribe_file(path)
+            .await
+            .map_err(|e| format!("Qwen ASR 失败: {}", e))?;
+        return Ok(AsrTranscriptionOutcome {
+            text,
+            model_name: HistoryService::qwen_batch_model_name(&config.qwen_batch_model),
+        });
+    }
+
+    let streaming = run_streaming_asr(path, config, CancellationToken::new()).await?;
+    let trimmed_streaming = streaming.text.trim().to_string();
+    if trimmed_streaming.is_empty() {
+        return Err("Qwen Realtime 返回空结果".into());
+    }
+
+    if !config.post_recording_batch_refine_enabled() {
+        return Ok(AsrTranscriptionOutcome {
+            text: trimmed_streaming,
+            model_name: HistoryService::format_provider_model("Qwen", &config.qwen_model),
+        });
+    }
+
+    let client = QwenTranscriptionClient::new(config.clone());
+    match client.transcribe_file(path).await {
+        Ok(refined) => {
+            let refined = refined.trim().to_string();
+            if refined.is_empty() {
+                log::warn!(
+                    "Qwen batch refine returned empty result during re-transcribe; falling back to realtime transcript"
+                );
+                Ok(AsrTranscriptionOutcome {
+                    text: trimmed_streaming,
+                    model_name: HistoryService::format_provider_model("Qwen", &config.qwen_model),
+                })
+            } else {
+                Ok(AsrTranscriptionOutcome {
+                    text: refined,
+                    model_name: HistoryService::qwen_realtime_batch_refine_model_name(
+                        &config.qwen_model,
+                        &config.qwen_batch_model,
+                    ),
+                })
+            }
+        }
+        Err(err) => {
+            log::warn!(
+                "Qwen batch refine failed during re-transcribe; falling back to realtime transcript: {}",
+                err
+            );
+            Ok(AsrTranscriptionOutcome {
+                text: trimmed_streaming,
+                model_name: HistoryService::format_provider_model("Qwen", &config.qwen_model),
+            })
+        }
+    }
+}
+
 /// Run ASR via Coli's file-based recognition.
-async fn run_coli_asr(path: &PathBuf, config: &mut AsrConfig) -> Result<AsrTranscriptionOutcome, String> {
+async fn run_coli_asr(
+    path: &PathBuf,
+    config: &mut AsrConfig,
+) -> Result<AsrTranscriptionOutcome, String> {
     // Force a refinement mode if currently Off — the user explicitly wants transcription
     if config.coli_final_refinement_mode == ColiRefinementMode::Off {
         config.coli_final_refinement_mode = ColiRefinementMode::SenseVoice;
@@ -276,11 +345,10 @@ async fn run_elevenlabs_asr(
                     } else {
                         Ok(AsrTranscriptionOutcome {
                             text: refined,
-                            model_name:
-                                HistoryService::elevenlabs_realtime_batch_refine_model_name(
-                                    &config.elevenlabs_realtime_model,
-                                    &config.elevenlabs_batch_model,
-                                ),
+                            model_name: HistoryService::elevenlabs_realtime_batch_refine_model_name(
+                                &config.elevenlabs_realtime_model,
+                                &config.elevenlabs_batch_model,
+                            ),
                         })
                     }
                 }
@@ -507,7 +575,13 @@ fn streaming_model_name(config: &AsrConfig) -> Option<String> {
         AsrProviderType::Soniox => {
             HistoryService::format_provider_model("Soniox", &config.soniox_model)
         }
-        AsrProviderType::Volcengine => Some("Volcengine / bigmodel".to_string()),
+        AsrProviderType::Volcengine if config.ws_url.contains("bigmodel_nostream") => {
+            Some("Volcengine / bigmodel_nostream".to_string())
+        }
+        AsrProviderType::Volcengine if config.enable_nonstream => {
+            Some("Volcengine / bigmodel_async + native two-pass".to_string())
+        }
+        AsrProviderType::Volcengine => Some("Volcengine / bigmodel_async".to_string()),
         _ => None,
     }
 }

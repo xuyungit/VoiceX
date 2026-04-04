@@ -2,6 +2,8 @@ import type { AppSettings } from '../stores/settings'
 
 export type AsrProviderValue = AppSettings['asrProviderType']
 export type LlmProviderValue = AppSettings['llmProviderType']
+export type BatchCapableRecognitionMode = 'realtime' | 'batch'
+export type PostRecordingBatchRefineValue = 'off' | 'batch_refine'
 export type ElevenLabsRecognitionMode = AppSettings['elevenlabsRecognitionMode']
 export type ElevenLabsPostRecordingRefine = AppSettings['elevenlabsPostRecordingRefine']
 
@@ -34,18 +36,18 @@ const LLM_PROVIDER_LABEL_KEYS: Array<{ key: string; value: LlmProviderValue }> =
 
 const ELEVENLABS_RECOGNITION_MODE_LABEL_KEYS: Array<{
   key: string
-  value: ElevenLabsRecognitionMode
+  value: BatchCapableRecognitionMode
 }> = [
-  { key: 'asr.elevenlabsRecognitionModeRealtime', value: 'realtime' },
-  { key: 'asr.elevenlabsRecognitionModeBatch', value: 'batch' }
+  { key: 'asr.batchCapableRecognitionModeRealtime', value: 'realtime' },
+  { key: 'asr.batchCapableRecognitionModeBatch', value: 'batch' }
 ]
 
 const ELEVENLABS_POST_RECORDING_REFINE_LABEL_KEYS: Array<{
   key: string
-  value: ElevenLabsPostRecordingRefine
+  value: PostRecordingBatchRefineValue
 }> = [
-  { key: 'asr.elevenlabsRefineOff', value: 'off' },
-  { key: 'asr.elevenlabsRefineBatch', value: 'batch_refine' }
+  { key: 'asr.postRecordingBatchRefineOff', value: 'off' },
+  { key: 'asr.postRecordingBatchRefineBatch', value: 'batch_refine' }
 ]
 
 export const ELEVENLABS_REALTIME_MODEL_OPTIONS = [
@@ -86,6 +88,12 @@ export function buildLlmProviderOptions(t: Translate): Array<ProviderOption<LlmP
 export function buildElevenLabsRecognitionModeOptions(
   t: Translate
 ): Array<ProviderOption<ElevenLabsRecognitionMode>> {
+  return buildBatchCapableRecognitionModeOptions(t)
+}
+
+export function buildBatchCapableRecognitionModeOptions(
+  t: Translate
+): Array<ProviderOption<BatchCapableRecognitionMode>> {
   return ELEVENLABS_RECOGNITION_MODE_LABEL_KEYS.map(({ key, value }) => ({
     label: t(key),
     value
@@ -95,6 +103,12 @@ export function buildElevenLabsRecognitionModeOptions(
 export function buildElevenLabsPostRecordingRefineOptions(
   t: Translate
 ): Array<ProviderOption<ElevenLabsPostRecordingRefine>> {
+  return buildPostRecordingBatchRefineOptions(t)
+}
+
+export function buildPostRecordingBatchRefineOptions(
+  t: Translate
+): Array<ProviderOption<PostRecordingBatchRefineValue>> {
   return ELEVENLABS_POST_RECORDING_REFINE_LABEL_KEYS.map(({ key, value }) => ({
     label: t(key),
     value

@@ -139,12 +139,27 @@ impl HistoryService {
     pub fn resolve_asr_model_name(settings: &AppSettings) -> Option<String> {
         let snapshot = match settings.asr_provider_type.as_str() {
             "google" => Some("Google / chirp_3".to_string()),
+            "volcengine" if settings.asr_ws_url.contains("bigmodel_nostream") => {
+                Some("Volcengine / bigmodel_nostream".to_string())
+            }
+            "volcengine" if settings.enable_nonstream => {
+                Some("Volcengine / bigmodel_async + native two-pass".to_string())
+            }
             "qwen" => {
-                let model = settings.qwen_asr_model.trim();
-                if model.is_empty() {
-                    Some("Qwen".to_string())
+                if settings.qwen_asr_recognition_mode == "batch" {
+                    Self::qwen_batch_model_name(&settings.qwen_asr_batch_model)
+                } else if settings.qwen_asr_post_recording_refine {
+                    Self::qwen_realtime_batch_refine_model_name(
+                        &settings.qwen_asr_model,
+                        &settings.qwen_asr_batch_model,
+                    )
                 } else {
-                    Some(format!("Qwen / {}", model))
+                    let model = settings.qwen_asr_model.trim();
+                    if model.is_empty() {
+                        Some("Qwen".to_string())
+                    } else {
+                        Some(format!("Qwen / {}", model))
+                    }
                 }
             }
             "gemini" => Self::format_provider_model("Gemini", &settings.gemini_model),
@@ -207,6 +222,24 @@ impl HistoryService {
             "ElevenLabs / {} + batch refine({})",
             Self::normalize_model_or_default(realtime_model, "scribe_v2_realtime"),
             Self::normalize_model_or_default(batch_model, "scribe_v2")
+        ))
+    }
+
+    pub fn qwen_realtime_batch_refine_model_name(
+        realtime_model: &str,
+        batch_model: &str,
+    ) -> Option<String> {
+        Some(format!(
+            "Qwen / {} + batch refine({})",
+            Self::normalize_model_or_default(realtime_model, "qwen3-asr-flash-realtime"),
+            Self::normalize_model_or_default(batch_model, "qwen3-asr-flash")
+        ))
+    }
+
+    pub fn qwen_batch_model_name(model: &str) -> Option<String> {
+        Some(format!(
+            "Qwen / {}",
+            Self::normalize_model_or_default(model, "qwen3-asr-flash")
         ))
     }
 
@@ -290,6 +323,62 @@ mod tests {
         assert_eq!(
             HistoryService::resolve_asr_model_name(&settings).as_deref(),
             Some("ElevenLabs / scribe_v2_realtime + batch refine(scribe_v2)")
+        );
+    }
+
+    #[test]
+    fn resolve_asr_model_name_for_qwen_refine_uses_shared_helper() {
+        let mut settings = AppSettings::default();
+        settings.asr_provider_type = "qwen".to_string();
+        settings.qwen_asr_recognition_mode = "realtime".to_string();
+        settings.qwen_asr_post_recording_refine = true;
+        settings.qwen_asr_model = "qwen3-asr-flash-realtime".to_string();
+        settings.qwen_asr_batch_model = "qwen3-asr-flash".to_string();
+
+        assert_eq!(
+            HistoryService::resolve_asr_model_name(&settings).as_deref(),
+            Some("Qwen / qwen3-asr-flash-realtime + batch refine(qwen3-asr-flash)")
+        );
+    }
+
+    #[test]
+    fn resolve_asr_model_name_for_qwen_batch_uses_batch_model() {
+        let mut settings = AppSettings::default();
+        settings.asr_provider_type = "qwen".to_string();
+        settings.qwen_asr_recognition_mode = "batch".to_string();
+        settings.qwen_asr_batch_model = "qwen3-asr-flash".to_string();
+
+        assert_eq!(
+            HistoryService::resolve_asr_model_name(&settings).as_deref(),
+            Some("Qwen / qwen3-asr-flash")
+        );
+    }
+
+    #[test]
+    fn resolve_asr_model_name_for_volcengine_native_two_pass_reflects_mode() {
+        let mut settings = AppSettings::default();
+        settings.asr_provider_type = "volcengine".to_string();
+        settings.asr_ws_url =
+            "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async".to_string();
+        settings.enable_nonstream = true;
+
+        assert_eq!(
+            HistoryService::resolve_asr_model_name(&settings).as_deref(),
+            Some("Volcengine / bigmodel_async + native two-pass")
+        );
+    }
+
+    #[test]
+    fn resolve_asr_model_name_for_volcengine_nostream_reflects_mode() {
+        let mut settings = AppSettings::default();
+        settings.asr_provider_type = "volcengine".to_string();
+        settings.asr_ws_url =
+            "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream".to_string();
+        settings.enable_nonstream = false;
+
+        assert_eq!(
+            HistoryService::resolve_asr_model_name(&settings).as_deref(),
+            Some("Volcengine / bigmodel_nostream")
         );
     }
 }

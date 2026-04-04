@@ -69,6 +69,27 @@ impl ElevenLabsRecognitionMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QwenRecognitionMode {
+    Realtime,
+    Batch,
+}
+
+impl Default for QwenRecognitionMode {
+    fn default() -> Self {
+        Self::Realtime
+    }
+}
+
+impl QwenRecognitionMode {
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "batch" => Self::Batch,
+            _ => Self::Realtime,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ElevenLabsPostRecordingRefine {
     Off,
     BatchRefine,
@@ -124,9 +145,12 @@ pub struct AsrConfig {
 
     // Qwen Realtime ASR settings
     pub qwen_api_key: String,
+    pub qwen_recognition_mode: QwenRecognitionMode,
     pub qwen_model: String,
+    pub qwen_batch_model: String,
     pub qwen_ws_url: String,
     pub qwen_language: String,
+    pub qwen_post_recording_refine: bool,
 
     // Gemini audio transcription settings
     pub gemini_api_key: String,
@@ -210,9 +234,12 @@ impl Default for AsrConfig {
             google_endpointing: "supershort".to_string(),
             google_phrase_boost: 8.0,
             qwen_api_key: String::new(),
+            qwen_recognition_mode: QwenRecognitionMode::Realtime,
             qwen_model: "qwen3-asr-flash-realtime".to_string(),
+            qwen_batch_model: "qwen3-asr-flash".to_string(),
             qwen_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime".to_string(),
-            qwen_language: "zh".to_string(),
+            qwen_language: String::new(),
+            qwen_post_recording_refine: false,
             gemini_api_key: String::new(),
             gemini_model: "gemini-3.1-flash-lite-preview".to_string(),
             gemini_live_model: "gemini-3.1-flash-live-preview".to_string(),
@@ -287,9 +314,14 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             google_endpointing: settings.google_stt_endpointing.clone(),
             google_phrase_boost: settings.google_stt_phrase_boost,
             qwen_api_key: settings.qwen_asr_api_key.clone(),
+            qwen_recognition_mode: QwenRecognitionMode::from_str(
+                &settings.qwen_asr_recognition_mode,
+            ),
             qwen_model: settings.qwen_asr_model.clone(),
+            qwen_batch_model: settings.qwen_asr_batch_model.clone(),
             qwen_ws_url: settings.qwen_asr_ws_url.clone(),
             qwen_language: settings.qwen_asr_language.clone(),
+            qwen_post_recording_refine: settings.qwen_asr_post_recording_refine,
             gemini_api_key: settings.gemini_api_key.clone(),
             gemini_model: settings.gemini_model.clone(),
             gemini_live_model: settings.gemini_live_model.clone(),
@@ -360,6 +392,12 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
 
 impl AsrConfig {
     fn normalize_provider_settings(&mut self) {
+        if self.provider_type == AsrProviderType::Qwen
+            && self.qwen_recognition_mode == QwenRecognitionMode::Batch
+        {
+            self.qwen_post_recording_refine = false;
+        }
+
         if self.provider_type == AsrProviderType::ElevenLabs
             && self.elevenlabs_recognition_mode == ElevenLabsRecognitionMode::Batch
         {
@@ -381,8 +419,8 @@ impl AsrConfig {
             },
             AsrProviderType::Qwen => AsrProviderCapabilities {
                 supports_realtime: true,
-                supports_batch: false,
-                supports_post_recording_batch_refine: false,
+                supports_batch: true,
+                supports_post_recording_batch_refine: true,
             },
             AsrProviderType::Gemini => AsrProviderCapabilities {
                 supports_realtime: false,
@@ -424,9 +462,18 @@ impl AsrConfig {
 
     pub fn post_recording_batch_refine_enabled(&self) -> bool {
         self.capabilities().supports_post_recording_batch_refine
-            && self.elevenlabs_recognition_mode == ElevenLabsRecognitionMode::Realtime
-            && self.elevenlabs_post_recording_refine
-                == ElevenLabsPostRecordingRefine::BatchRefine
+            && match self.provider_type {
+                AsrProviderType::ElevenLabs => {
+                    self.elevenlabs_recognition_mode == ElevenLabsRecognitionMode::Realtime
+                        && self.elevenlabs_post_recording_refine
+                            == ElevenLabsPostRecordingRefine::BatchRefine
+                }
+                AsrProviderType::Qwen => {
+                    self.qwen_recognition_mode == QwenRecognitionMode::Realtime
+                        && self.qwen_post_recording_refine
+                }
+                _ => false,
+            }
     }
 
     /// Returns true when the provider does not support streaming and requires
@@ -438,6 +485,7 @@ impl AsrConfig {
             AsrProviderType::GeminiLive => false,
             AsrProviderType::Cohere => true,
             AsrProviderType::OpenAI => self.openai_asr_mode != "realtime",
+            AsrProviderType::Qwen => self.qwen_recognition_mode == QwenRecognitionMode::Batch,
             AsrProviderType::ElevenLabs => {
                 self.elevenlabs_recognition_mode == ElevenLabsRecognitionMode::Batch
             }
@@ -459,8 +507,15 @@ impl AsrConfig {
             }
             AsrProviderType::Qwen => {
                 !self.qwen_api_key.is_empty()
-                    && !self.qwen_model.is_empty()
                     && !self.qwen_ws_url.is_empty()
+                    && match self.qwen_recognition_mode {
+                        QwenRecognitionMode::Realtime => {
+                            !self.qwen_model.trim().is_empty()
+                                && (!self.post_recording_batch_refine_enabled()
+                                    || !self.qwen_batch_model.trim().is_empty())
+                        }
+                        QwenRecognitionMode::Batch => !self.qwen_batch_model.trim().is_empty(),
+                    }
             }
             AsrProviderType::Gemini => {
                 !self.gemini_api_key.is_empty() && !self.gemini_model.is_empty()

@@ -29,17 +29,27 @@ const asrWsUrl = computed({
 
 const recognitionModeOptions = computed(() => [
   { label: t('asr.recognitionModeRealtime'), value: 'realtime_async' },
+  { label: t('asr.recognitionModeRealtimeTwoPass'), value: 'realtime_two_pass' },
   { label: t('asr.recognitionModeNostream'), value: 'nostream' }
 ])
 
 const recognitionMode = computed({
-  get: () => (settingsStore.settings.asrWsUrl.includes('nostream') ? 'nostream' : 'realtime_async'),
+  get: () => {
+    if (settingsStore.settings.asrWsUrl.includes('nostream')) {
+      return 'nostream'
+    }
+    if (settingsStore.settings.enableNonstream) {
+      return 'realtime_two_pass'
+    }
+    return 'realtime_async'
+  },
   set: (v: string) => {
-    const url =
-      v === 'nostream'
-        ? 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream'
-        : 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async'
+    const isNostream = v === 'nostream'
+    const url = isNostream
+      ? 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream'
+      : 'wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async'
     settingsStore.updateSetting('asrWsUrl', url)
+    settingsStore.updateSetting('enableNonstream', v === 'realtime_two_pass')
   }
 })
 
@@ -102,6 +112,7 @@ const forceToSpeechTime = computed({
       <div class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.recognitionMode') }}</div>
+          <div class="field-note">{{ t('asr.volcengineRecognitionModeNote') }}</div>
         </div>
         <NSelect
           v-model:value="recognitionMode"
