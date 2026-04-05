@@ -54,6 +54,7 @@ export interface AppSettings {
     openaiAsrLanguage: string
     openaiAsrPrompt: string
     openaiAsrMode: 'batch' | 'realtime'
+    openaiAsrPostRecordingRefine: 'off' | 'batch_refine'
 
     // ASR Provider: ElevenLabs
     elevenlabsApiKey: string
@@ -215,6 +216,7 @@ const defaultSettings: AppSettings = {
     openaiAsrLanguage: '',
     openaiAsrPrompt: 'Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.',
     openaiAsrMode: 'batch',
+    openaiAsrPostRecordingRefine: 'off',
     elevenlabsApiKey: '',
     elevenlabsRecognitionMode: 'realtime',
     elevenlabsPostRecordingRefine: 'off',

@@ -32,7 +32,7 @@ pub use coli_client::{
 };
 pub use config::{
     AsrConfig, AsrPipelineMode, AsrProviderCapabilities, AsrProviderType,
-    ElevenLabsPostRecordingRefine, ElevenLabsRecognitionMode, QwenRecognitionMode,
+    ElevenLabsRecognitionMode, PostRecordingBatchRefineMode, QwenRecognitionMode,
 };
 pub use elevenlabs_client::ElevenLabsTranscriptionClient;
 pub use elevenlabs_realtime_client::ElevenLabsRealtimeClient;

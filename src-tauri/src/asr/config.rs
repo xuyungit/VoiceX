@@ -90,18 +90,18 @@ impl QwenRecognitionMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ElevenLabsPostRecordingRefine {
+pub enum PostRecordingBatchRefineMode {
     Off,
     BatchRefine,
 }
 
-impl Default for ElevenLabsPostRecordingRefine {
+impl Default for PostRecordingBatchRefineMode {
     fn default() -> Self {
         Self::Off
     }
 }
 
-impl ElevenLabsPostRecordingRefine {
+impl PostRecordingBatchRefineMode {
     pub fn from_str(value: &str) -> Self {
         match value {
             "batch_refine" => Self::BatchRefine,
@@ -184,11 +184,12 @@ pub struct AsrConfig {
     pub openai_asr_language: String,
     pub openai_asr_prompt: String,
     pub openai_asr_mode: String,
+    pub openai_asr_post_recording_refine: PostRecordingBatchRefineMode,
 
     // ElevenLabs Speech-to-Text settings
     pub elevenlabs_api_key: String,
     pub elevenlabs_recognition_mode: ElevenLabsRecognitionMode,
-    pub elevenlabs_post_recording_refine: ElevenLabsPostRecordingRefine,
+    pub elevenlabs_post_recording_refine: PostRecordingBatchRefineMode,
     pub elevenlabs_realtime_model: String,
     pub elevenlabs_batch_model: String,
     pub elevenlabs_language: String,
@@ -267,9 +268,10 @@ impl Default for AsrConfig {
             openai_asr_language: String::new(),
             openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
             openai_asr_mode: "batch".to_string(),
+            openai_asr_post_recording_refine: PostRecordingBatchRefineMode::Off,
             elevenlabs_api_key: String::new(),
             elevenlabs_recognition_mode: ElevenLabsRecognitionMode::Realtime,
-            elevenlabs_post_recording_refine: ElevenLabsPostRecordingRefine::Off,
+            elevenlabs_post_recording_refine: PostRecordingBatchRefineMode::Off,
             elevenlabs_realtime_model: "scribe_v2_realtime".to_string(),
             elevenlabs_batch_model: "scribe_v2".to_string(),
             elevenlabs_language: String::new(),
@@ -349,11 +351,14 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             openai_asr_language: settings.openai_asr_language.clone(),
             openai_asr_prompt: settings.openai_asr_prompt.clone(),
             openai_asr_mode: settings.openai_asr_mode.clone(),
+            openai_asr_post_recording_refine: PostRecordingBatchRefineMode::from_str(
+                &settings.openai_asr_post_recording_refine,
+            ),
             elevenlabs_api_key: settings.elevenlabs_api_key.clone(),
             elevenlabs_recognition_mode: ElevenLabsRecognitionMode::from_str(
                 &settings.elevenlabs_recognition_mode,
             ),
-            elevenlabs_post_recording_refine: ElevenLabsPostRecordingRefine::from_str(
+            elevenlabs_post_recording_refine: PostRecordingBatchRefineMode::from_str(
                 &settings.elevenlabs_post_recording_refine,
             ),
             elevenlabs_realtime_model: settings.elevenlabs_realtime_model.clone(),
@@ -415,7 +420,11 @@ impl AsrConfig {
         if self.provider_type == AsrProviderType::ElevenLabs
             && self.elevenlabs_recognition_mode == ElevenLabsRecognitionMode::Batch
         {
-            self.elevenlabs_post_recording_refine = ElevenLabsPostRecordingRefine::Off;
+            self.elevenlabs_post_recording_refine = PostRecordingBatchRefineMode::Off;
+        }
+
+        if self.provider_type == AsrProviderType::OpenAI && self.openai_asr_mode == "batch" {
+            self.openai_asr_post_recording_refine = PostRecordingBatchRefineMode::Off;
         }
     }
 
@@ -459,9 +468,9 @@ impl AsrConfig {
             },
             AsrProviderType::OpenAI => AsrProviderCapabilities {
                 supports_realtime: true,
-                supports_realtime_with_final_pass: false,
+                supports_realtime_with_final_pass: true,
                 supports_batch: true,
-                supports_post_recording_batch_refine: false,
+                supports_post_recording_batch_refine: true,
             },
             AsrProviderType::ElevenLabs => AsrProviderCapabilities {
                 supports_realtime: true,
@@ -505,7 +514,12 @@ impl AsrConfig {
             AsrProviderType::GeminiLive => AsrPipelineMode::Realtime,
             AsrProviderType::Cohere => AsrPipelineMode::Batch,
             AsrProviderType::OpenAI if self.openai_asr_mode == "realtime" => {
-                AsrPipelineMode::Realtime
+                if self.openai_asr_post_recording_refine == PostRecordingBatchRefineMode::BatchRefine
+                {
+                    AsrPipelineMode::RealtimeWithFinalPass
+                } else {
+                    AsrPipelineMode::Realtime
+                }
             }
             AsrProviderType::OpenAI => AsrPipelineMode::Batch,
             AsrProviderType::ElevenLabs
@@ -515,7 +529,7 @@ impl AsrConfig {
             }
             AsrProviderType::ElevenLabs
                 if self.elevenlabs_post_recording_refine
-                    == ElevenLabsPostRecordingRefine::BatchRefine =>
+                    == PostRecordingBatchRefineMode::BatchRefine =>
             {
                 AsrPipelineMode::RealtimeWithFinalPass
             }
@@ -537,11 +551,16 @@ impl AsrConfig {
                 AsrProviderType::ElevenLabs => {
                     self.elevenlabs_recognition_mode == ElevenLabsRecognitionMode::Realtime
                         && self.elevenlabs_post_recording_refine
-                            == ElevenLabsPostRecordingRefine::BatchRefine
+                            == PostRecordingBatchRefineMode::BatchRefine
                 }
                 AsrProviderType::Qwen => {
                     self.qwen_recognition_mode == QwenRecognitionMode::Realtime
                         && self.qwen_post_recording_refine
+                }
+                AsrProviderType::OpenAI => {
+                    self.openai_asr_mode == "realtime"
+                        && self.openai_asr_post_recording_refine
+                            == PostRecordingBatchRefineMode::BatchRefine
                 }
                 _ => false,
             }
@@ -616,7 +635,7 @@ impl AsrConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsrConfig, AsrPipelineMode, AsrProviderType, ElevenLabsPostRecordingRefine,
+        AsrConfig, AsrPipelineMode, AsrProviderType, PostRecordingBatchRefineMode,
         ElevenLabsRecognitionMode, QwenRecognitionMode,
     };
 
@@ -648,14 +667,28 @@ mod tests {
         let mut config = AsrConfig::default();
         config.provider_type = AsrProviderType::ElevenLabs;
         config.elevenlabs_recognition_mode = ElevenLabsRecognitionMode::Batch;
-        config.elevenlabs_post_recording_refine = ElevenLabsPostRecordingRefine::BatchRefine;
+        config.elevenlabs_post_recording_refine = PostRecordingBatchRefineMode::BatchRefine;
         config.normalize_provider_settings();
 
         assert_eq!(config.pipeline_mode(), AsrPipelineMode::Batch);
         assert_eq!(
             config.elevenlabs_post_recording_refine,
-            ElevenLabsPostRecordingRefine::Off
+            PostRecordingBatchRefineMode::Off
         );
+    }
+
+    #[test]
+    fn openai_refine_pipeline_mode_maps_to_realtime_with_final_pass() {
+        let mut config = AsrConfig::default();
+        config.provider_type = AsrProviderType::OpenAI;
+        config.openai_asr_mode = "realtime".to_string();
+        config.openai_asr_post_recording_refine = PostRecordingBatchRefineMode::BatchRefine;
+
+        assert_eq!(
+            config.pipeline_mode(),
+            AsrPipelineMode::RealtimeWithFinalPass
+        );
+        assert!(config.capabilities().supports_post_recording_batch_refine);
     }
 
     #[test]

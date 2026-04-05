@@ -169,7 +169,10 @@ impl HistoryService {
                 AsrPipelineMode::Realtime => {
                     Self::format_provider_model("OpenAI Realtime", &config.openai_asr_model)
                 }
-                AsrPipelineMode::Batch | AsrPipelineMode::RealtimeWithFinalPass => {
+                AsrPipelineMode::RealtimeWithFinalPass => {
+                    Self::openai_realtime_batch_refine_model_name(&config.openai_asr_model)
+                }
+                AsrPipelineMode::Batch => {
                     Self::format_provider_model("OpenAI", &config.openai_asr_model)
                 }
             },
@@ -247,6 +250,11 @@ impl HistoryService {
             "Qwen / {}",
             Self::normalize_model_or_default(model, "qwen3-asr-flash")
         ))
+    }
+
+    pub fn openai_realtime_batch_refine_model_name(model: &str) -> Option<String> {
+        let model = Self::normalize_model_or_default(model, "gpt-4o-transcribe");
+        Some(format!("OpenAI / {} + batch refine({})", model, model))
     }
 
     pub fn resolve_llm_model_name(settings: &AppSettings) -> Option<String> {
@@ -344,6 +352,20 @@ mod tests {
         assert_eq!(
             HistoryService::resolve_asr_model_name(&settings).as_deref(),
             Some("Qwen / qwen3-asr-flash-realtime + batch refine(qwen3-asr-flash)")
+        );
+    }
+
+    #[test]
+    fn resolve_asr_model_name_for_openai_refine_uses_shared_helper() {
+        let mut settings = AppSettings::default();
+        settings.asr_provider_type = "openai".to_string();
+        settings.openai_asr_mode = "realtime".to_string();
+        settings.openai_asr_post_recording_refine = "batch_refine".to_string();
+        settings.openai_asr_model = "gpt-4o-transcribe".to_string();
+
+        assert_eq!(
+            HistoryService::resolve_asr_model_name(&settings).as_deref(),
+            Some("OpenAI / gpt-4o-transcribe + batch refine(gpt-4o-transcribe)")
         );
     }
 

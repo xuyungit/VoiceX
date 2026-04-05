@@ -6,6 +6,9 @@ export type PostRecordingBatchRefineValue = 'off' | 'batch_refine'
 export type UnifiedAsrPipelineMode = 'realtime' | 'realtime_with_final_pass' | 'batch'
 export type ElevenLabsRecognitionMode = AppSettings['elevenlabsRecognitionMode']
 export type ElevenLabsPostRecordingRefine = AppSettings['elevenlabsPostRecordingRefine']
+export type OpenAiPostRecordingRefine = AppSettings['openaiAsrPostRecordingRefine']
+export type ColiRecognitionMode = BatchCapableRecognitionMode
+export type ColiPostRecordingRefine = AppSettings['coliFinalRefinementMode']
 
 type ProviderOption<T extends string> = {
   label: string
@@ -41,6 +44,15 @@ const ELEVENLABS_POST_RECORDING_REFINE_LABEL_KEYS: Array<{
 }> = [
   { key: 'asr.postRecordingBatchRefineOff', value: 'off' },
   { key: 'asr.postRecordingBatchRefineBatch', value: 'batch_refine' }
+]
+
+const COLI_POST_RECORDING_REFINE_LABEL_KEYS: Array<{
+  key: string
+  value: ColiPostRecordingRefine
+}> = [
+  { key: 'asr.refinementOff', value: 'off' },
+  { key: 'asr.refinementSenseVoice', value: 'sensevoice' },
+  { key: 'asr.refinementWhisper', value: 'whisper' }
 ]
 
 export const ELEVENLABS_REALTIME_MODEL_OPTIONS = [
@@ -83,6 +95,12 @@ export function buildOpenAiRecognitionModeOptions(
   return buildBatchCapableRecognitionModeOptions(t)
 }
 
+export function buildColiRecognitionModeOptions(
+  t: Translate
+): Array<ProviderOption<ColiRecognitionMode>> {
+  return buildBatchCapableRecognitionModeOptions(t)
+}
+
 export function buildBatchCapableRecognitionModeOptions(
   t: Translate
 ): Array<ProviderOption<BatchCapableRecognitionMode>> {
@@ -96,6 +114,21 @@ export function buildElevenLabsPostRecordingRefineOptions(
   t: Translate
 ): Array<ProviderOption<ElevenLabsPostRecordingRefine>> {
   return buildPostRecordingBatchRefineOptions(t)
+}
+
+export function buildOpenAiPostRecordingRefineOptions(
+  t: Translate
+): Array<ProviderOption<OpenAiPostRecordingRefine>> {
+  return buildPostRecordingBatchRefineOptions(t)
+}
+
+export function buildColiPostRecordingRefineOptions(
+  t: Translate
+): Array<ProviderOption<ColiPostRecordingRefine>> {
+  return COLI_POST_RECORDING_REFINE_LABEL_KEYS.map(({ key, value }) => ({
+    label: t(key),
+    value
+  }))
 }
 
 export function buildPostRecordingBatchRefineOptions(
@@ -137,4 +170,11 @@ export function resolveBatchCapablePipelineMode(
     return 'realtime_with_final_pass'
   }
   return 'realtime'
+}
+
+export function normalizeColiPostRecordingRefine(
+  recognitionMode: ColiRecognitionMode,
+  postRecordingRefine: ColiPostRecordingRefine
+): ColiPostRecordingRefine {
+  return recognitionMode === 'batch' ? 'off' : postRecordingRefine
 }

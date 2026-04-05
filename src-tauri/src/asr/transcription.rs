@@ -168,7 +168,60 @@ async fn run_openai_asr(
     config: &AsrConfig,
 ) -> Result<AsrTranscriptionOutcome, String> {
     if config.openai_asr_mode == "realtime" {
-        return run_streaming_asr(path, config, CancellationToken::new()).await;
+        let streaming = run_streaming_asr(path, config, CancellationToken::new()).await?;
+        let trimmed_streaming = streaming.text.trim().to_string();
+        if trimmed_streaming.is_empty() {
+            return Err("OpenAI Realtime 返回空结果".into());
+        }
+
+        if !config.post_recording_batch_refine_enabled() {
+            return Ok(AsrTranscriptionOutcome {
+                text: trimmed_streaming,
+                model_name: HistoryService::format_provider_model(
+                    "OpenAI Realtime",
+                    &config.openai_asr_model,
+                ),
+            });
+        }
+
+        let client = OpenAITranscriptionClient::new(config.clone());
+        return match client.transcribe_file(path).await {
+            Ok(refined) => {
+                let refined = refined.trim().to_string();
+                if refined.is_empty() {
+                    log::warn!(
+                        "OpenAI batch refine returned empty result during transcription; falling back to realtime transcript"
+                    );
+                    Ok(AsrTranscriptionOutcome {
+                        text: trimmed_streaming,
+                        model_name: HistoryService::format_provider_model(
+                            "OpenAI Realtime",
+                            &config.openai_asr_model,
+                        ),
+                    })
+                } else {
+                    Ok(AsrTranscriptionOutcome {
+                        text: refined,
+                        model_name: HistoryService::openai_realtime_batch_refine_model_name(
+                            &config.openai_asr_model,
+                        ),
+                    })
+                }
+            }
+            Err(err) => {
+                log::warn!(
+                    "OpenAI batch refine failed during transcription; falling back to realtime transcript: {}",
+                    err
+                );
+                Ok(AsrTranscriptionOutcome {
+                    text: trimmed_streaming,
+                    model_name: HistoryService::format_provider_model(
+                        "OpenAI Realtime",
+                        &config.openai_asr_model,
+                    ),
+                })
+            }
+        }
     }
 
     let client = OpenAITranscriptionClient::new(config.clone());

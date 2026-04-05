@@ -862,6 +862,7 @@ impl SessionController {
                 && matches!(
                     state.active_asr_refinement_provider,
                     Some(crate::asr::AsrProviderType::ElevenLabs)
+                        | Some(crate::asr::AsrProviderType::OpenAI)
                         | Some(crate::asr::AsrProviderType::Qwen)
                 );
             let is_recognizing = state.session_state == HotkeySessionState::Finalizing
