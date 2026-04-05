@@ -3,6 +3,7 @@ import { ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { UiLanguage } from '../i18n'
 import { getDefaultPrompt } from '../utils/llmPrompts'
+import type { LlmApiModeValue, LlmProviderValue } from '../utils/llmOptions'
 
 export interface AppSettings {
     uiLanguage: UiLanguage
@@ -70,7 +71,7 @@ export interface AppSettings {
 
     // LLM
     enableLlmCorrection: boolean
-    llmProviderType: 'volcengine' | 'openai' | 'qwen' | 'custom'
+    llmProviderType: LlmProviderValue
     llmPromptTemplate: string
     translationPromptTemplate: string
     enableLlmHistoryContext: boolean
@@ -99,6 +100,7 @@ export interface AppSettings {
     llmCustomBaseUrl: string
     llmCustomApiKey: string
     llmCustomModel: string
+    llmCustomApiMode: LlmApiModeValue
 
     // Hotkey
     hotkeyConfig: string | null
@@ -250,6 +252,7 @@ const defaultSettings: AppSettings = {
     llmCustomBaseUrl: '',
     llmCustomApiKey: '',
     llmCustomModel: '',
+    llmCustomApiMode: 'chat_completions',
 
     hotkeyConfig: null,
     holdThresholdMs: 1000,

@@ -1,7 +1,6 @@
 import type { AppSettings } from '../stores/settings'
 
 export type AsrProviderValue = AppSettings['asrProviderType']
-export type LlmProviderValue = AppSettings['llmProviderType']
 export type BatchCapableRecognitionMode = 'realtime' | 'batch'
 export type PostRecordingBatchRefineValue = 'off' | 'batch_refine'
 export type ElevenLabsRecognitionMode = AppSettings['elevenlabsRecognitionMode']
@@ -25,13 +24,6 @@ const ASR_PROVIDER_LABEL_KEYS: Array<{ key: string; value: Exclude<AsrProviderVa
   { key: 'asr.providerOpenAI', value: 'openai' },
   { key: 'asr.providerElevenLabs', value: 'elevenlabs' },
   { key: 'asr.providerSoniox', value: 'soniox' }
-]
-
-const LLM_PROVIDER_LABEL_KEYS: Array<{ key: string; value: LlmProviderValue }> = [
-  { key: 'llm.providerVolcengine', value: 'volcengine' },
-  { key: 'llm.providerOpenAI', value: 'openai' },
-  { key: 'llm.providerQwen', value: 'qwen' },
-  { key: 'llm.providerCustom', value: 'custom' }
 ]
 
 const ELEVENLABS_RECOGNITION_MODE_LABEL_KEYS: Array<{
@@ -76,13 +68,6 @@ export function buildAsrProviderOptions(
       disabled: options.coliDisabled
     }
   ]
-}
-
-export function buildLlmProviderOptions(t: Translate): Array<ProviderOption<LlmProviderValue>> {
-  return LLM_PROVIDER_LABEL_KEYS.map(({ key, value }) => ({
-    label: t(key),
-    value
-  }))
 }
 
 export function buildElevenLabsRecognitionModeOptions(

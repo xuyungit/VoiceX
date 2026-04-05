@@ -24,6 +24,24 @@ impl LLMProviderType {
     }
 }
 
+/// OpenAI-compatible API mode
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LLMApiMode {
+    #[default]
+    ChatCompletions,
+    Responses,
+}
+
+impl LLMApiMode {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "responses" => Self::Responses,
+            _ => Self::ChatCompletions,
+        }
+    }
+}
+
 /// LLM service configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMConfig {
@@ -31,6 +49,7 @@ pub struct LLMConfig {
     pub base_url: String,
     pub api_key: String,
     pub model_name: String,
+    pub api_mode: LLMApiMode,
     /// Volcengine-specific: reasoning effort level
     pub volcengine_reasoning_effort: Option<String>,
 }
@@ -42,6 +61,7 @@ impl Default for LLMConfig {
             base_url: "https://ark.cn-beijing.volces.com/api/v3".to_string(),
             api_key: String::new(),
             model_name: "doubao-seed-2-0-mini-260215".to_string(),
+            api_mode: LLMApiMode::default(),
             volcengine_reasoning_effort: Some("minimal".to_string()),
         }
     }

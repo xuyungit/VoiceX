@@ -5,12 +5,13 @@ import { useI18n } from 'vue-i18n'
 import type { ResolvedLocale } from '../i18n'
 import { useSettingsStore, type AppSettings } from '../stores/settings'
 import { getDefaultPrompt } from '../utils/llmPrompts'
-import { buildLlmProviderOptions } from '../utils/providerOptions'
+import { buildLlmApiModeOptions, buildLlmProviderOptions } from '../utils/llmOptions'
 
 const settingsStore = useSettingsStore()
 const { t, locale } = useI18n()
 
 const providerOptions = computed(() => buildLlmProviderOptions(t))
+const apiModeOptions = computed(() => buildLlmApiModeOptions(t))
 
 const reasoningEffortOptions = computed(() => [
   { label: t('llm.low'), value: 'low' },
@@ -108,6 +109,10 @@ const llmCustomApiKey = computed({
 const llmCustomModel = computed({
   get: () => settingsStore.settings.llmCustomModel,
   set: (v: string) => settingsStore.updateSetting('llmCustomModel', v)
+})
+const llmCustomApiMode = computed({
+  get: () => settingsStore.settings.llmCustomApiMode,
+  set: (v: AppSettings['llmCustomApiMode']) => settingsStore.updateSetting('llmCustomApiMode', v)
 })
 
 const isVolcengine = computed(() => llmProviderType.value === 'volcengine')
@@ -295,6 +300,17 @@ function resetPrompt() {
               <div class="field-label">{{ t('llm.modelName') }}</div>
             </div>
             <NInput v-model:value="llmCustomModel" placeholder="your-model-id" class="field-control short" />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.apiMode') }}</div>
+              <div class="field-sub">{{ t('llm.customApiModeSub') }}</div>
+            </div>
+            <NSelect
+              v-model:value="llmCustomApiMode"
+              :options="apiModeOptions"
+              class="field-control short"
+            />
           </div>
         </template>
       </div>

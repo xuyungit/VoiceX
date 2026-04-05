@@ -119,6 +119,7 @@ pub struct AppSettings {
     pub llm_custom_base_url: String,
     pub llm_custom_api_key: String,
     pub llm_custom_model: String,
+    pub llm_custom_api_mode: String, // "chat_completions" | "responses"
 
     // Hotkey settings
     pub hotkey_config: Option<String>,
@@ -264,6 +265,7 @@ impl Default for AppSettings {
             llm_custom_base_url: String::new(),
             llm_custom_api_key: String::new(),
             llm_custom_model: String::new(),
+            llm_custom_api_mode: "chat_completions".to_string(),
 
             hotkey_config: None,
             hold_threshold_ms: 1000,
@@ -336,6 +338,13 @@ fn normalize_elevenlabs_settings(settings: &mut AppSettings) {
         "off".to_string()
     } else {
         refine_mode.to_string()
+    };
+}
+
+fn normalize_llm_settings(settings: &mut AppSettings) {
+    settings.llm_custom_api_mode = match settings.llm_custom_api_mode.as_str() {
+        "responses" => "responses".to_string(),
+        _ => "chat_completions".to_string(),
     };
 }
 
@@ -470,6 +479,7 @@ pub fn save_settings(
     settings.ui_language = crate::ui_locale::normalize_ui_language(&settings.ui_language);
     normalize_qwen_settings(&mut settings);
     normalize_elevenlabs_settings(&mut settings);
+    normalize_llm_settings(&mut settings);
 
     let text_changed = settings.dictionary_text != current_settings.dictionary_text;
     let ui_language_changed = settings.ui_language != current_settings.ui_language;

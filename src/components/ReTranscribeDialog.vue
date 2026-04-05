@@ -5,7 +5,8 @@ import { NButton, NModal, NSelect, NSwitch, NSpin } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import type { HistoryRecord } from '../stores/history'
-import { buildAsrProviderOptions, buildLlmProviderOptions } from '../utils/providerOptions'
+import { buildAsrProviderOptions } from '../utils/providerOptions'
+import { buildLlmProviderOptions } from '../utils/llmOptions'
 
 const props = defineProps<{
   show: boolean

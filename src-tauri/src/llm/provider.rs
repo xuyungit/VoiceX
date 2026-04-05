@@ -14,7 +14,28 @@ pub struct Message {
 /// Trait for LLM provider implementations
 pub trait LLMProvider: Send + Sync {
     /// Build the request body for the provider
-    fn build_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value;
+    fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value;
+
+    /// Build a Responses API request body for the provider.
+    fn build_responses_request(
+        &self,
+        instructions: &str,
+        input_text: &str,
+        config: &LLMConfig,
+    ) -> Value {
+        serde_json::json!({
+            "model": config.model_name,
+            "instructions": instructions,
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": input_text
+                }]
+            }],
+            "stream": true
+        })
+    }
 
     /// Get the display name for logging
     fn name(&self) -> &'static str;
@@ -37,7 +58,7 @@ pub fn create_provider(provider_type: &LLMProviderType) -> Box<dyn LLMProvider> 
 pub struct VolcengineProvider;
 
 impl LLMProvider for VolcengineProvider {
-    fn build_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
+    fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
         let reasoning_effort = config
             .volcengine_reasoning_effort
             .clone()
@@ -63,7 +84,7 @@ impl LLMProvider for VolcengineProvider {
 pub struct OpenAIProvider;
 
 impl LLMProvider for OpenAIProvider {
-    fn build_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
+    fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
         serde_json::json!({
             "model": config.model_name,
             "messages": messages,
@@ -83,7 +104,7 @@ impl LLMProvider for OpenAIProvider {
 pub struct QwenProvider;
 
 impl LLMProvider for QwenProvider {
-    fn build_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
+    fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
         serde_json::json!({
             "model": config.model_name,
             "messages": messages,
@@ -105,13 +126,35 @@ impl LLMProvider for QwenProvider {
 pub struct CustomProvider;
 
 impl LLMProvider for CustomProvider {
-    fn build_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
+    fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
         // Generic OpenAI-compatible format
         serde_json::json!({
             "model": config.model_name,
             "messages": messages,
             "temperature": 0.2,
             "max_tokens": 4096
+        })
+    }
+
+    fn build_responses_request(
+        &self,
+        instructions: &str,
+        input_text: &str,
+        config: &LLMConfig,
+    ) -> Value {
+        serde_json::json!({
+            "model": config.model_name,
+            "instructions": instructions,
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": input_text
+                }]
+            }],
+            "temperature": 0.2,
+            "max_output_tokens": 4096,
+            "stream": true
         })
     }
 

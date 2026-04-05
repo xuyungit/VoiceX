@@ -14,7 +14,7 @@ use crate::asr::{
     OpenAIRealtimeClient, OpenAITranscriptionClient, QwenRealtimeClient, QwenRecognitionMode,
     QwenTranscriptionClient,
 };
-use crate::llm::{LLMClient, LLMConfig, LLMProviderType, PromptBuildOptions};
+use crate::llm::{LLMApiMode, LLMClient, LLMConfig, LLMProviderType, PromptBuildOptions};
 use crate::services::history_service::HistoryService;
 use crate::storage;
 
@@ -593,29 +593,34 @@ async fn run_llm_correction(
 ) -> (Option<String>, Option<String>) {
     let provider_type = LLMProviderType::from_str(&settings.llm_provider_type);
 
-    let (base_url, api_key, model_name, volcengine_reasoning_effort) = match provider_type {
+    let (base_url, api_key, model_name, api_mode, volcengine_reasoning_effort) =
+        match provider_type {
         LLMProviderType::Volcengine => (
             settings.llm_volcengine_base_url.clone(),
             settings.llm_volcengine_api_key.clone(),
             settings.llm_volcengine_model.clone(),
+            LLMApiMode::ChatCompletions,
             settings.llm_volcengine_reasoning_effort.clone(),
         ),
         LLMProviderType::Openai => (
             settings.llm_openai_base_url.clone(),
             settings.llm_openai_api_key.clone(),
             settings.llm_openai_model.clone(),
+            LLMApiMode::ChatCompletions,
             None,
         ),
         LLMProviderType::Qwen => (
             settings.llm_qwen_base_url.clone(),
             settings.llm_qwen_api_key.clone(),
             settings.llm_qwen_model.clone(),
+            LLMApiMode::ChatCompletions,
             None,
         ),
         LLMProviderType::Custom => (
             settings.llm_custom_base_url.clone(),
             settings.llm_custom_api_key.clone(),
             settings.llm_custom_model.clone(),
+            LLMApiMode::from_str(&settings.llm_custom_api_mode),
             None,
         ),
     };
@@ -625,6 +630,7 @@ async fn run_llm_correction(
         base_url,
         api_key,
         model_name,
+        api_mode,
         volcengine_reasoning_effort,
     });
 
