@@ -292,7 +292,7 @@ const enUS = {
     elevenlabsRefineOff: 'Off',
     elevenlabsRefineBatch: 'Batch Refine',
     sonioxConfiguration: 'Soniox Real-Time Configuration',
-    sonioxConfigurationSub: 'Uses the Soniox real-time WebSocket API for streaming speech recognition. Provides interim results that progressively stabilize into final tokens.',
+    sonioxConfigurationSub: 'VoiceX currently integrates only the Soniox realtime WebSocket API. Batch mode and post-recording refine are intentionally not exposed here. Interim results progressively stabilize into final tokens during recording.',
     sonioxApiKeyNote: 'Enter your Soniox API key from the Soniox dashboard.',
     sonioxModelNote: 'Default model is `stt-rt-v4` for real-time streaming transcription.',
     sonioxLanguageNote: 'Comma-separated language hints, e.g. `en`, `zh`, or `en,zh` for multilingual.',

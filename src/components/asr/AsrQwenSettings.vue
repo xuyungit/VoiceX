@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed } from 'vue'
 import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
 import {
   buildBatchCapableRecognitionModeOptions,
   buildPostRecordingBatchRefineOptions,
+  normalizeBatchCapablePostRecordingRefine,
+  postRecordingBatchRefineEnabled,
+  postRecordingBatchRefineValueFromBoolean,
 } from '../../utils/providerOptions'
 
 const settingsStore = useSettingsStore()
@@ -20,9 +23,15 @@ const qwenAsrRecognitionMode = computed({
   get: () => settingsStore.settings.qwenAsrRecognitionMode,
   set: (value: 'realtime' | 'batch') => {
     settingsStore.updateSetting('qwenAsrRecognitionMode', value)
-    if (value === 'batch') {
-      settingsStore.updateSetting('qwenAsrPostRecordingRefine', false)
-    }
+    settingsStore.updateSetting(
+      'qwenAsrPostRecordingRefine',
+      postRecordingBatchRefineEnabled(
+        normalizeBatchCapablePostRecordingRefine(
+          value,
+          postRecordingBatchRefineValueFromBoolean(settingsStore.settings.qwenAsrPostRecordingRefine)
+        )
+      )
+    )
   }
 })
 
@@ -48,11 +57,13 @@ const qwenAsrLanguage = computed({
 
 const qwenAsrPostRecordingRefine = computed({
   get: (): 'off' | 'batch_refine' =>
-    settingsStore.settings.qwenAsrPostRecordingRefine ? 'batch_refine' : 'off',
+    postRecordingBatchRefineValueFromBoolean(settingsStore.settings.qwenAsrPostRecordingRefine),
   set: (value: 'off' | 'batch_refine') => {
     settingsStore.updateSetting(
       'qwenAsrPostRecordingRefine',
-      qwenAsrRecognitionMode.value === 'realtime' && value === 'batch_refine'
+      postRecordingBatchRefineEnabled(
+        normalizeBatchCapablePostRecordingRefine(qwenAsrRecognitionMode.value, value)
+      )
     )
   }
 })
@@ -76,12 +87,6 @@ const qwenWsUrlOptions = computed(() => [
 const recognitionModeOptions = computed(() => buildBatchCapableRecognitionModeOptions(t))
 const postRecordingRefineOptions = computed(() => buildPostRecordingBatchRefineOptions(t))
 const batchRefineDisabled = computed(() => qwenAsrRecognitionMode.value === 'batch')
-
-watch(qwenAsrRecognitionMode, (value) => {
-  if (value === 'batch' && qwenAsrPostRecordingRefine.value !== 'off') {
-    settingsStore.updateSetting('qwenAsrPostRecordingRefine', false)
-  }
-})
 </script>
 
 <template>

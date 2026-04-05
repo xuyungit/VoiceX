@@ -292,7 +292,7 @@ const zhCN = {
     elevenlabsRefineOff: '关闭',
     elevenlabsRefineBatch: 'Batch Refine',
     sonioxConfiguration: 'Soniox 实时配置',
-    sonioxConfigurationSub: '使用 Soniox 实时 WebSocket API 进行流式语音识别。提供逐步稳定为 final token 的中间结果。',
+    sonioxConfigurationSub: '当前只接入 Soniox 实时 WebSocket API，不提供 Batch 或录后精修模式。识别过程中会返回逐步稳定为 final token 的中间结果。',
     sonioxApiKeyNote: '填写 Soniox 控制台中的 API Key。',
     sonioxModelNote: '默认模型为 `stt-rt-v4`，用于实时流式转写。',
     sonioxLanguageNote: '语言提示，逗号分隔，例如 `en`、`zh`，或 `en,zh` 多语言。',

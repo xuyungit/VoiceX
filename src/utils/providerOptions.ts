@@ -3,6 +3,7 @@ import type { AppSettings } from '../stores/settings'
 export type AsrProviderValue = AppSettings['asrProviderType']
 export type BatchCapableRecognitionMode = 'realtime' | 'batch'
 export type PostRecordingBatchRefineValue = 'off' | 'batch_refine'
+export type UnifiedAsrPipelineMode = 'realtime' | 'realtime_with_final_pass' | 'batch'
 export type ElevenLabsRecognitionMode = AppSettings['elevenlabsRecognitionMode']
 export type ElevenLabsPostRecordingRefine = AppSettings['elevenlabsPostRecordingRefine']
 
@@ -76,6 +77,12 @@ export function buildElevenLabsRecognitionModeOptions(
   return buildBatchCapableRecognitionModeOptions(t)
 }
 
+export function buildOpenAiRecognitionModeOptions(
+  t: Translate
+): Array<ProviderOption<AppSettings['openaiAsrMode']>> {
+  return buildBatchCapableRecognitionModeOptions(t)
+}
+
 export function buildBatchCapableRecognitionModeOptions(
   t: Translate
 ): Array<ProviderOption<BatchCapableRecognitionMode>> {
@@ -98,4 +105,36 @@ export function buildPostRecordingBatchRefineOptions(
     label: t(key),
     value
   }))
+}
+
+export function normalizeBatchCapablePostRecordingRefine(
+  recognitionMode: BatchCapableRecognitionMode,
+  postRecordingRefine: PostRecordingBatchRefineValue
+): PostRecordingBatchRefineValue {
+  return recognitionMode === 'batch' ? 'off' : postRecordingRefine
+}
+
+export function postRecordingBatchRefineEnabled(
+  value: PostRecordingBatchRefineValue
+): boolean {
+  return value === 'batch_refine'
+}
+
+export function postRecordingBatchRefineValueFromBoolean(
+  enabled: boolean
+): PostRecordingBatchRefineValue {
+  return enabled ? 'batch_refine' : 'off'
+}
+
+export function resolveBatchCapablePipelineMode(
+  recognitionMode: BatchCapableRecognitionMode,
+  postRecordingRefine: PostRecordingBatchRefineValue
+): UnifiedAsrPipelineMode {
+  if (recognitionMode === 'batch') {
+    return 'batch'
+  }
+  if (normalizeBatchCapablePostRecordingRefine(recognitionMode, postRecordingRefine) === 'batch_refine') {
+    return 'realtime_with_final_pass'
+  }
+  return 'realtime'
 }

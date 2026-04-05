@@ -3,9 +3,8 @@ use std::path::PathBuf;
 
 use crate::{
     asr::{
-        AsrConfig, AsrEvent, AsrFailure, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
-        ColiRefinementMode, ElevenLabsTranscriptionClient, GeminiTranscriptionClient,
-        OpenAITranscriptionClient, QwenTranscriptionClient,
+        transcribe_audio_path_detailed, AsrConfig, AsrEvent, AsrFailure, AsrProviderType,
+        ColiAsrClient, ColiRefinementMode, ElevenLabsTranscriptionClient, QwenTranscriptionClient,
     },
     state::{AppState, HotkeySessionState, ProcessingIntent},
 };
@@ -177,9 +176,7 @@ impl SessionController {
             "ASR stream finished (has_final={}, len={}, refinement_mode_active={})",
             has_final,
             final_text_len,
-            self.should_run_coli_refinement(state)
-                || self.should_run_elevenlabs_batch_refinement(state)
-                || self.should_run_qwen_batch_refinement(state),
+            self.should_run_post_recording_refinement(state),
         );
         if !final_text_prev.is_empty() {
             log::debug!("ASR final preview: {}", final_text_prev);
@@ -308,16 +305,8 @@ impl SessionController {
             );
             return;
         }
-        if self.should_run_coli_refinement(state) && !state.asr_refinement_done {
-            self.start_coli_refinement(state);
-            return;
-        }
-        if self.should_run_elevenlabs_batch_refinement(state) && !state.asr_refinement_done {
-            self.start_elevenlabs_batch_refinement(state);
-            return;
-        }
-        if self.should_run_qwen_batch_refinement(state) && !state.asr_refinement_done {
-            self.start_qwen_batch_refinement(state);
+        if self.should_run_post_recording_refinement(state) && !state.asr_refinement_done {
+            self.start_post_recording_refinement(state);
             return;
         }
         if !state.has_final_result {
@@ -506,56 +495,12 @@ impl SessionController {
         });
     }
 
-    fn should_run_coli_refinement(&self, state: &AppState) -> bool {
+    fn should_run_post_recording_refinement(&self, state: &AppState) -> bool {
         if state.is_recording || !state.asr_stream_finished {
             return false;
         }
 
-        let audio_path = match state
-            .session_refinement_audio_path
-            .as_ref()
-            .or(state.session_audio_path.as_ref())
-        {
-            Some(path) if path.is_file() => path,
-            _ => return false,
-        };
-        if audio_path.as_os_str().is_empty() {
-            return false;
-        }
-
-        let settings = match crate::storage::get_settings() {
-            Ok(settings) => settings,
-            Err(err) => {
-                log::warn!("ASR refinement skipped, failed to load settings: {}", err);
-                log::warn!(
-                    "COLI_REFINE skipped reason=load_settings_failed err={}",
-                    err
-                );
-                return false;
-            }
-        };
-        let config = AsrConfig::from(&settings);
-        config.provider_type == AsrProviderType::Coli
-            && config.coli_final_refinement_mode != ColiRefinementMode::Off
-    }
-
-    fn should_run_elevenlabs_batch_refinement(&self, state: &AppState) -> bool {
-        if state.is_recording || !state.asr_stream_finished {
-            return false;
-        }
-
-        let settings = match crate::storage::get_settings() {
-            Ok(settings) => settings,
-            Err(err) => {
-                log::warn!(
-                    "ElevenLabs batch refine skipped, failed to load settings: {}",
-                    err
-                );
-                return false;
-            }
-        };
-        let config = AsrConfig::from(&settings);
-        config.post_recording_batch_refine_enabled()
+        self.configured_post_recording_refine_provider().is_some()
     }
 
     fn should_defer_injection_until_asr_finished(&self, state: &AppState) -> bool {
@@ -563,6 +508,10 @@ impl SessionController {
             return false;
         }
 
+        self.configured_post_recording_refine_provider().is_some()
+    }
+
+    fn configured_post_recording_refine_provider(&self) -> Option<PostRecordingRefineProvider> {
         let settings = match crate::storage::get_settings() {
             Ok(settings) => settings,
             Err(err) => {
@@ -570,72 +519,63 @@ impl SessionController {
                     "Inject defer check skipped, failed to load settings: {}",
                     err
                 );
-                return false;
+                return None;
             }
         };
         let config = AsrConfig::from(&settings);
-        (config.provider_type == AsrProviderType::Coli
-            && config.coli_final_refinement_mode != ColiRefinementMode::Off)
-            || config.post_recording_batch_refine_enabled()
+        PostRecordingRefineProvider::from_config(&config)
     }
 
-    fn start_coli_refinement(&self, state: &mut AppState) {
-        let audio_path = match state
-            .session_refinement_audio_path
-            .clone()
-            .or(state.session_audio_path.clone())
-        {
-            Some(path) => path,
-            None => {
-                log::info!("ASR refinement skipped: no audio path available");
-                log::info!("COLI_REFINE skipped reason=no_audio_path");
-                state.asr_refinement_done = true;
-                self.maybe_inject_final_state(state);
-                return;
-            }
-        };
-
+    fn start_post_recording_refinement(&self, state: &mut AppState) {
         let settings = match crate::storage::get_settings() {
             Ok(settings) => settings,
             Err(err) => {
                 log::warn!("ASR refinement skipped, failed to load settings: {}", err);
-                log::warn!(
-                    "COLI_REFINE skipped reason=load_settings_failed err={}",
-                    err
-                );
-                state.asr_refinement_done = true;
-                self.maybe_inject_final_state(state);
+                self.on_asr_refinement_failed_state(state, err.to_string());
                 return;
             }
         };
         let config = AsrConfig::from(&settings);
-        if config.coli_final_refinement_mode == ColiRefinementMode::Off {
-            log::info!("COLI_REFINE skipped reason=mode_off");
+        let Some(provider) = PostRecordingRefineProvider::from_config(&config) else {
+            log::info!("ASR_REFINE skipped reason=mode_off");
             state.asr_refinement_done = true;
             self.maybe_inject_final_state(state);
             return;
-        }
+        };
+
+        let audio_path = match provider.audio_path(state) {
+            Some(path) => path,
+            None => {
+                log::warn!("{} skipped reason=no_audio_path", provider.log_tag());
+                state.active_asr_refinement_provider = Some(provider.as_asr_provider_type());
+                self.on_asr_refinement_failed_state(state, provider.missing_audio_message());
+                return;
+            }
+        };
 
         state.asr_refinement_in_progress = true;
-        state.active_asr_refinement_provider = Some(AsrProviderType::Coli);
-        self.send_message(SessionMessage::CorrectingStart);
+        state.active_asr_refinement_provider = Some(provider.as_asr_provider_type());
+        if provider.uses_recognizing_hud() {
+            state.session_asr_model_name = provider.streaming_model_name(&config);
+            self.emit_state_from(state);
+        } else {
+            self.send_message(SessionMessage::CorrectingStart);
+        }
         if !state.session_final_text.trim().is_empty() {
             self.emit_transcript(&state.session_final_text, true);
         }
+
+        let model_name = provider.target_model_name(&config);
         log::info!(
-            "Starting local ASR refinement with model={} on {}",
-            config
-                .coli_final_refinement_mode
-                .display_name()
-                .unwrap_or("unknown"),
+            "Starting {} post-recording refinement with model={} on {}",
+            provider.display_name(),
+            model_name.as_deref().unwrap_or("unknown"),
             audio_path.display()
         );
         log::info!(
-            "COLI_REFINE start model={} audio_path={} stream_final_len={}",
-            config
-                .coli_final_refinement_mode
-                .display_name()
-                .unwrap_or("unknown"),
+            "{} start model={} audio_path={} stream_final_len={}",
+            provider.log_tag(),
+            model_name.as_deref().unwrap_or("unknown"),
             audio_path.display(),
             state.session_final_text.chars().count()
         );
@@ -645,226 +585,16 @@ impl SessionController {
             .injection_epoch
             .load(std::sync::atomic::Ordering::SeqCst);
         tauri::async_runtime::spawn(async move {
-            let client = ColiAsrClient::new(config);
-            match client.refine_file(&audio_path).await {
-                Ok(result) => {
-                    let (text, model_name) = match result {
-                        Some((text, model_name)) => (Some(text), Some(model_name)),
-                        None => (None, None),
-                    };
+            match provider.refine_file(config, &audio_path).await {
+                Ok((text, resolved_model_name)) => {
                     controller.send_message(SessionMessage::AsrRefinementDone {
                         text,
-                        model_name,
+                        model_name: resolved_model_name.or(model_name),
                         refinement_epoch,
                     });
                 }
                 Err(err) => controller.send_message(SessionMessage::AsrRefinementFailed {
-                    reason: err.to_string(),
-                    refinement_epoch,
-                }),
-            }
-        });
-    }
-
-    fn start_elevenlabs_batch_refinement(&self, state: &mut AppState) {
-        let settings = match crate::storage::get_settings() {
-            Ok(settings) => settings,
-            Err(err) => {
-                log::warn!(
-                    "ElevenLabs batch refine skipped, failed to load settings: {}",
-                    err
-                );
-                state.active_asr_refinement_provider = Some(AsrProviderType::ElevenLabs);
-                self.on_asr_refinement_failed_state(state, err.to_string());
-                return;
-            }
-        };
-        let config = AsrConfig::from(&settings);
-        if !config.post_recording_batch_refine_enabled() {
-            log::info!("ELEVENLABS_REFINE skipped reason=mode_off");
-            state.asr_refinement_done = true;
-            self.maybe_inject_final_state(state);
-            return;
-        }
-
-        let audio_path = match elevenlabs_batch_refine_audio_path(state) {
-            Some(path) => path,
-            None => {
-                log::warn!("ELEVENLABS_REFINE skipped reason=no_audio_path");
-                state.active_asr_refinement_provider = Some(AsrProviderType::ElevenLabs);
-                self.on_asr_refinement_failed_state(
-                    state,
-                    "ElevenLabs batch refine audio file is missing".to_string(),
-                );
-                return;
-            }
-        };
-
-        state.asr_refinement_in_progress = true;
-        state.active_asr_refinement_provider = Some(AsrProviderType::ElevenLabs);
-        state.session_asr_model_name =
-            crate::services::history_service::HistoryService::elevenlabs_realtime_model_name(
-                &config.elevenlabs_realtime_model,
-            );
-        self.emit_state_from(state);
-        if !state.session_final_text.trim().is_empty() {
-            self.emit_transcript(&state.session_final_text, true);
-        }
-
-        let model_name =
-            crate::services::history_service::HistoryService::elevenlabs_realtime_batch_refine_model_name(
-                &config.elevenlabs_realtime_model,
-                &config.elevenlabs_batch_model,
-            );
-        log::info!(
-            "Starting ElevenLabs batch refine with model={} on {}",
-            model_name.as_deref().unwrap_or("unknown"),
-            audio_path.display()
-        );
-        log::info!(
-            "ELEVENLABS_REFINE start model={} audio_path={} stream_final_len={}",
-            model_name.as_deref().unwrap_or("unknown"),
-            audio_path.display(),
-            state.session_final_text.chars().count()
-        );
-
-        let controller = self.clone();
-        let refinement_epoch = self
-            .injection_epoch
-            .load(std::sync::atomic::Ordering::SeqCst);
-        tauri::async_runtime::spawn(async move {
-            let client = ElevenLabsTranscriptionClient::new(config.clone());
-            match client.transcribe_file(&audio_path).await {
-                Ok(text) => {
-                    let refined = text.trim().to_string();
-                    if refined.is_empty() {
-                        controller.send_message(SessionMessage::AsrRefinementFailed {
-                            reason: "ElevenLabs batch refine returned empty result".to_string(),
-                            refinement_epoch,
-                        });
-                    } else {
-                        controller.send_message(SessionMessage::AsrRefinementDone {
-                            text: Some(refined),
-                            model_name,
-                            refinement_epoch,
-                        });
-                    }
-                }
-                Err(err) => controller.send_message(SessionMessage::AsrRefinementFailed {
-                    reason: err.to_string(),
-                    refinement_epoch,
-                }),
-            }
-        });
-    }
-
-    fn should_run_qwen_batch_refinement(&self, state: &AppState) -> bool {
-        if state.is_recording || !state.asr_stream_finished {
-            return false;
-        }
-
-        let settings = match crate::storage::get_settings() {
-            Ok(settings) => settings,
-            Err(err) => {
-                log::warn!(
-                    "Qwen batch refine skipped, failed to load settings: {}",
-                    err
-                );
-                return false;
-            }
-        };
-        let config = AsrConfig::from(&settings);
-        config.provider_type == AsrProviderType::Qwen
-            && config.post_recording_batch_refine_enabled()
-    }
-
-    fn start_qwen_batch_refinement(&self, state: &mut AppState) {
-        let settings = match crate::storage::get_settings() {
-            Ok(settings) => settings,
-            Err(err) => {
-                log::warn!(
-                    "Qwen batch refine skipped, failed to load settings: {}",
-                    err
-                );
-                state.active_asr_refinement_provider = Some(AsrProviderType::Qwen);
-                self.on_asr_refinement_failed_state(state, err.to_string());
-                return;
-            }
-        };
-        let config = AsrConfig::from(&settings);
-        if !config.post_recording_batch_refine_enabled() {
-            log::info!("QWEN_REFINE skipped reason=mode_off");
-            state.asr_refinement_done = true;
-            self.maybe_inject_final_state(state);
-            return;
-        }
-
-        let audio_path = match qwen_batch_refine_audio_path(state) {
-            Some(path) => path,
-            None => {
-                log::warn!("QWEN_REFINE skipped reason=no_audio_path");
-                state.active_asr_refinement_provider = Some(AsrProviderType::Qwen);
-                self.on_asr_refinement_failed_state(
-                    state,
-                    "Qwen batch refine audio file is missing".to_string(),
-                );
-                return;
-            }
-        };
-
-        state.asr_refinement_in_progress = true;
-        state.active_asr_refinement_provider = Some(AsrProviderType::Qwen);
-        state.session_asr_model_name =
-            crate::services::history_service::HistoryService::format_provider_model(
-                "Qwen",
-                &config.qwen_model,
-            );
-        self.emit_state_from(state);
-        if !state.session_final_text.trim().is_empty() {
-            self.emit_transcript(&state.session_final_text, true);
-        }
-
-        let model_name =
-            crate::services::history_service::HistoryService::qwen_realtime_batch_refine_model_name(
-                &config.qwen_model,
-                &config.qwen_batch_model,
-            );
-        log::info!(
-            "Starting Qwen batch refine with model={} on {}",
-            model_name.as_deref().unwrap_or("unknown"),
-            audio_path.display()
-        );
-        log::info!(
-            "QWEN_REFINE start model={} audio_path={} stream_final_len={}",
-            model_name.as_deref().unwrap_or("unknown"),
-            audio_path.display(),
-            state.session_final_text.chars().count()
-        );
-
-        let controller = self.clone();
-        let refinement_epoch = self
-            .injection_epoch
-            .load(std::sync::atomic::Ordering::SeqCst);
-        tauri::async_runtime::spawn(async move {
-            let client = QwenTranscriptionClient::new(config.clone());
-            match client.transcribe_file(&audio_path).await {
-                Ok(text) => {
-                    let refined = text.trim().to_string();
-                    if refined.is_empty() {
-                        controller.send_message(SessionMessage::AsrRefinementFailed {
-                            reason: "Qwen batch refine returned empty result".to_string(),
-                            refinement_epoch,
-                        });
-                    } else {
-                        controller.send_message(SessionMessage::AsrRefinementDone {
-                            text: Some(refined),
-                            model_name,
-                            refinement_epoch,
-                        });
-                    }
-                }
-                Err(err) => controller.send_message(SessionMessage::AsrRefinementFailed {
-                    reason: err.to_string(),
+                    reason: err,
                     refinement_epoch,
                 }),
             }
@@ -993,60 +723,29 @@ impl SessionController {
                     reason
                 );
             }
-            Some(AsrProviderType::ElevenLabs) => {
+            Some(AsrProviderType::ElevenLabs) | Some(AsrProviderType::Qwen) => {
+                let provider =
+                    PostRecordingRefineProvider::from_asr_provider(refinement_provider.unwrap())
+                        .expect("post-recording refine provider");
                 log::warn!(
-                    "ElevenLabs batch refine failed; falling back to streaming final: {}",
+                    "{} batch refine failed; falling back to streaming final: {}",
+                    provider.display_name(),
                     reason
                 );
                 log::warn!(
-                    "ELEVENLABS_REFINE failed fallback_to_streaming={} reason={}",
+                    "{} failed fallback_to_streaming={} reason={}",
+                    provider.log_tag(),
                     has_stream_fallback_result(state),
                     reason
                 );
                 if has_stream_fallback_result(state) {
                     state.session_asr_model_name = crate::storage::get_settings()
                         .ok()
-                        .and_then(|settings| {
-                            crate::services::history_service::HistoryService::elevenlabs_realtime_model_name(
-                                &settings.elevenlabs_realtime_model,
-                            )
-                        });
+                        .and_then(|settings| provider.streaming_model_name_from_settings(&settings));
                 }
-                let message = elevenlabs_refine_failure_message(state);
+                let message = provider.failure_message(state);
                 self.emit_asr_error(message);
-                if should_surface_terminal_elevenlabs_refine_failure(state) {
-                    state.asr_refinement_in_progress = false;
-                    state.asr_refinement_done = true;
-                    state.terminal_error_message = Some(message.to_string());
-                    state.terminal_asr_failure = None;
-                    self.emit_state_from(state);
-                    self.cancel_audio_level_task();
-                    self.schedule_error_cleanup();
-                    return;
-                }
-            }
-            Some(AsrProviderType::Qwen) => {
-                log::warn!(
-                    "Qwen batch refine failed; falling back to streaming final: {}",
-                    reason
-                );
-                log::warn!(
-                    "QWEN_REFINE failed fallback_to_streaming={} reason={}",
-                    has_stream_fallback_result(state),
-                    reason
-                );
-                if has_stream_fallback_result(state) {
-                    state.session_asr_model_name =
-                        crate::storage::get_settings().ok().and_then(|settings| {
-                            crate::services::history_service::HistoryService::format_provider_model(
-                                "Qwen",
-                                &settings.qwen_asr_model,
-                            )
-                        });
-                }
-                let message = qwen_refine_failure_message(state);
-                self.emit_asr_error(message);
-                if should_surface_terminal_qwen_refine_failure(state) {
+                if should_surface_terminal_batch_post_refine_failure(state) {
                     state.asr_refinement_in_progress = false;
                     state.asr_refinement_done = true;
                     state.terminal_error_message = Some(message.to_string());
@@ -1102,7 +801,7 @@ impl SessionController {
                 return;
             }
         };
-        let config = AsrConfig::from(&settings);
+        let mut config = AsrConfig::from(&settings);
         if !config.is_valid() {
             log::warn!("Batch ASR config invalid, skipping");
             self.fail_batch_asr_state(state, "批量识别失败：当前 ASR 服务配置不完整".to_string());
@@ -1126,177 +825,29 @@ impl SessionController {
         );
 
         tauri::async_runtime::spawn(async move {
-            match config.provider_type {
-                AsrProviderType::Coli => {
-                    // Use coli's file-based recognition (refine_file) in batch mode.
-                    let mut batch_config = config.clone();
-                    // Force SenseVoice for batch recognition if refinement is off.
-                    if batch_config.coli_final_refinement_mode == ColiRefinementMode::Off {
-                        batch_config.coli_final_refinement_mode = ColiRefinementMode::SenseVoice;
-                    }
-                    let client = ColiAsrClient::new(batch_config);
-                    match client.refine_file(&audio_path).await {
-                        Ok(Some((text, model_name))) => {
-                            controller.send_message(SessionMessage::BatchAsrDone {
-                                text,
-                                model_name: Some(format!("Local / coli / {}", model_name)),
-                                batch_epoch,
-                            });
-                        }
-                        Ok(None) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: "Batch ASR returned empty result".to_string(),
-                                batch_epoch,
-                            });
-                        }
-                        Err(e) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: e.to_string(),
-                                batch_epoch,
-                            });
-                        }
-                    }
+            match transcribe_audio_path_detailed(
+                &audio_path,
+                &mut config,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            {
+                Ok(outcome) if !outcome.text.trim().is_empty() => {
+                    controller.send_message(SessionMessage::BatchAsrDone {
+                        text: outcome.text,
+                        model_name: outcome.model_name,
+                        batch_epoch,
+                    });
                 }
-                AsrProviderType::Cohere => {
-                    let client = CohereTranscriptionClient::new(config.clone());
-                    match client.transcribe_file(&audio_path).await {
-                        Ok(text) if !text.trim().is_empty() => {
-                            controller.send_message(SessionMessage::BatchAsrDone {
-                                text,
-                                model_name: Some(format!(
-                                    "Cohere / {}",
-                                    config.cohere_model.trim()
-                                )),
-                                batch_epoch,
-                            });
-                        }
-                        Ok(_) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: "Batch ASR returned empty result".to_string(),
-                                batch_epoch,
-                            });
-                        }
-                        Err(e) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: e.to_string(),
-                                batch_epoch,
-                            });
-                        }
-                    }
-                }
-                AsrProviderType::OpenAI => {
-                    let client = OpenAITranscriptionClient::new(config.clone());
-                    match client.transcribe_file(&audio_path).await {
-                        Ok(text) if !text.trim().is_empty() => {
-                            controller.send_message(SessionMessage::BatchAsrDone {
-                                text,
-                                model_name: Some(format!(
-                                    "OpenAI / {}",
-                                    config.openai_asr_model.trim()
-                                )),
-                                batch_epoch,
-                            });
-                        }
-                        Ok(_) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: "Batch ASR returned empty result".to_string(),
-                                batch_epoch,
-                            });
-                        }
-                        Err(e) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: e.to_string(),
-                                batch_epoch,
-                            });
-                        }
-                    }
-                }
-                AsrProviderType::ElevenLabs => {
-                    let client = ElevenLabsTranscriptionClient::new(config.clone());
-                    match client.transcribe_file(&audio_path).await {
-                        Ok(text) if !text.trim().is_empty() => {
-                            controller.send_message(SessionMessage::BatchAsrDone {
-                                text,
-                                model_name: Some(format!(
-                                    "ElevenLabs / {}",
-                                    config.elevenlabs_batch_model.trim()
-                                )),
-                                batch_epoch,
-                            });
-                        }
-                        Ok(_) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: "Batch ASR returned empty result".to_string(),
-                                batch_epoch,
-                            });
-                        }
-                        Err(e) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: e.to_string(),
-                                batch_epoch,
-                            });
-                        }
-                    }
-                }
-                AsrProviderType::Qwen => {
-                    let client = QwenTranscriptionClient::new(config.clone());
-                    match client.transcribe_file(&audio_path).await {
-                        Ok(text) if !text.trim().is_empty() => {
-                            controller.send_message(SessionMessage::BatchAsrDone {
-                                text,
-                                model_name: crate::services::history_service::HistoryService::qwen_batch_model_name(
-                                    &config.qwen_batch_model,
-                                ),
-                                batch_epoch,
-                            });
-                        }
-                        Ok(_) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: "Batch ASR returned empty result".to_string(),
-                                batch_epoch,
-                            });
-                        }
-                        Err(e) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: e.to_string(),
-                                batch_epoch,
-                            });
-                        }
-                    }
-                }
-                AsrProviderType::Gemini => {
-                    let client = GeminiTranscriptionClient::new(config.clone());
-                    match client.transcribe_file(&audio_path).await {
-                        Ok(text) if !text.trim().is_empty() => {
-                            controller.send_message(SessionMessage::BatchAsrDone {
-                                text,
-                                model_name: Some(format!(
-                                    "Gemini / {}",
-                                    config.gemini_model.trim()
-                                )),
-                                batch_epoch,
-                            });
-                        }
-                        Ok(_) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: "Batch ASR returned empty result".to_string(),
-                                batch_epoch,
-                            });
-                        }
-                        Err(e) => {
-                            controller.send_message(SessionMessage::BatchAsrFailed {
-                                reason: e.to_string(),
-                                batch_epoch,
-                            });
-                        }
-                    }
-                }
-                _ => {
+                Ok(_) => {
                     controller.send_message(SessionMessage::BatchAsrFailed {
-                        reason: format!(
-                            "Batch mode not supported for provider {:?}",
-                            config.provider_type
-                        ),
+                        reason: "Batch ASR returned empty result".to_string(),
+                        batch_epoch,
+                    });
+                }
+                Err(reason) => {
+                    controller.send_message(SessionMessage::BatchAsrFailed {
+                        reason,
                         batch_epoch,
                     });
                 }
@@ -1361,17 +912,213 @@ impl SessionController {
     }
 }
 
-fn elevenlabs_batch_refine_audio_path(state: &AppState) -> Option<PathBuf> {
-    match state.session_audio_path.clone() {
-        Some(path) if path.is_file() => Some(path),
-        _ => None,
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostRecordingRefineProvider {
+    Coli,
+    ElevenLabs,
+    Qwen,
 }
 
-fn qwen_batch_refine_audio_path(state: &AppState) -> Option<PathBuf> {
-    match state.session_audio_path.clone() {
-        Some(path) if path.is_file() => Some(path),
-        _ => None,
+impl PostRecordingRefineProvider {
+    fn from_config(config: &AsrConfig) -> Option<Self> {
+        match config.provider_type {
+            AsrProviderType::Coli
+                if config.coli_realtime
+                    && config.coli_final_refinement_mode != ColiRefinementMode::Off =>
+            {
+                Some(Self::Coli)
+            }
+            _ if !config.post_recording_batch_refine_enabled() => None,
+            AsrProviderType::ElevenLabs => Some(Self::ElevenLabs),
+            AsrProviderType::Qwen => Some(Self::Qwen),
+            _ => None,
+        }
+    }
+
+    fn from_asr_provider(provider: AsrProviderType) -> Option<Self> {
+        match provider {
+            AsrProviderType::Coli => Some(Self::Coli),
+            AsrProviderType::ElevenLabs => Some(Self::ElevenLabs),
+            AsrProviderType::Qwen => Some(Self::Qwen),
+            _ => None,
+        }
+    }
+
+    fn as_asr_provider_type(self) -> AsrProviderType {
+        match self {
+            Self::Coli => AsrProviderType::Coli,
+            Self::ElevenLabs => AsrProviderType::ElevenLabs,
+            Self::Qwen => AsrProviderType::Qwen,
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Coli => "coli",
+            Self::ElevenLabs => "ElevenLabs",
+            Self::Qwen => "Qwen",
+        }
+    }
+
+    fn log_tag(self) -> &'static str {
+        match self {
+            Self::Coli => "COLI_REFINE",
+            Self::ElevenLabs => "ELEVENLABS_REFINE",
+            Self::Qwen => "QWEN_REFINE",
+        }
+    }
+
+    fn uses_recognizing_hud(self) -> bool {
+        !matches!(self, Self::Coli)
+    }
+
+    fn audio_path(self, state: &AppState) -> Option<PathBuf> {
+        match self {
+            Self::Coli => state
+                .session_refinement_audio_path
+                .clone()
+                .or(state.session_audio_path.clone())
+                .filter(|path| path.is_file()),
+            Self::ElevenLabs | Self::Qwen => match state.session_audio_path.clone() {
+                Some(path) if path.is_file() => Some(path),
+                _ => None,
+            },
+        }
+    }
+
+    fn missing_audio_message(self) -> String {
+        match self {
+            Self::Coli => "Local ASR refinement audio file is missing".to_string(),
+            Self::ElevenLabs => "ElevenLabs batch refine audio file is missing".to_string(),
+            Self::Qwen => "Qwen batch refine audio file is missing".to_string(),
+        }
+    }
+
+    fn empty_result_message(self) -> String {
+        match self {
+            Self::Coli => "Local ASR refinement returned empty result".to_string(),
+            Self::ElevenLabs => "ElevenLabs batch refine returned empty result".to_string(),
+            Self::Qwen => "Qwen batch refine returned empty result".to_string(),
+        }
+    }
+
+    fn streaming_model_name(self, config: &AsrConfig) -> Option<String> {
+        match self {
+            Self::Coli => None,
+            Self::ElevenLabs => {
+                crate::services::history_service::HistoryService::elevenlabs_realtime_model_name(
+                    &config.elevenlabs_realtime_model,
+                )
+            }
+            Self::Qwen => crate::services::history_service::HistoryService::format_provider_model(
+                "Qwen",
+                &config.qwen_model,
+            ),
+        }
+    }
+
+    fn streaming_model_name_from_settings(
+        self,
+        settings: &crate::commands::settings::AppSettings,
+    ) -> Option<String> {
+        match self {
+            Self::Coli => None,
+            Self::ElevenLabs => {
+                crate::services::history_service::HistoryService::elevenlabs_realtime_model_name(
+                    &settings.elevenlabs_realtime_model,
+                )
+            }
+            Self::Qwen => crate::services::history_service::HistoryService::format_provider_model(
+                "Qwen",
+                &settings.qwen_asr_model,
+            ),
+        }
+    }
+
+    fn target_model_name(self, config: &AsrConfig) -> Option<String> {
+        match self {
+            Self::Coli => config
+                .coli_final_refinement_mode
+                .display_name()
+                .map(|model| model.to_string()),
+            Self::ElevenLabs => crate::services::history_service::HistoryService::elevenlabs_realtime_batch_refine_model_name(
+                &config.elevenlabs_realtime_model,
+                &config.elevenlabs_batch_model,
+            ),
+            Self::Qwen => crate::services::history_service::HistoryService::qwen_realtime_batch_refine_model_name(
+                &config.qwen_model,
+                &config.qwen_batch_model,
+            ),
+        }
+    }
+
+    async fn refine_file(
+        self,
+        config: AsrConfig,
+        audio_path: &PathBuf,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        match self {
+            Self::Coli => {
+                let client = ColiAsrClient::new(config);
+                match client.refine_file(audio_path).await {
+                    Ok(Some((text, model_name))) => Ok((Some(text), Some(model_name))),
+                    Ok(None) => Ok((None, None)),
+                    Err(err) => Err(err.to_string()),
+                }
+            }
+            Self::ElevenLabs => {
+                let client = ElevenLabsTranscriptionClient::new(config);
+                let refined = client
+                    .transcribe_file(audio_path)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                let refined = refined.trim().to_string();
+                if refined.is_empty() {
+                    Err(self.empty_result_message())
+                } else {
+                    Ok((Some(refined), None))
+                }
+            }
+            Self::Qwen => {
+                let client = QwenTranscriptionClient::new(config);
+                let refined = client
+                    .transcribe_file(audio_path)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                let refined = refined.trim().to_string();
+                if refined.is_empty() {
+                    Err(self.empty_result_message())
+                } else {
+                    Ok((Some(refined), None))
+                }
+            }
+        }
+    }
+
+    fn failure_message(self, state: &AppState) -> &'static str {
+        match self {
+            Self::Coli => {
+                if has_stream_fallback_result(state) {
+                    "本地 ASR 精修失败，已保留实时结果"
+                } else {
+                    "本地 ASR 精修失败，且未保留到实时结果"
+                }
+            }
+            Self::ElevenLabs => {
+                if has_stream_fallback_result(state) {
+                    "ElevenLabs 精修失败，已保留实时结果"
+                } else {
+                    "ElevenLabs 精修失败，且未保留到实时结果"
+                }
+            }
+            Self::Qwen => {
+                if has_stream_fallback_result(state) {
+                    "Qwen 精修失败，已保留实时结果"
+                } else {
+                    "Qwen 精修失败，且未保留到实时结果"
+                }
+            }
+        }
     }
 }
 
@@ -1379,28 +1126,8 @@ fn has_stream_fallback_result(state: &AppState) -> bool {
     state.has_final_result && !state.session_final_text.trim().is_empty()
 }
 
-fn should_surface_terminal_elevenlabs_refine_failure(state: &AppState) -> bool {
+fn should_surface_terminal_batch_post_refine_failure(state: &AppState) -> bool {
     !has_stream_fallback_result(state)
-}
-
-fn elevenlabs_refine_failure_message(state: &AppState) -> &'static str {
-    if has_stream_fallback_result(state) {
-        "ElevenLabs 精修失败，已保留实时结果"
-    } else {
-        "ElevenLabs 精修失败，且未保留到实时结果"
-    }
-}
-
-fn should_surface_terminal_qwen_refine_failure(state: &AppState) -> bool {
-    !has_stream_fallback_result(state)
-}
-
-fn qwen_refine_failure_message(state: &AppState) -> &'static str {
-    if has_stream_fallback_result(state) {
-        "Qwen 精修失败，已保留实时结果"
-    } else {
-        "Qwen 精修失败，且未保留到实时结果"
-    }
 }
 
 fn format_batch_asr_failure_message(reason: &str) -> String {
@@ -1415,9 +1142,8 @@ fn format_batch_asr_failure_message(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        elevenlabs_refine_failure_message, format_batch_asr_failure_message,
-        qwen_refine_failure_message, should_surface_terminal_elevenlabs_refine_failure,
-        should_surface_terminal_qwen_refine_failure,
+        format_batch_asr_failure_message, should_surface_terminal_batch_post_refine_failure,
+        PostRecordingRefineProvider,
     };
     use crate::state::AppState;
 
@@ -1428,7 +1154,7 @@ mod tests {
         state.session_final_text = "hello world".to_string();
 
         assert_eq!(
-            elevenlabs_refine_failure_message(&state),
+            PostRecordingRefineProvider::ElevenLabs.failure_message(&state),
             "ElevenLabs 精修失败，已保留实时结果"
         );
     }
@@ -1438,7 +1164,7 @@ mod tests {
         let state = AppState::new();
 
         assert_eq!(
-            elevenlabs_refine_failure_message(&state),
+            PostRecordingRefineProvider::ElevenLabs.failure_message(&state),
             "ElevenLabs 精修失败，且未保留到实时结果"
         );
     }
@@ -1447,7 +1173,7 @@ mod tests {
     fn elevenlabs_refine_failure_without_stream_result_is_terminal() {
         let state = AppState::new();
 
-        assert!(should_surface_terminal_elevenlabs_refine_failure(&state));
+        assert!(should_surface_terminal_batch_post_refine_failure(&state));
     }
 
     #[test]
@@ -1456,7 +1182,7 @@ mod tests {
         state.has_final_result = true;
         state.session_final_text = "fallback".to_string();
 
-        assert!(!should_surface_terminal_elevenlabs_refine_failure(&state));
+        assert!(!should_surface_terminal_batch_post_refine_failure(&state));
     }
 
     #[test]
@@ -1466,7 +1192,7 @@ mod tests {
         state.session_final_text = "hello world".to_string();
 
         assert_eq!(
-            qwen_refine_failure_message(&state),
+            PostRecordingRefineProvider::Qwen.failure_message(&state),
             "Qwen 精修失败，已保留实时结果"
         );
     }
@@ -1475,7 +1201,7 @@ mod tests {
     fn qwen_refine_failure_without_stream_result_is_terminal() {
         let state = AppState::new();
 
-        assert!(should_surface_terminal_qwen_refine_failure(&state));
+        assert!(should_surface_terminal_batch_post_refine_failure(&state));
     }
 
     #[test]

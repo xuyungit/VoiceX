@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import { buildOpenAiRecognitionModeOptions } from '../../utils/providerOptions'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -43,10 +44,7 @@ const openaiModelOptions = computed(() => [
   { label: 'Whisper-1', value: 'whisper-1' },
 ])
 
-const openaiModeOptions = computed(() => [
-  { label: t('asr.openaiModeBatch'), value: 'batch' },
-  { label: t('asr.openaiModeRealtime'), value: 'realtime' },
-])
+const openaiModeOptions = computed(() => buildOpenAiRecognitionModeOptions(t))
 </script>
 
 <template>
