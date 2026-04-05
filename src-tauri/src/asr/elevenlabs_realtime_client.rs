@@ -44,10 +44,10 @@ impl ElevenLabsRealtimeClient {
         F: Fn(AsrEvent) + Send + Sync + 'static,
     {
         if !self.config.is_valid() {
-            return Err(
-                AsrError::ConnectionFailed("Invalid ElevenLabs realtime ASR configuration".into())
-                    .in_phase(AsrPhase::Connect),
-            );
+            return Err(AsrError::ConnectionFailed(
+                "Invalid ElevenLabs realtime ASR configuration".into(),
+            )
+            .in_phase(AsrPhase::Connect));
         }
 
         let ws_url = build_realtime_ws_url(&self.config);
@@ -287,13 +287,8 @@ impl ElevenLabsRealtimeClient {
             }
 
             if let Some(previous_chunk) = pending_chunk.replace(mono) {
-                send_audio_chunk(
-                    &mut ws_write,
-                    &previous_chunk,
-                    false,
-                    previous_text.take(),
-                )
-                .await?;
+                send_audio_chunk(&mut ws_write, &previous_chunk, false, previous_text.take())
+                    .await?;
                 audio_chunk_count = audio_chunk_count.saturating_add(1);
                 audio_byte_count = audio_byte_count.saturating_add(previous_chunk.len() as u64);
             }
@@ -556,7 +551,7 @@ mod tests {
         build_previous_text_context, build_realtime_ws_url, extract_server_error,
         parse_json_message,
     };
-    use crate::asr::{AsrConfig, ElevenLabsRecognitionMode, ElevenLabsPostRecordingRefine};
+    use crate::asr::{AsrConfig, ElevenLabsPostRecordingRefine, ElevenLabsRecognitionMode};
     use serde_json::json;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -604,12 +599,16 @@ mod tests {
 
     #[test]
     fn parse_json_message_ignores_control_frames() {
-        assert!(parse_json_message(Message::Ping(vec![1, 2, 3].into()), "runtime")
-            .unwrap()
-            .is_none());
-        assert!(parse_json_message(Message::Pong(vec![1, 2, 3].into()), "runtime")
-            .unwrap()
-            .is_none());
+        assert!(
+            parse_json_message(Message::Ping(vec![1, 2, 3].into()), "runtime")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            parse_json_message(Message::Pong(vec![1, 2, 3].into()), "runtime")
+                .unwrap()
+                .is_none()
+        );
         assert!(parse_json_message(Message::Close(None), "runtime")
             .unwrap()
             .is_none());

@@ -288,19 +288,6 @@ async function clearSonioxDebugOverrides() {
   }
 }
 
-// --- Common settings ---
-const maxRecordingOptions = computed(() => [
-  { label: t('asr.noLimit'), value: 0 },
-  { label: t('asr.oneMinute'), value: 1 },
-  { label: t('asr.fiveMinutes'), value: 5 },
-  { label: t('asr.tenMinutes'), value: 10 },
-  { label: t('asr.thirtyMinutes'), value: 30 }
-])
-
-const maxRecordingMinutes = computed({
-  get: () => settingsStore.settings.maxRecordingMinutes,
-  set: (v: number) => settingsStore.updateSetting('maxRecordingMinutes', v)
-})
 </script>
 
 <template>
@@ -488,28 +475,6 @@ const maxRecordingMinutes = computed({
 
         <div v-if="providerProbeError" class="warning-box">
           {{ providerProbeError }}
-        </div>
-      </div>
-    </div>
-
-    <!-- Common Recording Settings -->
-    <div class="surface-card asr-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('asr.recognition') }}</div>
-        <div class="card-sub">{{ t('asr.recognitionSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.maxRecordingDuration') }}</div>
-            <div class="field-note">{{ t('asr.maxRecordingDurationNote') }}</div>
-          </div>
-          <NSelect
-            v-model:value="maxRecordingMinutes"
-            :options="maxRecordingOptions"
-            size="small"
-            class="field-control short"
-          />
         </div>
       </div>
     </div>

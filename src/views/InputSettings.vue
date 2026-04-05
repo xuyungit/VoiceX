@@ -42,6 +42,19 @@ const translationTriggerOptions = computed(() => [
   { label: t('input.translationTriggerOff'), value: 'off' }
 ])
 
+const maxRecordingOptions = computed(() => [
+  { label: t('asr.noLimit'), value: 0 },
+  { label: t('asr.oneMinute'), value: 1 },
+  { label: t('asr.fiveMinutes'), value: 5 },
+  { label: t('asr.tenMinutes'), value: 10 },
+  { label: t('asr.thirtyMinutes'), value: 30 }
+])
+
+const maxRecordingMinutes = computed({
+  get: () => settingsStore.settings.maxRecordingMinutes,
+  set: (v: number) => settingsStore.updateSetting('maxRecordingMinutes', v)
+})
+
 const isRecording = ref(false)
 const recordedKey = ref('')
 const displayHotkey = ref(t('input.clickToRecord'))
@@ -251,6 +264,27 @@ onMounted(() => {
 
     <div class="surface-card input-card">
       <div class="card-header">
+        <div class="card-title">{{ t('asr.recognition') }}</div>
+        <div class="card-sub">{{ t('asr.recognitionSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('asr.maxRecordingDuration') }}</div>
+            <div class="field-note">{{ t('asr.maxRecordingDurationNote') }}</div>
+          </div>
+          <NSelect
+            v-model:value="maxRecordingMinutes"
+            :options="maxRecordingOptions"
+            size="small"
+            class="field-control short"
+          />
+        </div>
+      </div>
+    </div>
+
+    <div class="surface-card input-card">
+      <div class="card-header">
         <div class="card-title">{{ t('input.textInjection') }}</div>
         <div class="card-sub">{{ t('input.textInjectionSub') }}</div>
       </div>
@@ -338,7 +372,12 @@ onMounted(() => {
   align-items: center;
   gap: var(--spacing-sm);
   width: 420px;
+  max-width: 100%;
   justify-content: flex-end;
+}
+
+.field-control.short {
+  width: 200px;
 }
 
 .hotkey-display {

@@ -136,10 +136,7 @@ impl ElevenLabsTranscriptionClient {
     }
 }
 
-pub(crate) fn cleaned_elevenlabs_keyterms(
-    hotwords: &[String],
-    enabled: bool,
-) -> Vec<String> {
+pub(crate) fn cleaned_elevenlabs_keyterms(hotwords: &[String], enabled: bool) -> Vec<String> {
     if !enabled {
         return Vec::new();
     }
@@ -181,7 +178,9 @@ fn format_elevenlabs_error(status: u16, body: &[u8]) -> String {
     let parsed = serde_json::from_slice::<ElevenLabsErrorEnvelope>(body).ok();
 
     if let Some(detail) = parsed.and_then(|envelope| envelope.detail) {
-        let error_type = detail.error_type.unwrap_or_else(|| "unknown_error".to_string());
+        let error_type = detail
+            .error_type
+            .unwrap_or_else(|| "unknown_error".to_string());
         let code = detail.code.unwrap_or_else(|| "unknown_code".to_string());
         let message = detail.message.unwrap_or_else(|| body_text.clone());
         let param_suffix = detail
@@ -205,13 +204,7 @@ fn format_elevenlabs_error(status: u16, body: &[u8]) -> String {
 
         return format!(
             "{} HTTP {} [{}:{}] {}{}{}",
-            prefix,
-            status,
-            error_type,
-            code,
-            message,
-            param_suffix,
-            request_id_suffix
+            prefix, status, error_type, code, message, param_suffix, request_id_suffix
         );
     }
 
@@ -302,7 +295,10 @@ mod tests {
 
     #[test]
     fn multipart_filename_converts_opus_to_ogg() {
-        assert_eq!(multipart_filename(Path::new("/tmp/audio.opus")), "audio.ogg");
+        assert_eq!(
+            multipart_filename(Path::new("/tmp/audio.opus")),
+            "audio.ogg"
+        );
         assert_eq!(multipart_filename(Path::new("/tmp/audio.ogg")), "audio.ogg");
     }
 
