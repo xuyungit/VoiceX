@@ -551,7 +551,7 @@ mod tests {
         build_previous_text_context, build_realtime_ws_url, extract_server_error,
         parse_json_message,
     };
-    use crate::asr::{AsrConfig, ElevenLabsPostRecordingRefine, ElevenLabsRecognitionMode};
+    use crate::asr::{AsrConfig, ElevenLabsRecognitionMode, PostRecordingBatchRefineMode};
     use serde_json::json;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -561,7 +561,7 @@ mod tests {
         config.elevenlabs_realtime_model = "scribe_v2_realtime".to_string();
         config.elevenlabs_language = "en".to_string();
         config.elevenlabs_recognition_mode = ElevenLabsRecognitionMode::Realtime;
-        config.elevenlabs_post_recording_refine = ElevenLabsPostRecordingRefine::Off;
+        config.elevenlabs_post_recording_refine = PostRecordingBatchRefineMode::Off;
 
         let url = build_realtime_ws_url(&config);
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed } from 'vue'
 import { NCheckbox, NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
@@ -7,7 +7,8 @@ import {
   buildElevenLabsPostRecordingRefineOptions,
   buildElevenLabsRecognitionModeOptions,
   ELEVENLABS_BATCH_MODEL_OPTIONS,
-  ELEVENLABS_REALTIME_MODEL_OPTIONS
+  ELEVENLABS_REALTIME_MODEL_OPTIONS,
+  normalizeBatchCapablePostRecordingRefine
 } from '../../utils/providerOptions'
 
 const settingsStore = useSettingsStore()
@@ -22,17 +23,23 @@ const elevenlabsRecognitionMode = computed({
   get: () => settingsStore.settings.elevenlabsRecognitionMode,
   set: (value: 'realtime' | 'batch') => {
     settingsStore.updateSetting('elevenlabsRecognitionMode', value)
-    if (value === 'batch') {
-      settingsStore.updateSetting('elevenlabsPostRecordingRefine', 'off')
-    }
+    settingsStore.updateSetting(
+      'elevenlabsPostRecordingRefine',
+      normalizeBatchCapablePostRecordingRefine(
+        value,
+        settingsStore.settings.elevenlabsPostRecordingRefine
+      )
+    )
   }
 })
 
 const elevenlabsPostRecordingRefine = computed({
   get: () => settingsStore.settings.elevenlabsPostRecordingRefine,
   set: (value: 'off' | 'batch_refine') => {
-    const normalizedValue = elevenlabsRecognitionMode.value === 'batch' ? 'off' : value
-    settingsStore.updateSetting('elevenlabsPostRecordingRefine', normalizedValue)
+    settingsStore.updateSetting(
+      'elevenlabsPostRecordingRefine',
+      normalizeBatchCapablePostRecordingRefine(elevenlabsRecognitionMode.value, value)
+    )
   }
 })
 
@@ -60,12 +67,6 @@ const recognitionModeOptions = computed(() => buildElevenLabsRecognitionModeOpti
 const postRecordingRefineOptions = computed(() => buildElevenLabsPostRecordingRefineOptions(t))
 
 const batchRefineDisabled = computed(() => elevenlabsRecognitionMode.value === 'batch')
-
-watch(elevenlabsRecognitionMode, (value) => {
-  if (value === 'batch' && elevenlabsPostRecordingRefine.value !== 'off') {
-    settingsStore.updateSetting('elevenlabsPostRecordingRefine', 'off')
-  }
-})
 </script>
 
 <template>

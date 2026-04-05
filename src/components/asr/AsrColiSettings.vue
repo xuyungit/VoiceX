@@ -4,6 +4,11 @@ import { NButton, NCheckbox, NInput, NInputNumber, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
 import type { LocalAsrStatus } from '../../types/asr'
+import {
+  buildColiPostRecordingRefineOptions,
+  buildColiRecognitionModeOptions,
+  normalizeColiPostRecordingRefine,
+} from '../../utils/providerOptions'
 
 defineProps<{
   coliStatus: LocalAsrStatus | null
@@ -35,19 +40,26 @@ const coliAsrIntervalMs = computed({
 
 const coliFinalRefinementMode = computed({
   get: () => settingsStore.settings.coliFinalRefinementMode,
-  set: (v: 'off' | 'sensevoice' | 'whisper') => settingsStore.updateSetting('coliFinalRefinementMode', v)
+  set: (v: 'off' | 'sensevoice' | 'whisper') => settingsStore.updateSetting(
+    'coliFinalRefinementMode',
+    normalizeColiPostRecordingRefine(coliRecognitionMode.value, v)
+  )
 })
 
-const coliRealtime = computed({
-  get: () => settingsStore.settings.coliRealtime,
-  set: (v: boolean) => settingsStore.updateSetting('coliRealtime', v)
+const coliRecognitionMode = computed({
+  get: (): 'realtime' | 'batch' => settingsStore.settings.coliRealtime ? 'realtime' : 'batch',
+  set: (value: 'realtime' | 'batch') => {
+    settingsStore.updateSetting('coliRealtime', value === 'realtime')
+    settingsStore.updateSetting(
+      'coliFinalRefinementMode',
+      normalizeColiPostRecordingRefine(value, settingsStore.settings.coliFinalRefinementMode)
+    )
+  }
 })
 
-const coliRefinementOptions = computed(() => [
-  { label: t('asr.refinementOff'), value: 'off' },
-  { label: t('asr.refinementSenseVoice'), value: 'sensevoice' },
-  { label: t('asr.refinementWhisper'), value: 'whisper' },
-])
+const coliRecognitionModeOptions = computed(() => buildColiRecognitionModeOptions(t))
+const coliRefinementOptions = computed(() => buildColiPostRecordingRefineOptions(t))
+const batchRefineDisabled = computed(() => coliRecognitionMode.value === 'batch')
 </script>
 
 <template>
@@ -109,22 +121,27 @@ const coliRefinementOptions = computed(() => [
       </div>
       <div class="field-row">
         <div class="field-text">
-          <div class="field-label">{{ t('asr.realtimeStreaming') }}</div>
-          <div class="field-note">{{ t('asr.realtimeStreamingNote') }}</div>
+          <div class="field-label">{{ t('asr.recognitionMode') }}</div>
+          <div class="field-note">{{ t('asr.coliRecognitionModeNote') }}</div>
         </div>
-        <NCheckbox v-model:checked="coliRealtime" />
+        <NSelect
+          v-model:value="coliRecognitionMode"
+          :options="coliRecognitionModeOptions"
+          size="small"
+          class="field-control"
+        />
       </div>
-      <div v-if="coliRealtime" class="field-row">
+      <div v-if="coliRecognitionMode === 'realtime'" class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.enableVad') }}</div>
           <div class="field-note">{{ t('asr.enableVadNote') }}</div>
         </div>
         <NCheckbox v-model:checked="coliUseVad" />
       </div>
-      <div v-if="coliRealtime && !coliUseVad" class="warning-box">
+      <div v-if="coliRecognitionMode === 'realtime' && !coliUseVad" class="warning-box">
         {{ t('asr.warningVadOff') }}
       </div>
-      <div v-if="coliRealtime && !coliUseVad" class="field-row">
+      <div v-if="coliRecognitionMode === 'realtime' && !coliUseVad" class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.streamingInterval') }}</div>
           <div class="field-note">{{ t('asr.streamingIntervalNote') }}</div>
@@ -137,14 +154,15 @@ const coliRefinementOptions = computed(() => [
           class="field-control short"
         />
       </div>
-      <div v-if="coliRealtime" class="field-row">
+      <div class="field-row">
         <div class="field-text">
-          <div class="field-label">{{ t('asr.finalRefinement') }}</div>
-          <div class="field-note">{{ t('asr.finalRefinementNote') }}</div>
+          <div class="field-label">{{ t('asr.postRecordingRefine') }}</div>
+          <div class="field-note">{{ t('asr.coliPostRecordingRefineNote') }}</div>
         </div>
         <NSelect
           v-model:value="coliFinalRefinementMode"
           :options="coliRefinementOptions"
+          :disabled="batchRefineDisabled"
           size="small"
           class="field-control"
         />

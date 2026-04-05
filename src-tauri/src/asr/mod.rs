@@ -21,6 +21,7 @@ mod protocol;
 pub mod qwen_client;
 pub mod qwen_transcription_client;
 pub mod soniox_client;
+mod transcription;
 pub mod volc_auth;
 
 pub use client::AsrClient;
@@ -30,8 +31,8 @@ pub use coli_client::{
     ColiRefinementMode,
 };
 pub use config::{
-    AsrConfig, AsrProviderCapabilities, AsrProviderType, ElevenLabsPostRecordingRefine,
-    ElevenLabsRecognitionMode, QwenRecognitionMode,
+    AsrConfig, AsrPipelineMode, AsrProviderCapabilities, AsrProviderType,
+    ElevenLabsRecognitionMode, PostRecordingBatchRefineMode, QwenRecognitionMode,
 };
 pub use elevenlabs_client::ElevenLabsTranscriptionClient;
 pub use elevenlabs_realtime_client::ElevenLabsRealtimeClient;
@@ -44,3 +45,6 @@ pub use protocol::{AsrError, AsrEvent, AsrFailure, AsrFailureKind, AsrPhase};
 pub use qwen_client::QwenRealtimeClient;
 pub use qwen_transcription_client::QwenTranscriptionClient;
 pub use soniox_client::SonioxClient;
+pub use transcription::{
+    transcribe_audio_path, transcribe_audio_path_detailed, AsrTranscriptionOutcome,
+};

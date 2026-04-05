@@ -3,6 +3,7 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+use crate::asr::{AsrConfig, AsrPipelineMode, AsrProviderType, ColiRefinementMode};
 use crate::commands::settings::AppSettings;
 use crate::services::sync_service::SyncService;
 use crate::storage;
@@ -137,64 +138,72 @@ impl HistoryService {
     }
 
     pub fn resolve_asr_model_name(settings: &AppSettings) -> Option<String> {
-        let snapshot = match settings.asr_provider_type.as_str() {
-            "google" => Some("Google / chirp_3".to_string()),
-            "volcengine" if settings.asr_ws_url.contains("bigmodel_nostream") => {
-                Some("Volcengine / bigmodel_nostream".to_string())
-            }
-            "volcengine" if settings.enable_nonstream => {
-                Some("Volcengine / bigmodel_async + native two-pass".to_string())
-            }
-            "qwen" => {
-                if settings.qwen_asr_recognition_mode == "batch" {
-                    Self::qwen_batch_model_name(&settings.qwen_asr_batch_model)
-                } else if settings.qwen_asr_post_recording_refine {
-                    Self::qwen_realtime_batch_refine_model_name(
-                        &settings.qwen_asr_model,
-                        &settings.qwen_asr_batch_model,
-                    )
-                } else {
-                    let model = settings.qwen_asr_model.trim();
-                    if model.is_empty() {
-                        Some("Qwen".to_string())
-                    } else {
-                        Some(format!("Qwen / {}", model))
-                    }
+        let config = AsrConfig::from(settings);
+        let snapshot = match config.provider_type {
+            AsrProviderType::Google => Some("Google / chirp_3".to_string()),
+            AsrProviderType::Volcengine => match config.pipeline_mode() {
+                AsrPipelineMode::Batch => Some("Volcengine / bigmodel_nostream".to_string()),
+                AsrPipelineMode::RealtimeWithFinalPass => {
+                    Some("Volcengine / bigmodel_async + native two-pass".to_string())
                 }
+                AsrPipelineMode::Realtime => Some("Volcengine / bigmodel_async".to_string()),
+            },
+            AsrProviderType::Qwen => match config.pipeline_mode() {
+                AsrPipelineMode::Batch => Self::qwen_batch_model_name(&config.qwen_batch_model),
+                AsrPipelineMode::RealtimeWithFinalPass => {
+                    Self::qwen_realtime_batch_refine_model_name(
+                        &config.qwen_model,
+                        &config.qwen_batch_model,
+                    )
+                }
+                AsrPipelineMode::Realtime => {
+                    Self::format_provider_model("Qwen", &config.qwen_model)
+                }
+            },
+            AsrProviderType::Gemini => Self::format_provider_model("Gemini", &config.gemini_model),
+            AsrProviderType::GeminiLive => {
+                Self::format_provider_model("Gemini Live", &config.gemini_live_model)
             }
-            "gemini" => Self::format_provider_model("Gemini", &settings.gemini_model),
-            "gemini-live" => {
-                Self::format_provider_model("Gemini Live", &settings.gemini_live_model)
-            }
-            "cohere" => Self::format_provider_model("Cohere", &settings.cohere_model),
-            "openai" if settings.openai_asr_mode == "realtime" => {
-                Self::format_provider_model("OpenAI Realtime", &settings.openai_asr_model)
-            }
-            "openai" => Self::format_provider_model("OpenAI", &settings.openai_asr_model),
-            "elevenlabs"
-                if settings.elevenlabs_recognition_mode == "realtime"
-                    && settings.elevenlabs_post_recording_refine == "batch_refine" =>
-            {
-                Self::elevenlabs_realtime_batch_refine_model_name(
-                    &settings.elevenlabs_realtime_model,
-                    &settings.elevenlabs_batch_model,
-                )
-            }
-            "elevenlabs" if settings.elevenlabs_recognition_mode == "batch" => {
-                Self::elevenlabs_batch_model_name(&settings.elevenlabs_batch_model)
-            }
-            "elevenlabs" => {
-                Self::elevenlabs_realtime_model_name(&settings.elevenlabs_realtime_model)
-            }
-            "soniox" => Self::format_provider_model("Soniox", &settings.soniox_model),
-            "coli" if settings.coli_final_refinement_mode == "sensevoice" => {
-                Some("Local / coli / stream + sensevoice refine".to_string())
-            }
-            "coli" if settings.coli_final_refinement_mode == "whisper" => {
-                Some("Local / coli / stream + whisper refine".to_string())
-            }
-            "coli" => Some("Local / coli / sensevoice-small".to_string()),
-            _ => Some("Volcengine / bigmodel".to_string()),
+            AsrProviderType::Cohere => Self::format_provider_model("Cohere", &config.cohere_model),
+            AsrProviderType::OpenAI => match config.pipeline_mode() {
+                AsrPipelineMode::Realtime => {
+                    Self::format_provider_model("OpenAI Realtime", &config.openai_asr_model)
+                }
+                AsrPipelineMode::RealtimeWithFinalPass => {
+                    Self::openai_realtime_batch_refine_model_name(&config.openai_asr_model)
+                }
+                AsrPipelineMode::Batch => {
+                    Self::format_provider_model("OpenAI", &config.openai_asr_model)
+                }
+            },
+            AsrProviderType::ElevenLabs => match config.pipeline_mode() {
+                AsrPipelineMode::Batch => {
+                    Self::elevenlabs_batch_model_name(&config.elevenlabs_batch_model)
+                }
+                AsrPipelineMode::RealtimeWithFinalPass => {
+                    Self::elevenlabs_realtime_batch_refine_model_name(
+                        &config.elevenlabs_realtime_model,
+                        &config.elevenlabs_batch_model,
+                    )
+                }
+                AsrPipelineMode::Realtime => {
+                    Self::elevenlabs_realtime_model_name(&config.elevenlabs_realtime_model)
+                }
+            },
+            AsrProviderType::Soniox => Self::format_provider_model("Soniox", &config.soniox_model),
+            AsrProviderType::Coli => match config.pipeline_mode() {
+                AsrPipelineMode::Batch => Some("Local / coli / batch / sensevoice".to_string()),
+                AsrPipelineMode::RealtimeWithFinalPass => match config.coli_final_refinement_mode {
+                    ColiRefinementMode::SenseVoice => {
+                        Some("Local / coli / stream + sensevoice refine".to_string())
+                    }
+                    ColiRefinementMode::Whisper => {
+                        Some("Local / coli / stream + whisper refine".to_string())
+                    }
+                    ColiRefinementMode::Off => Some("Local / coli / sensevoice-small".to_string()),
+                },
+                AsrPipelineMode::Realtime => Some("Local / coli / sensevoice-small".to_string()),
+            },
         };
 
         snapshot.and_then(Self::normalize_snapshot)
@@ -241,6 +250,11 @@ impl HistoryService {
             "Qwen / {}",
             Self::normalize_model_or_default(model, "qwen3-asr-flash")
         ))
+    }
+
+    pub fn openai_realtime_batch_refine_model_name(model: &str) -> Option<String> {
+        let model = Self::normalize_model_or_default(model, "gpt-4o-transcribe");
+        Some(format!("OpenAI / {} + batch refine({})", model, model))
     }
 
     pub fn resolve_llm_model_name(settings: &AppSettings) -> Option<String> {
@@ -342,6 +356,20 @@ mod tests {
     }
 
     #[test]
+    fn resolve_asr_model_name_for_openai_refine_uses_shared_helper() {
+        let mut settings = AppSettings::default();
+        settings.asr_provider_type = "openai".to_string();
+        settings.openai_asr_mode = "realtime".to_string();
+        settings.openai_asr_post_recording_refine = "batch_refine".to_string();
+        settings.openai_asr_model = "gpt-4o-transcribe".to_string();
+
+        assert_eq!(
+            HistoryService::resolve_asr_model_name(&settings).as_deref(),
+            Some("OpenAI / gpt-4o-transcribe + batch refine(gpt-4o-transcribe)")
+        );
+    }
+
+    #[test]
     fn resolve_asr_model_name_for_qwen_batch_uses_batch_model() {
         let mut settings = AppSettings::default();
         settings.asr_provider_type = "qwen".to_string();
@@ -379,6 +407,18 @@ mod tests {
         assert_eq!(
             HistoryService::resolve_asr_model_name(&settings).as_deref(),
             Some("Volcengine / bigmodel_nostream")
+        );
+    }
+
+    #[test]
+    fn resolve_asr_model_name_for_soniox_stays_realtime_only() {
+        let mut settings = AppSettings::default();
+        settings.asr_provider_type = "soniox".to_string();
+        settings.soniox_model = "stt-rt-v4".to_string();
+
+        assert_eq!(
+            HistoryService::resolve_asr_model_name(&settings).as_deref(),
+            Some("Soniox / stt-rt-v4")
         );
     }
 }

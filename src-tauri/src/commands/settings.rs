@@ -66,6 +66,7 @@ pub struct AppSettings {
     pub openai_asr_language: String,
     pub openai_asr_prompt: String,
     pub openai_asr_mode: String, // "batch" | "realtime"
+    pub openai_asr_post_recording_refine: String, // "off" | "batch_refine"
 
     // ASR Provider: ElevenLabs Speech-to-Text
     pub elevenlabs_api_key: String,
@@ -223,6 +224,7 @@ impl Default for AppSettings {
             openai_asr_language: String::new(),
             openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
             openai_asr_mode: "batch".to_string(),
+            openai_asr_post_recording_refine: "off".to_string(),
             elevenlabs_api_key: String::new(),
             elevenlabs_recognition_mode: "realtime".to_string(),
             elevenlabs_post_recording_refine: "off".to_string(),

@@ -3,6 +3,11 @@ import { computed } from 'vue'
 import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import {
+  buildOpenAiPostRecordingRefineOptions,
+  buildOpenAiRecognitionModeOptions,
+  normalizeBatchCapablePostRecordingRefine,
+} from '../../utils/providerOptions'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -14,7 +19,21 @@ const openaiAsrApiKey = computed({
 
 const openaiAsrMode = computed({
   get: () => settingsStore.settings.openaiAsrMode,
-  set: (v: 'batch' | 'realtime') => settingsStore.updateSetting('openaiAsrMode', v)
+  set: (v: 'batch' | 'realtime') => {
+    settingsStore.updateSetting('openaiAsrMode', v)
+    settingsStore.updateSetting(
+      'openaiAsrPostRecordingRefine',
+      normalizeBatchCapablePostRecordingRefine(v, settingsStore.settings.openaiAsrPostRecordingRefine)
+    )
+  }
+})
+
+const openaiAsrPostRecordingRefine = computed({
+  get: () => settingsStore.settings.openaiAsrPostRecordingRefine,
+  set: (v: 'off' | 'batch_refine') => settingsStore.updateSetting(
+    'openaiAsrPostRecordingRefine',
+    normalizeBatchCapablePostRecordingRefine(openaiAsrMode.value, v)
+  )
 })
 
 const openaiAsrModel = computed({
@@ -43,10 +62,9 @@ const openaiModelOptions = computed(() => [
   { label: 'Whisper-1', value: 'whisper-1' },
 ])
 
-const openaiModeOptions = computed(() => [
-  { label: t('asr.openaiModeBatch'), value: 'batch' },
-  { label: t('asr.openaiModeRealtime'), value: 'realtime' },
-])
+const openaiModeOptions = computed(() => buildOpenAiRecognitionModeOptions(t))
+const openaiPostRecordingRefineOptions = computed(() => buildOpenAiPostRecordingRefineOptions(t))
+const batchRefineDisabled = computed(() => openaiAsrMode.value === 'batch')
 </script>
 
 <template>
@@ -77,6 +95,19 @@ const openaiModeOptions = computed(() => [
         <NSelect
           v-model:value="openaiAsrMode"
           :options="openaiModeOptions"
+          size="small"
+          class="field-control"
+        />
+      </div>
+      <div class="field-row">
+        <div class="field-text">
+          <div class="field-label">{{ t('asr.postRecordingRefine') }}</div>
+          <div class="field-note">{{ t('asr.openaiPostRecordingRefineNote') }}</div>
+        </div>
+        <NSelect
+          v-model:value="openaiAsrPostRecordingRefine"
+          :options="openaiPostRecordingRefineOptions"
+          :disabled="batchRefineDisabled"
           size="small"
           class="field-control"
         />
