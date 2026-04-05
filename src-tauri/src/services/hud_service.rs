@@ -72,6 +72,16 @@ impl HudService {
         let _ = self.app_handle.emit_to("hud", "asr:event", payload);
     }
 
+    pub fn clear_transcript(&self) {
+        let payload = json!({
+            "text": "",
+            "isFinal": false,
+            "clear": true,
+        });
+        let _ = self.app_handle.emit("asr:event", payload.clone());
+        let _ = self.app_handle.emit_to("hud", "asr:event", payload);
+    }
+
     pub fn emit_countdown(&self, seconds: Option<u32>) {
         let payload = json!({
             "seconds": seconds
@@ -175,7 +185,7 @@ impl HudService {
         self.emit_correcting(false);
         self.emit_intent(ProcessingIntent::Assistant);
         self.emit_error(None);
-        self.emit_transcript("", false);
+        self.clear_transcript();
         self.emit_audio_level(0.0);
         self.emit_audio_spectrum(&[]);
     }

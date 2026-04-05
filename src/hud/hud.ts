@@ -617,7 +617,18 @@ function renderTranscript() {
   }
 }
 
-function handleTranscriptUpdate(text: string | undefined, _isFinal: boolean) {
+function handleTranscriptUpdate(
+  text: string | undefined,
+  _isFinal: boolean,
+  clear = false,
+) {
+  if (clear) {
+    partialText = "";
+    lastNonEmptyText = "";
+    renderTranscript();
+    return;
+  }
+
   const trimmed = (text || "").trim();
 
   if (isCompactBatchMode()) {
@@ -759,9 +770,9 @@ async function initListeners() {
 
   await add(
     "asr:event",
-    (event: { payload?: { text?: string; isFinal?: boolean } }) => {
-      const { text, isFinal } = event.payload || {};
-      handleTranscriptUpdate(text, !!isFinal);
+    (event: { payload?: { text?: string; isFinal?: boolean; clear?: boolean } }) => {
+      const { text, isFinal, clear } = event.payload || {};
+      handleTranscriptUpdate(text, !!isFinal, !!clear);
     },
   );
 
