@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.3] - 2026-04-06
+
+### Added
+- **Configurable Soniox endpoint delay** — the Soniox settings page now exposes `max_endpoint_delay_ms`, and leaving it empty preserves the provider default instead of forcing a hardcoded delay.
+
+### Changed
+- Refined the built-in Assistant correction prompt so default cleanup handles self-corrections, light transcript cleanup, and spoken-number normalization more reliably without over-formatting casual input.
+- Refined the built-in Translation prompt so default translation better strips filler speech, corrects obvious ASR errors conservatively, and preserves technical terms before translating.
+
 ## [0.9.2] - 2026-04-04
 
 ### Added
