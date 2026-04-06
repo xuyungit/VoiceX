@@ -60,9 +60,6 @@ let smoothedAudioLevel = 0;
 let waveformFrameId = 0;
 let waveformLastFrameTime = 0;
 let waveformShiftAccumulator = 0;
-
-const HUD_FONT =
-  '12px -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif';
 const MAX_LINES = 2;
 const ELLIPSIS = "\u2026";
 const WAVEFORM_ATTACK = 0.4;
@@ -82,31 +79,36 @@ const hybridSpectrumHistory = Array.from(
   { length: HYBRID_HISTORY_COLUMNS },
   () => Array.from({ length: HYBRID_BAND_COUNT }, () => 0),
 );
-
-let measureCtx:
-  | OffscreenCanvasRenderingContext2D
-  | CanvasRenderingContext2D
-  | null = null;
 let textAreaMaxWidth = 0;
-
-function getMeasureCtx() {
-  if (measureCtx) return measureCtx;
-  if (typeof OffscreenCanvas !== "undefined") {
-    measureCtx = new OffscreenCanvas(1, 1).getContext("2d");
-  } else {
-    measureCtx = document.createElement("canvas").getContext("2d");
-  }
-  if (measureCtx) measureCtx.font = HUD_FONT;
-  return measureCtx;
-}
-
-function measureText(text: string): number {
-  const ctx = getMeasureCtx();
-  return ctx ? ctx.measureText(text).width : text.length * 7;
-}
+let textAreaLineHeight = 12 * 1.4;
+let textMeasureEl: HTMLDivElement | null = null;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+function getTextMeasureEl() {
+  if (textMeasureEl) return textMeasureEl;
+  const el = document.createElement("div");
+  el.setAttribute("aria-hidden", "true");
+  Object.assign(el.style, {
+    position: "fixed",
+    left: "-100000px",
+    top: "0",
+    visibility: "hidden",
+    pointerEvents: "none",
+    whiteSpace: "normal",
+    padding: "0",
+    margin: "0",
+    border: "0",
+    boxSizing: "content-box",
+    maxHeight: "none",
+    minHeight: "0",
+    overflow: "visible",
+  });
+  document.body.appendChild(el);
+  textMeasureEl = el;
+  return el;
 }
 
 function updateTextAreaMaxWidth() {
@@ -116,23 +118,46 @@ function updateTextAreaMaxWidth() {
   const pr = parseFloat(style.paddingRight) || 0;
   textAreaMaxWidth = textArea.clientWidth - pl - pr;
   if (textAreaMaxWidth <= 0) textAreaMaxWidth = 230;
+
+  const parsedLineHeight = parseFloat(style.lineHeight);
+  if (Number.isFinite(parsedLineHeight) && parsedLineHeight > 0) {
+    textAreaLineHeight = parsedLineHeight;
+  } else {
+    const fontSize = parseFloat(style.fontSize) || 12;
+    textAreaLineHeight = fontSize * 1.4;
+  }
+
+  const measureEl = getTextMeasureEl();
+  measureEl.style.width = `${Math.max(1, textAreaMaxWidth)}px`;
+  measureEl.style.font = style.font;
+  measureEl.style.fontFamily = style.fontFamily;
+  measureEl.style.fontSize = style.fontSize;
+  measureEl.style.fontWeight = style.fontWeight;
+  measureEl.style.fontStyle = style.fontStyle;
+  measureEl.style.lineHeight = style.lineHeight;
+  measureEl.style.letterSpacing = style.letterSpacing;
+  measureEl.style.wordSpacing = style.wordSpacing;
+  measureEl.style.wordBreak = style.wordBreak;
+  measureEl.style.overflowWrap = style.overflowWrap;
+  measureEl.style.textTransform = style.textTransform;
 }
 
 function fitText(text: string): string {
   if (!text) return text;
-  const maxW = textAreaMaxWidth || 230;
-  const totalBudget = (maxW - 4) * MAX_LINES;
+  const measureEl = getTextMeasureEl();
+  const maxHeight = textAreaLineHeight * MAX_LINES + 1;
+  const fits = (candidate: string) => {
+    measureEl.textContent = candidate;
+    return measureEl.scrollHeight <= maxHeight;
+  };
 
-  if (measureText(text) <= totalBudget) return text;
-
-  const ellipsisW = measureText(ELLIPSIS);
-  const budget = totalBudget - ellipsisW;
+  if (fits(text)) return text;
 
   let lo = 0;
   let hi = text.length;
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
-    if (measureText(text.slice(-mid)) <= budget) {
+    if (fits(`${ELLIPSIS}${text.slice(-mid)}`)) {
       lo = mid;
     } else {
       hi = mid - 1;
@@ -819,6 +844,7 @@ async function initListeners() {
     if (waveformFrameId) {
       window.cancelAnimationFrame(waveformFrameId);
     }
+    textMeasureEl?.remove();
     unsubs.forEach((fn) => fn && fn());
   });
 }
