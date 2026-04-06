@@ -297,6 +297,8 @@ const zhCN = {
     sonioxApiKeyNote: '填写 Soniox 控制台中的 API Key。',
     sonioxModelNote: '默认模型为 `stt-rt-v4`，用于实时流式转写。',
     sonioxLanguageNote: '语言提示，逗号分隔，例如 `en`、`zh`，或 `en,zh` 多语言。',
+    sonioxMaxEndpointDelay: '端点检测延迟 (ms)',
+    sonioxMaxEndpointDelayNote: '留空则不传 `max_endpoint_delay_ms`，由 Soniox 使用服务端默认值。',
     endpoint: 'Endpoint',
     endpointNote: '北京地域适用于中国内地部署；新加坡地域适用于国际部署。',
     model: 'Model',

@@ -297,6 +297,8 @@ const enUS = {
     sonioxApiKeyNote: 'Enter your Soniox API key from the Soniox dashboard.',
     sonioxModelNote: 'Default model is `stt-rt-v4` for real-time streaming transcription.',
     sonioxLanguageNote: 'Comma-separated language hints, e.g. `en`, `zh`, or `en,zh` for multilingual.',
+    sonioxMaxEndpointDelay: 'Endpoint Delay (ms)',
+    sonioxMaxEndpointDelayNote: 'Leave empty to omit `max_endpoint_delay_ms` and let Soniox use its service default.',
     endpoint: 'Endpoint',
     endpointNote: 'Beijing is for Mainland China deployment; Singapore is for international deployment.',
     model: 'Model',

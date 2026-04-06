@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { NInput } from 'naive-ui'
+import { NInput, NInputNumber } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
 
@@ -20,6 +20,11 @@ const sonioxModel = computed({
 const sonioxLanguage = computed({
   get: () => settingsStore.settings.sonioxLanguage,
   set: (v: string) => settingsStore.updateSetting('sonioxLanguage', v)
+})
+
+const sonioxMaxEndpointDelayMs = computed({
+  get: () => settingsStore.settings.sonioxMaxEndpointDelayMs,
+  set: (v: number | null) => settingsStore.updateSetting('sonioxMaxEndpointDelayMs', v)
 })
 </script>
 
@@ -56,6 +61,20 @@ const sonioxLanguage = computed({
           <div class="field-note">{{ t('asr.sonioxLanguageNote') }}</div>
         </div>
         <NInput v-model:value="sonioxLanguage" placeholder="zh, en" class="field-control" />
+      </div>
+      <div class="field-row">
+        <div class="field-text">
+          <div class="field-label">{{ t('asr.sonioxMaxEndpointDelay') }}</div>
+          <div class="field-note">{{ t('asr.sonioxMaxEndpointDelayNote') }}</div>
+        </div>
+        <NInputNumber
+          v-model:value="sonioxMaxEndpointDelayMs"
+          :min="0"
+          :max="120000"
+          :placeholder="t('asr.serviceDefault')"
+          class="field-control short"
+          clearable
+        />
       </div>
     </div>
   </div>

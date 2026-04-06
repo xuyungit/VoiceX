@@ -199,6 +199,7 @@ pub struct AsrConfig {
     pub soniox_api_key: String,
     pub soniox_model: String,
     pub soniox_language: String,
+    pub soniox_max_endpoint_delay_ms: Option<u32>,
 
     // Local ASR via `coli`
     pub coli_command_path: String,
@@ -279,6 +280,7 @@ impl Default for AsrConfig {
             soniox_api_key: String::new(),
             soniox_model: "stt-rt-v4".to_string(),
             soniox_language: String::new(),
+            soniox_max_endpoint_delay_ms: None,
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
@@ -368,6 +370,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             soniox_api_key: settings.soniox_api_key.clone(),
             soniox_model: settings.soniox_model.clone(),
             soniox_language: settings.soniox_language.clone(),
+            soniox_max_endpoint_delay_ms: settings.soniox_max_endpoint_delay_ms,
             coli_command_path: settings.coli_command_path.clone(),
             coli_use_vad: settings.coli_use_vad,
             coli_asr_interval_ms: settings.coli_asr_interval_ms,

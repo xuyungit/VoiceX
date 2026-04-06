@@ -95,14 +95,7 @@ impl SonioxClient {
 
         // Build initial configuration message
         // Ref: https://soniox.com/docs/stt/api-reference/websocket-api
-        let mut config_msg = json!({
-            "api_key": self.config.soniox_api_key,
-            "model": self.config.soniox_model,
-            "enable_endpoint_detection": true,
-            "audio_format": "s16le",
-            "sample_rate": stream_rate,
-            "num_channels": 1,
-        });
+        let mut config_msg = build_soniox_config_message(&self.config, stream_rate);
 
         // Language hints — comma-separated string → JSON array
         if !self.config.soniox_language.is_empty() {
@@ -541,9 +534,27 @@ fn resolve_soniox_ws_url() -> String {
         .unwrap_or_else(|| SONIOX_DEFAULT_WS_URL.to_string())
 }
 
+fn build_soniox_config_message(config: &AsrConfig, stream_rate: u32) -> Value {
+    let mut config_msg = json!({
+        "api_key": config.soniox_api_key,
+        "model": config.soniox_model,
+        "enable_endpoint_detection": true,
+        "audio_format": "s16le",
+        "sample_rate": stream_rate,
+        "num_channels": 1,
+    });
+
+    if let Some(max_delay_ms) = config.soniox_max_endpoint_delay_ms {
+        config_msg["max_endpoint_delay_ms"] = json!(max_delay_ms);
+    }
+
+    config_msg
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{soniox_completion_wait_ms, SonioxFaultMode};
+    use super::{build_soniox_config_message, soniox_completion_wait_ms, SonioxFaultMode};
+    use crate::asr::config::AsrConfig;
 
     #[test]
     fn parses_fault_aliases() {
@@ -575,6 +586,28 @@ mod tests {
         let audio_bytes = audio_ms * 32;
 
         assert_eq!(soniox_completion_wait_ms(audio_bytes, 54_000), 15_000);
+    }
+
+    #[test]
+    fn soniox_config_omits_endpoint_delay_when_unset() {
+        let config = AsrConfig::default();
+
+        let payload = build_soniox_config_message(&config, 16_000);
+
+        assert!(payload.get("max_endpoint_delay_ms").is_none());
+    }
+
+    #[test]
+    fn soniox_config_includes_endpoint_delay_when_set() {
+        let mut config = AsrConfig::default();
+        config.soniox_max_endpoint_delay_ms = Some(10_000);
+
+        let payload = build_soniox_config_message(&config, 16_000);
+
+        assert_eq!(
+            payload["max_endpoint_delay_ms"].as_u64(),
+            Some(10_000)
+        );
     }
 }
 

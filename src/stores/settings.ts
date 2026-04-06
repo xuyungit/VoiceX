@@ -69,6 +69,7 @@ export interface AppSettings {
     sonioxApiKey: string
     sonioxModel: string
     sonioxLanguage: string
+    sonioxMaxEndpointDelayMs: number | null
 
     // LLM
     enableLlmCorrection: boolean
@@ -227,6 +228,7 @@ const defaultSettings: AppSettings = {
     sonioxApiKey: '',
     sonioxModel: 'stt-rt-v4',
     sonioxLanguage: '',
+    sonioxMaxEndpointDelayMs: null,
 
     enableLlmCorrection: false,
     llmProviderType: 'volcengine',
