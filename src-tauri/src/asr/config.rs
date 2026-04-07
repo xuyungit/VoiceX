@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 pub enum AsrProviderType {
     Volcengine,
     Google,
+    FunAsr,
     Qwen,
     Gemini,
     GeminiLive,
@@ -28,6 +29,7 @@ impl AsrProviderType {
         match self {
             Self::Volcengine => "Volcengine",
             Self::Google => "Google STT",
+            Self::FunAsr => "Fun-ASR",
             Self::Qwen => "Qwen ASR",
             Self::Gemini => "Gemini",
             Self::GeminiLive => "Gemini Live",
@@ -157,6 +159,12 @@ pub struct AsrConfig {
     pub google_endpointing: String,
     pub google_phrase_boost: f32,
 
+    // DashScope Fun-ASR realtime settings
+    pub funasr_api_key: String,
+    pub funasr_model: String,
+    pub funasr_ws_url: String,
+    pub funasr_language: String,
+
     // Qwen Realtime ASR settings
     pub qwen_api_key: String,
     pub qwen_recognition_mode: QwenRecognitionMode,
@@ -249,6 +257,10 @@ impl Default for AsrConfig {
             google_location: "us".to_string(),
             google_endpointing: "supershort".to_string(),
             google_phrase_boost: 8.0,
+            funasr_api_key: String::new(),
+            funasr_model: "fun-asr-realtime".to_string(),
+            funasr_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/inference".to_string(),
+            funasr_language: String::new(),
             qwen_api_key: String::new(),
             qwen_recognition_mode: QwenRecognitionMode::Realtime,
             qwen_model: "qwen3-asr-flash-realtime".to_string(),
@@ -309,6 +321,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
     fn from(settings: &crate::commands::settings::AppSettings) -> Self {
         let provider_type = match settings.asr_provider_type.as_str() {
             "google" => AsrProviderType::Google,
+            "funasr" => AsrProviderType::FunAsr,
             "qwen" => AsrProviderType::Qwen,
             "gemini" => AsrProviderType::Gemini,
             "gemini-live" => AsrProviderType::GeminiLive,
@@ -331,6 +344,10 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             google_location: settings.google_stt_location.clone(),
             google_endpointing: settings.google_stt_endpointing.clone(),
             google_phrase_boost: settings.google_stt_phrase_boost,
+            funasr_api_key: settings.funasr_api_key.clone(),
+            funasr_model: settings.funasr_model.clone(),
+            funasr_ws_url: settings.funasr_ws_url.clone(),
+            funasr_language: settings.funasr_language.clone(),
             qwen_api_key: settings.qwen_asr_api_key.clone(),
             qwen_recognition_mode: QwenRecognitionMode::from_str(
                 &settings.qwen_asr_recognition_mode,
@@ -445,6 +462,12 @@ impl AsrConfig {
                 supports_batch: false,
                 supports_post_recording_batch_refine: false,
             },
+            AsrProviderType::FunAsr => AsrProviderCapabilities {
+                supports_realtime: true,
+                supports_realtime_with_final_pass: false,
+                supports_batch: false,
+                supports_post_recording_batch_refine: false,
+            },
             AsrProviderType::Qwen => AsrProviderCapabilities {
                 supports_realtime: true,
                 supports_realtime_with_final_pass: true,
@@ -506,6 +529,7 @@ impl AsrConfig {
             }
             AsrProviderType::Volcengine => AsrPipelineMode::Realtime,
             AsrProviderType::Google => AsrPipelineMode::Realtime,
+            AsrProviderType::FunAsr => AsrPipelineMode::Realtime,
             AsrProviderType::Qwen if self.qwen_recognition_mode == QwenRecognitionMode::Batch => {
                 AsrPipelineMode::Batch
             }
@@ -586,6 +610,11 @@ impl AsrConfig {
             AsrProviderType::Google => {
                 !self.google_project_id.is_empty() && !self.google_api_key.is_empty()
             }
+            AsrProviderType::FunAsr => {
+                !self.funasr_api_key.trim().is_empty()
+                    && !self.funasr_model.trim().is_empty()
+                    && !self.funasr_ws_url.trim().is_empty()
+            }
             AsrProviderType::Qwen => {
                 !self.qwen_api_key.is_empty()
                     && !self.qwen_ws_url.is_empty()
@@ -646,6 +675,16 @@ mod tests {
     fn soniox_pipeline_mode_is_realtime_only() {
         let mut config = AsrConfig::default();
         config.provider_type = AsrProviderType::Soniox;
+
+        assert_eq!(config.pipeline_mode(), AsrPipelineMode::Realtime);
+        assert!(!config.capabilities().supports_batch);
+        assert!(!config.capabilities().supports_realtime_with_final_pass);
+    }
+
+    #[test]
+    fn funasr_pipeline_mode_is_realtime_only() {
+        let mut config = AsrConfig::default();
+        config.provider_type = AsrProviderType::FunAsr;
 
         assert_eq!(config.pipeline_mode(), AsrPipelineMode::Realtime);
         assert!(!config.capabilities().supports_batch);

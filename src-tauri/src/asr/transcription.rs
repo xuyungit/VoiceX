@@ -7,9 +7,10 @@ use tokio_util::sync::CancellationToken;
 use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
     ColiRefinementMode, ElevenLabsRealtimeClient, ElevenLabsRecognitionMode,
-    ElevenLabsTranscriptionClient, GeminiLiveClient, GeminiTranscriptionClient, GoogleSttClient,
-    OpenAIRealtimeClient, OpenAITranscriptionClient, QwenRealtimeClient, QwenRecognitionMode,
-    QwenTranscriptionClient, SonioxClient,
+    ElevenLabsTranscriptionClient, FunAsrRealtimeClient, GeminiLiveClient,
+    GeminiTranscriptionClient, GoogleSttClient, OpenAIRealtimeClient,
+    OpenAITranscriptionClient, QwenRealtimeClient, QwenRecognitionMode, QwenTranscriptionClient,
+    SonioxClient,
 };
 use crate::services::history_service::HistoryService;
 
@@ -39,6 +40,7 @@ pub async fn transcribe_audio_path_detailed(
 ) -> Result<AsrTranscriptionOutcome, String> {
     match config.provider_type {
         AsrProviderType::Coli => run_coli_asr(path, config).await,
+        AsrProviderType::FunAsr => run_streaming_asr(path, config, cancel).await,
         AsrProviderType::Qwen => run_qwen_asr(path, config).await,
         AsrProviderType::Gemini => run_gemini_asr(path, config).await,
         AsrProviderType::GeminiLive => run_streaming_asr(path, config, cancel).await,
@@ -351,6 +353,7 @@ async fn run_streaming_asr(
     let feeder_cancel = cancel.clone();
     let pacing_ms: u64 = match config.provider_type {
         AsrProviderType::Google => 0,
+        AsrProviderType::FunAsr => 30,
         AsrProviderType::Gemini => unreachable!("Gemini should use file-based transcription"),
         AsrProviderType::GeminiLive => 100,
         AsrProviderType::Soniox => 50,
@@ -396,6 +399,12 @@ async fn run_streaming_asr(
         }
         AsrProviderType::Google => {
             let client = GoogleSttClient::new(config.clone());
+            client
+                .stream_session(16000, 1, rx, cancel.clone(), history, on_event)
+                .await
+        }
+        AsrProviderType::FunAsr => {
+            let client = FunAsrRealtimeClient::new(config.clone());
             client
                 .stream_session(16000, 1, rx, cancel.clone(), history, on_event)
                 .await
@@ -478,6 +487,9 @@ fn extract_final_text(events: &[AsrEvent]) -> Result<String, String> {
 fn streaming_model_name(config: &AsrConfig) -> Option<String> {
     match config.provider_type {
         AsrProviderType::Google => Some("Google / chirp_3".to_string()),
+        AsrProviderType::FunAsr => {
+            HistoryService::format_provider_model("Fun-ASR", &config.funasr_model)
+        }
         AsrProviderType::Qwen => HistoryService::format_provider_model("Qwen", &config.qwen_model),
         AsrProviderType::GeminiLive => {
             HistoryService::format_provider_model("Gemini Live", &config.gemini_live_model)

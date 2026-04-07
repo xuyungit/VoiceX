@@ -21,6 +21,7 @@ type Translate = (key: string) => string
 const ASR_PROVIDER_LABEL_KEYS: Array<{ key: string; value: Exclude<AsrProviderValue, 'coli'> }> = [
   { key: 'asr.providerVolcengine', value: 'volcengine' },
   { key: 'asr.providerGoogle', value: 'google' },
+  { key: 'asr.providerFunAsr', value: 'funasr' },
   { key: 'asr.providerQwen', value: 'qwen' },
   { key: 'asr.providerGemini', value: 'gemini' },
   { key: 'asr.providerGeminiLive', value: 'gemini-live' },

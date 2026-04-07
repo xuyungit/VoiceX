@@ -9,7 +9,7 @@ export interface AppSettings {
     uiLanguage: UiLanguage
 
     // ASR
-    asrProviderType: 'volcengine' | 'google' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'coli'
+    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'coli'
     asrAppKey: string
     asrAccessKey: string
     asrResourceId: string
@@ -31,6 +31,12 @@ export interface AppSettings {
     googleSttLocation: string
     googleSttEndpointing: 'supershort' | 'short' | 'standard'
     googleSttPhraseBoost: number
+
+    // ASR Provider: DashScope Fun-ASR realtime
+    funasrApiKey: string
+    funasrModel: string
+    funasrWsUrl: string
+    funasrLanguage: string
 
     // ASR Provider: Qwen Realtime ASR
     qwenAsrApiKey: string
@@ -196,6 +202,11 @@ const defaultSettings: AppSettings = {
     googleSttLocation: 'us',
     googleSttEndpointing: 'supershort',
     googleSttPhraseBoost: 8,
+
+    funasrApiKey: '',
+    funasrModel: 'fun-asr-realtime',
+    funasrWsUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/inference',
+    funasrLanguage: '',
 
     qwenAsrApiKey: '',
     qwenAsrRecognitionMode: 'realtime',

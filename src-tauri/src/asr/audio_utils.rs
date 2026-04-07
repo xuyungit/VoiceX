@@ -4,6 +4,10 @@ pub fn resample_to_16k(chunk: &[u8], src_rate: u32) -> Vec<u8> {
     resample_pcm(chunk, src_rate, 16_000)
 }
 
+pub fn resample_to_8k(chunk: &[u8], src_rate: u32) -> Vec<u8> {
+    resample_pcm(chunk, src_rate, 8_000)
+}
+
 pub fn resample_to_24k(chunk: &[u8], src_rate: u32) -> Vec<u8> {
     resample_pcm(chunk, src_rate, 24_000)
 }

@@ -2,8 +2,9 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrFailure, AsrProviderType, ColiAsrClient,
-    ElevenLabsRealtimeClient, ElevenLabsRecognitionMode, GeminiLiveClient, GoogleSttClient,
-    OpenAIRealtimeClient, QwenRealtimeClient, QwenRecognitionMode, SonioxClient,
+    ElevenLabsRealtimeClient, ElevenLabsRecognitionMode, FunAsrRealtimeClient,
+    GeminiLiveClient, GoogleSttClient, OpenAIRealtimeClient, QwenRealtimeClient,
+    QwenRecognitionMode, SonioxClient,
 };
 use crate::storage;
 
@@ -120,6 +121,34 @@ impl AsrManager {
                     config.google_language_code,
                 );
                 let client = GoogleSttClient::new(config);
+                let on_event = on_event.clone();
+                client
+                    .stream_session(
+                        sample_rate,
+                        channels,
+                        rx,
+                        cancel.clone(),
+                        history,
+                        move |evt| {
+                            (on_event)(evt);
+                        },
+                    )
+                    .await
+            }
+            AsrProviderType::FunAsr => {
+                log::info!(
+                    "Starting ASR stream [Fun-ASR] (ws: {}, {} Hz, {} ch, model={}, lang={})",
+                    config.funasr_ws_url,
+                    sample_rate,
+                    channels,
+                    config.funasr_model,
+                    if config.funasr_language.trim().is_empty() {
+                        "auto"
+                    } else {
+                        config.funasr_language.as_str()
+                    },
+                );
+                let client = FunAsrRealtimeClient::new(config);
                 let on_event = on_event.clone();
                 client
                     .stream_session(

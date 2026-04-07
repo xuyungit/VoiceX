@@ -17,6 +17,7 @@ const hotkeyDisplay = computed(() => {
 const ASR_DISPLAY_NAMES: Record<string, string> = {
   volcengine: 'Volcengine',
   google: 'Google',
+  funasr: 'Fun-ASR',
   qwen: 'Qwen',
   gemini: 'Gemini',
   'gemini-live': 'Gemini Live',

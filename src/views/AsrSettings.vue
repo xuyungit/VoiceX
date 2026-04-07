@@ -8,6 +8,7 @@ import type { LocalAsrStatus } from '../types/asr'
 import { buildAsrProviderOptions, type AsrProviderValue as ProviderValue } from '../utils/providerOptions'
 import AsrVolcengineSettings from '../components/asr/AsrVolcengineSettings.vue'
 import AsrGoogleSettings from '../components/asr/AsrGoogleSettings.vue'
+import AsrFunAsrSettings from '../components/asr/AsrFunAsrSettings.vue'
 import AsrQwenSettings from '../components/asr/AsrQwenSettings.vue'
 import AsrGeminiSettings from '../components/asr/AsrGeminiSettings.vue'
 import AsrGeminiLiveSettings from '../components/asr/AsrGeminiLiveSettings.vue'
@@ -83,6 +84,7 @@ const asrProviderType = computed({
 
 const isVolcengine = computed(() => settingsStore.settings.asrProviderType === 'volcengine')
 const isGoogle = computed(() => settingsStore.settings.asrProviderType === 'google')
+const isFunAsr = computed(() => settingsStore.settings.asrProviderType === 'funasr')
 const isQwen = computed(() => settingsStore.settings.asrProviderType === 'qwen')
 const isGemini = computed(() => settingsStore.settings.asrProviderType === 'gemini')
 const isGeminiLive = computed(() => settingsStore.settings.asrProviderType === 'gemini-live')
@@ -323,6 +325,7 @@ async function clearSonioxDebugOverrides() {
     <!-- Provider-specific configuration -->
     <AsrVolcengineSettings v-if="isVolcengine" />
     <AsrGoogleSettings v-if="isGoogle" />
+    <AsrFunAsrSettings v-if="isFunAsr" />
     <AsrQwenSettings v-if="isQwen" />
     <AsrGeminiSettings v-if="isGemini" />
     <AsrGeminiLiveSettings v-if="isGeminiLive" />

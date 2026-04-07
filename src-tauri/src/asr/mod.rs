@@ -11,6 +11,7 @@ pub mod coli_client;
 mod config;
 pub mod elevenlabs_client;
 pub mod elevenlabs_realtime_client;
+pub mod funasr_client;
 pub mod gemini_client;
 pub mod gemini_live_client;
 pub mod google_client;
@@ -36,6 +37,7 @@ pub use config::{
 };
 pub use elevenlabs_client::ElevenLabsTranscriptionClient;
 pub use elevenlabs_realtime_client::ElevenLabsRealtimeClient;
+pub use funasr_client::FunAsrRealtimeClient;
 pub use gemini_client::GeminiTranscriptionClient;
 pub use gemini_live_client::GeminiLiveClient;
 pub use google_client::GoogleSttClient;

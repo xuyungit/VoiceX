@@ -20,7 +20,7 @@ pub struct AppSettings {
     pub ui_language: String, // "system" | "zh-CN" | "en-US"
 
     // ASR settings
-    pub asr_provider_type: String, // "volcengine" | "google" | "qwen" | "gemini" | "gemini-live" | "cohere" | "openai" | "elevenlabs" | "soniox" | "coli"
+    pub asr_provider_type: String, // "volcengine" | "google" | "funasr" | "qwen" | "gemini" | "gemini-live" | "cohere" | "openai" | "elevenlabs" | "soniox" | "coli"
     pub asr_app_key: String,
     pub asr_access_key: String,
     pub asr_resource_id: String,
@@ -38,6 +38,12 @@ pub struct AppSettings {
     pub google_stt_location: String,
     pub google_stt_endpointing: String, // "supershort" | "short" | "standard"
     pub google_stt_phrase_boost: f32,
+
+    // ASR Provider: DashScope Fun-ASR realtime
+    pub funasr_api_key: String,
+    pub funasr_model: String,
+    pub funasr_ws_url: String,
+    pub funasr_language: String,
 
     // ASR Provider: Qwen Realtime ASR
     pub qwen_asr_api_key: String,
@@ -204,6 +210,10 @@ impl Default for AppSettings {
             google_stt_location: "us".to_string(),
             google_stt_endpointing: "supershort".to_string(),
             google_stt_phrase_boost: 8.0,
+            funasr_api_key: String::new(),
+            funasr_model: "fun-asr-realtime".to_string(),
+            funasr_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/inference".to_string(),
+            funasr_language: String::new(),
 
             qwen_asr_api_key: String::new(),
             qwen_asr_recognition_mode: "realtime".to_string(),
@@ -312,6 +322,7 @@ fn probe_provider_name(provider: &crate::asr::AsrProviderType) -> &'static str {
     match provider {
         crate::asr::AsrProviderType::Volcengine => "Volcengine Doubao",
         crate::asr::AsrProviderType::Google => "Google Cloud Speech-to-Text V2",
+        crate::asr::AsrProviderType::FunAsr => "Fun-ASR Realtime",
         crate::asr::AsrProviderType::Qwen => "Qwen Realtime ASR",
         crate::asr::AsrProviderType::Gemini => "Gemini Audio Transcription",
         crate::asr::AsrProviderType::GeminiLive => "Gemini Live Realtime",

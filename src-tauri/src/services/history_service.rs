@@ -141,6 +141,9 @@ impl HistoryService {
         let config = AsrConfig::from(settings);
         let snapshot = match config.provider_type {
             AsrProviderType::Google => Some("Google / chirp_3".to_string()),
+            AsrProviderType::FunAsr => {
+                Self::format_provider_model("Fun-ASR", &config.funasr_model)
+            }
             AsrProviderType::Volcengine => match config.pipeline_mode() {
                 AsrPipelineMode::Batch => Some("Volcengine / bigmodel_nostream".to_string()),
                 AsrPipelineMode::RealtimeWithFinalPass => {
