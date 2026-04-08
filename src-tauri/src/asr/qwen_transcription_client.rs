@@ -34,18 +34,19 @@ impl QwenTranscriptionClient {
             .await
             .map_err(|e| AsrError::ConnectionFailed(format!("Failed to read audio file: {}", e)))?;
 
-        if bytes.len() > QWEN_MAX_BATCH_INPUT_BYTES {
-            return Err(AsrError::ServerError(format!(
-                "Qwen batch refine supports files up to 10 MB; got {:.2} MB",
-                bytes.len() as f64 / (1024.0 * 1024.0)
-            )));
-        }
-
         let endpoint = format!(
             "{}/chat/completions",
             qwen_compatible_base_url(&self.config.qwen_ws_url)?
         );
-        let data_uri = format!("data:{};base64,{}", mime, STANDARD.encode(bytes));
+        let encoded_audio = STANDARD.encode(&bytes);
+        let data_uri = format!("data:{};base64,{}", mime, encoded_audio);
+        if data_uri.len() > QWEN_MAX_BATCH_INPUT_BYTES {
+            return Err(AsrError::ServerError(format!(
+                "Qwen batch mode accepts up to 10 MB of input_audio.data; original file is {:.2} MB, Base64 payload is {:.2} MB",
+                bytes.len() as f64 / (1024.0 * 1024.0),
+                data_uri.len() as f64 / (1024.0 * 1024.0)
+            )));
+        }
         let bias_text = crate::asr::qwen_client::build_corpus_text(&self.config.hotwords);
 
         let mut messages = Vec::new();

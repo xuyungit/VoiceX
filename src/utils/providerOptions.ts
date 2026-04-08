@@ -9,6 +9,7 @@ export type ElevenLabsPostRecordingRefine = AppSettings['elevenlabsPostRecording
 export type OpenAiPostRecordingRefine = AppSettings['openaiAsrPostRecordingRefine']
 export type ColiRecognitionMode = BatchCapableRecognitionMode
 export type ColiPostRecordingRefine = AppSettings['coliFinalRefinementMode']
+export const QWEN_BATCH_RECORDING_LIMIT_MINUTES = 5
 
 type ProviderOption<T extends string> = {
   label: string
@@ -171,6 +172,41 @@ export function resolveBatchCapablePipelineMode(
     return 'realtime_with_final_pass'
   }
   return 'realtime'
+}
+
+export function resolveQwenRecordingHardLimitMinutes(
+  recognitionMode: BatchCapableRecognitionMode,
+  postRecordingRefineEnabled: boolean
+): number | null {
+  const pipelineMode = resolveBatchCapablePipelineMode(
+    recognitionMode,
+    postRecordingBatchRefineValueFromBoolean(postRecordingRefineEnabled)
+  )
+  return pipelineMode === 'realtime' ? null : QWEN_BATCH_RECORDING_LIMIT_MINUTES
+}
+
+export function resolveAsrRecordingHardLimitMinutes(
+  settings: Pick<AppSettings, 'asrProviderType' | 'qwenAsrRecognitionMode' | 'qwenAsrPostRecordingRefine'>
+): number | null {
+  if (settings.asrProviderType !== 'qwen') {
+    return null
+  }
+
+  return resolveQwenRecordingHardLimitMinutes(
+    settings.qwenAsrRecognitionMode,
+    settings.qwenAsrPostRecordingRefine
+  )
+}
+
+export function exceedsRecordingHardLimit(
+  configuredMaxRecordingMinutes: number,
+  hardLimitMinutes: number | null
+): boolean {
+  if (hardLimitMinutes == null) {
+    return false
+  }
+
+  return configuredMaxRecordingMinutes === 0 || configuredMaxRecordingMinutes > hardLimitMinutes
 }
 
 export function normalizeColiPostRecordingRefine(

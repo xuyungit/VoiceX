@@ -238,7 +238,7 @@ impl SessionController {
         state.asr_stream_finished = true;
         state.asr_reconnect_in_progress = false;
         self.cancel_asr_final_timeout();
-        self.cancel_hands_free_timeout();
+        self.cancel_recording_timeout();
         self.cancel_auto_hide();
         self.emit_asr_error(&failure.display_message);
 
@@ -806,19 +806,6 @@ impl SessionController {
 
     /// Start batch ASR on the recorded audio file after capture stops.
     pub fn start_batch_asr(&self, state: &mut AppState) {
-        let audio_path = match state
-            .session_refinement_audio_path
-            .clone()
-            .or(state.session_audio_path.clone())
-        {
-            Some(path) => path,
-            None => {
-                log::warn!("Batch ASR skipped: no audio path available");
-                self.fail_batch_asr_state(state, "批量识别失败：录音文件缺失".to_string());
-                return;
-            }
-        };
-
         let settings = match crate::storage::get_settings() {
             Ok(s) => s,
             Err(e) => {
@@ -835,6 +822,15 @@ impl SessionController {
         }
         state.session_asr_model_name =
             crate::services::history_service::HistoryService::resolve_asr_model_name(&settings);
+
+        let audio_path = match select_batch_audio_path(state, &config) {
+            Some(path) => path,
+            None => {
+                log::warn!("Batch ASR skipped: no usable audio path available");
+                self.fail_batch_asr_state(state, "批量识别失败：录音文件缺失".to_string());
+                return;
+            }
+        };
 
         // Show recognizing state in HUD.
         if let Some(hud) = self.hud_service() {
@@ -959,6 +955,24 @@ impl SessionController {
         self.emit_asr_error(&message);
         self.cancel_audio_level_task();
         self.schedule_error_cleanup();
+    }
+}
+
+fn select_batch_audio_path(state: &AppState, config: &AsrConfig) -> Option<PathBuf> {
+    let opus_path = state
+        .session_audio_path
+        .clone()
+        .filter(|path| path.is_file());
+    let refinement_path = state
+        .session_refinement_audio_path
+        .clone()
+        .filter(|path| path.is_file());
+
+    match config.provider_type {
+        // Qwen batch mode supports ogg/opus and has a strict 10 MB cap.
+        // Prefer the compressed capture artifact over the temporary refinement WAV.
+        AsrProviderType::Qwen => opus_path.or(refinement_path),
+        _ => refinement_path.or(opus_path),
     }
 }
 

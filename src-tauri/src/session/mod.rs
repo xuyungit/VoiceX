@@ -275,10 +275,10 @@ impl SessionController {
             state.session_state == HotkeySessionState::HandsFree && state.is_recording;
 
         // Always cancel existing countdowns so new limits take effect immediately.
-        self.cancel_hands_free_timeout();
+        self.cancel_recording_timeout();
 
         if should_restart_timeout {
-            self.start_hands_free_timeout(max_recording_minutes);
+            self.start_recording_timeout(self.effective_max_recording_minutes(state));
         }
 
         if let Some(manager) = self.audio_manager() {
@@ -306,10 +306,10 @@ impl SessionController {
                     self.handle_cancel_session_state(state, reason)
                 }
             }
-            SessionMessage::HandsFreeCountdownTick(remaining) => {
+            SessionMessage::RecordingCountdownTick(remaining) => {
                 self.emit_countdown(Some(remaining))
             }
-            SessionMessage::HandsFreeTimeout => self.on_hands_free_timeout_state(state),
+            SessionMessage::RecordingTimeout => self.on_recording_timeout_state(state),
             SessionMessage::FinalizeHideReady => self.on_finalize_hide_ready_state(state),
             SessionMessage::ErrorDisplayDone => self.on_error_display_done_state(state),
             SessionMessage::AsrFinalTimeout => self.on_asr_final_timeout(state),
@@ -671,19 +671,19 @@ impl SessionController {
         }
     }
 
-    fn start_hands_free_timeout(&self, minutes: u32) {
-        self.cancel_hands_free_timeout();
+    fn start_recording_timeout(&self, minutes: u32) {
+        self.cancel_recording_timeout();
         self.cancel_asr_final_timeout();
 
         let controller = self.clone();
         let total_secs = (minutes as u64) * 60;
 
         if total_secs == 0 {
-            log::debug!("Hands-free timeout disabled (minutes=0)");
+            log::debug!("Recording timeout disabled (minutes=0)");
             return;
         }
 
-        log::debug!("Hands-free timeout scheduled for {} seconds", total_secs);
+        log::debug!("Recording timeout scheduled for {} seconds", total_secs);
         if let Some(countdown) = self.countdown_service() {
             let controller_tick = controller.clone();
             countdown.start(
@@ -691,20 +691,20 @@ impl SessionController {
                 move |remaining| {
                     if remaining as u64 <= COUNTDOWN_THRESHOLD_SECS {
                         controller_tick
-                            .send_message(SessionMessage::HandsFreeCountdownTick(remaining));
+                            .send_message(SessionMessage::RecordingCountdownTick(remaining));
                     }
                 },
                 move || {
-                    controller.send_message(SessionMessage::HandsFreeTimeout);
+                    controller.send_message(SessionMessage::RecordingTimeout);
                 },
             );
         }
     }
 
-    fn cancel_hands_free_timeout(&self) {
+    fn cancel_recording_timeout(&self) {
         if let Some(countdown) = self.countdown_service() {
             if countdown.cancel() {
-                log::debug!("Hands-free timeout cancelled");
+                log::debug!("Recording timeout cancelled");
             }
         }
         self.emit_countdown(None);
@@ -899,6 +899,20 @@ impl SessionController {
         }
     }
 
+    fn effective_max_recording_minutes(&self, state: &AppState) -> u32 {
+        let user_limit = state.max_recording_minutes;
+        let provider_limit = crate::storage::get_settings()
+            .ok()
+            .map(|settings| crate::asr::AsrConfig::from(&settings))
+            .and_then(|config| config.max_recording_minutes_limit());
+
+        match provider_limit {
+            Some(limit) if user_limit == 0 => limit,
+            Some(limit) => user_limit.min(limit),
+            None => user_limit,
+        }
+    }
+
     fn schedule_asr_startup_retry(&self, retry_count: u32) {
         let delay_ms = match retry_count {
             1 => 300,
@@ -983,7 +997,7 @@ impl SessionController {
         self.injection_epoch.fetch_add(1, Ordering::SeqCst);
         self.injection_cancel_flag.store(true, Ordering::SeqCst);
         self.cancel_hold_timer();
-        self.cancel_hands_free_timeout();
+        self.cancel_recording_timeout();
         self.cancel_auto_hide();
         // Stop ASR task immediately to avoid stale events/stream-finished driving injection.
         self.abort_asr_task();
@@ -1078,7 +1092,7 @@ impl SessionController {
 
     fn stop_audio_capture(&self, reason: &str) {
         // No further auto-stop after we intentionally stop capture.
-        self.cancel_hands_free_timeout();
+        self.cancel_recording_timeout();
 
         if let Some(manager) = self.audio_manager() {
             match manager.stop_capture() {
@@ -1286,7 +1300,7 @@ impl SessionController {
         self.injection_cancel_flag.store(true, Ordering::SeqCst);
 
         self.cancel_hold_timer();
-        self.cancel_hands_free_timeout();
+        self.cancel_recording_timeout();
         self.cancel_auto_hide();
         self.abort_asr_task();
         self.stop_asr_audio_bridge();

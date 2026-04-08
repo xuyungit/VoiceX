@@ -26,6 +26,7 @@ impl SessionController {
             // Default HUD to hands-free icon immediately; will switch to push-to-talk if hold threshold is reached.
             state.recording_style = Some(RecordingStyle::HandsFree);
             self.start_audio_capture();
+            self.start_recording_timeout(self.effective_max_recording_minutes(state));
             if let Some(hud) = self.hud_service() {
                 hud.reset_display();
             } else {
@@ -43,26 +44,16 @@ impl SessionController {
     pub fn on_hotkey_released(&self, state: &mut AppState) {
         self.cancel_hold_timer();
 
-        let prev = state.session_state;
         let was_recording = state.is_recording;
         state.handle_hotkey_released();
 
-        let mut schedule_hands_free = None;
         let mut schedule_finalize = false;
-        if state.session_state == HotkeySessionState::HandsFree
-            && prev == HotkeySessionState::Pending
-        {
-            schedule_hands_free = Some(state.max_recording_minutes);
-        } else if state.session_state == HotkeySessionState::Finalizing {
+        if state.session_state == HotkeySessionState::Finalizing {
             schedule_finalize = true;
         }
 
         if was_recording && !state.is_recording {
             self.stop_audio_capture("hotkey_release");
-        }
-
-        if let Some(minutes) = schedule_hands_free {
-            self.start_hands_free_timeout(minutes);
         }
 
         if schedule_finalize {

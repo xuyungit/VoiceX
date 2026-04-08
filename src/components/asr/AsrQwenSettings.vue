@@ -4,11 +4,14 @@ import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
 import {
+  QWEN_BATCH_RECORDING_LIMIT_MINUTES,
   buildBatchCapableRecognitionModeOptions,
   buildPostRecordingBatchRefineOptions,
+  exceedsRecordingHardLimit,
   normalizeBatchCapablePostRecordingRefine,
   postRecordingBatchRefineEnabled,
   postRecordingBatchRefineValueFromBoolean,
+  resolveQwenRecordingHardLimitMinutes,
 } from '../../utils/providerOptions'
 
 const settingsStore = useSettingsStore()
@@ -87,6 +90,18 @@ const qwenWsUrlOptions = computed(() => [
 const recognitionModeOptions = computed(() => buildBatchCapableRecognitionModeOptions(t))
 const postRecordingRefineOptions = computed(() => buildPostRecordingBatchRefineOptions(t))
 const batchRefineDisabled = computed(() => qwenAsrRecognitionMode.value === 'batch')
+const qwenRecordingHardLimitMinutes = computed(() =>
+  resolveQwenRecordingHardLimitMinutes(
+    qwenAsrRecognitionMode.value,
+    settingsStore.settings.qwenAsrPostRecordingRefine
+  )
+)
+const showQwenRecordingLimitNotice = computed(() =>
+  exceedsRecordingHardLimit(
+    settingsStore.settings.maxRecordingMinutes,
+    qwenRecordingHardLimitMinutes.value
+  )
+)
 </script>
 
 <template>
@@ -186,6 +201,13 @@ const batchRefineDisabled = computed(() => qwenAsrRecognitionMode.value === 'bat
           size="small"
           class="field-control"
         />
+      </div>
+      <div v-if="showQwenRecordingLimitNotice" class="notice-box">
+        {{
+          t('asr.qwenRecordingLimitNotice', {
+            minutes: qwenRecordingHardLimitMinutes ?? QWEN_BATCH_RECORDING_LIMIT_MINUTES
+          })
+        }}
       </div>
     </div>
   </div>

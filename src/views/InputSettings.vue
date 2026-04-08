@@ -5,6 +5,10 @@ import { NButton, NSelect, NInputNumber } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
+import {
+  exceedsRecordingHardLimit,
+  resolveAsrRecordingHardLimitMinutes
+} from '../utils/providerOptions'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -53,6 +57,24 @@ const maxRecordingOptions = computed(() => [
 const maxRecordingMinutes = computed({
   get: () => settingsStore.settings.maxRecordingMinutes,
   set: (v: number) => settingsStore.updateSetting('maxRecordingMinutes', v)
+})
+
+const asrRecordingHardLimitMinutes = computed(() =>
+  resolveAsrRecordingHardLimitMinutes(settingsStore.settings)
+)
+
+const showMaxRecordingDurationLimitHint = computed(() =>
+  exceedsRecordingHardLimit(maxRecordingMinutes.value, asrRecordingHardLimitMinutes.value)
+)
+
+const maxRecordingDurationLimitHint = computed(() => {
+  if (!showMaxRecordingDurationLimitHint.value || asrRecordingHardLimitMinutes.value == null) {
+    return null
+  }
+
+  return t('asr.maxRecordingDurationProviderCapNote', {
+    minutes: asrRecordingHardLimitMinutes.value
+  })
 })
 
 const isRecording = ref(false)
@@ -272,6 +294,9 @@ onMounted(() => {
           <div class="field-text">
             <div class="field-label">{{ t('asr.maxRecordingDuration') }}</div>
             <div class="field-note">{{ t('asr.maxRecordingDurationNote') }}</div>
+            <div v-if="maxRecordingDurationLimitHint" class="field-note limit-hint">
+              {{ maxRecordingDurationLimitHint }}
+            </div>
           </div>
           <NSelect
             v-model:value="maxRecordingMinutes"
@@ -365,6 +390,10 @@ onMounted(() => {
   font-size: var(--font-xs);
   color: var(--color-text-tertiary);
   max-width: 520px;
+}
+
+.field-note.limit-hint {
+  color: color-mix(in srgb, var(--color-warning) 72%, var(--color-text-secondary));
 }
 
 .field-control {

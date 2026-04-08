@@ -145,3 +145,13 @@
   font-size: var(--font-xs);
   line-height: 1.5;
 }
+
+.notice-box {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 28%, var(--color-border));
+  background: color-mix(in srgb, var(--color-warning) 10%, var(--color-bg-secondary));
+  color: color-mix(in srgb, var(--color-warning) 72%, var(--color-text-secondary));
+  font-size: var(--font-xs);
+  line-height: 1.5;
+}

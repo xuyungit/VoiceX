@@ -119,13 +119,13 @@ impl SessionController {
         self.hide_hud_and_reset_state(state);
     }
 
-    pub fn on_hands_free_timeout_state(&self, state: &mut AppState) {
+    pub fn on_recording_timeout_state(&self, state: &mut AppState) {
         if !state.is_recording {
-            log::debug!("Hands-free timeout fired but capture already stopped; skipping finalize");
+            log::debug!("Recording timeout fired but capture already stopped; skipping finalize");
             return;
         }
         state.transition_to_finalizing();
-        self.stop_audio_capture("hands_free_timeout");
+        self.stop_audio_capture("recording_timeout");
         self.emit_state_from(state);
         self.emit_countdown(None);
         self.schedule_finalize_cleanup();

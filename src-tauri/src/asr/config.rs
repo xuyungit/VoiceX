@@ -541,7 +541,8 @@ impl AsrConfig {
             AsrProviderType::GeminiLive => AsrPipelineMode::Realtime,
             AsrProviderType::Cohere => AsrPipelineMode::Batch,
             AsrProviderType::OpenAI if self.openai_asr_mode == "realtime" => {
-                if self.openai_asr_post_recording_refine == PostRecordingBatchRefineMode::BatchRefine
+                if self.openai_asr_post_recording_refine
+                    == PostRecordingBatchRefineMode::BatchRefine
                 {
                     AsrPipelineMode::RealtimeWithFinalPass
                 } else {
@@ -569,6 +570,14 @@ impl AsrConfig {
                 AsrPipelineMode::RealtimeWithFinalPass
             }
             AsrProviderType::Coli => AsrPipelineMode::Realtime,
+        }
+    }
+
+    pub fn max_recording_minutes_limit(&self) -> Option<u32> {
+        match (self.provider_type, self.pipeline_mode()) {
+            (AsrProviderType::Qwen, AsrPipelineMode::Batch)
+            | (AsrProviderType::Qwen, AsrPipelineMode::RealtimeWithFinalPass) => Some(5),
+            _ => None,
         }
     }
 
@@ -667,8 +676,8 @@ impl AsrConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsrConfig, AsrPipelineMode, AsrProviderType, PostRecordingBatchRefineMode,
-        ElevenLabsRecognitionMode, QwenRecognitionMode,
+        AsrConfig, AsrPipelineMode, AsrProviderType, ElevenLabsRecognitionMode,
+        PostRecordingBatchRefineMode, QwenRecognitionMode,
     };
 
     #[test]
@@ -702,6 +711,35 @@ mod tests {
             config.pipeline_mode(),
             AsrPipelineMode::RealtimeWithFinalPass
         );
+    }
+
+    #[test]
+    fn qwen_batch_has_five_minute_recording_cap() {
+        let mut config = AsrConfig::default();
+        config.provider_type = AsrProviderType::Qwen;
+        config.qwen_recognition_mode = QwenRecognitionMode::Batch;
+
+        assert_eq!(config.max_recording_minutes_limit(), Some(5));
+    }
+
+    #[test]
+    fn qwen_realtime_with_refine_has_five_minute_recording_cap() {
+        let mut config = AsrConfig::default();
+        config.provider_type = AsrProviderType::Qwen;
+        config.qwen_recognition_mode = QwenRecognitionMode::Realtime;
+        config.qwen_post_recording_refine = true;
+
+        assert_eq!(config.max_recording_minutes_limit(), Some(5));
+    }
+
+    #[test]
+    fn qwen_pure_realtime_has_no_recording_cap() {
+        let mut config = AsrConfig::default();
+        config.provider_type = AsrProviderType::Qwen;
+        config.qwen_recognition_mode = QwenRecognitionMode::Realtime;
+        config.qwen_post_recording_refine = false;
+
+        assert_eq!(config.max_recording_minutes_limit(), None);
     }
 
     #[test]
