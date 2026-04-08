@@ -82,6 +82,7 @@ function loadMore() {
 }
 
 async function handleCopy(record: HistoryRecord) {
+  if (!hasRecordText(record)) return
   await historyStore.copyText(record.text)
 }
 
@@ -194,7 +195,31 @@ function isTranslateMode(record: HistoryRecord): boolean {
   return record.mode.startsWith('translate_en')
 }
 
+function isFailedRecord(record: HistoryRecord): boolean {
+  return record.errorCode !== 0
+}
+
+function hasRecordText(record: HistoryRecord): boolean {
+  return record.text.trim().length > 0
+}
+
+function displayText(record: HistoryRecord): string {
+  if (hasRecordText(record)) {
+    return record.text
+  }
+  if (isFailedRecord(record)) {
+    return t('history.failedPlaceholder')
+  }
+  return t('common.notRecorded')
+}
+
+function failureMessage(record: HistoryRecord): string {
+  const message = record.errorMessage?.trim()
+  return message && message.length > 0 ? message : t('history.failedNoReason')
+}
+
 function canCompare(record: HistoryRecord) {
+  if (isFailedRecord(record)) return false
   if (!record.originalText) return false
   if (!isTranslateMode(record) && !record.aiCorrectionApplied) return false
 
@@ -205,6 +230,9 @@ function canCompare(record: HistoryRecord) {
 }
 
 function modeBadge(record: HistoryRecord): string | null {
+  if (isFailedRecord(record)) {
+    return null
+  }
   if (record.mode.startsWith('translate_en')) {
     return t('history.englishTranslation')
   }
@@ -270,6 +298,9 @@ function formatDateTime(timestamp: string): string {
 }
 
 function modeLabel(record: HistoryRecord): string {
+  if (isFailedRecord(record)) {
+    return t('history.transcriptionFailed')
+  }
   if (record.mode.startsWith('translate_en')) {
     return t('history.englishTranslation')
   }
@@ -287,6 +318,9 @@ function modelLabel(value: string | null | undefined, fallback?: string): string
 }
 
 function llmModelLabel(record: HistoryRecord): string {
+  if (isFailedRecord(record)) {
+    return t('common.none')
+  }
   if (record.llmInvoked) {
     return modelLabel(record.llmModelName)
   }
@@ -294,6 +328,9 @@ function llmModelLabel(record: HistoryRecord): string {
 }
 
 function resolvedOriginalText(record: HistoryRecord): string | null {
+  if (isFailedRecord(record)) {
+    return null
+  }
   if (record.originalText) {
     return record.originalText
   }
@@ -431,6 +468,12 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                 >
                   {{ compareTagLabel(record) }}
                 </span>
+                <span
+                  v-if="isFailedRecord(record)"
+                  class="tag row-tag failed-tag"
+                >
+                  {{ t('history.transcriptionFailed') }}
+                </span>
               </div>
               <div class="list-actions">
                 <span class="list-meta duration-chip">{{ formatDuration(record.durationMs) }}</span>
@@ -476,8 +519,11 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                 </div>
               </div>
             </div>
-            <div class="list-text">
-              {{ record.text }}
+            <div class="list-text" :class="{ failed: isFailedRecord(record) }">
+              {{ displayText(record) }}
+            </div>
+            <div v-if="isFailedRecord(record)" class="failure-note">
+              {{ failureMessage(record) }}
             </div>
           </div>
         </div>
@@ -552,13 +598,25 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
               <span v-if="showNoCorrectionTag(detailRecord)" class="tag detail-tag no-correction-tag">
                 {{ t('history.noCorrection') }}
               </span>
+              <span v-if="isFailedRecord(detailRecord)" class="tag detail-tag failed-tag">
+                {{ t('history.transcriptionFailed') }}
+              </span>
             </div>
-            <NButton quaternary size="tiny" @click="handleCopy(detailRecord)">
+            <NButton quaternary size="tiny" :disabled="!hasRecordText(detailRecord)" @click="handleCopy(detailRecord)">
               {{ t('common.copy') }}
             </NButton>
           </div>
-          <div class="detail-body">
-            {{ detailRecord.text }}
+          <div class="detail-body" :class="{ failed: isFailedRecord(detailRecord) }">
+            {{ displayText(detailRecord) }}
+          </div>
+        </div>
+
+        <div v-if="isFailedRecord(detailRecord)" class="detail-section">
+          <div class="detail-header">
+            <div class="detail-title">{{ t('history.failureReason') }}</div>
+          </div>
+          <div class="detail-body failed-detail">
+            {{ failureMessage(detailRecord) }}
           </div>
         </div>
 
@@ -730,6 +788,16 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   overflow-wrap: anywhere;
 }
 
+.list-text.failed {
+  color: var(--color-text-secondary);
+}
+
+.failure-note {
+  font-size: var(--font-sm);
+  color: #fda4af;
+  overflow-wrap: anywhere;
+}
+
 .list-actions {
   display: flex;
   align-items: center;
@@ -773,6 +841,11 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 .mode-tag.translate {
   border-color: rgba(134, 239, 172, 0.5);
   color: rgba(134, 239, 172, 0.95);
+}
+
+.failed-tag {
+  border-color: rgba(248, 113, 113, 0.35);
+  color: #fda4af;
 }
 
 .load-more {
@@ -872,6 +945,14 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   white-space: pre-wrap;
   min-height: 120px;
   font-size: var(--font-md);
+}
+
+.detail-body.failed {
+  color: var(--color-text-secondary);
+}
+
+.failed-detail {
+  color: #fda4af;
 }
 
 @media (max-width: 640px) {

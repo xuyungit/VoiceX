@@ -30,6 +30,7 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
             audio_path TEXT,
             is_final INTEGER DEFAULT 1,
             error_code INTEGER DEFAULT 0,
+            error_message TEXT,
             source_device_id TEXT,
             asr_model_name TEXT,
             llm_model_name TEXT
@@ -168,6 +169,7 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
 
     ensure_column(&conn, "history_record", "source_device_id", "TEXT")?;
     ensure_column(&conn, "history_record", "llm_invoked", "INTEGER DEFAULT 0")?;
+    ensure_column(&conn, "history_record", "error_message", "TEXT")?;
     ensure_column(&conn, "history_record", "asr_model_name", "TEXT")?;
     ensure_column(&conn, "history_record", "llm_model_name", "TEXT")?;
     ensure_column(&conn, "sync_state", "current_server_id", "TEXT")?;
@@ -204,6 +206,7 @@ pub struct HistoryRecord {
     pub audio_path: Option<String>,
     pub is_final: bool,
     pub error_code: i32,
+    pub error_message: Option<String>,
     pub source_device_id: Option<String>,
     pub source_device_name: Option<String>,
     pub asr_model_name: Option<String>,
@@ -223,10 +226,11 @@ fn map_history_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRe
         audio_path: row.get(8)?,
         is_final: row.get::<_, i32>(9)? != 0,
         error_code: row.get(10)?,
-        source_device_id: row.get(11)?,
-        source_device_name: row.get(12)?,
-        asr_model_name: row.get(13)?,
-        llm_model_name: row.get(14)?,
+        error_message: row.get(11)?,
+        source_device_id: row.get(12)?,
+        source_device_name: row.get(13)?,
+        asr_model_name: row.get(14)?,
+        llm_model_name: row.get(15)?,
     })
 }
 
@@ -245,7 +249,7 @@ pub struct UsageStats {
 pub fn get_history(limit: u32, offset: u32) -> Result<Vec<HistoryRecord>, StorageError> {
     with_db(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
+            "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
              FROM history_record h
              LEFT JOIN device_registry d ON d.device_id = h.source_device_id
              ORDER BY h.timestamp DESC 
@@ -273,7 +277,7 @@ pub fn get_history_since(
     }
     with_db(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
+            "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
              FROM history_record h
              LEFT JOIN device_registry d ON d.device_id = h.source_device_id
              WHERE h.timestamp > ?3
@@ -316,7 +320,7 @@ pub fn get_history_for_device_since(
         let records = if let Some(value) = since_value.as_deref() {
             let mut stmt = conn
                 .prepare(
-                    "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
+                    "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
                      FROM history_record h
                      LEFT JOIN device_registry d ON d.device_id = h.source_device_id
                      WHERE h.timestamp > ?3 AND (h.source_device_id = ?4 OR h.source_device_id IS NULL OR h.source_device_id = '')
@@ -335,7 +339,7 @@ pub fn get_history_for_device_since(
         } else {
             let mut stmt = conn
                 .prepare(
-                    "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
+                    "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
                      FROM history_record h
                      LEFT JOIN device_registry d ON d.device_id = h.source_device_id
                      WHERE (h.source_device_id = ?3 OR h.source_device_id IS NULL OR h.source_device_id = '')
@@ -367,8 +371,8 @@ pub fn insert_history_record_with_stats(
     with_db(|conn| {
         let inserted = conn.execute(
             "INSERT OR IGNORE INTO history_record (
-                id, timestamp, text, original_text, ai_correction_applied, llm_invoked, mode, duration_ms, audio_path, is_final, error_code, source_device_id, asr_model_name, llm_model_name
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                id, timestamp, text, original_text, ai_correction_applied, llm_invoked, mode, duration_ms, audio_path, is_final, error_code, error_message, source_device_id, asr_model_name, llm_model_name
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 record.id,
                 record.timestamp,
@@ -381,6 +385,7 @@ pub fn insert_history_record_with_stats(
                 record.audio_path,
                 record.is_final,
                 record.error_code,
+                record.error_message,
                 record.source_device_id,
                 record.asr_model_name,
                 record.llm_model_name,
@@ -609,10 +614,10 @@ pub fn cleanup_history_retention(
 
     if audio_retention_days > 0 {
         let cutoff = (now - Duration::days(audio_retention_days as i64)).to_rfc3339();
-        let candidates: Vec<(String, String)> = with_db(|conn| {
+        let candidates: Vec<(String, String, i32)> = with_db(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, audio_path
+                    "SELECT id, audio_path, error_code
                      FROM history_record
                      WHERE timestamp < ?1
                        AND audio_path IS NOT NULL
@@ -621,13 +626,17 @@ pub fn cleanup_history_retention(
                 .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
             let rows = stmt
                 .query_map(params![cutoff], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i32>(2)?,
+                    ))
                 })
                 .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
             Ok(rows.filter_map(|r| r.ok()).collect())
         })?;
 
-        for (id, path) in candidates {
+        for (id, path, error_code) in candidates {
             if let Err(err) = remove_audio_file_if_needed(&path) {
                 log::warn!(
                     "Failed to prune expired audio file id={} path={} err={}",
@@ -652,6 +661,17 @@ pub fn cleanup_history_retention(
                     path,
                     err
                 );
+                continue;
+            }
+
+            if error_code != 0 {
+                if let Err(err) = delete_history_record_allow_missing(&id) {
+                    log::warn!(
+                        "Failed to purge expired failed history record id={} after audio prune: {}",
+                        id,
+                        err
+                    );
+                }
             }
         }
     }

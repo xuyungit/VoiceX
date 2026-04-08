@@ -31,28 +31,11 @@ impl SessionController {
         state.final_injected = true;
         state.injection_in_progress = false;
 
-        let resolved_mode = match (intent, recording_style) {
-            (ProcessingIntent::Assistant, Some(RecordingStyle::PushToTalk)) => {
-                "assistant_push_to_talk".to_string()
-            }
-            (ProcessingIntent::Assistant, Some(RecordingStyle::HandsFree)) => {
-                "assistant_hands_free".to_string()
-            }
-            (ProcessingIntent::TranslateEn, Some(RecordingStyle::HandsFree)) => {
-                "translate_en_hands_free".to_string()
-            }
-            (ProcessingIntent::TranslateEn, Some(RecordingStyle::PushToTalk)) => {
-                "translate_en_push_to_talk".to_string()
-            }
-            (ProcessingIntent::Assistant, None) => {
-                if corrected {
-                    "assistant_corrected".to_string()
-                } else {
-                    "assistant_raw".to_string()
-                }
-            }
-            (ProcessingIntent::TranslateEn, None) => "translate_en".to_string(),
-        };
+        let resolved_mode = crate::services::history_service::HistoryService::resolve_mode(
+            intent,
+            recording_style,
+            corrected,
+        );
 
         let history = crate::services::history_service::HistoryService::new();
         history.persist(

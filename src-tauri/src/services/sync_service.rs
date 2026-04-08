@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::commands::settings::AppSettings;
+use crate::services::history_service::HISTORY_ERROR_NONE;
 use crate::storage::{self, HistoryRecord, UsageStats};
 
 #[derive(Clone, Default)]
@@ -109,6 +110,9 @@ impl SyncService {
         if !inner.config.is_valid() {
             return;
         }
+        if record.error_code != HISTORY_ERROR_NONE {
+            return;
+        }
 
         let source_device_id = record
             .source_device_id
@@ -130,6 +134,7 @@ impl SyncService {
             duration_ms: record.duration_ms,
             is_final: record.is_final,
             error_code: record.error_code,
+            error_message: record.error_message.clone(),
             asr_model_name: record.asr_model_name.clone(),
             llm_model_name: record.llm_model_name.clone(),
         };
@@ -617,6 +622,7 @@ fn apply_server_event(
                 audio_path: None,
                 is_final: record.is_final,
                 error_code: record.error_code,
+                error_message: record.error_message,
                 source_device_id: Some(record.source_device_id),
                 source_device_name: None,
                 asr_model_name: record.asr_model_name,
@@ -747,6 +753,9 @@ fn seed_outbox_from_history(
         }
 
         for record in records {
+            if record.error_code != HISTORY_ERROR_NONE {
+                continue;
+            }
             let source_device_id = record
                 .source_device_id
                 .clone()
@@ -764,6 +773,7 @@ fn seed_outbox_from_history(
                 duration_ms: record.duration_ms,
                 is_final: record.is_final,
                 error_code: record.error_code,
+                error_message: record.error_message,
                 asr_model_name: record.asr_model_name,
                 llm_model_name: record.llm_model_name,
             };
@@ -824,6 +834,8 @@ struct SyncHistoryRecord {
     duration_ms: i64,
     is_final: bool,
     error_code: i32,
+    #[serde(default)]
+    error_message: Option<String>,
     #[serde(default)]
     asr_model_name: Option<String>,
     #[serde(default)]

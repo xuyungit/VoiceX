@@ -6,11 +6,23 @@ use uuid::Uuid;
 use crate::asr::{AsrConfig, AsrPipelineMode, AsrProviderType, ColiRefinementMode};
 use crate::commands::settings::AppSettings;
 use crate::services::sync_service::SyncService;
+use crate::state::{ProcessingIntent, RecordingStyle};
 use crate::storage;
 use crate::storage::HistoryRecord;
 
+pub const HISTORY_ERROR_NONE: i32 = 0;
+pub const HISTORY_ERROR_ASR_FAILED: i32 = 1;
+
 #[derive(Clone, Default)]
 pub struct HistoryService;
+
+struct PersistBehavior {
+    update_stats: bool,
+    update_device_stats: bool,
+    enqueue_sync: bool,
+    text_retention_days: u32,
+    audio_retention_days: u32,
+}
 
 impl HistoryService {
     pub fn new() -> Self {
@@ -62,26 +74,115 @@ impl HistoryService {
             duration_ms: duration_ms.unwrap_or(0).min(i64::MAX as u64) as i64,
             audio_path,
             is_final: true,
-            error_code: 0,
+            error_code: HISTORY_ERROR_NONE,
+            error_message: None,
             source_device_id: None,
             source_device_name: None,
             asr_model_name,
             llm_model_name,
         };
 
-        let text_retention = if settings.sync_enabled {
-            0
-        } else {
-            settings.text_retention_days
-        };
-        let audio_retention = settings.audio_retention_days;
-        let handle_for_emit = app_handle;
+        self.persist_record(record, Self::completed_behavior(&settings), app_handle);
+    }
 
-        let update_stats = !settings.sync_enabled
-            || settings.sync_server_url.trim().is_empty()
-            || settings.sync_token.trim().is_empty()
-            || settings.sync_shared_secret.trim().is_empty()
-            || settings.sync_device_name.trim().is_empty();
+    pub fn persist_failed_asr(
+        &self,
+        mode: String,
+        duration_ms: Option<u64>,
+        audio_path: Option<String>,
+        asr_model_name: Option<String>,
+        error_message: String,
+        app_handle: Option<AppHandle>,
+    ) {
+        let settings = match storage::get_settings() {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!(
+                    "Failed ASR history not persisted (failed to load settings): {}",
+                    e
+                );
+                return;
+            }
+        };
+
+        let trimmed_error = error_message.trim();
+        let record = HistoryRecord {
+            id: Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            text: String::new(),
+            original_text: None,
+            ai_correction_applied: false,
+            llm_invoked: false,
+            mode,
+            duration_ms: duration_ms.unwrap_or(0).min(i64::MAX as u64) as i64,
+            audio_path,
+            is_final: true,
+            error_code: HISTORY_ERROR_ASR_FAILED,
+            error_message: if trimmed_error.is_empty() {
+                None
+            } else {
+                Some(trimmed_error.to_string())
+            },
+            source_device_id: None,
+            source_device_name: None,
+            asr_model_name,
+            llm_model_name: None,
+        };
+
+        self.persist_record(record, Self::local_failure_behavior(&settings), app_handle);
+    }
+
+    pub fn get_recent_history(&self, limit: u32) -> Vec<String> {
+        match storage::get_history(limit, 0) {
+            Ok(records) => records
+                .into_iter()
+                .filter(|r| r.error_code == HISTORY_ERROR_NONE)
+                .map(|r| r.text)
+                .filter(|text| !text.trim().is_empty())
+                .collect(),
+            Err(e) => {
+                log::warn!("Failed to fetch history for context: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    pub fn resolve_mode(
+        intent: ProcessingIntent,
+        recording_style: Option<RecordingStyle>,
+        corrected: bool,
+    ) -> String {
+        match (intent, recording_style) {
+            (ProcessingIntent::Assistant, Some(RecordingStyle::PushToTalk)) => {
+                "assistant_push_to_talk".to_string()
+            }
+            (ProcessingIntent::Assistant, Some(RecordingStyle::HandsFree)) => {
+                "assistant_hands_free".to_string()
+            }
+            (ProcessingIntent::TranslateEn, Some(RecordingStyle::HandsFree)) => {
+                "translate_en_hands_free".to_string()
+            }
+            (ProcessingIntent::TranslateEn, Some(RecordingStyle::PushToTalk)) => {
+                "translate_en_push_to_talk".to_string()
+            }
+            (ProcessingIntent::Assistant, None) => {
+                if corrected {
+                    "assistant_corrected".to_string()
+                } else {
+                    "assistant_raw".to_string()
+                }
+            }
+            (ProcessingIntent::TranslateEn, None) => "translate_en".to_string(),
+        }
+    }
+
+    fn persist_record(
+        &self,
+        record: HistoryRecord,
+        behavior: PersistBehavior,
+        app_handle: Option<AppHandle>,
+    ) {
+        let handle_for_emit = app_handle;
 
         tauri::async_runtime::spawn_blocking(move || {
             let mut record = record;
@@ -92,7 +193,7 @@ impl HistoryService {
             }
 
             let mut persisted = false;
-            match storage::insert_history_record_with_stats(&record, update_stats) {
+            match storage::insert_history_record_with_stats(&record, behavior.update_stats) {
                 Ok(inserted) => persisted = inserted,
                 Err(err) => log::warn!("Failed to persist history: {}", err),
             }
@@ -100,24 +201,31 @@ impl HistoryService {
                 return;
             }
 
-            if let Some(device_id) = record.source_device_id.as_ref() {
-                let chars = record.text.chars().count() as i64;
-                if let Err(err) = storage::increment_device_usage_stats(
-                    device_id,
-                    record.duration_ms,
-                    chars,
-                    record.llm_invoked,
-                ) {
-                    log::warn!("Failed to update device usage stats: {}", err);
+            if behavior.update_device_stats {
+                if let Some(device_id) = record.source_device_id.as_ref() {
+                    let chars = record.text.chars().count() as i64;
+                    if let Err(err) = storage::increment_device_usage_stats(
+                        device_id,
+                        record.duration_ms,
+                        chars,
+                        record.llm_invoked,
+                    ) {
+                        log::warn!("Failed to update device usage stats: {}", err);
+                    }
                 }
             }
 
-            if let Some(app) = handle_for_emit.as_ref() {
-                let sync = app.state::<SyncService>();
-                sync.enqueue_history_upsert(&record);
+            if behavior.enqueue_sync {
+                if let Some(app) = handle_for_emit.as_ref() {
+                    let sync = app.state::<SyncService>();
+                    sync.enqueue_history_upsert(&record);
+                }
             }
 
-            if let Err(err) = storage::cleanup_history_retention(text_retention, audio_retention) {
+            if let Err(err) = storage::cleanup_history_retention(
+                behavior.text_retention_days,
+                behavior.audio_retention_days,
+            ) {
                 log::warn!("Failed to apply history retention: {}", err);
             }
 
@@ -127,13 +235,33 @@ impl HistoryService {
         });
     }
 
-    pub fn get_recent_history(&self, limit: u32) -> Vec<String> {
-        match storage::get_history(limit, 0) {
-            Ok(records) => records.into_iter().map(|r| r.text).collect(),
-            Err(e) => {
-                log::warn!("Failed to fetch history for context: {}", e);
-                Vec::new()
-            }
+    fn completed_behavior(settings: &AppSettings) -> PersistBehavior {
+        let sync_ready = settings.sync_enabled
+            && !settings.sync_server_url.trim().is_empty()
+            && !settings.sync_token.trim().is_empty()
+            && !settings.sync_shared_secret.trim().is_empty()
+            && !settings.sync_device_name.trim().is_empty();
+
+        PersistBehavior {
+            update_stats: !sync_ready,
+            update_device_stats: true,
+            enqueue_sync: sync_ready,
+            text_retention_days: if settings.sync_enabled {
+                0
+            } else {
+                settings.text_retention_days
+            },
+            audio_retention_days: settings.audio_retention_days,
+        }
+    }
+
+    fn local_failure_behavior(settings: &AppSettings) -> PersistBehavior {
+        PersistBehavior {
+            update_stats: false,
+            update_device_stats: false,
+            enqueue_sync: false,
+            text_retention_days: settings.text_retention_days,
+            audio_retention_days: settings.audio_retention_days,
         }
     }
 
@@ -141,9 +269,7 @@ impl HistoryService {
         let config = AsrConfig::from(settings);
         let snapshot = match config.provider_type {
             AsrProviderType::Google => Some("Google / chirp_3".to_string()),
-            AsrProviderType::FunAsr => {
-                Self::format_provider_model("Fun-ASR", &config.funasr_model)
-            }
+            AsrProviderType::FunAsr => Self::format_provider_model("Fun-ASR", &config.funasr_model),
             AsrProviderType::Volcengine => match config.pipeline_mode() {
                 AsrPipelineMode::Batch => Some("Volcengine / bigmodel_nostream".to_string()),
                 AsrPipelineMode::RealtimeWithFinalPass => {

@@ -762,9 +762,10 @@ impl SessionController {
                     reason
                 );
                 if has_stream_fallback_result(state) {
-                    state.session_asr_model_name = crate::storage::get_settings()
-                        .ok()
-                        .and_then(|settings| provider.streaming_model_name_from_settings(&settings));
+                    state.session_asr_model_name =
+                        crate::storage::get_settings().ok().and_then(|settings| {
+                            provider.streaming_model_name_from_settings(&settings)
+                        });
                 }
                 let message = provider.failure_message(state);
                 self.emit_asr_error(message);
@@ -832,6 +833,8 @@ impl SessionController {
             self.fail_batch_asr_state(state, "批量识别失败：当前 ASR 服务配置不完整".to_string());
             return;
         }
+        state.session_asr_model_name =
+            crate::services::history_service::HistoryService::resolve_asr_model_name(&settings);
 
         // Show recognizing state in HUD.
         if let Some(hud) = self.hud_service() {
@@ -927,6 +930,28 @@ impl SessionController {
     }
 
     fn fail_batch_asr_state(&self, state: &mut AppState, message: String) {
+        if state.session_audio_path.is_some() {
+            let history = crate::services::history_service::HistoryService::new();
+            history.persist_failed_asr(
+                crate::services::history_service::HistoryService::resolve_mode(
+                    state.intent,
+                    state.recording_style,
+                    false,
+                ),
+                state.session_duration_ms,
+                state
+                    .session_audio_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
+                state.session_asr_model_name.clone(),
+                message.clone(),
+                self.app_handle(),
+            );
+            // Hand off the audio file to persisted history so cleanup does not remove it.
+            state.session_audio_path = None;
+            self.discard_session_refinement_audio_file(state, "batch_asr_failed_history_persisted");
+        }
+
         state.terminal_error_message = Some(message.clone());
         state.terminal_asr_failure = None;
         state.has_final_result = false;
@@ -1010,10 +1035,12 @@ impl PostRecordingRefineProvider {
                 .clone()
                 .or(state.session_audio_path.clone())
                 .filter(|path| path.is_file()),
-            Self::ElevenLabs | Self::OpenAI | Self::Qwen => match state.session_audio_path.clone() {
-                Some(path) if path.is_file() => Some(path),
-                _ => None,
-            },
+            Self::ElevenLabs | Self::OpenAI | Self::Qwen => {
+                match state.session_audio_path.clone() {
+                    Some(path) if path.is_file() => Some(path),
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -1043,10 +1070,12 @@ impl PostRecordingRefineProvider {
                     &config.elevenlabs_realtime_model,
                 )
             }
-            Self::OpenAI => crate::services::history_service::HistoryService::format_provider_model(
-                "OpenAI Realtime",
-                &config.openai_asr_model,
-            ),
+            Self::OpenAI => {
+                crate::services::history_service::HistoryService::format_provider_model(
+                    "OpenAI Realtime",
+                    &config.openai_asr_model,
+                )
+            }
             Self::Qwen => crate::services::history_service::HistoryService::format_provider_model(
                 "Qwen",
                 &config.qwen_model,
@@ -1065,10 +1094,12 @@ impl PostRecordingRefineProvider {
                     &settings.elevenlabs_realtime_model,
                 )
             }
-            Self::OpenAI => crate::services::history_service::HistoryService::format_provider_model(
-                "OpenAI Realtime",
-                &settings.openai_asr_model,
-            ),
+            Self::OpenAI => {
+                crate::services::history_service::HistoryService::format_provider_model(
+                    "OpenAI Realtime",
+                    &settings.openai_asr_model,
+                )
+            }
             Self::Qwen => crate::services::history_service::HistoryService::format_provider_model(
                 "Qwen",
                 &settings.qwen_asr_model,

@@ -14,6 +14,7 @@ export interface HistoryRecord {
     audioPath: string | null
     isFinal: boolean
     errorCode: number
+    errorMessage: string | null
     sourceDeviceId: string | null
     sourceDeviceName: string | null
     asrModelName: string | null

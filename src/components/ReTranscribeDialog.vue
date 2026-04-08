@@ -93,6 +93,20 @@ async function copyText(text: string) {
   }
 }
 
+function hasOriginalText(record: HistoryRecord): boolean {
+  return record.text.trim().length > 0
+}
+
+function originalRecordBody(record: HistoryRecord): string {
+  if (hasOriginalText(record)) {
+    return record.text
+  }
+  const message = record.errorMessage?.trim()
+  return message && message.length > 0
+    ? message
+    : '这次转写失败了，但录音已经保留下来，可以直接重新转录。'
+}
+
 function close() {
   if (isRunning.value) {
     void cancelTranscribe()
@@ -170,17 +184,17 @@ function close() {
 
       <!-- Original text from history record -->
       <div v-if="record" class="result-block original-block">
-        <div class="result-header">
-          <div class="result-title">
-            原始记录
-            <span v-if="record.asrModelName" class="result-model">{{ record.asrModelName }}<template v-if="record.llmModelName"> + {{ record.llmModelName }}</template></span>
-          </div>
-          <NButton quaternary size="tiny" @click="copyText(record.text)">
+          <div class="result-header">
+            <div class="result-title">
+              原始记录
+              <span v-if="record.asrModelName" class="result-model">{{ record.asrModelName }}<template v-if="record.llmModelName"> + {{ record.llmModelName }}</template></span>
+            </div>
+          <NButton quaternary size="tiny" :disabled="!hasOriginalText(record)" @click="copyText(record.text)">
             复制
           </NButton>
         </div>
         <div class="result-body muted">
-          {{ record.text }}
+          {{ originalRecordBody(record) }}
         </div>
       </div>
 
