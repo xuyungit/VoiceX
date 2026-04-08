@@ -15,7 +15,7 @@ VoiceX is a cross-platform desktop voice input tool. Its overall pipeline is: re
 ## Highlights
 
 - **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
-- **Multiple ASR backends** — switch between ten cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
+- **Multiple ASR backends** — switch between eleven cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
 - **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status without interrupting your workflow.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
@@ -41,7 +41,8 @@ Hold threshold and double-tap window are configurable. Press **Escape** at any t
 |---|---|---|
 | Volcengine (Doubao Speech) | Cloud streaming (WebSocket) | Optimized for Chinese; hot-word boosting, ITN, punctuation, DDC |
 | Google Cloud Speech-to-Text V2 | Cloud streaming (gRPC) | Multi-language, phrase boost, configurable endpointing |
-| Qwen (DashScope Realtime ASR) | Cloud streaming (WebSocket) | Alibaba Cloud; `qwen3-asr-flash-realtime` model |
+| Fun-ASR Realtime | Cloud streaming (WebSocket) | DashScope; `fun-asr-realtime` / `fun-asr-flash-8k-realtime`; tuned for low-latency live dictation |
+| Qwen (DashScope ASR) | Cloud streaming / batch file upload | Alibaba Cloud; supports `Realtime`, `Batch`, and `Realtime + Batch Refine`; batch paths currently inherit a 5-minute short-audio API cap |
 | Gemini Audio Transcription | Cloud batch file upload | `gemini-3.1-flash-lite-preview`; starts after recording stops; supports auto / zh / en / zh+en hints |
 | Gemini Live Realtime | Cloud streaming (WebSocket) | `gemini-3.1-flash-live-preview`; realtime input-audio transcription with language hints |
 | Cohere Audio Transcription | Cloud batch file upload | `cohere-transcribe-03-2026`; whole-file transcription with explicit ISO-639-1 language hint |
@@ -88,6 +89,7 @@ Features:
 - Full history grouped by date, with per-record audio playback, copy, and detail view.
 - Side-by-side comparison of original ASR output vs. LLM-corrected text.
 - Re-transcribe any saved recording with a different ASR backend and optional LLM correction to compare providers on the same audio.
+- Failed batch transcriptions are preserved locally with the original audio so you can retry later instead of repeating the whole dictation immediately.
 - Configurable retention policies for text and audio (7 / 30 / 180 / 365 days, or forever).
 - Overview dashboard: total duration, character count, AI correction calls, average dictation speed — aggregated per device.
 

@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.4] - 2026-04-08
+
+### Added
+- **Fun-ASR realtime provider** — added DashScope Fun-ASR as a dedicated low-latency realtime backend, including region-specific endpoints, model selection, and optional language hints.
+
+### Changed
+- Expanded VoiceX from ten to eleven ASR backends.
+- Updated Qwen batch handling to prefer compressed recording files and to surface provider-imposed recording caps directly in Settings when users configure a longer duration.
+
+### Fixed
+- Failed batch transcriptions are now preserved in local history with their audio and error details intact, so users can retry re-transcription later instead of losing the recording immediately.
+- Qwen batch and Qwen realtime-plus-batch-refine now stop at the provider's current five-minute hard limit instead of recording longer and failing only at upload time.
+- Qwen batch size preflight now checks the real Base64 request payload size, reducing avoidable `input_audio.data` oversize failures.
+
 ## [0.9.3] - 2026-04-06
 
 ### Added
