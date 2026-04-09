@@ -17,7 +17,7 @@ VoiceX is a cross-platform desktop voice input tool. Its overall pipeline is: re
 - **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
 - **Multiple ASR backends** — switch between eleven cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
-- **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status without interrupting your workflow.
+- **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status, and on macOS it follows the active Space when triggered from another desktop.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
 - **Smart text injection** — recognized text is pasted into the active app via clipboard (with automatic backup/restore) or simulated typing, seamlessly.
 - **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with audio playback and re-transcription.

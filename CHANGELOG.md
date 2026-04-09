@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.5] - 2026-04-09
+
+### Changed
+- Refined the Fun-ASR settings UI so placeholder text follows the active locale and failure states reuse shared theme tokens.
+- Short accidental recordings under 800 ms are now discarded before transcription starts.
+
+### Fixed
+- On macOS, the HUD overlay now follows the currently active Space when recording is triggered from another desktop.
+- Very quiet dictation is no longer prefiltered as "silent" before batch recognition, so low-volume recordings can still reach the ASR pipeline.
+
 ## [0.9.4] - 2026-04-08
 
 ### Added
