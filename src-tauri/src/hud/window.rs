@@ -24,11 +24,6 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
         return Ok(());
     }
 
-    #[cfg(target_os = "macos")]
-    let start_visible = true;
-    #[cfg(not(target_os = "macos"))]
-    let start_visible = false;
-
     let window =
         WebviewWindowBuilder::new(app, "hud", WebviewUrl::App("src/hud/index.html".into()))
             .title("VoiceX HUD")
@@ -38,7 +33,7 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
             .always_on_top(true)
             .skip_taskbar(true)
             .focused(false)
-            .visible(start_visible)
+            .visible(false)
             .build()
             .map_err(|e| HudError::CreateFailed(e.to_string()))?;
 
@@ -159,11 +154,14 @@ fn configure_macos_hud(window: &tauri::WebviewWindow) -> Result<(), HudError> {
                 // kCGMaximumWindowLevelKey is 2147483631, macOS screensaver level
                 // is 1000 — we use just below that.
                 ns_win.setLevel(999);
+
+                // Click-through HUD: never intercept mouse interactions from the
+                // currently focused app underneath.
+                ns_win.setIgnoresMouseEvents(true);
             }
         })
         .map_err(|e| HudError::PlatformConfigFailed(format!("{e:?}")))?;
 
-    order_front_on_active_space(window);
     Ok(())
 }
 
@@ -183,36 +181,12 @@ fn configure_platform_hud(_window: &tauri::WebviewWindow) -> Result<(), HudError
 pub fn show_hud(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("hud") {
         let _ = window.show();
-
-        #[cfg(target_os = "macos")]
-        order_front_on_active_space(&window);
     }
-}
-
-/// Move the HUD to the currently active macOS Space and bring it to front.
-#[cfg(target_os = "macos")]
-fn order_front_on_active_space(window: &tauri::WebviewWindow) {
-    use objc2_app_kit::NSWindow;
-
-    let _ = window.with_webview(move |webview| {
-        #[allow(clippy::undocumented_unsafe_blocks)]
-        unsafe {
-            let ns_window_ptr: *mut std::ffi::c_void = webview.ns_window();
-            let ns_win: &NSWindow = &*(ns_window_ptr as *const NSWindow);
-            ns_win.orderFrontRegardless();
-        }
-    });
 }
 
 /// Hide the HUD window
 pub fn hide_hud(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("hud") {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = window.destroy();
-        }
-
-        #[cfg(not(target_os = "macos"))]
         let _ = window.hide();
     }
 }

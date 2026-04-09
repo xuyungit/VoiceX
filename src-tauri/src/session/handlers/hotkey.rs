@@ -18,6 +18,24 @@ impl SessionController {
         }
 
         if start_recording {
+            match self.capture_foreground_app() {
+                Ok(app_info) => {
+                    log::info!(
+                        "Hotkey target app captured: display_name={:?}, process_name={:?}, bundle_id={:?}, pid={}, is_self={}",
+                        app_info.display_name,
+                        app_info.process_name,
+                        app_info.bundle_id,
+                        app_info.process_id,
+                        app_info.is_self
+                    );
+                    state.session_target_app = Some(app_info);
+                }
+                Err(err) => {
+                    log::warn!("Failed to capture hotkey target app: {}", err);
+                    state.session_target_app = None;
+                }
+            }
+
             let (asr_model_name, llm_model_name) =
                 crate::services::history_service::HistoryService::capture_model_snapshot();
             state.session_asr_model_name = asr_model_name;

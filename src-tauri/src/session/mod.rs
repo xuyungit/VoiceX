@@ -1176,6 +1176,13 @@ impl SessionController {
         self.app_handle.lock().ok().and_then(|h| h.clone())
     }
 
+    fn capture_foreground_app(&self) -> Result<crate::foreground_app::ForegroundAppInfo, String> {
+        let app = self
+            .app_handle()
+            .ok_or_else(|| "App handle is not initialized".to_string())?;
+        crate::foreground_app::detect_foreground_app(&app)
+    }
+
     fn handle_audio_started_state(
         &self,
         state: &mut AppState,

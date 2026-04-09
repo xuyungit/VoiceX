@@ -5,6 +5,7 @@
 pub mod asr;
 pub mod audio;
 pub mod commands;
+pub mod foreground_app;
 pub mod hotkey;
 pub mod hud;
 pub mod i18n;
@@ -107,6 +108,11 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     asr_debug_service.install_global();
     if !persisted_settings.enable_diagnostics {
         asr_debug_service.clear_soniox_debug_overrides_now()?;
+    }
+    // Pre-create the HUD while hidden so the first hotkey press doesn't have to
+    // pay the window creation cost or flash at the default window position.
+    if let Err(err) = hud::create_hud_window(&app.handle()) {
+        log::warn!("Failed to create HUD window: {}", err);
     }
     let session_coordinator = SessionCoordinator::new(session_controller.clone());
     session_controller.apply_settings(

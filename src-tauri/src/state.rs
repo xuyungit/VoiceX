@@ -1,6 +1,7 @@
 //! Application state machine
 
 use crate::asr::{AsrFailure, AsrProviderType};
+use crate::foreground_app::ForegroundAppInfo;
 use crate::injector::TextInjectionMode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -93,6 +94,7 @@ pub struct AppState {
     pub(crate) session_final_text: String,
     pub(crate) session_asr_model_name: Option<String>,
     pub(crate) session_llm_model_name: Option<String>,
+    pub(crate) session_target_app: Option<ForegroundAppInfo>,
     pub(crate) terminal_error_message: Option<String>,
     pub(crate) terminal_asr_failure: Option<AsrFailure>,
 
@@ -155,6 +157,7 @@ impl AppState {
             session_final_text: String::new(),
             session_asr_model_name: None,
             session_llm_model_name: None,
+            session_target_app: None,
             terminal_error_message: None,
             terminal_asr_failure: None,
             is_hotkey_down: false,
@@ -223,6 +226,7 @@ impl AppState {
                 self.transcript_text.clear();
                 self.terminal_error_message = None;
                 self.terminal_asr_failure = None;
+                self.session_target_app = None;
                 self.max_recording_countdown = None;
                 self.final_injected = false;
                 self.has_final_result = false;
@@ -382,6 +386,7 @@ impl AppState {
         self.session_final_text.clear();
         self.session_asr_model_name = None;
         self.session_llm_model_name = None;
+        self.session_target_app = None;
         self.terminal_error_message = None;
         self.terminal_asr_failure = None;
         self.is_hotkey_down = false;
