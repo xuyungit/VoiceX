@@ -101,7 +101,6 @@ struct CaptureShared {
     sample_rate: u32,
     start_instant: Instant,
     first_frame_logged: AtomicBool,
-    first_non_silent_logged: AtomicBool,
     samples_written: AtomicU64,
     running: AtomicBool,
 }
@@ -130,7 +129,6 @@ impl CaptureShared {
             sample_rate,
             start_instant: Instant::now(),
             first_frame_logged: AtomicBool::new(false),
-            first_non_silent_logged: AtomicBool::new(false),
             samples_written: AtomicU64::new(0),
             running: AtomicBool::new(true),
         }
@@ -1052,18 +1050,6 @@ where
 
     let bands = compute_visualization_bands(&mono, shared.sample_rate, rms);
     shared.dispatch_visualization(rms, &bands);
-
-    // Detect first non-silent audio (~-35dB threshold)
-    if !shared.first_non_silent_logged.load(Ordering::SeqCst) && rms > 0.0175 {
-        if !shared.first_non_silent_logged.swap(true, Ordering::SeqCst) {
-            let elapsed = shared.start_instant.elapsed();
-            log::debug!(
-                "First non-silent audio after {:.2?} (rms {:.4})",
-                elapsed,
-                rms
-            );
-        }
-    }
 
     shared.increment_samples(frames);
 
