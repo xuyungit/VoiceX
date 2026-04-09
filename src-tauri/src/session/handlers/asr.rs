@@ -342,7 +342,20 @@ impl SessionController {
         }
 
         let text = state.session_final_text.clone();
-        let mode = state.text_injection_mode;
+        let matched_override = state
+            .session_target_app
+            .as_ref()
+            .and_then(|app| {
+                crate::foreground_app::match_text_injection_override(
+                    app,
+                    &state.text_injection_overrides,
+                )
+            })
+            .cloned();
+        let mode = matched_override
+            .as_ref()
+            .map(|override_item| crate::injector::TextInjectionMode::from_str(&override_item.mode))
+            .unwrap_or(state.text_injection_mode);
         let duration_ms = state.session_duration_ms;
         let audio_path = state
             .session_audio_path
@@ -370,12 +383,17 @@ impl SessionController {
         self.emit_transcript(&text, true);
         state.injection_in_progress = true;
         log::info!(
-            "Inject attempt: len={}, mode={:?}, duration_ms={:?}, audio_path_set={}, version={}",
+            "Inject attempt: len={}, mode={:?}, duration_ms={:?}, audio_path_set={}, version={}, target_app={:?}, override_match={:?}",
             text.chars().count(),
             mode,
             duration_ms,
             audio_path.is_some(),
-            injection_version
+            injection_version,
+            state
+                .session_target_app
+                .as_ref()
+                .and_then(|app| app.display_name.clone().or_else(|| app.process_name.clone())),
+            matched_override.as_ref().map(|override_item| override_item.app_name.clone())
         );
 
         tauri::async_runtime::spawn(async move {

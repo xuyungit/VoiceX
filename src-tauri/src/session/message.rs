@@ -32,6 +32,7 @@ pub enum SessionMessage {
         hold_threshold_ms: u32,
         max_recording_minutes: u32,
         text_injection_mode: String,
+        text_injection_overrides: Vec<crate::foreground_app::TextInjectionAppOverride>,
         input_device_uid: Option<String>,
         remove_trailing_punctuation: bool,
         short_sentence_threshold: u32,

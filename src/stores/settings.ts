@@ -118,6 +118,13 @@ export interface AppSettings {
     // Input
     inputDeviceUid: string | null
     textInjectionMode: 'pasteboard' | 'typing'
+    textInjectionOverrides: Array<{
+        platform: string
+        appName: string
+        matchKind: string
+        matchValue: string
+        mode: 'pasteboard' | 'typing'
+    }>
 
     // Sync
     syncEnabled: boolean
@@ -275,6 +282,7 @@ const defaultSettings: AppSettings = {
 
     inputDeviceUid: null,
     textInjectionMode: 'pasteboard',
+    textInjectionOverrides: [],
 
     syncEnabled: false,
     syncServerUrl: '',

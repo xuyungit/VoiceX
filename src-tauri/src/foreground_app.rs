@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 #[derive(Debug, Clone, Serialize)]
@@ -13,6 +13,37 @@ pub struct ForegroundAppInfo {
     pub executable_path: Option<String>,
     pub process_id: u32,
     pub is_self: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TextInjectionAppOverride {
+    pub platform: String,
+    pub app_name: String,
+    pub match_kind: String,
+    pub match_value: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentTargetApp {
+    pub platform: String,
+    pub app_name: String,
+    pub match_kind: String,
+    pub match_value: String,
+    pub display_name: Option<String>,
+    pub process_name: Option<String>,
+    pub bundle_id: Option<String>,
+    pub executable_path: Option<String>,
+    pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppMatchCandidate {
+    platform: String,
+    match_kind: String,
+    match_value: String,
 }
 
 pub fn detect_foreground_app(app: &AppHandle) -> Result<ForegroundAppInfo, String> {
@@ -38,6 +69,93 @@ fn process_name_from_path(path: &str) -> Option<String> {
         .file_name()
         .and_then(|name| name.to_str())
         .map(|name| name.to_string())
+}
+
+fn normalize_platform(platform: &str) -> String {
+    platform.trim().to_ascii_lowercase()
+}
+
+fn normalize_match_value(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn all_match_candidates(info: &ForegroundAppInfo) -> Vec<AppMatchCandidate> {
+    let mut candidates = Vec::new();
+    let platform = normalize_platform(&info.platform);
+
+    if let Some(bundle_id) = info.bundle_id.as_deref() {
+        let normalized = normalize_match_value(bundle_id);
+        if !normalized.is_empty() {
+            candidates.push(AppMatchCandidate {
+                platform: platform.clone(),
+                match_kind: "bundle_id".to_string(),
+                match_value: normalized,
+            });
+        }
+    }
+
+    if let Some(executable_path) = info.executable_path.as_deref() {
+        let normalized = normalize_match_value(executable_path);
+        if !normalized.is_empty() {
+            candidates.push(AppMatchCandidate {
+                platform: platform.clone(),
+                match_kind: "executable_path".to_string(),
+                match_value: normalized,
+            });
+        }
+    }
+
+    if let Some(process_name) = info.process_name.as_deref() {
+        let normalized = normalize_match_value(process_name);
+        if !normalized.is_empty() {
+            candidates.push(AppMatchCandidate {
+                platform,
+                match_kind: "process_name".to_string(),
+                match_value: normalized,
+            });
+        }
+    }
+
+    candidates
+}
+
+impl ForegroundAppInfo {
+    pub fn to_recent_target_app(&self) -> Option<RecentTargetApp> {
+        let candidate = all_match_candidates(self).into_iter().next()?;
+        let app_name = self
+            .display_name
+            .clone()
+            .or_else(|| self.process_name.clone())
+            .unwrap_or_else(|| candidate.match_value.clone());
+
+        Some(RecentTargetApp {
+            platform: self.platform.clone(),
+            app_name,
+            match_kind: candidate.match_kind,
+            match_value: candidate.match_value,
+            display_name: self.display_name.clone(),
+            process_name: self.process_name.clone(),
+            bundle_id: self.bundle_id.clone(),
+            executable_path: self.executable_path.clone(),
+            last_seen_at: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+}
+
+pub fn match_text_injection_override<'a>(
+    app: &ForegroundAppInfo,
+    overrides: &'a [TextInjectionAppOverride],
+) -> Option<&'a TextInjectionAppOverride> {
+    let candidates = all_match_candidates(app);
+    overrides.iter().rev().find(|override_item| {
+        let override_platform = normalize_platform(&override_item.platform);
+        let override_value = normalize_match_value(&override_item.match_value);
+        candidates.iter().any(|candidate| {
+            candidate.platform == override_platform
+                && candidate.match_kind == override_item.match_kind
+                && candidate.match_value == override_value
+        })
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -156,5 +274,81 @@ mod windows {
                 is_self: process_id == std::process::id(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{match_text_injection_override, ForegroundAppInfo, TextInjectionAppOverride};
+
+    fn sample_macos_app() -> ForegroundAppInfo {
+        ForegroundAppInfo {
+            platform: "macOS".to_string(),
+            display_name: Some("Windows App".to_string()),
+            process_name: Some("Windows App".to_string()),
+            bundle_id: Some("com.microsoft.rdc.macos".to_string()),
+            executable_path: Some(
+                "/Applications/Windows App.app/Contents/MacOS/Windows App".to_string(),
+            ),
+            process_id: 42,
+            is_self: false,
+        }
+    }
+
+    #[test]
+    fn recent_target_app_prefers_bundle_id_on_macos() {
+        let app = sample_macos_app();
+        let recent = app.to_recent_target_app().expect("recent target app");
+        assert_eq!(recent.match_kind, "bundle_id");
+        assert_eq!(recent.match_value, "com.microsoft.rdc.macos");
+        assert_eq!(recent.app_name, "Windows App");
+    }
+
+    #[test]
+    fn override_matching_supports_fallback_candidates() {
+        let app = sample_macos_app();
+        let overrides = vec![
+            TextInjectionAppOverride {
+                platform: "macOS".to_string(),
+                app_name: "Windows App".to_string(),
+                match_kind: "process_name".to_string(),
+                match_value: "windows app".to_string(),
+                mode: "pasteboard".to_string(),
+            },
+            TextInjectionAppOverride {
+                platform: "Windows".to_string(),
+                app_name: "Terminal".to_string(),
+                match_kind: "process_name".to_string(),
+                match_value: "terminal".to_string(),
+                mode: "typing".to_string(),
+            },
+        ];
+
+        let matched = match_text_injection_override(&app, &overrides).expect("matched override");
+        assert_eq!(matched.app_name, "Windows App");
+    }
+
+    #[test]
+    fn latest_duplicate_override_wins() {
+        let app = sample_macos_app();
+        let overrides = vec![
+            TextInjectionAppOverride {
+                platform: "macOS".to_string(),
+                app_name: "Windows App".to_string(),
+                match_kind: "bundle_id".to_string(),
+                match_value: "com.microsoft.rdc.macos".to_string(),
+                mode: "pasteboard".to_string(),
+            },
+            TextInjectionAppOverride {
+                platform: " macos ".to_string(),
+                app_name: "Windows App".to_string(),
+                match_kind: "bundle_id".to_string(),
+                match_value: " COM.MICROSOFT.RDC.MACOS ".to_string(),
+                mode: "typing".to_string(),
+            },
+        ];
+
+        let matched = match_text_injection_override(&app, &overrides).expect("matched override");
+        assert_eq!(matched.mode, "typing");
     }
 }

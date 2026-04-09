@@ -8,9 +8,12 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::commands::settings::AppSettings;
+use crate::foreground_app::RecentTargetApp;
 use uuid::Uuid;
 
 static DB: std::sync::OnceLock<Mutex<Connection>> = std::sync::OnceLock::new();
+const RECENT_TARGET_APPS_KEY: &str = "recent_target_apps";
+const MAX_RECENT_TARGET_APPS: usize = 8;
 
 /// Initialize the database
 pub fn init_database(path: &Path) -> Result<(), StorageError> {
@@ -761,7 +764,10 @@ pub fn get_settings() -> Result<AppSettings, StorageError> {
 
         if let Some(json) = value {
             match serde_json::from_str::<AppSettings>(&json) {
-                Ok(settings) => Ok(settings),
+                Ok(mut settings) => {
+                    crate::commands::settings::normalize_text_injection_overrides(&mut settings);
+                    Ok(settings)
+                }
                 Err(e) => {
                     log::warn!("Failed to parse settings, falling back to defaults: {}", e);
                     Ok(AppSettings::default())
@@ -787,6 +793,35 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), StorageError> {
         .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         Ok(())
     })
+}
+
+pub fn get_recent_target_apps() -> Result<Vec<RecentTargetApp>, StorageError> {
+    let Some(json) = get_user_config_value(RECENT_TARGET_APPS_KEY)? else {
+        return Ok(Vec::new());
+    };
+
+    match serde_json::from_str::<Vec<RecentTargetApp>>(&json) {
+        Ok(apps) => Ok(apps),
+        Err(err) => {
+            log::warn!("Failed to parse recent target apps, returning empty list: {}", err);
+            Ok(Vec::new())
+        }
+    }
+}
+
+pub fn remember_recent_target_app(app: &RecentTargetApp) -> Result<(), StorageError> {
+    let mut apps = get_recent_target_apps()?;
+    apps.retain(|existing| {
+        !(existing.platform.eq_ignore_ascii_case(&app.platform)
+            && existing.match_kind == app.match_kind
+            && existing.match_value == app.match_value)
+    });
+    apps.insert(0, app.clone());
+    apps.truncate(MAX_RECENT_TARGET_APPS);
+
+    let payload = serde_json::to_string(&apps)
+        .map_err(|err| StorageError::SerializeFailed(err.to_string()))?;
+    set_user_config_value(RECENT_TARGET_APPS_KEY, &payload)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

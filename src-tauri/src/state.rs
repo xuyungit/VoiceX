@@ -1,7 +1,7 @@
 //! Application state machine
 
 use crate::asr::{AsrFailure, AsrProviderType};
-use crate::foreground_app::ForegroundAppInfo;
+use crate::foreground_app::{ForegroundAppInfo, TextInjectionAppOverride};
 use crate::injector::TextInjectionMode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -108,6 +108,7 @@ pub struct AppState {
     pub(crate) max_recording_minutes: u32,
     pub(crate) max_recording_countdown: Option<u32>,
     pub(crate) text_injection_mode: TextInjectionMode,
+    pub(crate) text_injection_overrides: Vec<TextInjectionAppOverride>,
     pub(crate) has_final_result: bool,
     pub(crate) final_injected: bool,
     pub(crate) last_injected_text: String,
@@ -167,6 +168,7 @@ impl AppState {
             max_recording_minutes: 5,
             max_recording_countdown: None,
             text_injection_mode: TextInjectionMode::Pasteboard,
+            text_injection_overrides: Vec::new(),
             has_final_result: false,
             final_injected: false,
             last_injected_text: String::new(),

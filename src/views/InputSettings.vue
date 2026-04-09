@@ -1,21 +1,46 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { NButton, NSelect, NInputNumber } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import { useSettingsStore } from '../stores/settings'
+import { useSettingsStore, type AppSettings } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
 import {
   exceedsRecordingHardLimit,
   resolveAsrRecordingHardLimitMinutes
 } from '../utils/providerOptions'
 
+type TextInjectionModeValue = AppSettings['textInjectionMode']
+type TextInjectionOverride = AppSettings['textInjectionOverrides'][number]
+type TextInjectionOverrideSelectValue = TextInjectionModeValue | 'default'
+
+interface RecentTargetApp {
+  platform: string
+  appName: string
+  matchKind: string
+  matchValue: string
+  displayName: string | null
+  processName: string | null
+  bundleId: string | null
+  executablePath: string | null
+  lastSeenAt: string | null
+}
+
+interface InjectionAppRow extends RecentTargetApp {
+  key: string
+  overrideMode: TextInjectionModeValue | null
+}
+
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
+const recentTargetApps = ref<RecentTargetApp[]>([])
+const loadingRecentTargetApps = ref(false)
+let unlistenRecentTargetApps: UnlistenFn | null = null
 
 const textInjectionMode = computed({
   get: () => settingsStore.settings.textInjectionMode,
-  set: (v: 'pasteboard' | 'typing') => settingsStore.updateSetting('textInjectionMode', v)
+  set: (v: TextInjectionModeValue) => settingsStore.updateSetting('textInjectionMode', v)
 })
 
 const injectionOptions = computed(() => [
@@ -92,6 +117,62 @@ const selectedDevice = ref<string | null>(null)
 const loadingDevices = ref(false)
 
 const hotkeyDisplay = computed(() => displayHotkey.value)
+const textInjectionOverrideMap = computed(() => {
+  const overrideMap = new Map<string, TextInjectionOverride>()
+  for (const overrideItem of settingsStore.settings.textInjectionOverrides) {
+    overrideMap.set(getAppRuleKey(overrideItem), overrideItem)
+  }
+  return overrideMap
+})
+
+const injectionAppRows = computed<InjectionAppRow[]>(() => {
+  const rows = new Map<string, InjectionAppRow>()
+
+  for (const app of recentTargetApps.value) {
+    const key = getAppRuleKey(app)
+    rows.set(key, {
+      ...app,
+      key,
+      overrideMode: textInjectionOverrideMap.value.get(key)?.mode ?? null
+    })
+  }
+
+  for (const overrideItem of settingsStore.settings.textInjectionOverrides) {
+    const key = getAppRuleKey(overrideItem)
+    const existing = rows.get(key)
+    if (existing) {
+      existing.overrideMode = overrideItem.mode
+      if (!existing.appName) {
+        existing.appName = overrideItem.appName
+      }
+      continue
+    }
+
+    rows.set(key, {
+      key,
+      platform: overrideItem.platform,
+      appName: overrideItem.appName,
+      matchKind: overrideItem.matchKind,
+      matchValue: overrideItem.matchValue,
+      displayName: overrideItem.appName,
+      processName: overrideItem.matchKind === 'process_name' ? overrideItem.appName : null,
+      bundleId: overrideItem.matchKind === 'bundle_id' ? overrideItem.matchValue : null,
+      executablePath:
+        overrideItem.matchKind === 'executable_path' ? overrideItem.matchValue : null,
+      lastSeenAt: null,
+      overrideMode: overrideItem.mode
+    })
+  }
+
+  return Array.from(rows.values()).sort((a, b) => {
+    if (a.lastSeenAt && b.lastSeenAt) {
+      return new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime()
+    }
+    if (a.lastSeenAt) return -1
+    if (b.lastSeenAt) return 1
+    return a.appName.localeCompare(b.appName)
+  })
+})
 
 watch(
   () => settingsStore.settings.hotkeyConfig,
@@ -183,8 +264,125 @@ async function refreshDevices() {
   }
 }
 
-onMounted(() => {
-  refreshDevices()
+async function loadRecentTargetApps() {
+  loadingRecentTargetApps.value = true
+  try {
+    recentTargetApps.value = await invoke<RecentTargetApp[]>('get_recent_target_apps')
+  } catch (error) {
+    console.error('Failed to load recent target apps:', error)
+    recentTargetApps.value = []
+  } finally {
+    loadingRecentTargetApps.value = false
+  }
+}
+
+function handleWindowFocus() {
+  void loadRecentTargetApps()
+}
+
+function handleVisibilityChange() {
+  if (!document.hidden) {
+    void loadRecentTargetApps()
+  }
+}
+
+function getAppRuleKey(app: {
+  platform: string
+  matchKind: string
+  matchValue: string
+}) {
+  return [
+    app.platform.trim().toLowerCase(),
+    app.matchKind.trim(),
+    app.matchValue.trim().toLowerCase()
+  ].join('::')
+}
+
+function getInjectionModeLabel(mode: TextInjectionModeValue) {
+  return mode === 'typing' ? t('input.typing') : t('input.pasteboard')
+}
+
+function getOverrideOptions() {
+  return [
+    {
+      label: t('input.followDefaultMode', {
+        mode: getInjectionModeLabel(textInjectionMode.value)
+      }),
+      value: 'default'
+    },
+    { label: t('input.pasteboard'), value: 'pasteboard' },
+    { label: t('input.typing'), value: 'typing' }
+  ]
+}
+
+function updateTextInjectionOverride(
+  app: InjectionAppRow,
+  value: TextInjectionOverrideSelectValue | null
+) {
+  const key = getAppRuleKey(app)
+  const nextOverrides = settingsStore.settings.textInjectionOverrides.filter(
+    (overrideItem) => getAppRuleKey(overrideItem) !== key
+  )
+
+  if (value === 'pasteboard' || value === 'typing') {
+    nextOverrides.push({
+      platform: app.platform,
+      appName: app.appName,
+      matchKind: app.matchKind,
+      matchValue: app.matchValue,
+      mode: value
+    })
+  }
+
+  settingsStore.updateSetting('textInjectionOverrides', nextOverrides)
+}
+
+function getAppIdentityLabel(app: InjectionAppRow) {
+  if (app.bundleId) {
+    return t('input.bundleIdValue', { value: app.bundleId })
+  }
+  if (app.processName) {
+    return t('input.processNameValue', { value: app.processName })
+  }
+  return app.platform
+}
+
+function getAppUsageLabel(app: InjectionAppRow) {
+  if (!app.lastSeenAt) {
+    return t('input.savedOverride')
+  }
+
+  return t('input.lastCapturedAt', {
+    time: new Intl.DateTimeFormat(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    }).format(new Date(app.lastSeenAt))
+  })
+}
+
+function getAppBadgeLabel(appName: string) {
+  const trimmed = appName.trim()
+  return (trimmed[0] ?? '?').toUpperCase()
+}
+
+onMounted(async () => {
+  unlistenRecentTargetApps = await listen('input:recent-target-apps-updated', () => {
+    void loadRecentTargetApps()
+  })
+  window.addEventListener('focus', handleWindowFocus)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  await Promise.all([refreshDevices(), loadRecentTargetApps()])
+})
+
+onBeforeUnmount(() => {
+  if (unlistenRecentTargetApps) {
+    unlistenRecentTargetApps()
+    unlistenRecentTargetApps = null
+  }
+  window.removeEventListener('focus', handleWindowFocus)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>
 
@@ -326,6 +524,53 @@ onMounted(() => {
             class="field-control"
           />
         </div>
+
+        <div class="app-overrides-section">
+          <div class="field-text">
+            <div class="field-label">{{ t('input.appOverrides') }}</div>
+            <div class="field-note">{{ t('input.appOverridesNote') }}</div>
+          </div>
+
+          <div v-if="injectionAppRows.length > 0" class="app-overrides-list">
+            <div
+              v-for="app in injectionAppRows"
+              :key="app.key"
+              class="app-override-item"
+            >
+              <div class="app-override-meta">
+                <div class="app-override-badge">{{ getAppBadgeLabel(app.appName) }}</div>
+                <div class="app-override-copy">
+                  <div class="app-override-title-row">
+                    <div class="app-override-name">{{ app.appName }}</div>
+                    <span class="pill app-override-pill">
+                      {{ getInjectionModeLabel(app.overrideMode ?? textInjectionMode) }}
+                    </span>
+                  </div>
+                  <div class="field-note app-override-note">
+                    <span>{{ getAppIdentityLabel(app) }}</span>
+                    <span class="app-override-separator">·</span>
+                    <span>{{ getAppUsageLabel(app) }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <NSelect
+                :value="app.overrideMode ?? 'default'"
+                :options="getOverrideOptions()"
+                size="small"
+                class="app-override-select"
+                @update:value="(value) => updateTextInjectionOverride(app, value as TextInjectionOverrideSelectValue)"
+              />
+            </div>
+          </div>
+
+          <div v-else class="app-overrides-empty">
+            <div class="app-overrides-empty-title">
+              {{ loadingRecentTargetApps ? t('input.loadingRecentApps') : t('input.appOverridesEmpty') }}
+            </div>
+            <div class="field-note">{{ t('input.appOverridesEmptyNote') }}</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -435,5 +680,118 @@ onMounted(() => {
 
 .device-select {
   flex: 1;
+}
+
+.app-overrides-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding-top: 2px;
+}
+
+.app-overrides-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.app-override-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-lg);
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid color-mix(in srgb, var(--color-border) 82%, var(--color-accent) 18%);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--color-bg-tertiary) 82%, transparent), transparent),
+    var(--color-bg-primary);
+}
+
+.app-override-meta {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.app-override-badge {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  font-size: var(--font-sm);
+  font-weight: 700;
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent-light) 72%, var(--color-bg-tertiary));
+  border: 1px solid color-mix(in srgb, var(--color-accent) 20%, var(--color-border));
+}
+
+.app-override-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.app-override-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.app-override-name {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.app-override-pill {
+  white-space: nowrap;
+}
+
+.app-override-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.app-override-separator {
+  color: var(--color-text-tertiary);
+}
+
+.app-override-select {
+  width: 240px;
+  flex: 0 0 240px;
+}
+
+.app-overrides-empty {
+  padding: 18px;
+  border-radius: var(--radius-lg);
+  border: 1px dashed var(--color-border);
+  background: color-mix(in srgb, var(--color-bg-tertiary) 70%, transparent);
+}
+
+.app-overrides-empty-title {
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin-bottom: 4px;
+}
+
+@media (max-width: 900px) {
+  .app-override-item {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .app-override-select {
+    width: 100%;
+    flex: none;
+  }
 }
 </style>

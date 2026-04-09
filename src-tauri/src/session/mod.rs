@@ -194,6 +194,7 @@ impl SessionController {
         hold_threshold_ms: u32,
         max_recording_minutes: u32,
         text_injection_mode: &str,
+        text_injection_overrides: Vec<crate::foreground_app::TextInjectionAppOverride>,
         input_device_uid: Option<String>,
         remove_trailing_punctuation: bool,
         short_sentence_threshold: u32,
@@ -214,6 +215,7 @@ impl SessionController {
                 hold_threshold_ms,
                 max_recording_minutes,
                 text_injection_mode: text_injection_mode.to_string(),
+                text_injection_overrides,
                 input_device_uid,
                 remove_trailing_punctuation,
                 short_sentence_threshold,
@@ -232,6 +234,7 @@ impl SessionController {
             hold_threshold_ms,
             max_recording_minutes,
             text_injection_mode,
+            text_injection_overrides,
             input_device_uid.as_deref(),
             remove_trailing_punctuation,
             short_sentence_threshold,
@@ -248,6 +251,7 @@ impl SessionController {
         hold_threshold_ms: u32,
         max_recording_minutes: u32,
         text_injection_mode: &str,
+        text_injection_overrides: Vec<crate::foreground_app::TextInjectionAppOverride>,
         input_device_uid: Option<&str>,
         remove_trailing_punctuation: bool,
         short_sentence_threshold: u32,
@@ -259,6 +263,7 @@ impl SessionController {
         state.hold_threshold_ms = hold_threshold_ms as u64;
         state.max_recording_minutes = max_recording_minutes;
         state.text_injection_mode = TextInjectionMode::from_str(text_injection_mode);
+        state.text_injection_overrides = text_injection_overrides;
         state.remove_trailing_punctuation = remove_trailing_punctuation;
         state.short_sentence_threshold = short_sentence_threshold;
         state.replacement_rules = replacement_rules;
@@ -343,6 +348,7 @@ impl SessionController {
                 hold_threshold_ms,
                 max_recording_minutes,
                 text_injection_mode,
+                text_injection_overrides,
                 input_device_uid,
                 remove_trailing_punctuation,
                 short_sentence_threshold,
@@ -355,6 +361,7 @@ impl SessionController {
                 hold_threshold_ms,
                 max_recording_minutes,
                 &text_injection_mode,
+                text_injection_overrides,
                 input_device_uid.as_deref(),
                 remove_trailing_punctuation,
                 short_sentence_threshold,

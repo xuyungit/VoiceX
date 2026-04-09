@@ -1,12 +1,14 @@
 //! Settings-related commands
 
 use std::path::PathBuf;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::time::timeout;
 
+use crate::foreground_app::{RecentTargetApp, TextInjectionAppOverride};
 use crate::services::{
     asr_debug_service::{AsrDebugService, SonioxDebugHarnessStatus, SonioxMockScenario},
     sync_service::SyncService,
@@ -137,6 +139,7 @@ pub struct AppSettings {
     // Input
     pub input_device_uid: Option<String>,
     pub text_injection_mode: String, // "pasteboard" or "typing"
+    pub text_injection_overrides: Vec<TextInjectionAppOverride>,
 
     // Sync
     pub sync_enabled: bool,
@@ -287,6 +290,7 @@ impl Default for AppSettings {
 
             input_device_uid: None,
             text_injection_mode: "pasteboard".to_string(),
+            text_injection_overrides: Vec::new(),
 
             sync_enabled: false,
             sync_server_url: String::new(),
@@ -373,6 +377,54 @@ fn normalize_qwen_settings(settings: &mut AppSettings) {
     if recognition_mode == "batch" {
         settings.qwen_asr_post_recording_refine = false;
     }
+}
+
+fn normalize_text_injection_override_mode(mode: &str) -> String {
+    match mode.trim() {
+        "typing" => "typing".to_string(),
+        _ => "pasteboard".to_string(),
+    }
+}
+
+fn normalize_text_injection_override_match_kind(match_kind: &str) -> String {
+    match match_kind.trim() {
+        "bundle_id" => "bundle_id".to_string(),
+        "executable_path" => "executable_path".to_string(),
+        _ => "process_name".to_string(),
+    }
+}
+
+pub fn normalize_text_injection_overrides(settings: &mut AppSettings) {
+    let mut normalized = Vec::with_capacity(settings.text_injection_overrides.len());
+    let mut seen = HashSet::new();
+
+    for mut override_item in settings.text_injection_overrides.iter().rev().cloned() {
+        override_item.platform = override_item.platform.trim().to_ascii_lowercase();
+        override_item.match_kind =
+            normalize_text_injection_override_match_kind(&override_item.match_kind);
+        override_item.match_value = override_item.match_value.trim().to_ascii_lowercase();
+        override_item.app_name = override_item.app_name.trim().to_string();
+        override_item.mode = normalize_text_injection_override_mode(&override_item.mode);
+
+        if override_item.platform.is_empty() || override_item.match_value.is_empty() {
+            continue;
+        }
+
+        if override_item.app_name.is_empty() {
+            override_item.app_name = override_item.match_value.clone();
+        }
+
+        let dedupe_key = format!(
+            "{}::{}::{}",
+            override_item.platform, override_item.match_kind, override_item.match_value
+        );
+        if seen.insert(dedupe_key) {
+            normalized.push(override_item);
+        }
+    }
+
+    normalized.reverse();
+    settings.text_injection_overrides = normalized;
 }
 
 fn write_provider_probe_audio() -> Result<PathBuf, String> {
@@ -469,6 +521,11 @@ pub fn get_settings() -> Result<AppSettings, String> {
 }
 
 #[tauri::command]
+pub fn get_recent_target_apps() -> Result<Vec<RecentTargetApp>, String> {
+    crate::storage::get_recent_target_apps().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn get_resolved_ui_locale(preferred: Option<String>) -> Result<String, String> {
     let requested_language = if let Some(preferred) = preferred {
         preferred
@@ -495,6 +552,7 @@ pub fn save_settings(
     normalize_qwen_settings(&mut settings);
     normalize_elevenlabs_settings(&mut settings);
     normalize_llm_settings(&mut settings);
+    normalize_text_injection_overrides(&mut settings);
 
     let text_changed = settings.dictionary_text != current_settings.dictionary_text;
     let ui_language_changed = settings.ui_language != current_settings.ui_language;
@@ -538,6 +596,7 @@ pub fn save_settings(
         settings.hold_threshold_ms,
         settings.max_recording_minutes,
         &settings.text_injection_mode,
+        settings.text_injection_overrides.clone(),
         settings.input_device_uid.clone(),
         settings.remove_trailing_punctuation,
         settings.short_sentence_threshold,
@@ -609,4 +668,41 @@ pub async fn clear_soniox_debug_overrides(
     debug: State<'_, AsrDebugService>,
 ) -> Result<SonioxDebugHarnessStatus, String> {
     debug.clear_soniox_debug_overrides().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_text_injection_overrides, AppSettings};
+    use crate::foreground_app::TextInjectionAppOverride;
+
+    #[test]
+    fn normalize_text_injection_overrides_deduplicates_semantic_duplicates() {
+        let mut settings = AppSettings::default();
+        settings.text_injection_overrides = vec![
+            TextInjectionAppOverride {
+                platform: "macOS".to_string(),
+                app_name: "Windows App".to_string(),
+                match_kind: "bundle_id".to_string(),
+                match_value: "com.microsoft.rdc.macos".to_string(),
+                mode: "pasteboard".to_string(),
+            },
+            TextInjectionAppOverride {
+                platform: " macos ".to_string(),
+                app_name: "Windows App".to_string(),
+                match_kind: "bundle_id".to_string(),
+                match_value: " COM.MICROSOFT.RDC.MACOS ".to_string(),
+                mode: "typing".to_string(),
+            },
+        ];
+
+        normalize_text_injection_overrides(&mut settings);
+
+        assert_eq!(settings.text_injection_overrides.len(), 1);
+        assert_eq!(settings.text_injection_overrides[0].platform, "macos");
+        assert_eq!(
+            settings.text_injection_overrides[0].match_value,
+            "com.microsoft.rdc.macos"
+        );
+        assert_eq!(settings.text_injection_overrides[0].mode, "typing");
+    }
 }
