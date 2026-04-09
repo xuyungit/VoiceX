@@ -12,6 +12,25 @@ use std::time::Duration;
 /// Typing is slower but avoids clipboard sync issues; use clipboard for long text.
 const TYPING_MODE_MAX_CHARS: usize = 500;
 
+/// How long we wait for a clipboard write to become readable again.
+const CLIPBOARD_WRITE_VERIFY_RETRIES: usize = 5;
+const CLIPBOARD_WRITE_VERIFY_INTERVAL_MS: u64 = 20;
+
+/// Give clipboard bridges (for example remote desktop sessions) a brief window
+/// to observe the new clipboard payload before we synthesize paste.
+#[cfg(target_os = "macos")]
+const CLIPBOARD_PRE_PASTE_DELAY_MS: u64 = 120;
+#[cfg(not(target_os = "macos"))]
+const CLIPBOARD_PRE_PASTE_DELAY_MS: u64 = 80;
+
+/// Do not restore the user's clipboard immediately after paste. Remote hosts
+/// often sync clipboard contents asynchronously and can otherwise paste stale
+/// data or receive the restore before the fresh payload is consumed.
+#[cfg(target_os = "macos")]
+const CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
+#[cfg(not(target_os = "macos"))]
+const CLIPBOARD_RESTORE_DELAY_MS: u64 = 500;
+
 #[cfg(target_os = "macos")]
 fn text_chunks(s: &str, max_chars: usize) -> Vec<&str> {
     assert!(max_chars > 0);
@@ -126,6 +145,7 @@ impl ClipboardBackup {
 /// Text injector for inserting recognized text into applications
 pub struct TextInjector {
     mode: TextInjectionMode,
+    pre_paste_delay_ms: u64,
     restore_delay_ms: u64,
 }
 
@@ -133,14 +153,16 @@ impl TextInjector {
     pub fn new() -> Self {
         Self {
             mode: TextInjectionMode::Pasteboard,
-            restore_delay_ms: 200,
+            pre_paste_delay_ms: CLIPBOARD_PRE_PASTE_DELAY_MS,
+            restore_delay_ms: CLIPBOARD_RESTORE_DELAY_MS,
         }
     }
 
     pub fn with_mode(mode: TextInjectionMode) -> Self {
         Self {
             mode,
-            restore_delay_ms: 200,
+            pre_paste_delay_ms: CLIPBOARD_PRE_PASTE_DELAY_MS,
+            restore_delay_ms: CLIPBOARD_RESTORE_DELAY_MS,
         }
     }
 
@@ -176,16 +198,79 @@ impl TextInjector {
         clipboard
             .set_text(text)
             .map_err(|e| InjectorError::ClipboardError(e.to_string()))?;
+        self.verify_clipboard_text(&mut clipboard, text)?;
+
+        if self.pre_paste_delay_ms > 0 {
+            thread::sleep(Duration::from_millis(self.pre_paste_delay_ms));
+        }
 
         // 3. Send paste command
         self.send_paste_command()?;
 
         // 4. Wait and restore clipboard
         thread::sleep(Duration::from_millis(self.restore_delay_ms));
-        backup.restore(&mut clipboard);
+        self.restore_clipboard_if_unchanged(&mut clipboard, backup, text);
 
         log::debug!("Injected {} characters via pasteboard", text.len());
         Ok(())
+    }
+
+    fn verify_clipboard_text(
+        &self,
+        clipboard: &mut Clipboard,
+        expected: &str,
+    ) -> Result<(), InjectorError> {
+        for attempt in 0..CLIPBOARD_WRITE_VERIFY_RETRIES {
+            match clipboard.get_text() {
+                Ok(current) if current == expected => return Ok(()),
+                Ok(current) => {
+                    log::debug!(
+                        "Clipboard verification mismatch on attempt {} (expected {} chars, got {} chars)",
+                        attempt + 1,
+                        expected.chars().count(),
+                        current.chars().count()
+                    );
+                }
+                Err(err) => {
+                    log::debug!(
+                        "Clipboard verification read failed on attempt {}: {}",
+                        attempt + 1,
+                        err
+                    );
+                }
+            }
+
+            thread::sleep(Duration::from_millis(
+                CLIPBOARD_WRITE_VERIFY_INTERVAL_MS,
+            ));
+        }
+
+        Err(InjectorError::ClipboardError(
+            "Clipboard write could not be verified before paste".to_string(),
+        ))
+    }
+
+    fn restore_clipboard_if_unchanged(
+        &self,
+        clipboard: &mut Clipboard,
+        backup: ClipboardBackup,
+        injected_text: &str,
+    ) {
+        match clipboard.get_text() {
+            Ok(current) if current == injected_text => backup.restore(clipboard),
+            Ok(current) => {
+                log::info!(
+                    "Skipping clipboard restore because clipboard changed after injection ({} chars)",
+                    current.chars().count()
+                );
+            }
+            Err(err) => {
+                log::info!(
+                    "Skipping clipboard restore because clipboard is no longer readable after injection: {}",
+                    err
+                );
+            }
+        }
     }
 
     fn inject_via_typing(&self, text: &str) -> Result<(), InjectorError> {
