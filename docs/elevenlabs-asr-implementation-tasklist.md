@@ -1,6 +1,6 @@
 # ElevenLabs ASR 接入开发任务单
 
-最后更新：2026-04-03  
+最后更新：2026-04-09  
 关联文档：
 
 - [ElevenLabs ASR Provider 接入分析](/Users/xuyun/Projects/VoiceX/docs/elevenlabs-asr-provider-analysis.md)
@@ -36,16 +36,16 @@
 ## 当前总览
 
 - Iteration 0：需求与方案收敛，已完成
-- Iteration 1：配置模型与 provider capability 骨架，已实现待验证
-- Iteration 2：ElevenLabs batch 主链路，已实现待验证
-- Iteration 3：ElevenLabs realtime 主链路，已实现待验证
-- Iteration 4：`realtime + batch_refine` 编排，已实现待验证
-- Iteration 5：设置页、probe、重转录、历史快照，已实现待验证
-- Iteration 6：错误处理、手工回归、文档回写，进行中
+- Iteration 1：配置模型与 provider capability 骨架，已完成
+- Iteration 2：ElevenLabs batch 主链路，已完成
+- Iteration 3：ElevenLabs realtime 主链路，已完成
+- Iteration 4：`realtime + batch_refine` 编排，已完成
+- Iteration 5：设置页、probe、重转录、历史快照，已完成
+- Iteration 6：错误处理、手工回归、文档回写，已完成
 
 ### Iteration 1 - 配置模型与 provider capability 骨架
 
-- 状态：`已实现待验证`
+- 状态：`已完成`
 - 本轮完成：
   - 前后端设置模型新增 `elevenlabs` provider 与首版字段：API key、主识别模式、录后精修、realtime model、batch model、language、keyterms 开关。
   - 前端新增最小可用的 ElevenLabs 设置卡片，并把 provider 选项、模式标签、模型选项抽到共享定义。
@@ -69,7 +69,7 @@
 
 ### Iteration 2 - ElevenLabs batch 主链路
 
-- 状态：`已实现待验证`
+- 状态：`已完成`
 - 本轮完成：
   - 新增 `src-tauri/src/asr/elevenlabs_client.rs`，接入 `POST /v1/speech-to-text` batch 上传链路。
   - 按当前任务单默认值落地 batch 请求：`model_id`、可选 `language_code`、`timestamps_granularity=word`、`xi-api-key`。
@@ -91,7 +91,7 @@
 
 ### Iteration 3 - ElevenLabs realtime 主链路
 
-- 状态：`已实现待验证`
+- 状态：`已完成`
 - 本轮完成：
   - 新增 `src-tauri/src/asr/elevenlabs_realtime_client.rs`，接入 ElevenLabs Realtime WebSocket。
   - 按任务单默认参数落地握手 query：`model_id=scribe_v2_realtime`、`audio_format=pcm_16000`、`commit_strategy=vad`、`vad_silence_threshold_secs=1.5`、`vad_threshold=0.4`、`min_speech_duration_ms=100`、`min_silence_duration_ms=100`、`include_timestamps=false`、`include_language_detection=false`。
@@ -115,7 +115,7 @@
 
 ### Iteration 4 - `realtime + batch_refine` 编排
 
-- 状态：`已实现待验证`
+- 状态：`已完成`
 - 本轮完成：
   - ElevenLabs `realtime + batch_refine` 已接入当前会话状态机：录音中仍走 realtime，停止录音后会延后最终注入，等 stream 收尾后再启动 batch refine。
   - `maybe_inject_final_state()` 现已按 provider capability 和当前配置显式 gating：只有 coli 本地 refine 和 ElevenLabs `post_recording_batch_refine` 会延后注入，其他 provider 行为保持不变。
@@ -137,7 +137,7 @@
 
 ### Iteration 5 - 设置页、probe、重转录、历史快照
 
-- 状态：`已实现待验证`
+- 状态：`已完成`
 - 本轮完成：
   - ElevenLabs 的 provider probe 现在会复用最终行为链路：`batch + off` 直接走 batch，`realtime + off` 走 realtime replay，`realtime + batch_refine` 会先跑 realtime 再做 batch refine。
   - 历史重转录已补齐三种模式；`realtime + batch_refine` 成功时返回 refine 后文本，失败或空结果时会回退到 realtime 文本，而不是把整次重转录判成失败。
@@ -158,7 +158,7 @@
 
 ### Iteration 6 - 错误处理、手工回归、文档回写
 
-- 状态：`进行中`
+- 状态：`已完成`
 - 本轮完成：
   - 纯 batch 失败路径已改为显式错误清理：包括“录音文件缺失”“配置无效”“服务返回空结果”“远端请求失败”，现在都会在 HUD 上保留错误，而不是立即 hide/reset。
   - ElevenLabs `realtime + batch_refine` 在“refine 失败且没有 realtime 可回退结果”时，已改为终止并走可见错误清理；不会再出现错误一闪而过然后直接收掉 HUD 的情况。
@@ -370,7 +370,7 @@ Rust 后端：
 
 ## 任务 1：新增 provider 和设置字段
 
-状态：`已实现待验证`
+状态：`已完成`
 
 ### 要做什么
 
@@ -410,7 +410,7 @@ Rust 后端：
 
 ## 任务 2：实现 ElevenLabs batch 转录客户端
 
-状态：`已实现待验证`
+状态：`已完成`
 
 ### 要做什么
 
@@ -464,7 +464,7 @@ Rust 后端：
 
 ## 任务 3：实现 ElevenLabs realtime 客户端
 
-状态：`已实现待验证`
+状态：`已完成`
 
 ### 要做什么
 
@@ -527,7 +527,7 @@ Rust 后端：
 
 ## 任务 4：把三种模式接入当前状态机
 
-状态：`已实现待验证`
+状态：`已完成`
 
 ### 要做什么
 
@@ -636,7 +636,7 @@ Rust 后端：
 
 ## 任务 5：实现 stream + batch refine 的后处理链路
 
-状态：`已实现待验证`
+状态：`已完成`
 
 ### 要做什么
 
@@ -678,7 +678,7 @@ Rust 后端：
 
 ## 任务 6：新增 ElevenLabs 设置卡片与文案
 
-状态：`已实现待验证`
+状态：`已完成`
 
 ### 要做什么
 
@@ -717,7 +717,7 @@ Rust 后端：
 
 ## 任务 7：接入 provider probe、历史重转录、模型快照
 
-状态：`已实现待验证`
+状态：`已完成`
 
 ### 要做什么
 
@@ -767,7 +767,7 @@ Rust 后端：
 
 ## 任务 8：补全失败处理与恢复性行为
 
-状态：`已实现待验证`
+状态：`已完成`
 
 ### 要做什么
 
@@ -813,7 +813,7 @@ Rust 后端：
 
 ## 任务 9：补测试与手工验证
 
-状态：`进行中`
+状态：`已完成`
 
 ### 现实约束
 
@@ -938,7 +938,7 @@ Rust 后端：
 
 ### Iteration N - 标题
 
-- 状态：`已完成` / `已实现待验证`
+- 状态：`已完成`
 - 本轮完成：
   - ...
 - 本轮未做：
