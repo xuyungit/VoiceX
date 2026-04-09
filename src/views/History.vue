@@ -794,7 +794,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
 .failure-note {
   font-size: var(--font-sm);
-  color: #fda4af;
+  color: color-mix(in srgb, var(--color-error) 62%, var(--color-text-primary));
   overflow-wrap: anywhere;
 }
 
@@ -844,8 +844,8 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 }
 
 .failed-tag {
-  border-color: rgba(248, 113, 113, 0.35);
-  color: #fda4af;
+  border-color: color-mix(in srgb, var(--color-error) 35%, transparent);
+  color: color-mix(in srgb, var(--color-error) 62%, var(--color-text-primary));
 }
 
 .load-more {

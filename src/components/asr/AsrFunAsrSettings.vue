@@ -95,7 +95,7 @@ const endpointOptions = computed(() => [
         </div>
         <NInput
           v-model:value="funasrLanguage"
-          placeholder="留空为自动检测"
+          :placeholder="t('asr.leaveEmptyToAuto')"
           class="field-control"
         />
       </div>
