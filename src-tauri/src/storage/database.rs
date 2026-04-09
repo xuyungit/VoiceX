@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 static DB: std::sync::OnceLock<Mutex<Connection>> = std::sync::OnceLock::new();
 const RECENT_TARGET_APPS_KEY: &str = "recent_target_apps";
-const MAX_RECENT_TARGET_APPS: usize = 8;
+const MAX_RECENT_TARGET_APPS: usize = 5;
 
 /// Initialize the database
 pub fn init_database(path: &Path) -> Result<(), StorageError> {

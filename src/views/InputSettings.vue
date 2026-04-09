@@ -125,6 +125,15 @@ const textInjectionOverrideMap = computed(() => {
   return overrideMap
 })
 
+function compareAppRows(a: InjectionAppRow, b: InjectionAppRow) {
+  if (a.lastSeenAt && b.lastSeenAt) {
+    return new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime()
+  }
+  if (a.lastSeenAt) return -1
+  if (b.lastSeenAt) return 1
+  return a.appName.localeCompare(b.appName)
+}
+
 const injectionAppRows = computed<InjectionAppRow[]>(() => {
   const rows = new Map<string, InjectionAppRow>()
 
@@ -164,15 +173,16 @@ const injectionAppRows = computed<InjectionAppRow[]>(() => {
     })
   }
 
-  return Array.from(rows.values()).sort((a, b) => {
-    if (a.lastSeenAt && b.lastSeenAt) {
-      return new Date(b.lastSeenAt).getTime() - new Date(a.lastSeenAt).getTime()
-    }
-    if (a.lastSeenAt) return -1
-    if (b.lastSeenAt) return 1
-    return a.appName.localeCompare(b.appName)
-  })
+  return Array.from(rows.values()).sort(compareAppRows)
 })
+
+const configuredInjectionAppRows = computed(() =>
+  injectionAppRows.value.filter((app) => app.overrideMode !== null).sort(compareAppRows)
+)
+
+const recentUnconfiguredAppRows = computed(() =>
+  injectionAppRows.value.filter((app) => app.overrideMode === null).sort(compareAppRows)
+)
 
 watch(
   () => settingsStore.settings.hotkeyConfig,
@@ -531,36 +541,83 @@ onBeforeUnmount(() => {
             <div class="field-note">{{ t('input.appOverridesNote') }}</div>
           </div>
 
-          <div v-if="injectionAppRows.length > 0" class="app-overrides-list">
-            <div
-              v-for="app in injectionAppRows"
-              :key="app.key"
-              class="app-override-item"
-            >
-              <div class="app-override-meta">
-                <div class="app-override-badge">{{ getAppBadgeLabel(app.appName) }}</div>
-                <div class="app-override-copy">
-                  <div class="app-override-title-row">
-                    <div class="app-override-name">{{ app.appName }}</div>
-                    <span class="pill app-override-pill">
-                      {{ getInjectionModeLabel(app.overrideMode ?? textInjectionMode) }}
-                    </span>
+          <div v-if="injectionAppRows.length > 0" class="app-overrides-groups">
+            <div v-if="configuredInjectionAppRows.length > 0" class="app-overrides-group">
+              <div class="app-overrides-group-header">
+                <div class="app-overrides-group-title">{{ t('input.configuredApps') }}</div>
+                <div class="field-note">{{ t('input.configuredAppsNote') }}</div>
+              </div>
+              <div class="app-overrides-list">
+                <div
+                  v-for="app in configuredInjectionAppRows"
+                  :key="app.key"
+                  class="app-override-item"
+                >
+                  <div class="app-override-meta">
+                    <div class="app-override-badge">{{ getAppBadgeLabel(app.appName) }}</div>
+                    <div class="app-override-copy">
+                      <div class="app-override-title-row">
+                        <div class="app-override-name">{{ app.appName }}</div>
+                        <span class="pill app-override-pill">
+                          {{ getInjectionModeLabel(app.overrideMode ?? textInjectionMode) }}
+                        </span>
+                      </div>
+                      <div class="field-note app-override-note">
+                        <span>{{ getAppIdentityLabel(app) }}</span>
+                        <span class="app-override-separator">·</span>
+                        <span>{{ getAppUsageLabel(app) }}</span>
+                      </div>
+                    </div>
                   </div>
-                  <div class="field-note app-override-note">
-                    <span>{{ getAppIdentityLabel(app) }}</span>
-                    <span class="app-override-separator">·</span>
-                    <span>{{ getAppUsageLabel(app) }}</span>
-                  </div>
+
+                  <NSelect
+                    :value="app.overrideMode ?? 'default'"
+                    :options="getOverrideOptions()"
+                    size="small"
+                    class="app-override-select"
+                    @update:value="(value) => updateTextInjectionOverride(app, value as TextInjectionOverrideSelectValue)"
+                  />
                 </div>
               </div>
+            </div>
 
-              <NSelect
-                :value="app.overrideMode ?? 'default'"
-                :options="getOverrideOptions()"
-                size="small"
-                class="app-override-select"
-                @update:value="(value) => updateTextInjectionOverride(app, value as TextInjectionOverrideSelectValue)"
-              />
+            <div v-if="recentUnconfiguredAppRows.length > 0" class="app-overrides-group">
+              <div class="app-overrides-group-header">
+                <div class="app-overrides-group-title">{{ t('input.recentApps') }}</div>
+                <div class="field-note">{{ t('input.recentAppsNote') }}</div>
+              </div>
+              <div class="app-overrides-list">
+                <div
+                  v-for="app in recentUnconfiguredAppRows"
+                  :key="app.key"
+                  class="app-override-item"
+                >
+                  <div class="app-override-meta">
+                    <div class="app-override-badge">{{ getAppBadgeLabel(app.appName) }}</div>
+                    <div class="app-override-copy">
+                      <div class="app-override-title-row">
+                        <div class="app-override-name">{{ app.appName }}</div>
+                        <span class="pill app-override-pill">
+                          {{ getInjectionModeLabel(textInjectionMode) }}
+                        </span>
+                      </div>
+                      <div class="field-note app-override-note">
+                        <span>{{ getAppIdentityLabel(app) }}</span>
+                        <span class="app-override-separator">·</span>
+                        <span>{{ getAppUsageLabel(app) }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <NSelect
+                    :value="'default'"
+                    :options="getOverrideOptions()"
+                    size="small"
+                    class="app-override-select"
+                    @update:value="(value) => updateTextInjectionOverride(app, value as TextInjectionOverrideSelectValue)"
+                  />
+                </div>
+              </div>
             </div>
           </div>
 
@@ -687,6 +744,31 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: var(--spacing-sm);
   padding-top: 2px;
+}
+
+.app-overrides-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.app-overrides-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.app-overrides-group-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 2px;
+}
+
+.app-overrides-group-title {
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--color-text-secondary);
 }
 
 .app-overrides-list {
