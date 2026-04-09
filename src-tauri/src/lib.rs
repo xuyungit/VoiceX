@@ -108,11 +108,6 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if !persisted_settings.enable_diagnostics {
         asr_debug_service.clear_soniox_debug_overrides_now()?;
     }
-    // Prepare HUD window ahead of time
-    if let Err(err) = hud::create_hud_window(&app.handle()) {
-        log::warn!("Failed to create HUD window: {}", err);
-    }
-
     let session_coordinator = SessionCoordinator::new(session_controller.clone());
     session_controller.apply_settings(
         persisted_settings.hold_threshold_ms,
@@ -171,6 +166,18 @@ pub fn run() {
                 let _ = main.show();
                 let _ = main.unminimize();
                 let _ = main.set_focus();
+
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = main.run_on_main_thread(|| {
+                        use objc2::MainThreadMarker;
+                        use objc2_app_kit::NSApplication;
+                        // Safe: run_on_main_thread guarantees we are on the main thread.
+                        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+                        let ns_app = NSApplication::sharedApplication(mtm);
+                        ns_app.activate();
+                    });
+                }
             }
         }))
         .manage(audio::AudioService::default())
@@ -203,6 +210,21 @@ pub fn run() {
                 if let Some(main) = app.get_webview_window("main") {
                     let _ = main.show();
                     let _ = main.set_focus();
+
+                    // Under Accessory policy the app has no Dock presence,
+                    // so we must explicitly activate it to bring the window
+                    // to the foreground.
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = main.run_on_main_thread(|| {
+                            use objc2::MainThreadMarker;
+                            use objc2_app_kit::NSApplication;
+                            // Safe: run_on_main_thread guarantees we are on the main thread.
+                            let mtm = unsafe { MainThreadMarker::new_unchecked() };
+                            let ns_app = NSApplication::sharedApplication(mtm);
+                            ns_app.activate();
+                        });
+                    }
                 }
             } else if event.id() == "quit_app" {
                 app.exit(0);
@@ -213,6 +235,21 @@ pub fn run() {
             if let Err(err) = enforce_macos_release_install_path() {
                 eprintln!("{}", err);
                 return Err(err);
+            }
+
+            // Accessory policy: no Dock icon, no "home Space".
+            // This lets the HUD window appear on whichever Space is active.
+            // Main window is accessible via the tray icon menu.
+            #[cfg(target_os = "macos")]
+            {
+                use objc2::MainThreadMarker;
+                use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+                // setup() is always called on the main thread; use the safe check.
+                let mtm = MainThreadMarker::new()
+                    .expect("Tauri setup must run on the main thread");
+                let ns_app = NSApplication::sharedApplication(mtm);
+                ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+                log::info!("macOS activation policy set to Accessory");
             }
 
             if let Err(e) = init_app(app) {
@@ -241,6 +278,7 @@ pub fn run() {
             commands::audio::open_recordings_dir,
             commands::build_info::get_build_info,
             commands::hud::set_hud_content_bounds,
+            commands::hud::hud_ready,
             commands::hotkey::record_hotkey,
             commands::hotkey::apply_hotkey_config,
             commands::hotkey::current_hotkey,

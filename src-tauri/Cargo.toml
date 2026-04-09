@@ -90,7 +90,8 @@ rdev = { path = "vendor/rdev" }
 audiopus_sys = { path = "vendor/audiopus_sys" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# macOS specific - will add core-graphics etc. later
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSApplication", "NSRunningApplication"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows specific - SendInput API for direct unicode injection

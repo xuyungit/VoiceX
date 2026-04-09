@@ -14,8 +14,20 @@ const HUD_MAX_HEIGHT: f64 = 120.0;
 pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
     if let Some(existing) = app.get_webview_window("hud") {
         reposition_hud_window(&existing)?;
+
+        #[cfg(target_os = "macos")]
+        configure_macos_hud(&existing)?;
+
+        #[cfg(target_os = "windows")]
+        configure_windows_hud(&existing)?;
+
         return Ok(());
     }
+
+    #[cfg(target_os = "macos")]
+    let start_visible = true;
+    #[cfg(not(target_os = "macos"))]
+    let start_visible = false;
 
     let window =
         WebviewWindowBuilder::new(app, "hud", WebviewUrl::App("src/hud/index.html".into()))
@@ -26,7 +38,7 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
             .always_on_top(true)
             .skip_taskbar(true)
             .focused(false)
-            .visible(false) // Start hidden
+            .visible(start_visible)
             .build()
             .map_err(|e| HudError::CreateFailed(e.to_string()))?;
 
@@ -123,13 +135,35 @@ pub fn set_hud_content_bounds(app: &AppHandle, width: f64, height: f64) -> Resul
 }
 
 #[cfg(target_os = "macos")]
-fn configure_macos_hud(_window: &tauri::WebviewWindow) -> Result<(), HudError> {
-    // TODO: Set NSWindow properties
-    // - setLevel_(NSFloatingWindowLevel)
-    // - setCollectionBehavior_(CanJoinAllSpaces | FullScreenAuxiliary)
-    // - setIgnoresMouseEvents_(true)
-    // - setHidesOnDeactivate_(false)
-    log::debug!("macOS HUD configuration pending");
+fn configure_macos_hud(window: &tauri::WebviewWindow) -> Result<(), HudError> {
+    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+
+    window
+        .with_webview(move |webview| {
+            #[allow(clippy::undocumented_unsafe_blocks)]
+            unsafe {
+                let ns_window_ptr: *mut std::ffi::c_void = webview.ns_window();
+                let ns_win: &NSWindow = &*(ns_window_ptr as *const NSWindow);
+
+                // canJoinAllSpaces: appear on every Space simultaneously
+                // fullScreenAuxiliary: appear alongside full-screen apps
+                // ignoresCycle: don't appear in Cmd+Tab / Mission Control
+                ns_win.setCollectionBehavior(
+                    NSWindowCollectionBehavior::CanJoinAllSpaces
+                        | NSWindowCollectionBehavior::FullScreenAuxiliary
+                        | NSWindowCollectionBehavior::IgnoresCycle,
+                );
+
+                // Use a high window level (1000) to float above full-screen apps.
+                // NSFloatingWindowLevel (3) is too low for full-screen contexts.
+                // kCGMaximumWindowLevelKey is 2147483631, macOS screensaver level
+                // is 1000 — we use just below that.
+                ns_win.setLevel(999);
+            }
+        })
+        .map_err(|e| HudError::PlatformConfigFailed(format!("{e:?}")))?;
+
+    order_front_on_active_space(window);
     Ok(())
 }
 
@@ -149,12 +183,36 @@ fn configure_platform_hud(_window: &tauri::WebviewWindow) -> Result<(), HudError
 pub fn show_hud(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("hud") {
         let _ = window.show();
+
+        #[cfg(target_os = "macos")]
+        order_front_on_active_space(&window);
     }
+}
+
+/// Move the HUD to the currently active macOS Space and bring it to front.
+#[cfg(target_os = "macos")]
+fn order_front_on_active_space(window: &tauri::WebviewWindow) {
+    use objc2_app_kit::NSWindow;
+
+    let _ = window.with_webview(move |webview| {
+        #[allow(clippy::undocumented_unsafe_blocks)]
+        unsafe {
+            let ns_window_ptr: *mut std::ffi::c_void = webview.ns_window();
+            let ns_win: &NSWindow = &*(ns_window_ptr as *const NSWindow);
+            ns_win.orderFrontRegardless();
+        }
+    });
 }
 
 /// Hide the HUD window
 pub fn hide_hud(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("hud") {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = window.destroy();
+        }
+
+        #[cfg(not(target_os = "macos"))]
         let _ = window.hide();
     }
 }
@@ -163,6 +221,9 @@ pub fn hide_hud(app: &AppHandle) {
 pub enum HudError {
     #[error("Failed to create HUD window: {0}")]
     CreateFailed(String),
+
+    #[error("Failed to configure HUD window: {0}")]
+    PlatformConfigFailed(String),
 
     #[error("Failed to resize HUD window: {0}")]
     SizeFailed(String),

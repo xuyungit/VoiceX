@@ -847,6 +847,11 @@ async function initListeners() {
     textMeasureEl?.remove();
     unsubs.forEach((fn) => fn && fn());
   });
+
+  await invoke("hud_ready");
+
+  // State snapshot has been replayed; reveal the HUD.
+  document.body.classList.remove("hud-loading");
 }
 
 invoke<"zh-CN" | "en-US">("get_resolved_ui_locale")

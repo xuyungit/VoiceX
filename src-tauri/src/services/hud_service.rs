@@ -12,6 +12,7 @@ use crate::{
 pub struct HudService {
     app_handle: AppHandle,
     hide_timer: std::sync::Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
+    snapshot: std::sync::Arc<std::sync::Mutex<HudSnapshot>>,
 }
 
 const STREAM_HUD_WIDTH: f64 = 256.0;
@@ -19,11 +20,17 @@ const STREAM_HUD_HEIGHT: f64 = 100.0;
 const BATCH_HUD_WIDTH: f64 = 204.0;
 const BATCH_HUD_HEIGHT: f64 = 78.0;
 
+#[derive(Default, Clone)]
+struct HudSnapshot {
+    events: std::collections::BTreeMap<&'static str, serde_json::Value>,
+}
+
 impl HudService {
     pub fn new(app_handle: AppHandle) -> Self {
         Self {
             app_handle,
             hide_timer: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            snapshot: std::sync::Arc::new(std::sync::Mutex::new(HudSnapshot::default())),
         }
     }
 
@@ -39,6 +46,23 @@ impl HudService {
 
     pub fn hide(&self) {
         hud::hide_hud(&self.app_handle);
+    }
+
+    pub fn replay_snapshot(&self) {
+        let snapshot = self.snapshot.lock().ok().map(|guard| guard.clone());
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+
+        for (event_name, payload) in snapshot.events {
+            let _ = self.app_handle.emit_to("hud", event_name, payload);
+        }
+    }
+
+    fn cache_event(&self, event_name: &'static str, payload: &serde_json::Value) {
+        if let Ok(mut guard) = self.snapshot.lock() {
+            guard.events.insert(event_name, payload.clone());
+        }
     }
 
     /// Schedule a hide after delay_ms. Cancels any previous hide timer.
@@ -68,6 +92,7 @@ impl HudService {
             "text": text,
             "isFinal": is_final
         });
+        self.cache_event("asr:event", &payload);
         let _ = self.app_handle.emit("asr:event", payload.clone());
         let _ = self.app_handle.emit_to("hud", "asr:event", payload);
     }
@@ -78,6 +103,7 @@ impl HudService {
             "isFinal": false,
             "clear": true,
         });
+        self.cache_event("asr:event", &payload);
         let _ = self.app_handle.emit("asr:event", payload.clone());
         let _ = self.app_handle.emit_to("hud", "asr:event", payload);
     }
@@ -91,6 +117,7 @@ impl HudService {
             log::debug!("Countdown: {}s remaining", value);
         }
 
+        self.cache_event("state:countdown", &payload);
         let _ = self.app_handle.emit("state:countdown", payload.clone());
         let _ = self.app_handle.emit_to("hud", "state:countdown", payload);
     }
@@ -102,16 +129,16 @@ impl HudService {
             None => None,
         };
 
-        let _ = self.app_handle.emit(
-            "state:recording_style",
-            json!({ "style": style_str, "batch": is_batch }),
-        );
+        let payload = json!({ "style": style_str, "batch": is_batch });
+        self.cache_event("state:recording_style", &payload);
+        let _ = self.app_handle.emit("state:recording_style", payload);
     }
 
     pub fn emit_presentation_mode(&self, is_batch: bool) {
         let payload = json!({
             "mode": if is_batch { "batch" } else { "stream" }
         });
+        self.cache_event("state:hud_presentation", &payload);
         let _ = self
             .app_handle
             .emit_to("hud", "state:hud_presentation", payload);
@@ -127,27 +154,28 @@ impl HudService {
     }
 
     pub fn emit_correcting(&self, is_correcting: bool) {
-        let _ = self.app_handle.emit(
-            "state:correcting",
-            json!({ "is_correcting": is_correcting }),
-        );
+        let payload = json!({ "is_correcting": is_correcting });
+        self.cache_event("state:correcting", &payload);
+        let _ = self.app_handle.emit("state:correcting", payload);
     }
 
     pub fn emit_recognizing(&self, is_recognizing: bool) {
-        let _ = self.app_handle.emit(
-            "state:recognizing",
-            json!({ "is_recognizing": is_recognizing }),
-        );
+        let payload = json!({ "is_recognizing": is_recognizing });
+        self.cache_event("state:recognizing", &payload);
+        let _ = self.app_handle.emit("state:recognizing", payload);
     }
 
     pub fn emit_recognition_stopped(&self) {
-        let _ = self.app_handle.emit("recognition:stopped", json!({}));
+        let payload = json!({});
+        self.cache_event("recognition:stopped", &payload);
+        let _ = self.app_handle.emit("recognition:stopped", payload);
     }
 
     pub fn emit_audio_level(&self, level: f32) {
         let payload = json!({
             "level": level.clamp(0.0, 1.0)
         });
+        self.cache_event("state:audio_level", &payload);
         let _ = self.app_handle.emit_to("hud", "state:audio_level", payload);
     }
 
@@ -155,15 +183,16 @@ impl HudService {
         let payload = json!({
             "bands": bands
         });
+        self.cache_event("state:audio_spectrum", &payload);
         let _ = self
             .app_handle
             .emit_to("hud", "state:audio_spectrum", payload);
     }
 
     pub fn emit_intent(&self, intent: ProcessingIntent) {
-        let _ = self
-            .app_handle
-            .emit("state:intent", json!({ "intent": intent.as_str() }));
+        let payload = json!({ "intent": intent.as_str() });
+        self.cache_event("state:intent", &payload);
+        let _ = self.app_handle.emit("state:intent", payload);
     }
 
     pub fn emit_recognition(&self, event_name: &str, payload: serde_json::Value) {
@@ -175,6 +204,7 @@ impl HudService {
         let payload = json!({
             "message": message,
         });
+        self.cache_event("state:error", &payload);
         let _ = self.app_handle.emit("state:error", payload.clone());
         let _ = self.app_handle.emit_to("hud", "state:error", payload);
     }

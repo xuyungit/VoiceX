@@ -374,7 +374,12 @@ impl SessionController {
                 path,
                 refinement_path,
                 duration_ms,
-            } => self.handle_audio_stopped_state(state, path, refinement_path, duration_ms),
+            } => self.handle_audio_stopped_state(
+                state,
+                path,
+                refinement_path,
+                duration_ms,
+            ),
             SessionMessage::AudioStartFailed { reason } => {
                 self.on_audio_start_failed_state(state, reason)
             }
@@ -1151,6 +1156,12 @@ impl SessionController {
 
     fn hud_service(&self) -> Option<HudService> {
         self.hud_service.lock().ok().and_then(|h| h.clone())
+    }
+
+    pub fn replay_hud_snapshot(&self) {
+        if let Some(hud) = self.hud_service() {
+            hud.replay_snapshot();
+        }
     }
 
     fn audio_manager(&self) -> Option<AudioManager> {

@@ -5996,6 +5996,8 @@ dependencies = [
  "hex",
  "hmac",
  "log",
+ "objc2",
+ "objc2-app-kit",
  "ogg",
  "prost",
  "prost-types",
