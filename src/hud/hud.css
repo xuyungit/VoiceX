@@ -228,8 +228,24 @@ body.compact-batch-mode .status-icon.animating {
 }
 
 body.compact-batch-mode .countdown,
-body.compact-batch-mode .intent-chip {
+body.compact-batch-mode .countdown {
     display: none;
+}
+
+body.compact-batch-mode .intent-chip {
+    display: inline-flex;
+    align-items: center;
+    right: 0;
+    font-size: 7px;
+    line-height: 1.35;
+    padding: 1px 5px;
+    color: rgba(255, 255, 255, 0.64);
+    border-color: rgba(255, 255, 255, 0.16);
+}
+
+body.compact-batch-mode .intent-chip.translate {
+    color: rgba(134, 239, 172, 0.84);
+    border-color: rgba(134, 239, 172, 0.3);
 }
 
 body.batch-recognizing-mode .hud-container {
