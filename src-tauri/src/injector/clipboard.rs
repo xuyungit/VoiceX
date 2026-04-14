@@ -240,9 +240,7 @@ impl TextInjector {
                 }
             }
 
-            thread::sleep(Duration::from_millis(
-                CLIPBOARD_WRITE_VERIFY_INTERVAL_MS,
-            ));
+            thread::sleep(Duration::from_millis(CLIPBOARD_WRITE_VERIFY_INTERVAL_MS));
         }
 
         Err(InjectorError::ClipboardError(

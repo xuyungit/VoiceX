@@ -2,9 +2,8 @@ use tokio::sync::mpsc::Receiver;
 
 use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrFailure, AsrProviderType, ColiAsrClient,
-    ElevenLabsRealtimeClient, ElevenLabsRecognitionMode, FunAsrRealtimeClient,
-    GeminiLiveClient, GoogleSttClient, OpenAIRealtimeClient, QwenRealtimeClient,
-    QwenRecognitionMode, SonioxClient,
+    ElevenLabsRealtimeClient, ElevenLabsRecognitionMode, FunAsrRealtimeClient, GeminiLiveClient,
+    GoogleSttClient, OpenAIRealtimeClient, QwenRealtimeClient, QwenRecognitionMode, SonioxClient,
 };
 use crate::storage;
 

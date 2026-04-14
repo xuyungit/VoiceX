@@ -8,9 +8,8 @@ use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
     ColiRefinementMode, ElevenLabsRealtimeClient, ElevenLabsRecognitionMode,
     ElevenLabsTranscriptionClient, FunAsrRealtimeClient, GeminiLiveClient,
-    GeminiTranscriptionClient, GoogleSttClient, OpenAIRealtimeClient,
-    OpenAITranscriptionClient, QwenRealtimeClient, QwenRecognitionMode, QwenTranscriptionClient,
-    SonioxClient,
+    GeminiTranscriptionClient, GoogleSttClient, OpenAIRealtimeClient, OpenAITranscriptionClient,
+    QwenRealtimeClient, QwenRecognitionMode, QwenTranscriptionClient, SonioxClient,
 };
 use crate::services::history_service::HistoryService;
 
@@ -223,7 +222,7 @@ async fn run_openai_asr(
                     ),
                 })
             }
-        }
+        };
     }
 
     let client = OpenAITranscriptionClient::new(config.clone());

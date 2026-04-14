@@ -10,7 +10,7 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
 };
 
-use super::audio_utils::{downmix_to_mono, resample_to_8k, resample_to_16k};
+use super::audio_utils::{downmix_to_mono, resample_to_16k, resample_to_8k};
 use super::config::AsrConfig;
 use super::protocol::{AsrError, AsrEvent, AsrPhase};
 
@@ -56,12 +56,10 @@ impl FunAsrRealtimeClient {
             headers.insert("Authorization", auth_value);
         }
 
-        let (ws_stream, _) = connect_async(req)
-            .await
-            .map_err(|e| {
-                AsrError::ConnectionFailed(format!("Fun-ASR WebSocket connect failed: {}", e))
-                    .in_phase(AsrPhase::Connect)
-            })?;
+        let (ws_stream, _) = connect_async(req).await.map_err(|e| {
+            AsrError::ConnectionFailed(format!("Fun-ASR WebSocket connect failed: {}", e))
+                .in_phase(AsrPhase::Connect)
+        })?;
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -88,9 +86,8 @@ impl FunAsrRealtimeClient {
         let on_event = Arc::new(on_event);
         let reader_cancel = cancel.clone();
         let on_event_reader = on_event.clone();
-        let reader_handle = tokio::spawn(async move {
-            read_events(ws_read, reader_cancel, on_event_reader).await
-        });
+        let reader_handle =
+            tokio::spawn(async move { read_events(ws_read, reader_cancel, on_event_reader).await });
 
         write_audio_and_finish(
             &self.config,
@@ -104,12 +101,10 @@ impl FunAsrRealtimeClient {
         )
         .await?;
 
-        reader_handle
-            .await
-            .map_err(|e| {
-                AsrError::ConnectionFailed(format!("Fun-ASR reader task join failed: {}", e))
-                    .in_phase(AsrPhase::Finalizing)
-            })?
+        reader_handle.await.map_err(|e| {
+            AsrError::ConnectionFailed(format!("Fun-ASR reader task join failed: {}", e))
+                .in_phase(AsrPhase::Finalizing)
+        })?
     }
 }
 
@@ -131,11 +126,18 @@ async fn wait_for_task_started(
                     ))
                     .in_phase(AsrPhase::Handshake)
                 })?;
-                let header = payload.get("header").and_then(Value::as_object).ok_or_else(|| {
-                    AsrError::ProtocolError("Fun-ASR handshake missing header".to_string())
-                        .in_phase(AsrPhase::Handshake)
-                })?;
-                match header.get("event").and_then(Value::as_str).unwrap_or_default() {
+                let header = payload
+                    .get("header")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        AsrError::ProtocolError("Fun-ASR handshake missing header".to_string())
+                            .in_phase(AsrPhase::Handshake)
+                    })?;
+                match header
+                    .get("event")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                {
                     "task-started" => return Ok(()),
                     "task-failed" => {
                         return Err(task_failed_error(header).in_phase(AsrPhase::Handshake));
@@ -169,10 +171,10 @@ async fn wait_for_task_started(
         }
     }
 
-    Err(AsrError::ConnectionFailed(
-        "Fun-ASR connection ended before task-started".to_string(),
+    Err(
+        AsrError::ConnectionFailed("Fun-ASR connection ended before task-started".to_string())
+            .in_phase(AsrPhase::Handshake),
     )
-    .in_phase(AsrPhase::Handshake))
 }
 
 async fn read_events(
@@ -197,11 +199,17 @@ async fn read_events(
                     AsrError::ProtocolError(format!("Invalid Fun-ASR event JSON: {}", e))
                         .in_phase(AsrPhase::Streaming)
                 })?;
-                let header = payload.get("header").and_then(Value::as_object).ok_or_else(|| {
-                    AsrError::ProtocolError("Fun-ASR event missing header".to_string())
-                        .in_phase(AsrPhase::Streaming)
-                })?;
-                let event_name = header.get("event").and_then(Value::as_str).unwrap_or_default();
+                let header = payload
+                    .get("header")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        AsrError::ProtocolError("Fun-ASR event missing header".to_string())
+                            .in_phase(AsrPhase::Streaming)
+                    })?;
+                let event_name = header
+                    .get("event")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
 
                 match event_name {
                     "result-generated" => {
@@ -304,10 +312,10 @@ async fn read_events(
         return Ok(());
     }
 
-    Err(AsrError::ConnectionFailed(
-        "Fun-ASR stream ended before task-finished".to_string(),
+    Err(
+        AsrError::ConnectionFailed("Fun-ASR stream ended before task-finished".to_string())
+            .in_phase(AsrPhase::Finalizing),
     )
-    .in_phase(AsrPhase::Finalizing))
 }
 
 async fn write_audio_and_finish(
@@ -333,10 +341,13 @@ async fn write_audio_and_finish(
         if pcm.is_empty() {
             continue;
         }
-        ws_write.send(Message::Binary(pcm.into())).await.map_err(|e| {
-            AsrError::ConnectionFailed(format!("Fun-ASR audio send failed: {}", e))
-                .in_phase(AsrPhase::Streaming)
-        })?;
+        ws_write
+            .send(Message::Binary(pcm.into()))
+            .await
+            .map_err(|e| {
+                AsrError::ConnectionFailed(format!("Fun-ASR audio send failed: {}", e))
+                    .in_phase(AsrPhase::Streaming)
+            })?;
     }
 
     if cancel.is_cancelled() {
@@ -368,7 +379,11 @@ async fn write_audio_and_finish(
     Ok(())
 }
 
-fn build_run_task_message(config: &AsrConfig, task_id: &str, sample_rate: u32) -> Result<String, AsrError> {
+fn build_run_task_message(
+    config: &AsrConfig,
+    task_id: &str,
+    sample_rate: u32,
+) -> Result<String, AsrError> {
     let mut parameters = json!({
         "format": "pcm",
         "sample_rate": sample_rate

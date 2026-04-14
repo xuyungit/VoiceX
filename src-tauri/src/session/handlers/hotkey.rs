@@ -32,7 +32,9 @@ impl SessionController {
                     );
                     if !app_info.is_self {
                         if let Some(recent_app) = app_info.to_recent_target_app() {
-                            if let Err(err) = crate::storage::remember_recent_target_app(&recent_app) {
+                            if let Err(err) =
+                                crate::storage::remember_recent_target_app(&recent_app)
+                            {
                                 log::warn!("Failed to remember target app: {}", err);
                             } else if let Some(app_handle) = self.app_handle() {
                                 if let Err(err) = app_handle.emit(

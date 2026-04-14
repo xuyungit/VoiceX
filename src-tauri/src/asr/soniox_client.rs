@@ -604,10 +604,7 @@ mod tests {
 
         let payload = build_soniox_config_message(&config, 16_000);
 
-        assert_eq!(
-            payload["max_endpoint_delay_ms"].as_u64(),
-            Some(10_000)
-        );
+        assert_eq!(payload["max_endpoint_delay_ms"].as_u64(), Some(10_000));
     }
 }
 

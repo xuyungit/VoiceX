@@ -252,8 +252,7 @@ pub fn run() {
                 use objc2::MainThreadMarker;
                 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
                 // setup() is always called on the main thread; use the safe check.
-                let mtm = MainThreadMarker::new()
-                    .expect("Tauri setup must run on the main thread");
+                let mtm = MainThreadMarker::new().expect("Tauri setup must run on the main thread");
                 let ns_app = NSApplication::sharedApplication(mtm);
                 ns_app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
                 log::info!("macOS activation policy set to Accessory");

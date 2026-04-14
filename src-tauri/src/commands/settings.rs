@@ -1,7 +1,7 @@
 //! Settings-related commands
 
-use std::path::PathBuf;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -73,7 +73,7 @@ pub struct AppSettings {
     pub openai_asr_base_url: String,
     pub openai_asr_language: String,
     pub openai_asr_prompt: String,
-    pub openai_asr_mode: String, // "batch" | "realtime"
+    pub openai_asr_mode: String,                  // "batch" | "realtime"
     pub openai_asr_post_recording_refine: String, // "off" | "batch_refine"
 
     // ASR Provider: ElevenLabs Speech-to-Text

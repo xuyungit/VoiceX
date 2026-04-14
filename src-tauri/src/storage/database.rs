@@ -803,7 +803,10 @@ pub fn get_recent_target_apps() -> Result<Vec<RecentTargetApp>, StorageError> {
     match serde_json::from_str::<Vec<RecentTargetApp>>(&json) {
         Ok(apps) => Ok(apps),
         Err(err) => {
-            log::warn!("Failed to parse recent target apps, returning empty list: {}", err);
+            log::warn!(
+                "Failed to parse recent target apps, returning empty list: {}",
+                err
+            );
             Ok(Vec::new())
         }
     }

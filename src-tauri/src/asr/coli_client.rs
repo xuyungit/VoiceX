@@ -1087,12 +1087,12 @@ fn parse_json_suffix<T: DeserializeOwned>(text: &str) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "windows")]
+    use super::normalize_existing_path;
     use super::{
         extract_windows_command_shim_script, parse_json_suffix, ColiFileAsrOutput,
         ColiRefinementMode, TranscriptAccumulator,
     };
-    #[cfg(target_os = "windows")]
-    use super::normalize_existing_path;
     use std::{fs, path::PathBuf};
 
     #[test]

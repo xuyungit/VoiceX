@@ -59,11 +59,13 @@ impl LLMClient {
         let user_message = format!("原文：\n{}", text);
 
         match self.config.api_mode {
-            LLMApiMode::ChatCompletions => self
-                .correct_with_chat_completions(&system_prompt, &user_message)
-                .await,
+            LLMApiMode::ChatCompletions => {
+                self.correct_with_chat_completions(&system_prompt, &user_message)
+                    .await
+            }
             LLMApiMode::Responses => {
-                self.correct_with_responses(&system_prompt, &user_message).await
+                self.correct_with_responses(&system_prompt, &user_message)
+                    .await
             }
         }
     }
@@ -104,9 +106,9 @@ impl LLMClient {
         user_message: &str,
     ) -> Result<String, LLMError> {
         let url = format!("{}/responses", self.config.base_url.trim_end_matches('/'));
-        let payload = self
-            .provider
-            .build_responses_request(system_prompt, user_message, &self.config);
+        let payload =
+            self.provider
+                .build_responses_request(system_prompt, user_message, &self.config);
         let bytes = self.send_json_request(&url, &payload).await?;
         let body_text = String::from_utf8_lossy(&bytes).to_string();
 
@@ -299,7 +301,11 @@ fn parse_responses_sse(body: &str) -> Option<String> {
 
     for line in body.lines() {
         if line.is_empty() {
-            flush_event(&mut event_data_lines, &mut delta_output, &mut fallback_output);
+            flush_event(
+                &mut event_data_lines,
+                &mut delta_output,
+                &mut fallback_output,
+            );
             continue;
         }
 
@@ -308,7 +314,11 @@ fn parse_responses_sse(body: &str) -> Option<String> {
         }
     }
 
-    flush_event(&mut event_data_lines, &mut delta_output, &mut fallback_output);
+    flush_event(
+        &mut event_data_lines,
+        &mut delta_output,
+        &mut fallback_output,
+    );
 
     let result = if delta_output.trim().is_empty() {
         fallback_output.and_then(|text| {
@@ -335,7 +345,8 @@ fn extract_responses_output_from_value(value: &Value) -> Option<String> {
         }
     }
 
-    value.get("response")
+    value
+        .get("response")
         .and_then(extract_responses_output_from_value)
 }
 
