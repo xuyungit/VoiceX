@@ -520,4 +520,39 @@ mod tests {
 
         assert_eq!(state.session_state, HotkeySessionState::Finalizing);
     }
+
+    #[test]
+    fn repeated_press_while_pending_still_resolves_as_single_tap() {
+        let mut state = AppState::new();
+        let t0 = Instant::now();
+
+        state.handle_hotkey_pressed_at(t0);
+        state.handle_hotkey_pressed_at(t0 + ms(10));
+        state.handle_hotkey_released_at(t0 + ms(90));
+
+        assert_eq!(state.session_state, HotkeySessionState::HandsFree);
+        assert_eq!(state.recording_style, Some(RecordingStyle::HandsFree));
+        assert_eq!(state.intent, ProcessingIntent::Assistant);
+    }
+
+    #[test]
+    fn third_tap_after_translation_upgrade_stops_hands_free() {
+        let mut state = AppState::new();
+        let t0 = Instant::now();
+
+        state.handle_hotkey_pressed_at(t0);
+        state.handle_hotkey_released_at(t0 + ms(80));
+        assert_eq!(state.session_state, HotkeySessionState::HandsFree);
+
+        state.handle_hotkey_pressed_at(t0 + ms(220));
+        state.handle_hotkey_released_at(t0 + ms(280));
+        assert_eq!(state.intent, ProcessingIntent::TranslateEn);
+        assert_eq!(state.session_state, HotkeySessionState::HandsFree);
+
+        state.handle_hotkey_pressed_at(t0 + ms(340));
+        state.handle_hotkey_released_at(t0 + ms(400));
+
+        assert_eq!(state.session_state, HotkeySessionState::Finalizing);
+        assert!(!state.is_recording);
+    }
 }

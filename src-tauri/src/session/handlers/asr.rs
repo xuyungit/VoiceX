@@ -157,7 +157,9 @@ impl SessionController {
     }
 
     pub fn on_asr_stream_finished_state(&self, state: &mut AppState) {
-        state.is_recording = false;
+        // ASR stream completion is not the same as microphone capture stopping.
+        // Keep the recording flag owned by the hotkey/audio stop path so we do not
+        // accidentally skip a required stop_capture() after a reconnect/close race.
         state.asr_stream_finished = true;
         state.asr_reconnect_in_progress = false;
         state.asr_reconnect_retry_count = 0;

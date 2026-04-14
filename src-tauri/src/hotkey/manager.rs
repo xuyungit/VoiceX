@@ -80,6 +80,7 @@ impl HotkeyManager {
             let modifier_state = RefCell::new(ModifierState::default());
             let last_key_for_config: RefCell<Option<Key>> = RefCell::new(None);
             let last_active_config: RefCell<Option<HotkeyConfiguration>> = RefCell::new(None);
+            let active_hotkey_pressed = RefCell::new(false);
             let (hook_tx, hook_rx) = mpsc::channel::<HookEvent>();
 
             // Worker thread to process hotkey actions off the hook callback.
@@ -159,7 +160,10 @@ impl HotkeyManager {
                             {
                                 *last_key_for_config.borrow_mut() = Some(key);
                                 *last_active_config.borrow_mut() = Some(cfg.clone());
-                                let _ = hook_tx.send(HookEvent::Pressed(cfg));
+                                if !*active_hotkey_pressed.borrow() {
+                                    *active_hotkey_pressed.borrow_mut() = true;
+                                    let _ = hook_tx.send(HookEvent::Pressed(cfg));
+                                }
                                 suppress = true;
                             }
                         }
@@ -180,9 +184,13 @@ impl HotkeyManager {
                         if let Some(active_key) = active_key_opt {
                             if key == active_key {
                                 let cfg_opt = last_active_config.borrow().as_ref().cloned();
+                                let was_pressed = *active_hotkey_pressed.borrow();
+                                *active_hotkey_pressed.borrow_mut() = false;
                                 if suspension_count.load(Ordering::SeqCst) == 0 {
-                                    if let Some(cfg) = cfg_opt {
-                                        let _ = hook_tx.send(HookEvent::Released(cfg));
+                                    if was_pressed {
+                                        if let Some(cfg) = cfg_opt {
+                                            let _ = hook_tx.send(HookEvent::Released(cfg));
+                                        }
                                     }
                                 }
                                 *last_key_for_config.borrow_mut() = None;

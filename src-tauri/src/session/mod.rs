@@ -151,6 +151,7 @@ pub struct SessionController {
     asr_final_timeout: Arc<Mutex<Option<JoinHandle<()>>>>,
     injection_epoch: Arc<AtomicU64>,
     injection_cancel_flag: Arc<AtomicBool>,
+    audio_epoch: Arc<AtomicU64>,
 }
 
 impl SessionController {
@@ -373,24 +374,63 @@ impl SessionController {
             SessionMessage::RetryAsrStartup => self.on_retry_asr_startup_state(state),
             SessionMessage::RetryAsrReconnect => self.on_retry_asr_reconnect_state(state),
             SessionMessage::AudioStarted {
+                audio_epoch,
                 sample_rate,
                 channels,
                 path,
-            } => self.handle_audio_started_state(state, sample_rate, channels, path),
+            } => {
+                if !self.is_current_audio_epoch(audio_epoch) {
+                    log::debug!(
+                        "Dropping stale AudioStarted (epoch={}, current={})",
+                        audio_epoch,
+                        self.current_audio_epoch()
+                    );
+                    return;
+                }
+                self.handle_audio_started_state(state, sample_rate, channels, path)
+            }
             SessionMessage::AudioStopped {
+                audio_epoch,
                 path,
                 refinement_path,
                 duration_ms,
-            } => self.handle_audio_stopped_state(
-                state,
-                path,
-                refinement_path,
-                duration_ms,
-            ),
-            SessionMessage::AudioStartFailed { reason } => {
+            } => {
+                if !self.is_current_audio_epoch(audio_epoch) {
+                    log::debug!(
+                        "Dropping stale AudioStopped (epoch={}, current={})",
+                        audio_epoch,
+                        self.current_audio_epoch()
+                    );
+                    return;
+                }
+                self.handle_audio_stopped_state(state, path, refinement_path, duration_ms)
+            }
+            SessionMessage::AudioStartFailed {
+                audio_epoch,
+                reason,
+            } => {
+                if !self.is_current_audio_epoch(audio_epoch) {
+                    log::debug!(
+                        "Dropping stale AudioStartFailed (epoch={}, current={})",
+                        audio_epoch,
+                        self.current_audio_epoch()
+                    );
+                    return;
+                }
                 self.on_audio_start_failed_state(state, reason)
             }
-            SessionMessage::AudioStopFailed { reason } => {
+            SessionMessage::AudioStopFailed {
+                audio_epoch,
+                reason,
+            } => {
+                if !self.is_current_audio_epoch(audio_epoch) {
+                    log::debug!(
+                        "Dropping stale AudioStopFailed (epoch={}, current={})",
+                        audio_epoch,
+                        self.current_audio_epoch()
+                    );
+                    return;
+                }
                 self.on_audio_stop_failed_state(state, reason)
             }
             SessionMessage::BatchAsrDone {
@@ -589,6 +629,7 @@ impl SessionController {
         self.cancel_auto_hide();
         self.cancel_asr_final_timeout();
         self.stop_asr_audio_bridge();
+        self.invalidate_audio_epoch();
         // If an audio file is still referenced in state, it was never persisted to the
         // database (e.g. ASR returned no result).  Delete it so it doesn't become an orphan.
         self.discard_session_audio_file(state, "session_reset");
@@ -1021,6 +1062,7 @@ impl SessionController {
         } else {
             self.abort_asr_task();
         }
+        self.invalidate_audio_epoch();
 
         self.discard_session_audio_file(state, "session_cancelled");
         self.discard_session_refinement_audio_file(state, "session_cancelled");
@@ -1032,6 +1074,7 @@ impl SessionController {
     }
 
     fn start_audio_capture(&self) {
+        let audio_epoch = self.next_audio_epoch();
         if let Some(manager) = self.audio_manager() {
             let is_batch = crate::storage::get_settings()
                 .map(|settings| {
@@ -1069,6 +1112,7 @@ impl SessionController {
                     let path_str = file_path.as_ref().map(|p| p.to_string_lossy().to_string());
                     self.spawn_audio_level_bridge(level_rx);
                     self.send_message(SessionMessage::AudioStarted {
+                        audio_epoch,
                         sample_rate,
                         channels,
                         path: path_str.clone(),
@@ -1092,19 +1136,26 @@ impl SessionController {
                 Err(err) => {
                     let reason = format!("Failed to start audio capture: {}", err);
                     log::error!("{}", reason);
-                    self.send_message(SessionMessage::AudioStartFailed { reason });
+                    self.send_message(SessionMessage::AudioStartFailed {
+                        audio_epoch,
+                        reason,
+                    });
                 }
             }
         } else {
             let reason = "Audio manager not initialized; cannot start capture".to_string();
             log::error!("{}", reason);
-            self.send_message(SessionMessage::AudioStartFailed { reason });
+            self.send_message(SessionMessage::AudioStartFailed {
+                audio_epoch,
+                reason,
+            });
         }
     }
 
     fn stop_audio_capture(&self, reason: &str) {
         // No further auto-stop after we intentionally stop capture.
         self.cancel_recording_timeout();
+        let audio_epoch = self.current_audio_epoch();
 
         if let Some(manager) = self.audio_manager() {
             match manager.stop_capture() {
@@ -1115,6 +1166,7 @@ impl SessionController {
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_else(|| "<none>".to_string());
                     self.send_message(SessionMessage::AudioStopped {
+                        audio_epoch,
                         path: summary
                             .path
                             .as_ref()
@@ -1149,6 +1201,7 @@ impl SessionController {
                 Err(err) => {
                     log::error!("Failed to stop audio capture (reason: {}): {}", reason, err);
                     self.send_message(SessionMessage::AudioStopFailed {
+                        audio_epoch,
                         reason: err.to_string(),
                     });
                 }
@@ -1156,9 +1209,26 @@ impl SessionController {
         } else {
             log::error!("Audio manager not initialized; cannot stop capture");
             self.send_message(SessionMessage::AudioStopFailed {
+                audio_epoch,
                 reason: "Audio manager not initialized; cannot stop capture".to_string(),
             });
         }
+    }
+
+    fn next_audio_epoch(&self) -> u64 {
+        self.audio_epoch.fetch_add(1, Ordering::SeqCst).saturating_add(1)
+    }
+
+    fn current_audio_epoch(&self) -> u64 {
+        self.audio_epoch.load(Ordering::SeqCst)
+    }
+
+    fn is_current_audio_epoch(&self, epoch: u64) -> bool {
+        epoch != 0 && epoch == self.current_audio_epoch()
+    }
+
+    fn invalidate_audio_epoch(&self) {
+        self.next_audio_epoch();
     }
 
     fn hud_service(&self) -> Option<HudService> {
@@ -1330,6 +1400,7 @@ impl SessionController {
         self.abort_asr_task();
         self.stop_asr_audio_bridge();
         self.cancel_audio_level_task();
+        self.invalidate_audio_epoch();
 
         self.discard_session_audio_file(state, "audio_start_failed");
         self.discard_session_refinement_audio_file(state, "audio_start_failed");
@@ -1371,6 +1442,156 @@ impl Default for SessionController {
             asr_final_timeout: Arc::new(Mutex::new(None)),
             injection_epoch: Arc::new(AtomicU64::new(0)),
             injection_cancel_flag: Arc::new(AtomicBool::new(false)),
+            audio_epoch: Arc::new(AtomicU64::new(0)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::HotkeySessionState;
+
+    fn ms(value: u64) -> Duration {
+        Duration::from_millis(value)
+    }
+
+    fn path_string(path: Option<&std::path::PathBuf>) -> Option<String> {
+        path.map(|value| value.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn current_audio_epoch_messages_update_session_state() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        let epoch = controller.next_audio_epoch();
+
+        controller.handle_message(
+            &mut state,
+            SessionMessage::AudioStarted {
+                audio_epoch: epoch,
+                sample_rate: 16_000,
+                channels: 1,
+                path: Some("active.ogg".to_string()),
+            },
+        );
+
+        assert_eq!(path_string(state.session_audio_path.as_ref()), Some("active.ogg".into()));
+        assert_eq!(state.session_sample_rate, Some(16_000));
+        assert_eq!(state.session_channels, Some(1));
+
+        state.asr_stream_finished = true;
+        controller.handle_message(
+            &mut state,
+            SessionMessage::AudioStopped {
+                audio_epoch: epoch,
+                path: Some("active.ogg".to_string()),
+                refinement_path: Some("active.wav".to_string()),
+                duration_ms: Some(1_500),
+            },
+        );
+
+        assert_eq!(path_string(state.session_audio_path.as_ref()), Some("active.ogg".into()));
+        assert_eq!(
+            path_string(state.session_refinement_audio_path.as_ref()),
+            Some("active.wav".into())
+        );
+        assert_eq!(state.session_duration_ms, Some(1_500));
+    }
+
+    #[test]
+    fn stale_audio_stopped_message_is_ignored_after_cancel() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        let t0 = Instant::now();
+
+        state.handle_hotkey_pressed_at(t0);
+        state.handle_hotkey_released_at(t0 + ms(80));
+        assert_eq!(state.session_state, HotkeySessionState::HandsFree);
+        assert!(state.is_recording);
+
+        let epoch = controller.next_audio_epoch();
+        controller.handle_message(
+            &mut state,
+            SessionMessage::AudioStarted {
+                audio_epoch: epoch,
+                sample_rate: 16_000,
+                channels: 1,
+                path: Some("session.ogg".to_string()),
+            },
+        );
+
+        controller.handle_message(
+            &mut state,
+            SessionMessage::CancelSession(CancelReason::EscapeKey),
+        );
+
+        assert_eq!(state.session_state, HotkeySessionState::Idle);
+        assert!(!state.is_recording);
+        assert!(state.session_audio_path.is_none());
+        assert!(controller.current_audio_epoch() > epoch);
+
+        controller.handle_message(
+            &mut state,
+            SessionMessage::AudioStopped {
+                audio_epoch: epoch,
+                path: Some("stale.ogg".to_string()),
+                refinement_path: Some("stale.wav".to_string()),
+                duration_ms: Some(2_000),
+            },
+        );
+
+        assert_eq!(state.session_state, HotkeySessionState::Idle);
+        assert!(state.session_audio_path.is_none());
+        assert!(state.session_refinement_audio_path.is_none());
+        assert!(state.session_duration_ms.is_none());
+    }
+
+    #[test]
+    fn stale_audio_start_failed_message_is_ignored_after_epoch_advance() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        let stale_epoch = controller.next_audio_epoch();
+
+        state.session_state = HotkeySessionState::HandsFree;
+        state.is_recording = true;
+        controller.invalidate_audio_epoch();
+
+        controller.handle_message(
+            &mut state,
+            SessionMessage::AudioStartFailed {
+                audio_epoch: stale_epoch,
+                reason: "stale failure".to_string(),
+            },
+        );
+
+        assert_eq!(state.session_state, HotkeySessionState::HandsFree);
+        assert!(state.is_recording);
+        assert!(state.terminal_error_message.is_none());
+    }
+
+    #[test]
+    fn asr_stream_finished_keeps_recording_active_until_hotkey_stop() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        let t0 = Instant::now();
+
+        state.handle_hotkey_pressed_at(t0);
+        state.handle_hotkey_released_at(t0 + ms(80));
+        assert_eq!(state.session_state, HotkeySessionState::HandsFree);
+        assert!(state.is_recording);
+        state.transcript_text = "partial transcript".to_string();
+
+        controller.on_asr_stream_finished_state(&mut state);
+
+        assert_eq!(state.session_state, HotkeySessionState::HandsFree);
+        assert!(state.is_recording);
+        assert!(state.asr_stream_finished);
+
+        state.handle_hotkey_pressed_at(t0 + ms(550));
+        state.handle_hotkey_released_at(t0 + ms(620));
+
+        assert_eq!(state.session_state, HotkeySessionState::Finalizing);
+        assert!(!state.is_recording);
     }
 }
