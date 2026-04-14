@@ -45,19 +45,23 @@ pub enum SessionMessage {
     RetryAsrStartup,
     RetryAsrReconnect,
     AudioStarted {
+        audio_epoch: u64,
         sample_rate: u32,
         channels: u16,
         path: Option<String>,
     },
     AudioStopped {
+        audio_epoch: u64,
         path: Option<String>,
         refinement_path: Option<String>,
         duration_ms: Option<u64>,
     },
     AudioStartFailed {
+        audio_epoch: u64,
         reason: String,
     },
     AudioStopFailed {
+        audio_epoch: u64,
         reason: String,
     },
     BatchAsrDone {
