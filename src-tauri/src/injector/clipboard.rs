@@ -1,8 +1,11 @@
 //! Clipboard-based text injection
 
 use arboard::{Clipboard, ImageData};
+#[cfg(target_os = "windows")]
+use enigo::Key as EnigoKey;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use enigo::{Enigo, Keyboard, Settings};
+use enigo::{Direction, Enigo, Keyboard, Settings};
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 use rdev::{simulate, EventType, Key};
 use std::borrow::Cow;
 use std::thread;
@@ -22,6 +25,12 @@ const CLIPBOARD_WRITE_VERIFY_INTERVAL_MS: u64 = 20;
 const CLIPBOARD_PRE_PASTE_DELAY_MS: u64 = 120;
 #[cfg(not(target_os = "macos"))]
 const CLIPBOARD_PRE_PASTE_DELAY_MS: u64 = 80;
+
+/// Physical keycodes for a layout-independent Command+V shortcut on macOS.
+#[cfg(target_os = "macos")]
+const MACOS_COMMAND_KEYCODE: u16 = 55;
+#[cfg(target_os = "macos")]
+const MACOS_V_KEYCODE: u16 = 9;
 
 /// Do not restore the user's clipboard immediately after paste. Remote hosts
 /// often sync clipboard contents asynchronously and can otherwise paste stale
@@ -342,25 +351,61 @@ impl TextInjector {
 
     fn send_paste_command(&self) -> Result<(), InjectorError> {
         #[cfg(target_os = "macos")]
-        let modifiers = [Key::MetaLeft];
-
-        #[cfg(not(target_os = "macos"))]
-        let modifiers = [Key::ControlLeft];
-
-        let sequence = modifiers
-            .iter()
-            .map(|m| EventType::KeyPress(*m))
-            .chain(std::iter::once(EventType::KeyPress(Key::KeyV)))
-            .chain(std::iter::once(EventType::KeyRelease(Key::KeyV)))
-            .chain(modifiers.iter().rev().map(|m| EventType::KeyRelease(*m)));
-
-        for evt in sequence {
-            self.simulate_key(evt)?;
+        {
+            // Use Enigo here instead of raw rdev events so modifier flags are kept
+            // in sync with the generated key events. Otherwise macOS can occasionally
+            // treat the trailing V as a literal character instead of Command+V.
+            let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
+                InjectorError::PasteCommandFailed(format!("Failed to create Enigo: {e}"))
+            })?;
+            enigo
+                .raw(MACOS_COMMAND_KEYCODE, Direction::Press)
+                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
+            enigo
+                .raw(MACOS_V_KEYCODE, Direction::Click)
+                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
+            enigo
+                .raw(MACOS_COMMAND_KEYCODE, Direction::Release)
+                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
+            return Ok(());
         }
 
-        Ok(())
+        #[cfg(target_os = "windows")]
+        {
+            let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
+                InjectorError::PasteCommandFailed(format!("Failed to create Enigo: {e}"))
+            })?;
+            enigo
+                .key(EnigoKey::Control, Direction::Press)
+                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
+            enigo
+                .key(EnigoKey::V, Direction::Click)
+                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
+            enigo
+                .key(EnigoKey::Control, Direction::Release)
+                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
+            return Ok(());
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let modifiers = [Key::ControlLeft];
+            let sequence = modifiers
+                .iter()
+                .map(|m| EventType::KeyPress(*m))
+                .chain(std::iter::once(EventType::KeyPress(Key::KeyV)))
+                .chain(std::iter::once(EventType::KeyRelease(Key::KeyV)))
+                .chain(modifiers.iter().rev().map(|m| EventType::KeyRelease(*m)));
+
+            for evt in sequence {
+                self.simulate_key(evt)?;
+            }
+
+            Ok(())
+        }
     }
 
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn simulate_key(&self, evt: EventType) -> Result<(), InjectorError> {
         simulate(&evt).map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
         // Tiny delay to preserve key ordering for some hosts.
