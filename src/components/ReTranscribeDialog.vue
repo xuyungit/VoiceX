@@ -25,12 +25,16 @@ const enableLlm = ref(settingsStore.settings.enableLlmCorrection)
 const llmProvider = ref(settingsStore.settings.llmProviderType)
 
 const isRunning = ref(false)
+const runningAction = ref<'transcribe' | 'replayInject' | null>(null)
 const error = ref<string | null>(null)
 const result = ref<{
   asrText: string
   llmText: string | null
+  finalText: string
   asrModelName: string
   llmModelName: string | null
+  targetAppName?: string | null
+  injectionMode?: string | null
 } | null>(null)
 
 const asrProviderOptions = computed(() => buildAsrProviderOptions(t))
@@ -45,6 +49,7 @@ watch(() => props.show, (visible) => {
     error.value = null
     result.value = null
     isRunning.value = false
+    runningAction.value = null
   }
 })
 
@@ -52,6 +57,7 @@ async function startTranscribe() {
   if (!props.record?.audioPath) return
 
   isRunning.value = true
+  runningAction.value = 'transcribe'
   error.value = null
   result.value = null
 
@@ -59,6 +65,7 @@ async function startTranscribe() {
     const res = await invoke<{
       asrText: string
       llmText: string | null
+      finalText: string
       asrModelName: string
       llmModelName: string | null
     }>('re_transcribe', {
@@ -67,6 +74,7 @@ async function startTranscribe() {
         asrProvider: asrProvider.value,
         enableLlm: enableLlm.value,
         llmProvider: enableLlm.value ? llmProvider.value : null,
+        historyMode: props.record.mode
       }
     })
     result.value = res
@@ -74,6 +82,43 @@ async function startTranscribe() {
     error.value = String(e)
   } finally {
     isRunning.value = false
+    runningAction.value = null
+  }
+}
+
+async function startReplayInject() {
+  if (!props.record?.audioPath) return
+
+  isRunning.value = true
+  runningAction.value = 'replayInject'
+  error.value = null
+  result.value = null
+
+  try {
+    const res = await invoke<{
+      asrText: string
+      llmText: string | null
+      finalText: string
+      asrModelName: string
+      llmModelName: string | null
+      targetAppName: string | null
+      injectionMode: string
+    }>('replay_history_injection', {
+      request: {
+        audioPath: props.record.audioPath,
+        asrProvider: asrProvider.value,
+        enableLlm: enableLlm.value,
+        llmProvider: enableLlm.value ? llmProvider.value : null,
+        historyMode: props.record.mode,
+        delayMs: 3000
+      }
+    })
+    result.value = res
+  } catch (e) {
+    error.value = String(e)
+  } finally {
+    isRunning.value = false
+    runningAction.value = null
   }
 }
 
@@ -104,7 +149,7 @@ function originalRecordBody(record: HistoryRecord): string {
   const message = record.errorMessage?.trim()
   return message && message.length > 0
     ? message
-    : '这次转写失败了，但录音已经保留下来，可以直接重新转录。'
+    : t('history.reTranscribeFailedPlaceholder')
 }
 
 function close() {
@@ -119,7 +164,7 @@ function close() {
   <NModal
     :show="show"
     preset="card"
-    title="重新转录"
+    :title="t('history.reTranscribe')"
     style="max-width: 600px;"
     :mask-closable="!isRunning"
     :close-on-esc="!isRunning"
@@ -130,7 +175,7 @@ function close() {
       <!-- Settings -->
       <div class="settings-section">
         <div class="setting-row">
-          <span class="setting-label">ASR 模型</span>
+          <span class="setting-label">{{ t('history.reTranscribeAsrModel') }}</span>
           <NSelect
             v-model:value="asrProvider"
             :options="asrProviderOptions"
@@ -140,11 +185,11 @@ function close() {
           />
         </div>
         <div class="setting-row">
-          <span class="setting-label">LLM 纠错</span>
+          <span class="setting-label">{{ t('history.reTranscribeLlmCorrection') }}</span>
           <NSwitch v-model:value="enableLlm" :disabled="isRunning" />
         </div>
         <div v-if="enableLlm" class="setting-row">
-          <span class="setting-label">LLM 模型</span>
+          <span class="setting-label">{{ t('history.reTranscribeLlmModel') }}</span>
           <NSelect
             v-model:value="llmProvider"
             :options="llmProviderOptions"
@@ -157,14 +202,22 @@ function close() {
 
       <!-- Action -->
       <div class="action-section">
-        <NButton
-          v-if="!isRunning"
-          type="primary"
-          :disabled="!record?.audioPath"
-          @click="startTranscribe"
-        >
-          开始转录
-        </NButton>
+        <template v-if="!isRunning">
+          <NButton
+            type="primary"
+            :disabled="!record?.audioPath"
+            @click="startTranscribe"
+          >
+            {{ t('history.reTranscribeStart') }}
+          </NButton>
+          <NButton
+            secondary
+            :disabled="!record?.audioPath"
+            @click="startReplayInject"
+          >
+            {{ t('history.replayInjectStart') }}
+          </NButton>
+        </template>
         <NButton
           v-else
           type="warning"
@@ -173,8 +226,12 @@ function close() {
           <template #icon>
             <NSpin :size="14" />
           </template>
-          取消
+          {{ runningAction === 'replayInject' ? t('history.replayInjectCancel') : t('history.reTranscribeCancel') }}
         </NButton>
+      </div>
+
+      <div v-if="isRunning && runningAction === 'replayInject'" class="hint-section">
+        {{ t('history.replayInjectHint') }}
       </div>
 
       <!-- Error -->
@@ -186,11 +243,11 @@ function close() {
       <div v-if="record" class="result-block original-block">
           <div class="result-header">
             <div class="result-title">
-              原始记录
+              {{ t('history.originalRecord') }}
               <span v-if="record.asrModelName" class="result-model">{{ record.asrModelName }}<template v-if="record.llmModelName"> + {{ record.llmModelName }}</template></span>
             </div>
           <NButton quaternary size="tiny" :disabled="!hasOriginalText(record)" @click="copyText(record.text)">
-            复制
+            {{ t('common.copy') }}
           </NButton>
         </div>
         <div class="result-body muted">
@@ -203,11 +260,11 @@ function close() {
         <div class="result-block">
           <div class="result-header">
             <div class="result-title">
-              ASR 识别结果
+              {{ t('history.asrRecognitionResult') }}
               <span class="result-model">{{ result.asrModelName }}</span>
             </div>
             <NButton quaternary size="tiny" @click="copyText(result.asrText)">
-              复制
+              {{ t('common.copy') }}
             </NButton>
           </div>
           <div class="result-body">
@@ -218,15 +275,34 @@ function close() {
         <div v-if="result.llmText !== null" class="result-block">
           <div class="result-header">
             <div class="result-title">
-              LLM 纠错结果
+              {{ t('history.llmCorrectionResult') }}
               <span v-if="result.llmModelName" class="result-model">{{ result.llmModelName }}</span>
             </div>
             <NButton quaternary size="tiny" @click="copyText(result.llmText!)">
-              复制
+              {{ t('common.copy') }}
             </NButton>
           </div>
           <div class="result-body">
             {{ result.llmText }}
+          </div>
+        </div>
+
+        <div class="result-block">
+          <div class="result-header">
+            <div class="result-title">
+              {{ t('history.finalText') }}
+              <span v-if="result.targetAppName || result.injectionMode" class="result-model">
+                <template v-if="result.targetAppName">{{ result.targetAppName }}</template>
+                <template v-if="result.targetAppName && result.injectionMode"> · </template>
+                <template v-if="result.injectionMode">{{ result.injectionMode }}</template>
+              </span>
+            </div>
+            <NButton quaternary size="tiny" @click="copyText(result.finalText)">
+              {{ t('common.copy') }}
+            </NButton>
+          </div>
+          <div class="result-body">
+            {{ result.finalText }}
           </div>
         </div>
       </div>
@@ -263,6 +339,17 @@ function close() {
 .action-section {
   display: flex;
   justify-content: center;
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
+}
+
+.hint-section {
+  padding: var(--spacing-md);
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  background: rgba(96, 165, 250, 0.08);
+  color: var(--color-text-secondary);
+  font-size: var(--font-sm);
 }
 
 .error-section {

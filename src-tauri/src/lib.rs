@@ -295,6 +295,7 @@ pub fn run() {
             commands::settings::save_settings,
             commands::settings::probe_local_asr,
             commands::settings::probe_current_asr_provider,
+            commands::settings::probe_current_llm_provider,
             commands::settings::load_provider_probe_audio,
             commands::settings::get_soniox_debug_harness_status,
             commands::settings::start_soniox_debug_mock_server,
@@ -312,6 +313,7 @@ pub fn run() {
             commands::hotword::force_download_hotwords,
             commands::hotword::list_online_vocabularies,
             commands::retranscribe::re_transcribe,
+            commands::retranscribe::replay_history_injection,
             commands::retranscribe::cancel_retranscribe,
         ])
         .run(tauri::generate_context!())

@@ -22,6 +22,15 @@ impl LLMProviderType {
             _ => Self::Volcengine,
         }
     }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Volcengine => "Volcengine Doubao",
+            Self::Openai => "OpenAI",
+            Self::Qwen => "Qwen",
+            Self::Custom => "Custom",
+        }
+    }
 }
 
 /// OpenAI-compatible API mode
@@ -69,6 +78,20 @@ impl Default for LLMConfig {
 
 impl LLMConfig {
     pub fn is_valid(&self) -> bool {
-        !self.api_key.is_empty()
+        !self.api_key.trim().is_empty()
+    }
+
+    pub fn missing_request_fields(&self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if self.base_url.trim().is_empty() {
+            fields.push("base URL");
+        }
+        if self.api_key.trim().is_empty() {
+            fields.push("API key");
+        }
+        if self.model_name.trim().is_empty() {
+            fields.push("model name");
+        }
+        fields
     }
 }

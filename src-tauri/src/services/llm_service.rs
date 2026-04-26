@@ -1,4 +1,5 @@
 use crate::{
+    commands::settings::AppSettings,
     llm::{LLMApiMode, LLMClient, LLMConfig, LLMProviderType, PromptBuildOptions},
     services::history_service::HistoryService,
     state::ProcessingIntent,
@@ -12,6 +13,45 @@ pub struct LlmService;
 
 const LLM_HISTORY_LIMIT: u32 = 5;
 const LLM_CORRECTION_TIMEOUT_SECS: u64 = 8;
+
+pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
+    let provider_type = LLMProviderType::from_str(&settings.llm_provider_type);
+
+    match provider_type {
+        LLMProviderType::Volcengine => LLMConfig {
+            provider_type: LLMProviderType::Volcengine,
+            base_url: settings.llm_volcengine_base_url.clone(),
+            api_key: settings.llm_volcengine_api_key.clone(),
+            model_name: settings.llm_volcengine_model.clone(),
+            api_mode: LLMApiMode::ChatCompletions,
+            volcengine_reasoning_effort: settings.llm_volcengine_reasoning_effort.clone(),
+        },
+        LLMProviderType::Openai => LLMConfig {
+            provider_type: LLMProviderType::Openai,
+            base_url: settings.llm_openai_base_url.clone(),
+            api_key: settings.llm_openai_api_key.clone(),
+            model_name: settings.llm_openai_model.clone(),
+            api_mode: LLMApiMode::ChatCompletions,
+            volcengine_reasoning_effort: None,
+        },
+        LLMProviderType::Qwen => LLMConfig {
+            provider_type: LLMProviderType::Qwen,
+            base_url: settings.llm_qwen_base_url.clone(),
+            api_key: settings.llm_qwen_api_key.clone(),
+            model_name: settings.llm_qwen_model.clone(),
+            api_mode: LLMApiMode::ChatCompletions,
+            volcengine_reasoning_effort: None,
+        },
+        LLMProviderType::Custom => LLMConfig {
+            provider_type: LLMProviderType::Custom,
+            base_url: settings.llm_custom_base_url.clone(),
+            api_key: settings.llm_custom_api_key.clone(),
+            model_name: settings.llm_custom_model.clone(),
+            api_mode: LLMApiMode::from_str(&settings.llm_custom_api_mode),
+            volcengine_reasoning_effort: None,
+        },
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct LlmCorrectionResult {
@@ -51,48 +91,7 @@ impl LlmService {
             }
         };
 
-        let provider_type = LLMProviderType::from_str(&settings.llm_provider_type);
-
-        let (base_url, api_key, model_name, api_mode, volcengine_reasoning_effort) =
-            match provider_type {
-                LLMProviderType::Volcengine => (
-                    settings.llm_volcengine_base_url.clone(),
-                    settings.llm_volcengine_api_key.clone(),
-                    settings.llm_volcengine_model.clone(),
-                    LLMApiMode::ChatCompletions,
-                    settings.llm_volcengine_reasoning_effort.clone(),
-                ),
-                LLMProviderType::Openai => (
-                    settings.llm_openai_base_url.clone(),
-                    settings.llm_openai_api_key.clone(),
-                    settings.llm_openai_model.clone(),
-                    LLMApiMode::ChatCompletions,
-                    None,
-                ),
-                LLMProviderType::Qwen => (
-                    settings.llm_qwen_base_url.clone(),
-                    settings.llm_qwen_api_key.clone(),
-                    settings.llm_qwen_model.clone(),
-                    LLMApiMode::ChatCompletions,
-                    None,
-                ),
-                LLMProviderType::Custom => (
-                    settings.llm_custom_base_url.clone(),
-                    settings.llm_custom_api_key.clone(),
-                    settings.llm_custom_model.clone(),
-                    LLMApiMode::from_str(&settings.llm_custom_api_mode),
-                    None,
-                ),
-            };
-
-        let client = LLMClient::new(LLMConfig {
-            provider_type,
-            base_url,
-            api_key,
-            model_name,
-            api_mode,
-            volcengine_reasoning_effort,
-        });
+        let client = LLMClient::new(build_llm_config_from_settings(&settings));
 
         let (prompt_template, dictionary_text, history, prompt_options) = match intent {
             ProcessingIntent::Assistant => {

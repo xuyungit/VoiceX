@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-04-26
+
+### Added
+- **StepAudio 2.5 ASR** — added StepFun batch transcription via HTTP + SSE, including API key/model settings, provider selection, history metadata, and re-transcription support.
+- **Per-app text injection overrides** — Input Settings can now remember recent target apps and choose pasteboard or typing mode per application, so apps with special editor behavior can use their own injection strategy.
+- **LLM connectivity test** — Settings → LLM can send a real correction probe with the active provider and model, then show status, response time, test input, and model output.
+- **History replay injection test** — saved recordings can now be re-transcribed, post-processed, and injected into the current foreground app for end-to-end provider and injection checks.
+
+### Changed
+- Expanded VoiceX from eleven to twelve ASR backends.
+- Re-transcription now returns the final post-processed text in addition to ASR and LLM intermediate results, and it respects the original history mode when choosing assistant vs. translation prompts.
+- Clipboard injection and macOS paste shortcuts now use steadier timing to improve reliability in editors that process paste events slowly.
+- The compact HUD now keeps the processing intent chip visible during batch and compact states.
+
+### Fixed
+- Prevented the HUD from stealing input focus and preserved the original foreground app context when recording starts.
+- Hardened hotkey session races around rapid start/stop/cancel flows.
+- Empty Qwen sessions that exit because of silence are now handled without leaving stale session state.
+
 ## [0.9.5] - 2026-04-09
 
 ### Changed

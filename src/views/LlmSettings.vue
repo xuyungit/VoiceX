@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
 import { NInput, NSwitch, NButton, NSelect, NTabs, NTabPane } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ResolvedLocale } from '../i18n'
@@ -9,6 +10,16 @@ import { buildLlmApiModeOptions, buildLlmProviderOptions } from '../utils/llmOpt
 
 const settingsStore = useSettingsStore()
 const { t, locale } = useI18n()
+
+interface LlmProviderProbeResult {
+  provider: string
+  ok: boolean
+  responseTimeMs: number | null
+  requestText: string
+  responseText: string
+  expectedMatch: boolean
+  errorMessage: string | null
+}
 
 const providerOptions = computed(() => buildLlmProviderOptions(t))
 const apiModeOptions = computed(() => buildLlmApiModeOptions(t))
@@ -120,6 +131,9 @@ const isOpenai = computed(() => llmProviderType.value === 'openai')
 const isQwen = computed(() => llmProviderType.value === 'qwen')
 const isCustom = computed(() => llmProviderType.value === 'custom')
 const activePromptTab = ref<'assistant' | 'translation'>('assistant')
+const llmProbeLoading = ref(false)
+const llmProbeResult = ref<LlmProviderProbeResult | null>(null)
+const llmProbeError = ref('')
 
 const resolvedLocale = computed<ResolvedLocale>(() => {
   return locale.value === 'zh-CN' ? 'zh-CN' : 'en-US'
@@ -131,6 +145,20 @@ function resetPrompt() {
     return
   }
   translationPromptTemplate.value = getDefaultPrompt('translation', resolvedLocale.value)
+}
+
+async function runLlmProviderProbe() {
+  llmProbeLoading.value = true
+  llmProbeError.value = ''
+  try {
+    await settingsStore.forceSaveSettings()
+    llmProbeResult.value = await invoke<LlmProviderProbeResult>('probe_current_llm_provider')
+  } catch (error) {
+    llmProbeResult.value = null
+    llmProbeError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    llmProbeLoading.value = false
+  }
 }
 </script>
 
@@ -313,6 +341,57 @@ function resetPrompt() {
             />
           </div>
         </template>
+
+        <div class="field-row align-start">
+          <div class="field-text">
+            <div class="field-label">{{ t('llm.providerProbe') }}</div>
+            <div class="field-sub">{{ t('llm.providerProbeNote') }}</div>
+          </div>
+          <div class="probe-actions">
+            <NButton
+              :loading="llmProbeLoading"
+              type="primary"
+              secondary
+              size="small"
+              @click="runLlmProviderProbe"
+            >
+              {{ t('llm.providerProbeButton') }}
+            </NButton>
+          </div>
+        </div>
+
+        <div v-if="llmProbeResult" class="probe-result" :class="{ ok: llmProbeResult.ok, error: !llmProbeResult.ok }">
+          <div class="probe-line">
+            <span>{{ t('llm.providerProbeProvider') }}</span>
+            <strong>{{ llmProbeResult.provider }}</strong>
+          </div>
+          <div class="probe-line">
+            <span>{{ t('llm.providerProbeStatus') }}</span>
+            <strong>{{ llmProbeResult.ok ? t('llm.providerProbeStatusOk') : t('llm.providerProbeStatusFailed') }}</strong>
+          </div>
+          <div v-if="llmProbeResult.responseTimeMs !== null" class="probe-line">
+            <span>{{ t('llm.providerProbeLatency') }}</span>
+            <strong>{{ llmProbeResult.responseTimeMs }} ms</strong>
+          </div>
+          <div v-if="llmProbeResult.ok" class="probe-line">
+            <span>{{ t('llm.providerProbeCorrectionCheck') }}</span>
+            <strong>{{ llmProbeResult.expectedMatch ? t('llm.providerProbeCorrectionOk') : t('llm.providerProbeCorrectionUnchecked') }}</strong>
+          </div>
+          <div class="probe-result-label">{{ t('llm.providerProbeInput') }}</div>
+          <div class="probe-message">{{ llmProbeResult.requestText }}</div>
+          <div class="probe-result-label">{{ t('llm.providerProbeOutput') }}</div>
+          <div class="probe-message">
+            {{ llmProbeResult.responseText || t('llm.providerProbeOutputEmpty') }}
+          </div>
+        </div>
+
+        <div v-if="llmProbeResult?.errorMessage" class="warning-box">
+          {{ llmProbeResult.errorMessage }}
+        </div>
+
+        <div v-if="llmProbeError" class="warning-box">
+          {{ llmProbeError }}
+        </div>
       </div>
     </div>
 
@@ -395,6 +474,10 @@ function resetPrompt() {
   gap: var(--spacing-lg);
 }
 
+.field-row.align-start {
+  align-items: flex-start;
+}
+
 .field-text {
   display: flex;
   flex-direction: column;
@@ -419,5 +502,70 @@ function resetPrompt() {
 
 .field-control.short {
   width: 260px;
+}
+
+.probe-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.probe-result {
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  display: grid;
+  gap: 8px;
+}
+
+.probe-result.ok {
+  border-color: rgba(74, 222, 128, 0.28);
+  background: rgba(74, 222, 128, 0.08);
+}
+
+.probe-result.error {
+  border-color: rgba(248, 113, 113, 0.28);
+  background: rgba(248, 113, 113, 0.08);
+}
+
+.probe-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--font-xs);
+  color: var(--color-text-secondary);
+}
+
+.probe-line strong {
+  color: var(--color-text-primary);
+  text-align: right;
+  word-break: break-word;
+}
+
+.probe-result-label {
+  font-size: var(--font-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.probe-message {
+  font-size: var(--font-xs);
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  word-break: break-word;
+  user-select: text;
+}
+
+.warning-box {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, #9a3412 35%, var(--color-border));
+  background: color-mix(in srgb, #9a3412 10%, var(--color-bg-secondary));
+  color: #9a3412;
+  font-size: var(--font-xs);
+  line-height: 1.5;
+  user-select: text;
 }
 </style>

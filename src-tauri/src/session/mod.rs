@@ -1216,7 +1216,9 @@ impl SessionController {
     }
 
     fn next_audio_epoch(&self) -> u64 {
-        self.audio_epoch.fetch_add(1, Ordering::SeqCst).saturating_add(1)
+        self.audio_epoch
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1)
     }
 
     fn current_audio_epoch(&self) -> u64 {
@@ -1476,7 +1478,10 @@ mod tests {
             },
         );
 
-        assert_eq!(path_string(state.session_audio_path.as_ref()), Some("active.ogg".into()));
+        assert_eq!(
+            path_string(state.session_audio_path.as_ref()),
+            Some("active.ogg".into())
+        );
         assert_eq!(state.session_sample_rate, Some(16_000));
         assert_eq!(state.session_channels, Some(1));
 
@@ -1491,7 +1496,10 @@ mod tests {
             },
         );
 
-        assert_eq!(path_string(state.session_audio_path.as_ref()), Some("active.ogg".into()));
+        assert_eq!(
+            path_string(state.session_audio_path.as_ref()),
+            Some("active.ogg".into())
+        );
         assert_eq!(
             path_string(state.session_refinement_audio_path.as_ref()),
             Some("active.wav".into())

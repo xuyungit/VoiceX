@@ -1,6 +1,6 @@
 [package]
 name = "voicex"
-version = "0.9.5"
+version = "0.10.0"
 description = "Cross-platform voice input application with ASR"
 authors = ["VoiceX Contributors"]
 license = "MIT"

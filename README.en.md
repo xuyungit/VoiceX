@@ -19,8 +19,8 @@ VoiceX is a cross-platform desktop voice input tool. Its overall pipeline is: re
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
 - **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status, and on macOS it follows the active Space when triggered from another desktop.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
-- **Smart text injection** — recognized text is pasted into the active app via clipboard (with automatic backup/restore) or simulated typing, seamlessly.
-- **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with audio playback and re-transcription.
+- **Smart text injection** — recognized text is pasted into the active app via clipboard (with automatic backup/restore) or simulated typing, with per-app overrides for apps that need a different injection strategy.
+- **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with audio playback, re-transcription, and replay injection testing.
 - **Cross-device sync** — a self-hosted sync server keeps history in sync across your machines.
 
 ## Interaction Modes
@@ -73,6 +73,7 @@ Features:
 - **ASR correction** — fix recognition errors using dictionary context and customizable prompts.
 - **Translation** — translate dictation to English, triggered by double-tap gesture.
 - **Prompt templates** — full control over correction and translation prompts, with `{{DICTIONARY}}` placeholder for hot-word injection.
+- **Connectivity test** — send one real correction request with the active provider and model to inspect latency and output quality.
 
 ## Dictionary & Hot-Words
 
@@ -85,11 +86,17 @@ Features:
 - **Smart punctuation cleanup** — auto-remove trailing punctuation from short sentences (configurable threshold).
 - **Keyword substitution** — regex/exact/contains replacement rules applied before text injection.
 
+## Text Injection
+
+- Global support for clipboard paste and simulated typing modes.
+- Per-app overrides can be created from recent target apps, so standard text fields can keep clipboard paste while editors that are sensitive to paste events can switch to typing.
+- On macOS, VoiceX records the target app when the hotkey starts, reducing the chance that the HUD or main window changes the injection target.
+
 ## History & Statistics
 
 - Full history grouped by date, with per-record audio playback, copy, and detail view.
 - Side-by-side comparison of original ASR output vs. LLM-corrected text.
-- Re-transcribe any saved recording with a different ASR backend and optional LLM correction to compare providers on the same audio.
+- Re-transcribe any saved recording with a different ASR backend and optional LLM correction to compare providers on the same audio; replay the final text into the current app to test the full end-to-end flow.
 - Failed batch transcriptions are preserved locally with the original audio so you can retry later instead of repeating the whole dictation immediately.
 - Configurable retention policies for text and audio (7 / 30 / 180 / 365 days, or forever).
 - Overview dashboard: total duration, character count, AI correction calls, average dictation speed — aggregated per device.

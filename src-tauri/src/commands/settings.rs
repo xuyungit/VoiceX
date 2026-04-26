@@ -9,8 +9,10 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::time::timeout;
 
 use crate::foreground_app::{RecentTargetApp, TextInjectionAppOverride};
+use crate::llm::{LLMClient, PromptBuildOptions};
 use crate::services::{
     asr_debug_service::{AsrDebugService, SonioxDebugHarnessStatus, SonioxMockScenario},
+    llm_service::build_llm_config_from_settings,
     sync_service::SyncService,
 };
 use crate::session::SessionController;
@@ -198,6 +200,18 @@ pub struct AsrProviderProbeResult {
     pub error_message: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmProviderProbeResult {
+    pub provider: String,
+    pub ok: bool,
+    pub response_time_ms: Option<u64>,
+    pub request_text: String,
+    pub response_text: String,
+    pub expected_match: bool,
+    pub error_message: Option<String>,
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -331,6 +345,9 @@ impl Default for AppSettings {
 
 const PROVIDER_PROBE_AUDIO_BYTES: &[u8] = include_bytes!("../../provider-probe.ogg");
 const PROVIDER_PROBE_TIMEOUT_SECS: u64 = 90;
+const LLM_PROVIDER_PROBE_TIMEOUT_SECS: u64 = 10;
+const LLM_PROVIDER_PROBE_INPUT: &str = "今天开会的记要我已经发到群里了，麻烦帮我看一下有没有问题。";
+const LLM_PROVIDER_PROBE_PROMPT: &str = "你是 VoiceX 的文本纠错器。只修正明显错别字、标点和口语重复，保持原意。只输出纠正后的文本，不要输出解释。";
 
 fn probe_provider_name(provider: &crate::asr::AsrProviderType) -> &'static str {
     match provider {
@@ -525,6 +542,98 @@ async fn probe_current_provider_impl(
     Ok(result)
 }
 
+async fn probe_current_llm_provider_impl(
+    config: crate::llm::LLMConfig,
+) -> Result<LlmProviderProbeResult, String> {
+    let provider_name = config.provider_type.display_name().to_string();
+    let request_text = LLM_PROVIDER_PROBE_INPUT.to_string();
+    let missing_fields = config.missing_request_fields();
+
+    if !missing_fields.is_empty() {
+        return Ok(LlmProviderProbeResult {
+            provider: provider_name,
+            ok: false,
+            response_time_ms: None,
+            request_text,
+            response_text: String::new(),
+            expected_match: false,
+            error_message: Some(format!(
+                "Current LLM configuration is incomplete or invalid: missing {}.",
+                missing_fields.join(", ")
+            )),
+        });
+    }
+
+    let client = LLMClient::new(config);
+    let started_at = Instant::now();
+    let probe = timeout(
+        Duration::from_secs(LLM_PROVIDER_PROBE_TIMEOUT_SECS),
+        client.correct(
+            LLM_PROVIDER_PROBE_INPUT,
+            LLM_PROVIDER_PROBE_PROMPT,
+            "",
+            None,
+            PromptBuildOptions {
+                append_dictionary_if_missing: false,
+                append_history_if_missing: false,
+            },
+        ),
+    )
+    .await;
+
+    let response_time_ms = Some(elapsed_ms(started_at));
+    let result = match probe {
+        Ok(Ok(text)) => {
+            let trimmed = text.trim().to_string();
+            if trimmed.is_empty() {
+                LlmProviderProbeResult {
+                    provider: provider_name,
+                    ok: false,
+                    response_time_ms,
+                    request_text,
+                    response_text: String::new(),
+                    expected_match: false,
+                    error_message: Some("The provider returned an empty response.".to_string()),
+                }
+            } else {
+                let expected_match = trimmed.contains("纪要");
+                LlmProviderProbeResult {
+                    provider: provider_name,
+                    ok: true,
+                    response_time_ms,
+                    request_text,
+                    response_text: trimmed,
+                    expected_match,
+                    error_message: None,
+                }
+            }
+        }
+        Ok(Err(err)) => LlmProviderProbeResult {
+            provider: provider_name,
+            ok: false,
+            response_time_ms,
+            request_text,
+            response_text: String::new(),
+            expected_match: false,
+            error_message: Some(err.to_string()),
+        },
+        Err(_) => LlmProviderProbeResult {
+            provider: provider_name,
+            ok: false,
+            response_time_ms,
+            request_text,
+            response_text: String::new(),
+            expected_match: false,
+            error_message: Some(format!(
+                "LLM test timed out after {} seconds.",
+                LLM_PROVIDER_PROBE_TIMEOUT_SECS
+            )),
+        },
+    };
+
+    Ok(result)
+}
+
 /// Get current settings
 #[tauri::command]
 pub fn get_settings() -> Result<AppSettings, String> {
@@ -634,6 +743,13 @@ pub async fn probe_current_asr_provider() -> Result<AsrProviderProbeResult, Stri
     let settings = crate::storage::get_settings().map_err(|err| err.to_string())?;
     let config = crate::asr::AsrConfig::from(&settings);
     probe_current_provider_impl(config).await
+}
+
+#[tauri::command]
+pub async fn probe_current_llm_provider() -> Result<LlmProviderProbeResult, String> {
+    let settings = crate::storage::get_settings().map_err(|err| err.to_string())?;
+    let config = build_llm_config_from_settings(&settings);
+    probe_current_llm_provider_impl(config).await
 }
 
 #[tauri::command]
