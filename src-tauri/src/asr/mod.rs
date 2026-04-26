@@ -22,6 +22,7 @@ mod protocol;
 pub mod qwen_client;
 pub mod qwen_transcription_client;
 pub mod soniox_client;
+pub mod stepaudio_client;
 mod transcription;
 pub mod volc_auth;
 
@@ -47,6 +48,7 @@ pub use protocol::{AsrError, AsrEvent, AsrFailure, AsrFailureKind, AsrPhase};
 pub use qwen_client::QwenRealtimeClient;
 pub use qwen_transcription_client::QwenTranscriptionClient;
 pub use soniox_client::SonioxClient;
+pub use stepaudio_client::StepAudioTranscriptionClient;
 pub use transcription::{
     transcribe_audio_path, transcribe_audio_path_detailed, AsrTranscriptionOutcome,
 };

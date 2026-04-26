@@ -24,6 +24,7 @@ const ASR_DISPLAY_NAMES: Record<string, string> = {
   cohere: 'Cohere',
   openai: 'OpenAI',
   soniox: 'Soniox',
+  stepaudio: 'StepAudio',
   coli: 'coli (local)'
 }
 

@@ -10,6 +10,7 @@ use crate::asr::{
     ElevenLabsTranscriptionClient, FunAsrRealtimeClient, GeminiLiveClient,
     GeminiTranscriptionClient, GoogleSttClient, OpenAIRealtimeClient, OpenAITranscriptionClient,
     QwenRealtimeClient, QwenRecognitionMode, QwenTranscriptionClient, SonioxClient,
+    StepAudioTranscriptionClient,
 };
 use crate::services::history_service::HistoryService;
 
@@ -46,9 +47,25 @@ pub async fn transcribe_audio_path_detailed(
         AsrProviderType::Cohere => run_cohere_asr(path, config).await,
         AsrProviderType::OpenAI => run_openai_asr(path, config).await,
         AsrProviderType::ElevenLabs => run_elevenlabs_asr(path, config).await,
+        AsrProviderType::StepAudio => run_stepaudio_asr(path, config).await,
         AsrProviderType::Google => run_google_asr(path, config, cancel).await,
         _ => run_streaming_asr(path, config, cancel).await,
     }
+}
+
+async fn run_stepaudio_asr(
+    path: &PathBuf,
+    config: &AsrConfig,
+) -> Result<AsrTranscriptionOutcome, String> {
+    let client = StepAudioTranscriptionClient::new(config.clone());
+    let text = client
+        .transcribe_file(path)
+        .await
+        .map_err(|e| format!("StepAudio ASR 失败: {}", e))?;
+    Ok(AsrTranscriptionOutcome {
+        text,
+        model_name: HistoryService::format_provider_model("StepAudio", &config.stepaudio_model),
+    })
 }
 
 async fn run_qwen_asr(
@@ -360,6 +377,7 @@ async fn run_streaming_asr(
         AsrProviderType::OpenAI if config.openai_asr_mode == "realtime" => 50,
         AsrProviderType::OpenAI => unreachable!("OpenAI should use file-based transcription"),
         AsrProviderType::ElevenLabs => 100,
+        AsrProviderType::StepAudio => unreachable!("StepAudio should use file-based transcription"),
         _ => 30,
     };
     tokio::spawn(async move {
@@ -449,6 +467,9 @@ async fn run_streaming_asr(
             client
                 .stream_session(16000, 1, rx, cancel.clone(), history, on_event)
                 .await
+        }
+        AsrProviderType::StepAudio => {
+            unreachable!("StepAudio should use file-based transcription")
         }
         AsrProviderType::Coli => {
             unreachable!("Coli should use refine_file path")

@@ -1032,9 +1032,9 @@ fn select_batch_audio_path(state: &AppState, config: &AsrConfig) -> Option<PathB
         .filter(|path| path.is_file());
 
     match config.provider_type {
-        // Qwen batch mode supports ogg/opus and has a strict 10 MB cap.
-        // Prefer the compressed capture artifact over the temporary refinement WAV.
-        AsrProviderType::Qwen => opus_path.or(refinement_path),
+        // These batch providers accept ogg/opus directly. Prefer the compressed
+        // capture artifact over the temporary refinement WAV.
+        AsrProviderType::Qwen | AsrProviderType::StepAudio => opus_path.or(refinement_path),
         _ => refinement_path.or(opus_path),
     }
 }

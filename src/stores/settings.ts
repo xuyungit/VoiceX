@@ -9,7 +9,7 @@ export interface AppSettings {
     uiLanguage: UiLanguage
 
     // ASR
-    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'coli'
+    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'coli'
     asrAppKey: string
     asrAccessKey: string
     asrResourceId: string
@@ -76,6 +76,12 @@ export interface AppSettings {
     sonioxModel: string
     sonioxLanguage: string
     sonioxMaxEndpointDelayMs: number | null
+
+    // ASR Provider: StepAudio
+    stepaudioApiKey: string
+    stepaudioModel: string
+    stepaudioBaseUrl: string
+    stepaudioLanguage: 'auto' | 'zh' | 'en' | ''
 
     // LLM
     enableLlmCorrection: boolean
@@ -247,6 +253,10 @@ const defaultSettings: AppSettings = {
     sonioxModel: 'stt-rt-v4',
     sonioxLanguage: '',
     sonioxMaxEndpointDelayMs: null,
+    stepaudioApiKey: '',
+    stepaudioModel: 'stepaudio-2.5-asr',
+    stepaudioBaseUrl: 'https://api.stepfun.com/v1',
+    stepaudioLanguage: 'auto',
 
     enableLlmCorrection: false,
     llmProviderType: 'volcengine',

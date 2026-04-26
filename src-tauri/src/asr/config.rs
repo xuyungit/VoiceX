@@ -15,6 +15,7 @@ pub enum AsrProviderType {
     OpenAI,
     ElevenLabs,
     Soniox,
+    StepAudio,
     Coli,
 }
 
@@ -37,6 +38,7 @@ impl AsrProviderType {
             Self::OpenAI => "OpenAI Realtime",
             Self::ElevenLabs => "ElevenLabs",
             Self::Soniox => "Soniox",
+            Self::StepAudio => "StepAudio",
             Self::Coli => "coli",
         }
     }
@@ -209,6 +211,12 @@ pub struct AsrConfig {
     pub soniox_language: String,
     pub soniox_max_endpoint_delay_ms: Option<u32>,
 
+    // StepAudio 2.5 ASR settings
+    pub stepaudio_api_key: String,
+    pub stepaudio_model: String,
+    pub stepaudio_base_url: String,
+    pub stepaudio_language: String,
+
     // Local ASR via `coli`
     pub coli_command_path: String,
     pub coli_use_vad: bool,
@@ -293,6 +301,10 @@ impl Default for AsrConfig {
             soniox_model: "stt-rt-v4".to_string(),
             soniox_language: String::new(),
             soniox_max_endpoint_delay_ms: None,
+            stepaudio_api_key: String::new(),
+            stepaudio_model: "stepaudio-2.5-asr".to_string(),
+            stepaudio_base_url: "https://api.stepfun.com/v1".to_string(),
+            stepaudio_language: "auto".to_string(),
             coli_command_path: String::new(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
@@ -329,6 +341,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             "openai" => AsrProviderType::OpenAI,
             "elevenlabs" => AsrProviderType::ElevenLabs,
             "soniox" => AsrProviderType::Soniox,
+            "stepaudio" => AsrProviderType::StepAudio,
             "coli" => AsrProviderType::Coli,
             _ => AsrProviderType::Volcengine,
         };
@@ -388,6 +401,10 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             soniox_model: settings.soniox_model.clone(),
             soniox_language: settings.soniox_language.clone(),
             soniox_max_endpoint_delay_ms: settings.soniox_max_endpoint_delay_ms,
+            stepaudio_api_key: settings.stepaudio_api_key.clone(),
+            stepaudio_model: settings.stepaudio_model.clone(),
+            stepaudio_base_url: settings.stepaudio_base_url.clone(),
+            stepaudio_language: settings.stepaudio_language.clone(),
             coli_command_path: settings.coli_command_path.clone(),
             coli_use_vad: settings.coli_use_vad,
             coli_asr_interval_ms: settings.coli_asr_interval_ms,
@@ -510,6 +527,12 @@ impl AsrConfig {
                 supports_batch: false,
                 supports_post_recording_batch_refine: false,
             },
+            AsrProviderType::StepAudio => AsrProviderCapabilities {
+                supports_realtime: false,
+                supports_realtime_with_final_pass: false,
+                supports_batch: true,
+                supports_post_recording_batch_refine: false,
+            },
             AsrProviderType::Coli => AsrProviderCapabilities {
                 supports_realtime: true,
                 supports_realtime_with_final_pass: true,
@@ -563,6 +586,7 @@ impl AsrConfig {
             }
             AsrProviderType::ElevenLabs => AsrPipelineMode::Realtime,
             AsrProviderType::Soniox => AsrPipelineMode::Realtime,
+            AsrProviderType::StepAudio => AsrPipelineMode::Batch,
             AsrProviderType::Coli if !self.coli_realtime => AsrPipelineMode::Batch,
             AsrProviderType::Coli
                 if self.coli_final_refinement_mode != crate::asr::ColiRefinementMode::Off =>
@@ -577,6 +601,7 @@ impl AsrConfig {
         match (self.provider_type, self.pipeline_mode()) {
             (AsrProviderType::Qwen, AsrPipelineMode::Batch)
             | (AsrProviderType::Qwen, AsrPipelineMode::RealtimeWithFinalPass) => Some(5),
+            (AsrProviderType::StepAudio, AsrPipelineMode::Batch) => Some(30),
             _ => None,
         }
     }
@@ -666,6 +691,11 @@ impl AsrConfig {
                     }
             }
             AsrProviderType::Soniox => !self.soniox_api_key.is_empty(),
+            AsrProviderType::StepAudio => {
+                !self.stepaudio_api_key.trim().is_empty()
+                    && !self.stepaudio_model.trim().is_empty()
+                    && !self.stepaudio_base_url.trim().is_empty()
+            }
             AsrProviderType::Coli => {
                 crate::asr::resolve_coli_command(&self.coli_command_path).is_some()
             }
@@ -698,6 +728,17 @@ mod tests {
         assert_eq!(config.pipeline_mode(), AsrPipelineMode::Realtime);
         assert!(!config.capabilities().supports_batch);
         assert!(!config.capabilities().supports_realtime_with_final_pass);
+    }
+
+    #[test]
+    fn stepaudio_pipeline_mode_is_batch_with_thirty_minute_cap() {
+        let mut config = AsrConfig::default();
+        config.provider_type = AsrProviderType::StepAudio;
+
+        assert_eq!(config.pipeline_mode(), AsrPipelineMode::Batch);
+        assert!(config.capabilities().supports_batch);
+        assert!(!config.capabilities().supports_realtime);
+        assert_eq!(config.max_recording_minutes_limit(), Some(30));
     }
 
     #[test]

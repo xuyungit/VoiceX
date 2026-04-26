@@ -320,6 +320,9 @@ impl HistoryService {
                 }
             },
             AsrProviderType::Soniox => Self::format_provider_model("Soniox", &config.soniox_model),
+            AsrProviderType::StepAudio => {
+                Self::format_provider_model("StepAudio", &config.stepaudio_model)
+            }
             AsrProviderType::Coli => match config.pipeline_mode() {
                 AsrPipelineMode::Batch => Some("Local / coli / batch / sensevoice".to_string()),
                 AsrPipelineMode::RealtimeWithFinalPass => match config.coli_final_refinement_mode {

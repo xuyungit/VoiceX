@@ -10,6 +10,7 @@ export type OpenAiPostRecordingRefine = AppSettings['openaiAsrPostRecordingRefin
 export type ColiRecognitionMode = BatchCapableRecognitionMode
 export type ColiPostRecordingRefine = AppSettings['coliFinalRefinementMode']
 export const QWEN_BATCH_RECORDING_LIMIT_MINUTES = 5
+export const STEPAUDIO_RECORDING_LIMIT_MINUTES = 30
 
 type ProviderOption<T extends string> = {
   label: string
@@ -29,7 +30,8 @@ const ASR_PROVIDER_LABEL_KEYS: Array<{ key: string; value: Exclude<AsrProviderVa
   { key: 'asr.providerCohere', value: 'cohere' },
   { key: 'asr.providerOpenAI', value: 'openai' },
   { key: 'asr.providerElevenLabs', value: 'elevenlabs' },
-  { key: 'asr.providerSoniox', value: 'soniox' }
+  { key: 'asr.providerSoniox', value: 'soniox' },
+  { key: 'asr.providerStepAudio', value: 'stepaudio' }
 ]
 
 const ELEVENLABS_RECOGNITION_MODE_LABEL_KEYS: Array<{
@@ -188,6 +190,10 @@ export function resolveQwenRecordingHardLimitMinutes(
 export function resolveAsrRecordingHardLimitMinutes(
   settings: Pick<AppSettings, 'asrProviderType' | 'qwenAsrRecognitionMode' | 'qwenAsrPostRecordingRefine'>
 ): number | null {
+  if (settings.asrProviderType === 'stepaudio') {
+    return STEPAUDIO_RECORDING_LIMIT_MINUTES
+  }
+
   if (settings.asrProviderType !== 'qwen') {
     return null
   }

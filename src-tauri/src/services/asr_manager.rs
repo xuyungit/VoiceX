@@ -320,6 +320,10 @@ impl AsrManager {
                     )
                     .await
             }
+            AsrProviderType::StepAudio => {
+                log::warn!("StepAudio ASR is batch-only and should not enter streaming mode");
+                Ok(())
+            }
             AsrProviderType::Coli => {
                 let command_path = crate::asr::resolve_coli_command(&config.coli_command_path)
                     .map(|path| path.display().to_string())
