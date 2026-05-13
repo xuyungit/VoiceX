@@ -1,18 +1,19 @@
 use crate::{
     commands::settings::AppSettings,
-    llm::{LLMApiMode, LLMClient, LLMConfig, LLMProviderType, PromptBuildOptions},
+    llm::{
+        correction_timeout_for_text, LLMApiMode, LLMClient, LLMConfig, LLMProviderType,
+        PromptBuildOptions,
+    },
     services::history_service::HistoryService,
     state::ProcessingIntent,
     storage,
 };
-use std::time::Duration;
 
 /// Handles optional LLM correction, returning corrected text plus invocation metadata.
 #[derive(Clone, Default)]
 pub struct LlmService;
 
 const LLM_HISTORY_LIMIT: u32 = 5;
-const LLM_CORRECTION_TIMEOUT_SECS: u64 = 8;
 
 pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
     let provider_type = LLMProviderType::from_str(&settings.llm_provider_type);
@@ -134,8 +135,10 @@ impl LlmService {
             }
         };
 
+        let correction_timeout = correction_timeout_for_text(trimmed);
+
         match tokio::time::timeout(
-            Duration::from_secs(LLM_CORRECTION_TIMEOUT_SECS),
+            correction_timeout,
             client.correct(
                 trimmed,
                 &prompt_template,
@@ -165,7 +168,7 @@ impl LlmService {
             Err(_) => {
                 log::warn!(
                     "LLM correction timed out after {}s; using original text",
-                    LLM_CORRECTION_TIMEOUT_SECS
+                    correction_timeout.as_secs()
                 );
                 LlmCorrectionResult {
                     text: text.to_string(),

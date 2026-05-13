@@ -12,7 +12,10 @@ use crate::asr::{transcribe_audio_path, transcribe_audio_path_detailed, AsrConfi
 use crate::commands::settings::AppSettings;
 use crate::foreground_app::{detect_foreground_app, match_text_injection_override};
 use crate::injector::{inject_serialized, TextInjectionMode};
-use crate::llm::{LLMApiMode, LLMClient, LLMConfig, LLMProviderType, PromptBuildOptions};
+use crate::llm::{
+    correction_timeout_for_text, LLMApiMode, LLMClient, LLMConfig, LLMProviderType,
+    PromptBuildOptions,
+};
 use crate::services::{
     history_service::HistoryService, post_processing_service::PostProcessingService,
 };
@@ -27,7 +30,6 @@ fn cancel_store() -> &'static Mutex<Option<CancellationToken>> {
 }
 
 const OVERALL_TIMEOUT_SECS: u64 = 300;
-const LLM_TIMEOUT_SECS: u64 = 8;
 const DEFAULT_REPLAY_DELAY_MS: u64 = 3_000;
 
 #[derive(Debug, Deserialize)]
@@ -406,8 +408,10 @@ async fn run_llm_correction(
 
     let llm_model_name = HistoryService::resolve_llm_model_name(settings);
 
+    let correction_timeout = correction_timeout_for_text(asr_text);
+
     match tokio::time::timeout(
-        Duration::from_secs(LLM_TIMEOUT_SECS),
+        correction_timeout,
         client.correct(
             asr_text.trim(),
             &prompt_template,
@@ -424,7 +428,10 @@ async fn run_llm_correction(
             (None, llm_model_name)
         }
         Err(_) => {
-            log::warn!("Re-transcribe LLM correction timed out");
+            log::warn!(
+                "Re-transcribe LLM correction timed out after {}s",
+                correction_timeout.as_secs()
+            );
             (None, llm_model_name)
         }
     }
