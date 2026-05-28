@@ -511,7 +511,7 @@ async fn run_once(
             },
             Message {
                 role: "user".into(),
-                content: format!("原文：\n{}", input),
+                content: format!("原文：\n{}", timestamped_input(input)),
             },
         ],
         temperature: None,
@@ -623,7 +623,7 @@ async fn run_once_response(
 ) -> RoundResult {
     let mut request = ResponseApiRequest {
         model: provider.model.clone(),
-        input: serde_json::json!(format!("原文：\n{}", input)),
+        input: serde_json::json!(format!("原文：\n{}", timestamped_input(input))),
         instructions: Some(system_prompt.to_string()),
         temperature: None,
         max_output_tokens: None,
@@ -736,7 +736,7 @@ async fn run_once_gemini(
         }),
         contents: vec![GeminiContent {
             role: Some("user".into()),
-            parts: vec![GeminiPart { text: format!("原文：\n{}", input) }],
+            parts: vec![GeminiPart { text: format!("原文：\n{}", timestamped_input(input)) }],
         }],
         generation_config: Some(GeminiGenerationConfig {
             temperature: Some(0.2),
@@ -829,6 +829,15 @@ async fn run_once_gemini(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+fn timestamped_input(input: &str) -> String {
+    let now = chrono::Local::now();
+    format!(
+        "现在的时间是 {}\n{}",
+        now.format("%Y年%m月%d日 %H时%M分%S秒"),
+        input
+    )
+}
 
 fn toml_to_json(v: &toml::Value) -> serde_json::Value {
     match v {
