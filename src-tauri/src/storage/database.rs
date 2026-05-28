@@ -180,9 +180,84 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     ensure_column(&conn, "sync_server_state", "usage_seq", "INTEGER DEFAULT 0")?;
     ensure_column(&conn, "sync_server_state", "seeded_at", "TEXT")?;
 
+    // Upgrade the persisted settings blob in place (e.g. legacy single custom
+    // LLM endpoint -> named endpoints array). Best-effort: never block startup.
+    migrate_settings_blob(&conn);
+
     let _ = DB.set(Mutex::new(conn));
     log::info!("Database initialized at {:?}", path);
     Ok(())
+}
+
+/// One-time, idempotent upgrade of the `app_settings` JSON blob at startup.
+///
+/// Settings are stored as a single JSON document (no per-field columns), so
+/// schema "migrations" here are JSON-shape transforms. `get_settings` already
+/// applies them on read; doing it once eagerly at startup persists the cleaned
+/// form (dropping legacy fields, stabilizing generated ids) instead of leaving
+/// it to the next user-triggered save.
+///
+/// Best-effort by design: any failure is logged and startup proceeds, because
+/// `get_settings` still migrates on read as a fallback.
+fn migrate_settings_blob(conn: &Connection) {
+    let raw_json: Option<String> = match conn
+        .query_row(
+            "SELECT value FROM user_config WHERE key = 'app_settings' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+    {
+        Ok(value) => value,
+        Err(e) => {
+            log::warn!("Settings migration skipped (read failed): {}", e);
+            return;
+        }
+    };
+
+    let Some(json) = raw_json else {
+        return; // No settings persisted yet; nothing to migrate.
+    };
+
+    let mut value: serde_json::Value = match serde_json::from_str(&json) {
+        Ok(value) => value,
+        Err(e) => {
+            // Leave the blob untouched; get_settings handles the fallback.
+            log::warn!("Settings migration skipped (parse failed): {}", e);
+            return;
+        }
+    };
+
+    let migrated = crate::commands::settings::migrate_llm_custom_endpoints(&mut value);
+    if !migrated {
+        return;
+    }
+
+    // Re-serialize through AppSettings so legacy fields are dropped and the
+    // canonical shape is persisted.
+    let settings: AppSettings = match serde_json::from_value(value) {
+        Ok(settings) => settings,
+        Err(e) => {
+            log::warn!("Settings migration skipped (deserialize failed): {}", e);
+            return;
+        }
+    };
+    let payload = match serde_json::to_string(&settings) {
+        Ok(payload) => payload,
+        Err(e) => {
+            log::warn!("Settings migration skipped (serialize failed): {}", e);
+            return;
+        }
+    };
+
+    match conn.execute(
+        "INSERT INTO user_config (key, value) VALUES ('app_settings', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![payload],
+    ) {
+        Ok(_) => log::info!("Migrated persisted settings: custom LLM endpoints -> named array"),
+        Err(e) => log::warn!("Settings migration write-back failed: {}", e),
+    }
 }
 
 fn with_db<T, F>(f: F) -> Result<T, StorageError>
@@ -1205,4 +1280,101 @@ pub enum StorageError {
 
     #[error("File operation failed: {0}")]
     FileOpFailed(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE user_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn read_settings_blob(conn: &Connection) -> serde_json::Value {
+        let json: String = conn
+            .query_row(
+                "SELECT value FROM user_config WHERE key = 'app_settings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn migrate_settings_blob_persists_named_endpoint_and_drops_legacy_fields() {
+        let conn = setup_conn();
+        let legacy = r#"{
+            "llmProviderType": "custom",
+            "llmCustomBaseUrl": "https://api.deepseek.com",
+            "llmCustomApiKey": "sk-legacy",
+            "llmCustomModel": "deepseek-v4-flash",
+            "llmCustomApiMode": "chat_completions"
+        }"#;
+        conn.execute(
+            "INSERT INTO user_config (key, value) VALUES ('app_settings', ?1)",
+            params![legacy],
+        )
+        .unwrap();
+
+        migrate_settings_blob(&conn);
+
+        let value = read_settings_blob(&conn);
+        // New shape persisted.
+        let endpoints = value["llmCustomEndpoints"].as_array().unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0]["baseUrl"], "https://api.deepseek.com");
+        assert_eq!(endpoints[0]["model"], "deepseek-v4-flash");
+        let id = endpoints[0]["id"].as_str().unwrap().to_string();
+        assert_eq!(value["llmActiveCustomEndpointId"], id);
+        // Legacy fields are gone after re-serializing through AppSettings.
+        assert!(value.get("llmCustomBaseUrl").is_none());
+        assert!(value.get("llmCustomApiMode").is_none());
+    }
+
+    #[test]
+    fn migrate_settings_blob_is_idempotent() {
+        let conn = setup_conn();
+        let legacy = r#"{
+            "llmProviderType": "custom",
+            "llmCustomBaseUrl": "https://api.deepseek.com",
+            "llmCustomApiKey": "sk-legacy",
+            "llmCustomModel": "deepseek-v4-flash",
+            "llmCustomApiMode": "chat_completions"
+        }"#;
+        conn.execute(
+            "INSERT INTO user_config (key, value) VALUES ('app_settings', ?1)",
+            params![legacy],
+        )
+        .unwrap();
+
+        migrate_settings_blob(&conn);
+        let id_after_first = read_settings_blob(&conn)["llmActiveCustomEndpointId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Second run must not regenerate the id or duplicate the endpoint.
+        migrate_settings_blob(&conn);
+        let value = read_settings_blob(&conn);
+        assert_eq!(value["llmCustomEndpoints"].as_array().unwrap().len(), 1);
+        assert_eq!(value["llmActiveCustomEndpointId"], id_after_first);
+    }
+
+    #[test]
+    fn migrate_settings_blob_noop_when_no_settings_row() {
+        let conn = setup_conn();
+        // Must not panic or insert anything when there's no settings row.
+        migrate_settings_blob(&conn);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM user_config", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
 }

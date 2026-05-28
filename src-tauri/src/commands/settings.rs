@@ -443,9 +443,12 @@ pub fn apply_llm_provider_selection(settings: &mut AppSettings, key: &str) {
 /// `llmCustomApiKey`, `llmCustomModel`, `llmCustomApiMode`) into the
 /// `llmCustomEndpoints` array. Operates on the raw JSON before deserialization so
 /// existing users keep their configured endpoint.
-pub fn migrate_llm_custom_endpoints(value: &mut serde_json::Value) {
+///
+/// Returns `true` when it actually migrated something, so callers can decide
+/// whether to persist the upgraded blob.
+pub fn migrate_llm_custom_endpoints(value: &mut serde_json::Value) -> bool {
     let Some(obj) = value.as_object_mut() else {
-        return;
+        return false;
     };
 
     let already_migrated = obj
@@ -454,7 +457,7 @@ pub fn migrate_llm_custom_endpoints(value: &mut serde_json::Value) {
         .map(|arr| !arr.is_empty())
         .unwrap_or(false);
     if already_migrated {
-        return;
+        return false;
     }
 
     let read = |key: &str| -> String {
@@ -469,7 +472,7 @@ pub fn migrate_llm_custom_endpoints(value: &mut serde_json::Value) {
 
     // Nothing meaningful to migrate.
     if base_url.trim().is_empty() && api_key.trim().is_empty() && model.trim().is_empty() {
-        return;
+        return false;
     }
 
     let api_mode = match obj.get("llmCustomApiMode").and_then(|v| v.as_str()) {
@@ -494,6 +497,7 @@ pub fn migrate_llm_custom_endpoints(value: &mut serde_json::Value) {
         "llmActiveCustomEndpointId".to_string(),
         serde_json::Value::String(id),
     );
+    true
 }
 
 /// Derive a friendly default name from a base URL host, e.g.
