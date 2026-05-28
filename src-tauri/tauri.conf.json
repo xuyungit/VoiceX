@@ -4,7 +4,7 @@
   "version": "0.10.0",
   "identifier": "com.voicex.app",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "node scripts/dev-server.mjs",
     "devUrl": "http://localhost:1520",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
