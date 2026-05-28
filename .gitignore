@@ -39,5 +39,8 @@ sync-server/logs
 *.sln
 *.sw?
 
-# Claude Code local config
-.claude/settings.local.json
+# Claude Code local working dir (settings, plans, worktrees)
+.claude/
+
+# Local-only working notes
+.local-notes/
