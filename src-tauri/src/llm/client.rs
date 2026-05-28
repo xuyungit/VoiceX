@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use std::env;
+use std::time::Instant;
 
 const DICTIONARY_PLACEHOLDER: &str = "{{DICTIONARY}}";
 const INPUT_HISTORY_PLACEHOLDER: &str = "{{INPUT_HISTORY}}";
@@ -145,6 +146,7 @@ impl LLMClient {
             log::debug!("LLM request body: {}", body_preview);
         }
 
+        let started_at = Instant::now();
         let response = self
             .http
             .post(url)
@@ -153,15 +155,39 @@ impl LLMClient {
             .body(request_body)
             .send()
             .await
-            .map_err(|e| LLMError::HttpError(e.to_string()))?;
+            .map_err(|e| {
+                log::info!(
+                    "LLM request failed after {}ms: {}",
+                    started_at.elapsed().as_millis(),
+                    e
+                );
+                LLMError::HttpError(e.to_string())
+            })?;
 
+        let headers_ms = started_at.elapsed().as_millis();
         let status = response.status();
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| LLMError::HttpError(e.to_string()))?;
+            .map_err(|e| {
+                log::info!(
+                    "LLM body read failed after {}ms (headers={}ms): {}",
+                    started_at.elapsed().as_millis(),
+                    headers_ms,
+                    e
+                );
+                LLMError::HttpError(e.to_string())
+            })?;
+        let total_ms = started_at.elapsed().as_millis();
         let body_text = String::from_utf8_lossy(&bytes).to_string();
-        log::info!("LLM response status={}", status);
+        log::info!(
+            "LLM response status={} elapsed={}ms (headers={}ms body={}ms bytes={})",
+            status,
+            total_ms,
+            headers_ms,
+            total_ms.saturating_sub(headers_ms),
+            bytes.len()
+        );
         if llm_diag {
             log::info!("LLM diag response body: {}", body_text);
         } else {
