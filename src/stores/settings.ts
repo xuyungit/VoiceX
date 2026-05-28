@@ -5,6 +5,15 @@ import type { UiLanguage } from '../i18n'
 import { getDefaultPrompt } from '../utils/llmPrompts'
 import type { LlmApiModeValue, LlmProviderValue } from '../utils/llmOptions'
 
+export interface CustomLlmEndpoint {
+    id: string
+    name: string
+    baseUrl: string
+    apiKey: string
+    model: string
+    apiMode: LlmApiModeValue
+}
+
 export interface AppSettings {
     uiLanguage: UiLanguage
 
@@ -110,11 +119,9 @@ export interface AppSettings {
     llmQwenApiKey: string
     llmQwenModel: string
 
-    // LLM Provider: Custom
-    llmCustomBaseUrl: string
-    llmCustomApiKey: string
-    llmCustomModel: string
-    llmCustomApiMode: LlmApiModeValue
+    // LLM Provider: Custom (multiple named OpenAI-compatible endpoints)
+    llmCustomEndpoints: CustomLlmEndpoint[]
+    llmActiveCustomEndpointId: string
 
     // Hotkey
     hotkeyConfig: string | null
@@ -281,10 +288,8 @@ const defaultSettings: AppSettings = {
     llmQwenApiKey: '',
     llmQwenModel: 'qwen3.5-flash',
 
-    llmCustomBaseUrl: '',
-    llmCustomApiKey: '',
-    llmCustomModel: '',
-    llmCustomApiMode: 'chat_completions',
+    llmCustomEndpoints: [],
+    llmActiveCustomEndpointId: '',
 
     hotkeyConfig: null,
     holdThresholdMs: 1000,

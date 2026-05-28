@@ -43,14 +43,19 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             api_mode: LLMApiMode::ChatCompletions,
             volcengine_reasoning_effort: None,
         },
-        LLMProviderType::Custom => LLMConfig {
-            provider_type: LLMProviderType::Custom,
-            base_url: settings.llm_custom_base_url.clone(),
-            api_key: settings.llm_custom_api_key.clone(),
-            model_name: settings.llm_custom_model.clone(),
-            api_mode: LLMApiMode::from_str(&settings.llm_custom_api_mode),
-            volcengine_reasoning_effort: None,
-        },
+        LLMProviderType::Custom => {
+            let endpoint = crate::commands::settings::active_custom_endpoint(settings);
+            LLMConfig {
+                provider_type: LLMProviderType::Custom,
+                base_url: endpoint.map(|e| e.base_url.clone()).unwrap_or_default(),
+                api_key: endpoint.map(|e| e.api_key.clone()).unwrap_or_default(),
+                model_name: endpoint.map(|e| e.model.clone()).unwrap_or_default(),
+                api_mode: endpoint
+                    .map(|e| LLMApiMode::from_str(&e.api_mode))
+                    .unwrap_or_default(),
+                volcengine_reasoning_effort: None,
+            }
+        }
     }
 }
 
@@ -136,8 +141,10 @@ impl LlmService {
         };
 
         let correction_timeout = correction_timeout_for_text(trimmed);
+        let started_at = std::time::Instant::now();
+        let input_chars = trimmed.chars().count();
 
-        match tokio::time::timeout(
+        let result = tokio::time::timeout(
             correction_timeout,
             client.correct(
                 trimmed,
@@ -147,10 +154,20 @@ impl LlmService {
                 prompt_options,
             ),
         )
-        .await
-        {
+        .await;
+
+        let elapsed_ms = started_at.elapsed().as_millis();
+        match result {
             Ok(Ok(corrected)) => {
                 let changed = corrected.trim() != trimmed;
+                log::info!(
+                    "LLM correction done intent={:?} elapsed={}ms input_chars={} output_chars={} changed={}",
+                    intent,
+                    elapsed_ms,
+                    input_chars,
+                    corrected.chars().count(),
+                    changed
+                );
                 LlmCorrectionResult {
                     text: corrected,
                     invoked: true,
@@ -158,7 +175,13 @@ impl LlmService {
                 }
             }
             Ok(Err(err)) => {
-                log::warn!("LLM correction failed: {}", err);
+                log::warn!(
+                    "LLM correction failed intent={:?} elapsed={}ms input_chars={}: {}",
+                    intent,
+                    elapsed_ms,
+                    input_chars,
+                    err
+                );
                 LlmCorrectionResult {
                     text: text.to_string(),
                     invoked: true,
@@ -167,8 +190,11 @@ impl LlmService {
             }
             Err(_) => {
                 log::warn!(
-                    "LLM correction timed out after {}s; using original text",
-                    correction_timeout.as_secs()
+                    "LLM correction timed out intent={:?} after {}ms (limit={}s) input_chars={}; using original text",
+                    intent,
+                    elapsed_ms,
+                    correction_timeout.as_secs(),
+                    input_chars
                 );
                 LlmCorrectionResult {
                     text: text.to_string(),

@@ -763,13 +763,27 @@ pub fn get_settings() -> Result<AppSettings, StorageError> {
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
         if let Some(json) = value {
-            match serde_json::from_str::<AppSettings>(&json) {
-                Ok(mut settings) => {
-                    crate::commands::settings::normalize_text_injection_overrides(&mut settings);
-                    Ok(settings)
+            match serde_json::from_str::<serde_json::Value>(&json) {
+                Ok(mut raw) => {
+                    crate::commands::settings::migrate_llm_custom_endpoints(&mut raw);
+                    match serde_json::from_value::<AppSettings>(raw) {
+                        Ok(mut settings) => {
+                            crate::commands::settings::normalize_text_injection_overrides(
+                                &mut settings,
+                            );
+                            Ok(settings)
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "Failed to parse settings, falling back to defaults: {}",
+                                e
+                            );
+                            Ok(AppSettings::default())
+                        }
+                    }
                 }
                 Err(e) => {
-                    log::warn!("Failed to parse settings, falling back to defaults: {}", e);
+                    log::warn!("Failed to parse settings JSON, falling back to defaults: {}", e);
                     Ok(AppSettings::default())
                 }
             }

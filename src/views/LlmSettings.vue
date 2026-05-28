@@ -4,9 +4,16 @@ import { invoke } from '@tauri-apps/api/core'
 import { NInput, NSwitch, NButton, NSelect, NTabs, NTabPane } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ResolvedLocale } from '../i18n'
-import { useSettingsStore, type AppSettings } from '../stores/settings'
+import { useSettingsStore, type AppSettings, type CustomLlmEndpoint } from '../stores/settings'
 import { getDefaultPrompt } from '../utils/llmPrompts'
-import { buildLlmApiModeOptions, buildLlmProviderOptions } from '../utils/llmOptions'
+import {
+  buildLlmApiModeOptions,
+  buildLlmProviderOptions,
+  providerSelectionKey,
+  ADD_CUSTOM_ENDPOINT_VALUE,
+  CUSTOM_ENDPOINT_PREFIX,
+  type LlmProviderValue
+} from '../utils/llmOptions'
 
 const settingsStore = useSettingsStore()
 const { t, locale } = useI18n()
@@ -21,7 +28,9 @@ interface LlmProviderProbeResult {
   errorMessage: string | null
 }
 
-const providerOptions = computed(() => buildLlmProviderOptions(t))
+const providerOptions = computed(() =>
+  buildLlmProviderOptions(t, settingsStore.settings.llmCustomEndpoints, { includeAddAction: true })
+)
 const apiModeOptions = computed(() => buildLlmApiModeOptions(t))
 
 const reasoningEffortOptions = computed(() => [
@@ -108,23 +117,98 @@ const llmQwenModel = computed({
   set: (v: string) => settingsStore.updateSetting('llmQwenModel', v)
 })
 
-// Custom-specific
+// Custom-specific: the currently selected named endpoint within llmCustomEndpoints.
+const activeCustomEndpoint = computed<CustomLlmEndpoint | null>(() => {
+  const { llmCustomEndpoints, llmActiveCustomEndpointId } = settingsStore.settings
+  return (
+    llmCustomEndpoints.find((endpoint) => endpoint.id === llmActiveCustomEndpointId) ??
+    llmCustomEndpoints[0] ??
+    null
+  )
+})
+
+const llmCustomName = computed({
+  get: () => activeCustomEndpoint.value?.name ?? '',
+  set: (v: string) => {
+    if (activeCustomEndpoint.value) activeCustomEndpoint.value.name = v
+  }
+})
 const llmCustomBaseUrl = computed({
-  get: () => settingsStore.settings.llmCustomBaseUrl,
-  set: (v: string) => settingsStore.updateSetting('llmCustomBaseUrl', v)
+  get: () => activeCustomEndpoint.value?.baseUrl ?? '',
+  set: (v: string) => {
+    if (activeCustomEndpoint.value) activeCustomEndpoint.value.baseUrl = v
+  }
 })
 const llmCustomApiKey = computed({
-  get: () => settingsStore.settings.llmCustomApiKey,
-  set: (v: string) => settingsStore.updateSetting('llmCustomApiKey', v)
+  get: () => activeCustomEndpoint.value?.apiKey ?? '',
+  set: (v: string) => {
+    if (activeCustomEndpoint.value) activeCustomEndpoint.value.apiKey = v
+  }
 })
 const llmCustomModel = computed({
-  get: () => settingsStore.settings.llmCustomModel,
-  set: (v: string) => settingsStore.updateSetting('llmCustomModel', v)
+  get: () => activeCustomEndpoint.value?.model ?? '',
+  set: (v: string) => {
+    if (activeCustomEndpoint.value) activeCustomEndpoint.value.model = v
+  }
 })
 const llmCustomApiMode = computed({
-  get: () => settingsStore.settings.llmCustomApiMode,
-  set: (v: AppSettings['llmCustomApiMode']) => settingsStore.updateSetting('llmCustomApiMode', v)
+  get: () => activeCustomEndpoint.value?.apiMode ?? 'chat_completions',
+  set: (v: CustomLlmEndpoint['apiMode']) => {
+    if (activeCustomEndpoint.value) activeCustomEndpoint.value.apiMode = v
+  }
 })
+
+// Dropdown selection: maps built-in providers and `custom:<id>` keys onto the
+// persisted (llmProviderType, llmActiveCustomEndpointId) pair.
+const selectedProviderKey = computed({
+  get: () =>
+    providerSelectionKey(
+      settingsStore.settings.llmProviderType,
+      settingsStore.settings.llmCustomEndpoints,
+      settingsStore.settings.llmActiveCustomEndpointId
+    ),
+  set: (key: string) => {
+    if (key === ADD_CUSTOM_ENDPOINT_VALUE) {
+      addCustomEndpoint()
+      return
+    }
+    if (key.startsWith(CUSTOM_ENDPOINT_PREFIX)) {
+      settingsStore.updateSetting('llmProviderType', 'custom')
+      settingsStore.updateSetting('llmActiveCustomEndpointId', key.slice(CUSTOM_ENDPOINT_PREFIX.length))
+      return
+    }
+    settingsStore.updateSetting('llmProviderType', key as LlmProviderValue)
+  }
+})
+
+function addCustomEndpoint() {
+  const endpoints = settingsStore.settings.llmCustomEndpoints
+  const id = crypto.randomUUID()
+  endpoints.push({
+    id,
+    name: `${t('llm.customDefaultEndpointName')} ${endpoints.length + 1}`,
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    apiMode: 'chat_completions'
+  })
+  settingsStore.updateSetting('llmProviderType', 'custom')
+  settingsStore.updateSetting('llmActiveCustomEndpointId', id)
+}
+
+function deleteActiveCustomEndpoint() {
+  const endpoints = settingsStore.settings.llmCustomEndpoints
+  const index = endpoints.findIndex((endpoint) => endpoint.id === activeCustomEndpoint.value?.id)
+  if (index === -1) return
+  endpoints.splice(index, 1)
+  if (endpoints.length > 0) {
+    const next = endpoints[Math.max(0, index - 1)]
+    settingsStore.updateSetting('llmActiveCustomEndpointId', next.id)
+  } else {
+    settingsStore.updateSetting('llmActiveCustomEndpointId', '')
+    settingsStore.updateSetting('llmProviderType', 'volcengine')
+  }
+}
 
 const isVolcengine = computed(() => llmProviderType.value === 'volcengine')
 const isOpenai = computed(() => llmProviderType.value === 'openai')
@@ -201,7 +285,7 @@ async function runLlmProviderProbe() {
             <div class="field-sub">{{ t('llm.providerSub') }}</div>
           </div>
           <NSelect
-            v-model:value="llmProviderType"
+            v-model:value="selectedProviderKey"
             :options="providerOptions"
             class="field-control short"
           />
@@ -304,6 +388,22 @@ async function runLlmProviderProbe() {
 
         <!-- Custom Settings -->
         <template v-if="isCustom">
+          <div v-if="!activeCustomEndpoint" class="field-row">
+            <div class="field-text">
+              <div class="field-sub">{{ t('llm.customNoEndpointHint') }}</div>
+            </div>
+            <NButton type="primary" secondary size="small" @click="addCustomEndpoint">
+              {{ t('llm.addCustomEndpoint') }}
+            </NButton>
+          </div>
+          <template v-else>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.customEndpointName') }}</div>
+              <div class="field-sub">{{ t('llm.customEndpointNameSub') }}</div>
+            </div>
+            <NInput v-model:value="llmCustomName" :placeholder="t('llm.customEndpointNamePlaceholder')" class="field-control short" />
+          </div>
           <div class="field-row">
             <div class="field-text">
               <div class="field-label">{{ t('llm.baseUrl') }}</div>
@@ -340,6 +440,16 @@ async function runLlmProviderProbe() {
               class="field-control short"
             />
           </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.deleteCustomEndpoint') }}</div>
+              <div class="field-sub">{{ t('llm.deleteCustomEndpointSub') }}</div>
+            </div>
+            <NButton type="error" secondary size="small" @click="deleteActiveCustomEndpoint">
+              {{ t('llm.deleteCustomEndpoint') }}
+            </NButton>
+          </div>
+          </template>
         </template>
 
         <div class="field-row align-start">

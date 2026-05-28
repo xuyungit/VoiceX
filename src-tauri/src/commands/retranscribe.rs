@@ -12,12 +12,10 @@ use crate::asr::{transcribe_audio_path, transcribe_audio_path_detailed, AsrConfi
 use crate::commands::settings::AppSettings;
 use crate::foreground_app::{detect_foreground_app, match_text_injection_override};
 use crate::injector::{inject_serialized, TextInjectionMode};
-use crate::llm::{
-    correction_timeout_for_text, LLMApiMode, LLMClient, LLMConfig, LLMProviderType,
-    PromptBuildOptions,
-};
+use crate::llm::{correction_timeout_for_text, LLMClient, PromptBuildOptions};
 use crate::services::{
-    history_service::HistoryService, post_processing_service::PostProcessingService,
+    history_service::HistoryService, llm_service::build_llm_config_from_settings,
+    post_processing_service::PostProcessingService,
 };
 use crate::state::ProcessingIntent;
 use crate::storage;
@@ -238,7 +236,7 @@ fn load_settings_with_provider_overrides(
     let mut settings = storage::get_settings().map_err(|e| format!("加载设置失败: {}", e))?;
     settings.asr_provider_type = asr_provider.to_string();
     if let Some(llm_provider) = llm_provider {
-        settings.llm_provider_type = llm_provider.clone();
+        crate::commands::settings::apply_llm_provider_selection(&mut settings, llm_provider);
     }
     Ok(settings)
 }
@@ -339,47 +337,7 @@ async fn run_llm_correction(
         return (None, None);
     }
 
-    let provider_type = LLMProviderType::from_str(&settings.llm_provider_type);
-    let (base_url, api_key, model_name, api_mode, volcengine_reasoning_effort) = match provider_type
-    {
-        LLMProviderType::Volcengine => (
-            settings.llm_volcengine_base_url.clone(),
-            settings.llm_volcengine_api_key.clone(),
-            settings.llm_volcengine_model.clone(),
-            LLMApiMode::ChatCompletions,
-            settings.llm_volcengine_reasoning_effort.clone(),
-        ),
-        LLMProviderType::Openai => (
-            settings.llm_openai_base_url.clone(),
-            settings.llm_openai_api_key.clone(),
-            settings.llm_openai_model.clone(),
-            LLMApiMode::ChatCompletions,
-            None,
-        ),
-        LLMProviderType::Qwen => (
-            settings.llm_qwen_base_url.clone(),
-            settings.llm_qwen_api_key.clone(),
-            settings.llm_qwen_model.clone(),
-            LLMApiMode::ChatCompletions,
-            None,
-        ),
-        LLMProviderType::Custom => (
-            settings.llm_custom_base_url.clone(),
-            settings.llm_custom_api_key.clone(),
-            settings.llm_custom_model.clone(),
-            LLMApiMode::from_str(&settings.llm_custom_api_mode),
-            None,
-        ),
-    };
-
-    let client = LLMClient::new(LLMConfig {
-        provider_type: provider_type.clone(),
-        base_url,
-        api_key,
-        model_name,
-        api_mode,
-        volcengine_reasoning_effort,
-    });
+    let client = LLMClient::new(build_llm_config_from_settings(settings));
 
     let (prompt_template, dictionary_text, history, prompt_options) = match intent {
         ProcessingIntent::Assistant => {

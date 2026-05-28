@@ -133,11 +133,9 @@ pub struct AppSettings {
     pub llm_qwen_api_key: String,
     pub llm_qwen_model: String,
 
-    // LLM Provider: Custom
-    pub llm_custom_base_url: String,
-    pub llm_custom_api_key: String,
-    pub llm_custom_model: String,
-    pub llm_custom_api_mode: String, // "chat_completions" | "responses"
+    // LLM Provider: Custom (multiple named OpenAI-compatible endpoints)
+    pub llm_custom_endpoints: Vec<CustomLlmEndpoint>,
+    pub llm_active_custom_endpoint_id: String,
 
     // Hotkey settings
     pub hotkey_config: Option<String>,
@@ -178,6 +176,18 @@ pub struct AppSettings {
 
     // Diagnostics
     pub enable_diagnostics: bool,
+}
+
+/// A single named OpenAI-compatible custom endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomLlmEndpoint {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub api_mode: String, // "chat_completions" | "responses"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,10 +313,8 @@ impl Default for AppSettings {
             llm_qwen_api_key: String::new(),
             llm_qwen_model: "qwen3.5-flash".to_string(),
 
-            llm_custom_base_url: String::new(),
-            llm_custom_api_key: String::new(),
-            llm_custom_model: String::new(),
-            llm_custom_api_mode: "chat_completions".to_string(),
+            llm_custom_endpoints: Vec::new(),
+            llm_active_custom_endpoint_id: String::new(),
 
             hotkey_config: None,
             hold_threshold_ms: 1000,
@@ -389,10 +397,123 @@ fn normalize_elevenlabs_settings(settings: &mut AppSettings) {
 }
 
 fn normalize_llm_settings(settings: &mut AppSettings) {
-    settings.llm_custom_api_mode = match settings.llm_custom_api_mode.as_str() {
-        "responses" => "responses".to_string(),
-        _ => "chat_completions".to_string(),
+    for endpoint in settings.llm_custom_endpoints.iter_mut() {
+        endpoint.api_mode = match endpoint.api_mode.as_str() {
+            "responses" => "responses".to_string(),
+            _ => "chat_completions".to_string(),
+        };
+    }
+
+    // Ensure the active endpoint id points to an existing endpoint; otherwise fall
+    // back to the first one (or empty when there are none).
+    let active_valid = settings
+        .llm_custom_endpoints
+        .iter()
+        .any(|endpoint| endpoint.id == settings.llm_active_custom_endpoint_id);
+    if !active_valid {
+        settings.llm_active_custom_endpoint_id = settings
+            .llm_custom_endpoints
+            .first()
+            .map(|endpoint| endpoint.id.clone())
+            .unwrap_or_default();
+    }
+}
+
+/// Resolve the active custom endpoint (selected one, else the first defined one).
+pub fn active_custom_endpoint(settings: &AppSettings) -> Option<&CustomLlmEndpoint> {
+    settings
+        .llm_custom_endpoints
+        .iter()
+        .find(|endpoint| endpoint.id == settings.llm_active_custom_endpoint_id)
+        .or_else(|| settings.llm_custom_endpoints.first())
+}
+
+/// Apply a provider dropdown selection key (`volcengine` | `openai` | `qwen` |
+/// `custom:<id>`) onto a settings struct. Used by re-transcribe provider overrides.
+pub fn apply_llm_provider_selection(settings: &mut AppSettings, key: &str) {
+    if let Some(id) = key.strip_prefix("custom:") {
+        settings.llm_provider_type = "custom".to_string();
+        settings.llm_active_custom_endpoint_id = id.to_string();
+    } else {
+        settings.llm_provider_type = key.to_string();
+    }
+}
+
+/// One-time migration of the legacy single custom endpoint (`llmCustomBaseUrl`,
+/// `llmCustomApiKey`, `llmCustomModel`, `llmCustomApiMode`) into the
+/// `llmCustomEndpoints` array. Operates on the raw JSON before deserialization so
+/// existing users keep their configured endpoint.
+pub fn migrate_llm_custom_endpoints(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
     };
+
+    let already_migrated = obj
+        .get("llmCustomEndpoints")
+        .and_then(|v| v.as_array())
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false);
+    if already_migrated {
+        return;
+    }
+
+    let read = |key: &str| -> String {
+        obj.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let base_url = read("llmCustomBaseUrl");
+    let api_key = read("llmCustomApiKey");
+    let model = read("llmCustomModel");
+
+    // Nothing meaningful to migrate.
+    if base_url.trim().is_empty() && api_key.trim().is_empty() && model.trim().is_empty() {
+        return;
+    }
+
+    let api_mode = match obj.get("llmCustomApiMode").and_then(|v| v.as_str()) {
+        Some("responses") => "responses",
+        _ => "chat_completions",
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    let name = custom_endpoint_name_from_base_url(&base_url);
+
+    obj.insert(
+        "llmCustomEndpoints".to_string(),
+        serde_json::json!([{
+            "id": id,
+            "name": name,
+            "baseUrl": base_url,
+            "apiKey": api_key,
+            "model": model,
+            "apiMode": api_mode,
+        }]),
+    );
+    obj.insert(
+        "llmActiveCustomEndpointId".to_string(),
+        serde_json::Value::String(id),
+    );
+}
+
+/// Derive a friendly default name from a base URL host, e.g.
+/// `https://api.deepseek.com/v1` -> `api.deepseek.com`.
+fn custom_endpoint_name_from_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim();
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host = without_scheme
+        .split(['/', ':'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    if host.is_empty() {
+        "Custom".to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 fn normalize_qwen_settings(settings: &mut AppSettings) {
@@ -799,8 +920,12 @@ pub async fn clear_soniox_debug_overrides(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_text_injection_overrides, AppSettings};
+    use super::{
+        active_custom_endpoint, apply_llm_provider_selection, migrate_llm_custom_endpoints,
+        normalize_text_injection_overrides, AppSettings,
+    };
     use crate::foreground_app::TextInjectionAppOverride;
+    use crate::services::llm_service::build_llm_config_from_settings;
 
     #[test]
     fn normalize_text_injection_overrides_deduplicates_semantic_duplicates() {
@@ -831,5 +956,114 @@ mod tests {
             "com.microsoft.rdc.macos"
         );
         assert_eq!(settings.text_injection_overrides[0].mode, "typing");
+    }
+
+    /// Mirrors the real persisted shape of a legacy single custom endpoint.
+    fn legacy_custom_settings_json() -> serde_json::Value {
+        serde_json::json!({
+            "llmProviderType": "custom",
+            "llmCustomBaseUrl": "https://api.deepseek.com",
+            "llmCustomApiKey": "sk-legacy-key",
+            "llmCustomModel": "deepseek-v4-flash",
+            "llmCustomApiMode": "chat_completions"
+        })
+    }
+
+    #[test]
+    fn migrates_legacy_single_custom_endpoint_into_array() {
+        let mut value = legacy_custom_settings_json();
+        migrate_llm_custom_endpoints(&mut value);
+
+        let endpoints = value["llmCustomEndpoints"].as_array().unwrap();
+        assert_eq!(endpoints.len(), 1);
+        let endpoint = &endpoints[0];
+        assert_eq!(endpoint["baseUrl"], "https://api.deepseek.com");
+        assert_eq!(endpoint["apiKey"], "sk-legacy-key");
+        assert_eq!(endpoint["model"], "deepseek-v4-flash");
+        assert_eq!(endpoint["apiMode"], "chat_completions");
+        // Name is derived from the base URL host.
+        assert_eq!(endpoint["name"], "api.deepseek.com");
+
+        // The active id must point at the migrated endpoint.
+        let id = endpoint["id"].as_str().unwrap();
+        assert_eq!(value["llmActiveCustomEndpointId"], id);
+
+        // Deserialization + active-endpoint resolution + config building all line up.
+        let settings: AppSettings = serde_json::from_value(value).unwrap();
+        let active = active_custom_endpoint(&settings).expect("active endpoint resolves");
+        assert_eq!(active.model, "deepseek-v4-flash");
+
+        let config = build_llm_config_from_settings(&settings);
+        assert_eq!(config.base_url, "https://api.deepseek.com");
+        assert_eq!(config.api_key, "sk-legacy-key");
+        assert_eq!(config.model_name, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn migration_skips_when_endpoints_already_present() {
+        let mut value = serde_json::json!({
+            "llmProviderType": "custom",
+            "llmCustomBaseUrl": "https://api.deepseek.com",
+            "llmCustomEndpoints": [{
+                "id": "abc", "name": "Existing", "baseUrl": "https://x",
+                "apiKey": "k", "model": "mm", "apiMode": "responses"
+            }],
+            "llmActiveCustomEndpointId": "abc"
+        });
+        migrate_llm_custom_endpoints(&mut value);
+
+        let endpoints = value["llmCustomEndpoints"].as_array().unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0]["name"], "Existing");
+        assert_eq!(value["llmActiveCustomEndpointId"], "abc");
+    }
+
+    #[test]
+    fn migration_is_noop_without_legacy_custom_data() {
+        let mut value = serde_json::json!({ "llmProviderType": "volcengine" });
+        migrate_llm_custom_endpoints(&mut value);
+        assert!(value.get("llmCustomEndpoints").is_none());
+        assert!(value.get("llmActiveCustomEndpointId").is_none());
+    }
+
+    #[test]
+    fn build_config_picks_the_active_endpoint_among_many() {
+        let mut settings = AppSettings::default();
+        settings.llm_provider_type = "custom".to_string();
+        settings.llm_custom_endpoints = vec![
+            super::CustomLlmEndpoint {
+                id: "a".to_string(),
+                name: "DeepSeek".to_string(),
+                base_url: "https://api.deepseek.com".to_string(),
+                api_key: "ka".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                api_mode: "chat_completions".to_string(),
+            },
+            super::CustomLlmEndpoint {
+                id: "b".to_string(),
+                name: "Groq".to_string(),
+                base_url: "https://api.groq.com/openai/v1".to_string(),
+                api_key: "kb".to_string(),
+                model: "llama-3.3-70b".to_string(),
+                api_mode: "chat_completions".to_string(),
+            },
+        ];
+        settings.llm_active_custom_endpoint_id = "b".to_string();
+
+        let config = build_llm_config_from_settings(&settings);
+        assert_eq!(config.base_url, "https://api.groq.com/openai/v1");
+        assert_eq!(config.model_name, "llama-3.3-70b");
+        assert_eq!(config.api_key, "kb");
+    }
+
+    #[test]
+    fn apply_llm_provider_selection_parses_custom_endpoint_key() {
+        let mut settings = AppSettings::default();
+        apply_llm_provider_selection(&mut settings, "custom:xyz");
+        assert_eq!(settings.llm_provider_type, "custom");
+        assert_eq!(settings.llm_active_custom_endpoint_id, "xyz");
+
+        apply_llm_provider_selection(&mut settings, "openai");
+        assert_eq!(settings.llm_provider_type, "openai");
     }
 }

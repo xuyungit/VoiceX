@@ -6,7 +6,7 @@ import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import type { HistoryRecord } from '../stores/history'
 import { buildAsrProviderOptions } from '../utils/providerOptions'
-import { buildLlmProviderOptions } from '../utils/llmOptions'
+import { buildLlmProviderOptions, providerSelectionKey } from '../utils/llmOptions'
 
 const props = defineProps<{
   show: boolean
@@ -20,9 +20,17 @@ const emit = defineEmits<{
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
 
+function currentLlmSelectionKey() {
+  return providerSelectionKey(
+    settingsStore.settings.llmProviderType,
+    settingsStore.settings.llmCustomEndpoints,
+    settingsStore.settings.llmActiveCustomEndpointId
+  )
+}
+
 const asrProvider = ref(settingsStore.settings.asrProviderType)
 const enableLlm = ref(settingsStore.settings.enableLlmCorrection)
-const llmProvider = ref(settingsStore.settings.llmProviderType)
+const llmProvider = ref(currentLlmSelectionKey())
 
 const isRunning = ref(false)
 const runningAction = ref<'transcribe' | 'replayInject' | null>(null)
@@ -38,14 +46,16 @@ const result = ref<{
 } | null>(null)
 
 const asrProviderOptions = computed(() => buildAsrProviderOptions(t))
-const llmProviderOptions = computed(() => buildLlmProviderOptions(t))
+const llmProviderOptions = computed(() =>
+  buildLlmProviderOptions(t, settingsStore.settings.llmCustomEndpoints)
+)
 
 // Reset state when dialog opens
 watch(() => props.show, (visible) => {
   if (visible) {
     asrProvider.value = settingsStore.settings.asrProviderType
     enableLlm.value = settingsStore.settings.enableLlmCorrection
-    llmProvider.value = settingsStore.settings.llmProviderType
+    llmProvider.value = currentLlmSelectionKey()
     error.value = null
     result.value = null
     isRunning.value = false
