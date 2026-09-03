@@ -214,6 +214,18 @@ struct GeminiGenerationConfig {
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    #[serde(rename = "thinkingConfig", skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<GeminiThinkingConfig>,
+}
+
+#[derive(Serialize, Default)]
+struct GeminiThinkingConfig {
+    /// Gemini 3.x: MINIMAL / LOW / MEDIUM / HIGH. MINIMAL is rejected by 3.7/3.8 Flash.
+    #[serde(rename = "thinkingLevel", skip_serializing_if = "Option::is_none")]
+    thinking_level: Option<String>,
+    /// Gemini 2.5 Flash: 0 disables thinking. Invalid on current 3.x Flash-Lite.
+    #[serde(rename = "thinkingBudget", skip_serializing_if = "Option::is_none")]
+    thinking_budget: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -232,6 +244,9 @@ struct GeminiCandidate {
 struct GeminiUsageMetadata {
     #[serde(rename = "totalTokenCount")]
     total_token_count: Option<u32>,
+    #[allow(dead_code)]
+    #[serde(rename = "thoughtsTokenCount")]
+    thoughts_token_count: Option<u32>,
 }
 
 // ── Results ─────────────────────────────────────────────────────────────────
@@ -1295,6 +1310,7 @@ async fn run_once_gemini(
         generation_config: Some(GeminiGenerationConfig {
             temperature: Some(0.2),
             max_output_tokens: Some(4096),
+            thinking_config: gemini_thinking_config(provider),
         }),
     };
 
@@ -1383,6 +1399,73 @@ async fn run_once_gemini(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Lowest thinking Gemini accepts for this model. 3.7/3.8 Flash reject MINIMAL;
+/// 2.5 Flash can set thinkingBudget=0; Flash-Lite already thinks off by default.
+fn gemini_thinking_config(provider: &Provider) -> Option<GeminiThinkingConfig> {
+    let extra_level = extra_string(&provider.extra, "thinking_level")
+        .or_else(|| extra_string(&provider.extra, "thinkingLevel"));
+    let extra_budget = extra_i32(&provider.extra, "thinking_budget")
+        .or_else(|| extra_i32(&provider.extra, "thinkingBudget"));
+    if extra_level.is_some() || extra_budget.is_some() {
+        return Some(GeminiThinkingConfig {
+            thinking_level: extra_level,
+            thinking_budget: extra_budget,
+        });
+    }
+    if let Some(level) = provider.reasoning_effort.as_ref() {
+        return Some(GeminiThinkingConfig {
+            thinking_level: Some(normalize_gemini_thinking_level(level)),
+            thinking_budget: None,
+        });
+    }
+    default_gemini_thinking(&provider.model)
+}
+
+fn default_gemini_thinking(model: &str) -> Option<GeminiThinkingConfig> {
+    let model = model.to_ascii_lowercase();
+    if model.contains("2.5") {
+        if model.contains("pro") {
+            return Some(GeminiThinkingConfig {
+                thinking_level: Some("LOW".into()),
+                thinking_budget: None,
+            });
+        }
+        return Some(GeminiThinkingConfig {
+            thinking_level: None,
+            thinking_budget: Some(0),
+        });
+    }
+    // 3.5 Flash-Lite already defaults to no thinking; sending LOW can be slower.
+    if model.contains("lite") {
+        return None;
+    }
+    Some(GeminiThinkingConfig {
+        thinking_level: Some("LOW".into()),
+        thinking_budget: None,
+    })
+}
+
+fn normalize_gemini_thinking_level(level: &str) -> String {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "minimal" | "min" => "MINIMAL".into(),
+        "low" => "LOW".into(),
+        "medium" | "mid" => "MEDIUM".into(),
+        "high" => "HIGH".into(),
+        other => other.to_ascii_uppercase(),
+    }
+}
+
+fn extra_string(
+    extra: &std::collections::HashMap<String, toml::Value>,
+    key: &str,
+) -> Option<String> {
+    extra.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+fn extra_i32(extra: &std::collections::HashMap<String, toml::Value>, key: &str) -> Option<i32> {
+    extra.get(key).and_then(|v| v.as_integer()).and_then(|n| i32::try_from(n).ok())
+}
 
 fn toml_to_json(v: &toml::Value) -> serde_json::Value {
     match v {
@@ -2342,6 +2425,33 @@ mod tests {
         assert!(checkpoint_passed("指向 README", &c));
         assert!(checkpoint_passed("指向 Readme", &c));
         assert!(!checkpoint_passed("指向 read me", &c));
+    }
+
+    #[test]
+    fn gemini_thinking_defaults_to_lowest_supported() {
+        assert_eq!(
+            default_gemini_thinking("gemini-3.7-flash")
+                .unwrap()
+                .thinking_level
+                .as_deref(),
+            Some("LOW")
+        );
+        assert_eq!(
+            default_gemini_thinking("gemini-3.8-flash")
+                .unwrap()
+                .thinking_level
+                .as_deref(),
+            Some("LOW")
+        );
+        assert!(default_gemini_thinking("gemini-3.5-flash-lite").is_none());
+        assert_eq!(
+            default_gemini_thinking("gemini-2.5-flash")
+                .unwrap()
+                .thinking_budget,
+            Some(0)
+        );
+        assert_eq!(normalize_gemini_thinking_level("low"), "LOW");
+        assert_eq!(normalize_gemini_thinking_level("minimal"), "MINIMAL");
     }
 
     #[test]

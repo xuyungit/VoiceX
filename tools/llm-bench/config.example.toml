@@ -107,6 +107,16 @@ enable_thinking = false
 # type = "gemini"
 
 # [[provider]]
+# name = "Gemini-3.8-Flash"
+# base_url = "https://generativelanguage.googleapis.com/v1beta"
+# api_key = "${GEMINI_API_KEY}"
+# model = "gemini-3.8-flash"
+# type = "gemini"
+# # Gemini 3.x Flash cannot turn thinking fully off (MINIMAL returns 400).
+# # LOW is the lowest accepted level and cuts thinking tokens / latency.
+# reasoning_effort = "low"
+
+# [[provider]]
 # name = "Gemini-2.5-Pro"
 # base_url = "https://generativelanguage.googleapis.com/v1beta"
 # api_key = "${GEMINI_API_KEY}"

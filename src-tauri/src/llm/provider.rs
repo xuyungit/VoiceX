@@ -170,8 +170,24 @@ impl LLMProvider for CustomProvider {
 
 pub struct GeminiProvider;
 
+/// Lowest thinking Gemini accepts for this model. 3.7/3.8 Flash reject MINIMAL;
+/// 2.5 Flash can set thinkingBudget=0; Flash-Lite already thinks off by default.
+fn gemini_thinking_config(model: &str) -> Option<Value> {
+    let model = model.to_ascii_lowercase();
+    if model.contains("2.5") {
+        if model.contains("pro") {
+            return Some(serde_json::json!({ "thinkingLevel": "LOW" }));
+        }
+        return Some(serde_json::json!({ "thinkingBudget": 0 }));
+    }
+    if model.contains("lite") {
+        return None;
+    }
+    Some(serde_json::json!({ "thinkingLevel": "LOW" }))
+}
+
 impl LLMProvider for GeminiProvider {
-    fn build_chat_request(&self, messages: Vec<Message>, _config: &LLMConfig) -> Value {
+    fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
         let mut system_instruction: Option<Value> = None;
         let mut contents: Vec<Value> = Vec::new();
 
@@ -193,12 +209,17 @@ impl LLMProvider for GeminiProvider {
             }
         }
 
+        let mut generation_config = serde_json::json!({
+            "temperature": 0.2,
+            "maxOutputTokens": 4096
+        });
+        if let Some(thinking) = gemini_thinking_config(&config.model_name) {
+            generation_config["thinkingConfig"] = thinking;
+        }
+
         let mut req = serde_json::json!({
             "contents": contents,
-            "generation_config": {
-                "temperature": 0.2,
-                "maxOutputTokens": 4096
-            }
+            "generation_config": generation_config
         });
 
         if let Some(sys) = system_instruction {
@@ -249,7 +270,25 @@ mod tests {
         );
         assert_eq!(req["contents"][0]["role"], "user");
         assert_eq!(req["contents"][0]["parts"][0]["text"], "User message");
+        assert!(req["generation_config"]["thinkingConfig"].is_null());
         assert_eq!(provider.name(), "Gemini");
+    }
+
+    #[test]
+    fn gemini_flash_uses_low_thinking() {
+        assert_eq!(
+            gemini_thinking_config("gemini-3.7-flash"),
+            Some(serde_json::json!({ "thinkingLevel": "LOW" }))
+        );
+        assert_eq!(
+            gemini_thinking_config("gemini-3.8-flash"),
+            Some(serde_json::json!({ "thinkingLevel": "LOW" }))
+        );
+        assert_eq!(gemini_thinking_config("gemini-3.5-flash-lite"), None);
+        assert_eq!(
+            gemini_thinking_config("gemini-2.5-flash"),
+            Some(serde_json::json!({ "thinkingBudget": 0 }))
+        );
     }
 
     #[test]
