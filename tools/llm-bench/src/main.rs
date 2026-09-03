@@ -1036,7 +1036,7 @@ async fn run_once(
     } else {
         format!("{}\n\n用户热词词典：\n{}", prompt, dictionary.trim())
     };
-    let user_content = format!("原文：\n{}", timestamped_input(input));
+    let user_content = format!("原文：\n{}", input);
     run_prompt(http, provider, system_prompt, user_content).await
 }
 
@@ -1383,15 +1383,6 @@ async fn run_once_gemini(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
-
-fn timestamped_input(input: &str) -> String {
-    let now = chrono::Local::now();
-    format!(
-        "现在的时间是 {}\n{}",
-        now.format("%Y年%m月%d日 %H时%M分%S秒"),
-        input
-    )
-}
 
 fn toml_to_json(v: &toml::Value) -> serde_json::Value {
     match v {
