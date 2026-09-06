@@ -299,9 +299,58 @@ plus 档是另一组（`longanlingxin`、`longanlufeng`）。另有 500+ 复刻�
 1. **音量参数是否生效**：字节数测不出音量，需要比 RMS。不影响本期（走本地增益）。
 2. **`pitch_rate` 的真实语义**：4.2x 时长对不上朴素重采样，需听感确认。
 3. **免费额度是按模型还是按账号**：1 万字符的口径未验证。
-4. **中国站人民币单价**：只拿到国际站美元报价。
+4. **中国站人民币单价**：~~只拿到国际站美元报价~~ 已核实（见 §8，2026-08-30）。
 5. **旧 `dashscope.aliyuncs.com` 主机的下线时间**：官方说要迁到 workspace 域名，
    但未给期限，实测仍可用。
+
+---
+
+## 8. 补记（2026-08-30）：cosyvoice-v3.5-flash 探测与中国站价格
+
+### 8.1 中国站价格（官方定价页实时核实）
+
+按输入字符计费、输出不计费；**一个汉字计 2 个字符**（英文/数字/标点/空格计 1），
+SSML 标签不计入。免费额度均为 1 万字符（仅北京地域，开通后 90 天有效）。
+
+| 模型 | 元/万字符 |
+|---|---|
+| qwen3-tts-flash | 0.8 |
+| qwen-audio-3.0-tts-flash | 1.0 |
+| qwen-audio-3.0-tts-plus | 1.4 |
+| cosyvoice-v3.5-flash | 0.8 |
+| cosyvoice-v3.5-plus | 1.5 |
+| cosyvoice-v3-flash | 1.0 |
+| cosyvoice-v3-plus / v2 / v1 | 2.0 |
+
+百炼还上架了 MiniMax：speech-2.8-turbo 2 元、speech-2.8-hd 3.5 元（同一 API Key 可用）。
+
+### 8.2 cosyvoice-v3.5-flash：无系统预置音色，不可作朗读引擎
+
+- 实测（2026-08-30，SpeechSynthesizer HTTP 端点）：v3 音色表全量、各种 `_v3.5`
+  后缀猜测、以及**不传 voice 参数**，一律返回 `InvalidParameter: [cosyvoice:]
+  Engine return error code: 418`；官方 FAQ 确认 418 = 音色不支持。同请求换
+  cosyvoice-v3-flash + `longanyang` 正常出音频（对照组）。
+- 官方音色列表页无 v3.5 小节；声音复刻 API 文档将 v3.5-flash/plus 仅列为
+  **复刻音色的 target_model**（创建复刻音色免费，需 10-20 秒样本音频）。
+- 结论：v3.5 的低价（0.8 元）只对自备复刻/设计音色可用，**预置音色场景不可用**，
+  VoiceX 暂不提供该选项（曾加入后因必然 418 回退）。复查信号：
+  [CosyVoice 音色列表](https://help.aliyun.com/zh/model-studio/cosyvoice-voice-list)
+  页面出现 v3.5 小节。
+- 若将来做「声音复刻」功能，v3.5-flash 是首选合成目标（免费建音色 + 最低合成价）。
+
+### 8.3 qwen-audio-3.0-tts-flash 音色全量（2026-08-30 核实）
+
+- **系统音色共 12 个**（官方[音色列表页](https://help.aliyun.com/zh/model-studio/qwen-audio-tts-voice-list)）：
+  此前内置 8 个，缺 龙泡泡 `longpaopao_v3.6`、龙火火 `longhuohuo_v3.6`、
+  龙川叔 `longchuanshu_v3.6`、loongeva `loongeva_v3.6`，已实测补齐。
+  plus 型号另有旗舰音色 `longanlingxin`/`longanlufeng`（flash 不可用）。
+- **基础音色 597 个**：命名 `qwen-audio-3.0-tts-flash-<后缀>`，调用方式与系统
+  音色一致，完整清单在音色列表页的 Excel（含名称/性别/年龄/特质/场景/试听）。
+  场景分布：日常对话 316、情感陪伴 144、有声阅读 18、知识分享 6、新闻播报 12、
+  有声书配音 7、古风有声书 10 等；英文仅 8 个。
+- 从「有声阅读/知识分享/演讲朗诵」挑了 7 个补入内置列表（龙蓉桃涟、龙翼暮凌、
+  龙羽瑶鸾、龙霓岚凤、龙瑾涟晓、Adrian Gao、Ivy Hu），全部实测出音频；
+  其余基础音色可在音色选择器中手输 ID 使用。
 
 ---
 

@@ -46,8 +46,21 @@ pub const MODEL_QWEN3: &str = "qwen3-tts-flash";
 pub const MODEL_QWEN_AUDIO: &str = "qwen-audio-3.0-tts-flash";
 pub const MODEL_COSYVOICE: &str = "cosyvoice-v3-flash";
 
+// cosyvoice-v3.5-flash is deliberately absent despite its lower price
+// (0.8元/万字符 against v3-flash's 1元): probed 2026-08-30, it has no system
+// preset voices at all — every id from the v3 table, every `_v3.5`-suffixed
+// guess, and even omitting `voice` come back `InvalidParameter: 418` (the
+// documented "voice unsupported" code), while the same requests succeed on
+// v3-flash. The clone/design API lists v3.5 only as a target for cloned
+// voices, so offering it here would be a picker entry that always 418s.
+// Revisit if the official voice list ever grows a v3.5 section.
+
 pub fn default_model() -> &'static str {
-    MODEL_QWEN3
+    // Qwen-Audio 3.0 over Qwen3: the same 中英混读 quality with the far larger
+    // voice roster (12 system + ~600 basic ids) and the 9000-character piece
+    // size. Qwen3 remains the pick for its dialect voices. Keep the frontend
+    // store default (settings.ts) in step with this.
+    MODEL_QWEN_AUDIO
 }
 
 /// Everything that differs between the model families.
@@ -114,15 +127,32 @@ const QWEN3_VOICES: [(&str, &str, &str); 12] = [
 /// Qwen-Audio-3.0-TTS, which shares its engine with CosyVoice — the error
 /// messages say `[cosyvoice:]` outright. Voice ids still do not carry across:
 /// `longanhuan_v3.6` here is not `longanhuan` / `longanhuan_v3` on CosyVoice.
-const QWEN_AUDIO_VOICES: [(&str, &str, &str); 8] = [
+///
+/// The first twelve are the flash model's complete system-voice list. Below
+/// them is a reading-shaped pick from the ~600 "basic" voices the same model
+/// serves under `qwen-audio-3.0-tts-flash-<suffix>` ids (the 有声阅读/知识分享
+/// rows of the published Excel); the picker's typed-id path reaches the rest.
+/// Every entry here returned audio from the live account on 2026-08-30.
+const QWEN_AUDIO_VOICES: [(&str, &str, &str); 19] = [
     ("longanfengyue", "龙安风悦", "zh-CN"),
     ("longanyuanfei", "龙安元妃", "zh-CN"),
     ("longanlingxi", "龙安灵希", "zh-CN"),
     ("longanxiaoxin", "龙安小昕", "zh-CN"),
     ("longanhuan_v3.6", "龙安欢", "zh-CN"),
     ("longjielidou_v3.6", "龙杰力豆", "zh-CN"),
+    ("longpaopao_v3.6", "龙泡泡", "zh-CN"),
+    ("longhuohuo_v3.6", "龙火火", "zh-CN"),
+    ("longchuanshu_v3.6", "龙川叔", "zh-CN"),
     ("loongmary", "loongmary", "en-GB"),
+    ("loongeva_v3.6", "loongeva", "en-US"),
     ("loongjohn", "loongJohn", "en-US"),
+    ("qwen-audio-3.0-tts-flash-longrongtaolian", "龙蓉桃涟（有声阅读）", "zh-CN"),
+    ("qwen-audio-3.0-tts-flash-longyimuling", "龙翼暮凌（有声阅读）", "zh-CN"),
+    ("qwen-audio-3.0-tts-flash-longyuyaoluan", "龙羽瑶鸾（有声阅读）", "zh-CN"),
+    ("qwen-audio-3.0-tts-flash-longnilanfeng", "龙霓岚凤（有声阅读）", "zh-CN"),
+    ("qwen-audio-3.0-tts-flash-longjinlianxiao", "龙瑾涟晓（有声阅读）", "zh-CN"),
+    ("qwen-audio-3.0-tts-flash-loongadriangao", "Adrian Gao（阅读）", "en-US"),
+    ("qwen-audio-3.0-tts-flash-loongivyhu", "Ivy Hu（朗诵）", "en-US"),
 ];
 
 /// CosyVoice-v3-flash system voices. The service has eighty-plus; this is the

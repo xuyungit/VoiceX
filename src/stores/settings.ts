@@ -401,7 +401,7 @@ const defaultSettings: AppSettings = {
     volcTtsVolume: 1,
 
     aliyunTtsApiKey: '',
-    aliyunTtsModel: 'qwen3-tts-flash',
+    aliyunTtsModel: 'qwen-audio-3.0-tts-flash',
     aliyunTtsVoiceQwen3: 'Cherry',
     aliyunTtsVoiceQwenAudio: 'longanfengyue',
     aliyunTtsVoiceCosyVoice: 'longanyang',
