@@ -11,6 +11,7 @@ pub mod hud;
 pub mod i18n;
 pub mod injector;
 pub mod llm;
+mod network;
 pub mod selection;
 pub mod services;
 pub mod session;
@@ -349,6 +350,8 @@ pub fn run() {
             commands::settings::get_resolved_ui_locale,
             commands::settings::save_settings,
             commands::settings::probe_local_asr,
+            commands::settings::list_local_qwen_models,
+            commands::settings::choose_local_model_directory,
             commands::settings::probe_current_asr_provider,
             commands::settings::probe_current_llm_provider,
             commands::settings::load_provider_probe_audio,

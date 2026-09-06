@@ -78,6 +78,7 @@ pub struct AppSettings {
     // ASR Provider: OpenAI Audio Transcription
     pub openai_asr_api_key: String,
     pub openai_asr_model: String,
+    pub openai_asr_refine_model: String,
     pub openai_asr_base_url: String,
     pub openai_asr_language: String,
     pub openai_asr_prompt: String,
@@ -356,14 +357,14 @@ impl Default for AppSettings {
             google_stt_endpointing: "supershort".to_string(),
             google_stt_phrase_boost: 8.0,
             funasr_api_key: String::new(),
-            funasr_model: "fun-asr-realtime".to_string(),
+            funasr_model: crate::asr::models::default_model("funasr"),
             funasr_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/inference".to_string(),
             funasr_language: String::new(),
 
             qwen_asr_api_key: String::new(),
             qwen_asr_recognition_mode: "realtime".to_string(),
-            qwen_asr_model: "qwen3-asr-flash-realtime".to_string(),
-            qwen_asr_batch_model: "qwen3-asr-flash".to_string(),
+            qwen_asr_model: crate::asr::models::default_model("qwen"),
+            qwen_asr_batch_model: crate::asr::models::default_model("qwenBatch"),
             qwen_asr_ws_url: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime".to_string(),
             qwen_asr_workspace_id: String::new(),
             qwen_asr_language: String::new(),
@@ -374,14 +375,15 @@ impl Default for AppSettings {
             qwen_asr_max_sentence_silence_ms: 1300,
             qwen_asr_heartbeat: false,
             gemini_api_key: String::new(),
-            gemini_model: "gemini-3.1-flash-lite-preview".to_string(),
-            gemini_live_model: "gemini-3.1-flash-live-preview".to_string(),
+            gemini_model: crate::asr::models::default_model("gemini"),
+            gemini_live_model: crate::asr::models::default_model("geminiLive"),
             gemini_language: "auto".to_string(),
             cohere_api_key: String::new(),
-            cohere_model: "cohere-transcribe-03-2026".to_string(),
+            cohere_model: crate::asr::models::default_model("cohere"),
             cohere_language: "zh".to_string(),
             openai_asr_api_key: String::new(),
-            openai_asr_model: "gpt-transcribe".to_string(),
+            openai_asr_model: crate::asr::models::default_model("openai"),
+            openai_asr_refine_model: crate::asr::models::default_model("openaiRefine"),
             openai_asr_base_url: "https://api.openai.com/v1".to_string(),
             openai_asr_language: String::new(),
             openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
@@ -391,20 +393,20 @@ impl Default for AppSettings {
             elevenlabs_api_key: String::new(),
             elevenlabs_recognition_mode: "realtime".to_string(),
             elevenlabs_post_recording_refine: "off".to_string(),
-            elevenlabs_realtime_model: "scribe_v2_realtime".to_string(),
-            elevenlabs_batch_model: "scribe_v2".to_string(),
+            elevenlabs_realtime_model: crate::asr::models::default_model("elevenlabsRealtime"),
+            elevenlabs_batch_model: crate::asr::models::default_model("elevenlabsBatch"),
             elevenlabs_language: String::new(),
             elevenlabs_enable_keyterms: true,
             soniox_api_key: String::new(),
-            soniox_model: "stt-rt-v4".to_string(),
+            soniox_model: crate::asr::models::default_model("soniox"),
             soniox_language: String::new(),
             soniox_max_endpoint_delay_ms: None,
             stepaudio_api_key: String::new(),
-            stepaudio_model: "stepaudio-2.5-asr".to_string(),
+            stepaudio_model: crate::asr::models::default_model("stepaudio"),
             stepaudio_base_url: "https://api.stepfun.com/v1".to_string(),
             stepaudio_language: "auto".to_string(),
             mimo_api_key: String::new(),
-            mimo_model: "mimo-v2.5-asr".to_string(),
+            mimo_model: crate::asr::models::default_model("mimo"),
             mimo_base_url: "https://api.xiaomimimo.com/v1".to_string(),
             mimo_language: "auto".to_string(),
             qwen_local_command_path: String::new(),
@@ -614,6 +616,19 @@ pub fn apply_llm_provider_selection(settings: &mut AppSettings, key: &str) {
     } else {
         settings.llm_provider_type = key.to_string();
     }
+}
+
+/// Preserve the previous final-pass model when introducing its independent setting.
+pub fn migrate_openai_refine_model(value: &mut serde_json::Value) -> bool {
+    let Some(object) = value.as_object_mut() else { return false; };
+    if object.contains_key("openaiAsrRefineModel") { return false; }
+    let previous = object.get("openaiAsrModel").and_then(serde_json::Value::as_str);
+    // Existing configurations used the same model for live and final passes.
+    // Preserve custom deployment IDs too; only known incompatible IDs change.
+    let model = previous.filter(|id| crate::asr::models::validate_model("openai", id, "batch").is_ok())
+        .map(str::to_string).unwrap_or_else(|| crate::asr::models::default_model("openaiRefine"));
+    object.insert("openaiAsrRefineModel".into(), model.into());
+    true
 }
 
 /// One-time migration of the legacy single custom endpoint (`llmCustomBaseUrl`,
@@ -1089,6 +1104,18 @@ pub fn save_settings(
 }
 
 #[tauri::command]
+pub async fn list_local_qwen_models(configured: String) -> Result<Vec<crate::asr::local_models::LocalModel>, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::asr::local_models::discover(&configured))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn choose_local_model_directory() -> Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new().pick_folder().await
+        .map(|folder| folder.path().to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
 pub async fn probe_local_asr(
     command_path: Option<String>,
 ) -> Result<crate::asr::ColiAsrStatus, String> {
@@ -1458,4 +1485,21 @@ mod tests {
         assert_eq!(settings.qwen_local_language, "Chinese");
         assert!(settings.qwen_local_use_dictionary);
     }
+    #[test]
+    fn refine_model_migration_preserves_existing_models_and_is_idempotent() {
+        for id in ["gpt-4o-transcribe", "my-deployment"] {
+            let mut value = serde_json::json!({"openaiAsrModel": id});
+            assert!(super::migrate_openai_refine_model(&mut value));
+            assert_eq!(value["openaiAsrRefineModel"], id);
+            assert!(!super::migrate_openai_refine_model(&mut value));
+        }
+        let mut value = serde_json::json!({"openaiAsrModel":"gpt-live-transcribe"});
+        super::migrate_openai_refine_model(&mut value);
+        assert_eq!(value["openaiAsrModel"], "gpt-live-transcribe");
+        assert_eq!(value["openaiAsrRefineModel"], "gpt-transcribe");
+        value["openaiAsrRefineModel"] = "whisper-1".into();
+        assert!(!super::migrate_openai_refine_model(&mut value));
+        assert_eq!(value["openaiAsrRefineModel"], "whisper-1");
+    }
+
 }

@@ -36,6 +36,8 @@ impl OpenAITranscriptionClient {
             .await
             .map_err(|e| AsrError::ConnectionFailed(format!("Failed to read audio file: {}", e)))?;
 
+        super::models::validate_model("openai", &self.config.openai_asr_model, "batch")
+            .map_err(AsrError::ProtocolError)?;
         let endpoint = format!(
             "{}/audio/transcriptions",
             self.config.openai_asr_base_url.trim_end_matches('/')

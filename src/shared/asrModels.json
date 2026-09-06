@@ -1,0 +1,304 @@
+{
+  "defaults": {
+    "openai": "gpt-transcribe",
+    "openaiRefine": "gpt-transcribe",
+    "gemini": "gemini-3.5-flash-lite",
+    "geminiLive": "gemini-3.1-flash-live-preview",
+    "soniox": "stt-rt-v5",
+    "qwen": "qwen3-asr-flash-realtime",
+    "qwenBatch": "qwen3-asr-flash",
+    "funasr": "fun-asr-realtime",
+    "cohere": "cohere-transcribe-03-2026",
+    "elevenlabsRealtime": "scribe_v2_realtime",
+    "elevenlabsBatch": "scribe_v2",
+    "stepaudio": "stepaudio-2.5-asr",
+    "mimo": "mimo-v2.5-asr"
+  },
+  "models": [
+    {
+      "provider": "openai",
+      "id": "gpt-live-transcribe",
+      "modes": [
+        "realtime"
+      ],
+      "note": "modelLive",
+      "delay": true
+    },
+    {
+      "provider": "openai",
+      "id": "gpt-transcribe",
+      "modes": [
+        "realtime",
+        "batch"
+      ],
+      "note": "modelCommitted"
+    },
+    {
+      "provider": "openai",
+      "id": "gpt-4o-transcribe",
+      "modes": [
+        "realtime",
+        "batch"
+      ],
+      "status": "legacy"
+    },
+    {
+      "provider": "openai",
+      "id": "gpt-4o-mini-transcribe",
+      "modes": [
+        "realtime",
+        "batch"
+      ],
+      "status": "legacy"
+    },
+    {
+      "provider": "openai",
+      "id": "whisper-1",
+      "modes": [
+        "realtime",
+        "batch"
+      ],
+      "status": "legacy"
+    },
+    {
+      "provider": "openai",
+      "id": "gpt-realtime-whisper",
+      "modes": [],
+      "status": "unverified"
+    },
+    {
+      "provider": "gemini",
+      "id": "gemini-3.5-flash-lite",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "gemini",
+      "id": "gemini-3.1-flash-lite",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "gemini",
+      "id": "gemini-3.5-transcribe",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "gemini",
+      "id": "gemini-3.1-flash-lite-preview",
+      "modes": [
+        "batch"
+      ],
+      "status": "preview"
+    },
+    {
+      "provider": "gemini-live",
+      "id": "gemini-3.1-flash-live-preview",
+      "modes": [
+        "realtime"
+      ],
+      "status": "preview"
+    },
+    {
+      "provider": "gemini-live",
+      "id": "gemini-3.5-transcribe-live",
+      "modes": [
+        "realtime"
+      ]
+    },
+    {
+      "provider": "soniox",
+      "id": "stt-rt-v5",
+      "modes": [
+        "realtime"
+      ]
+    },
+    {
+      "provider": "soniox",
+      "id": "stt-rt-v4",
+      "modes": [
+        "realtime"
+      ],
+      "note": "modelAliasV5",
+      "status": "legacy"
+    },
+    {
+      "provider": "soniox",
+      "id": "stt-async-v5",
+      "modes": [],
+      "status": "unavailable"
+    },
+    {
+      "provider": "cohere",
+      "id": "cohere-transcribe-03-2026",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "cohere",
+      "id": "cohere-transcribe-arabic-07-2026",
+      "modes": [
+        "batch"
+      ],
+      "note": "modelArabic"
+    },
+    {
+      "provider": "stepaudio",
+      "id": "stepaudio-2.5-asr",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "mimo",
+      "id": "mimo-v2.5-asr",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "elevenlabs",
+      "id": "scribe_v2_realtime",
+      "modes": [
+        "realtime"
+      ]
+    },
+    {
+      "provider": "elevenlabs",
+      "id": "scribe_v2",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen-audio-3.0-asr-flash-streaming",
+      "modes": [
+        "realtime"
+      ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-realtime",
+      "modes": [
+        "realtime"
+      ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-realtime-2026-02-10",
+      "modes": [
+        "realtime"
+      ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-realtime-2025-10-27",
+      "modes": [
+        "realtime"
+      ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen-audio-3.0-asr-flash",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-2026-02-10",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-2025-09-08",
+      "modes": [
+        "batch"
+      ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen-audio-3.0-asr-flash-filetrans",
+      "modes": [],
+      "status": "unavailable"
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-filetrans",
+      "modes": [],
+      "status": "unavailable"
+    },
+    {
+      "provider": "funasr",
+      "id": "fun-asr-realtime",
+      "modes": [
+        "realtime"
+      ],
+      "supportsContext": true,
+      "supportsHotword": true
+    },
+    {
+      "provider": "funasr",
+      "id": "fun-asr-realtime-2026-02-28",
+      "modes": [
+        "realtime"
+      ],
+      "supportsContext": false,
+      "supportsHotword": true
+    },
+    {
+      "provider": "funasr",
+      "id": "fun-asr-realtime-2025-11-07",
+      "modes": [
+        "realtime"
+      ],
+      "supportsContext": true,
+      "supportsHotword": true
+    },
+    {
+      "provider": "funasr",
+      "id": "fun-asr-flash-8k-realtime",
+      "modes": [
+        "realtime"
+      ],
+      "supportsContext": false,
+      "supportsHotword": true
+    },
+    {
+      "provider": "funasr",
+      "id": "fun-asr-flash-8k-realtime-2026-01-28",
+      "modes": [
+        "realtime"
+      ],
+      "supportsContext": false,
+      "supportsHotword": true
+    },
+    {
+      "provider": "funasr",
+      "id": "fun-asr",
+      "modes": [],
+      "status": "unavailable"
+    },
+    {
+      "provider": "funasr",
+      "id": "fun-asr-flash-2026-06-15",
+      "modes": [],
+      "status": "unavailable"
+    }
+  ]
+}

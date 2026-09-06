@@ -1,3 +1,4 @@
+import { ASR_MODEL_DEFAULTS } from '../utils/asrModels'
 import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
@@ -75,6 +76,7 @@ export interface AppSettings {
     cohereLanguage: string
 
     openaiAsrApiKey: string
+    openaiAsrRefineModel: string
     openaiAsrModel: string
     openaiAsrBaseUrl: string
     openaiAsrLanguage: string
@@ -307,14 +309,14 @@ const defaultSettings: AppSettings = {
     googleSttPhraseBoost: 8,
 
     funasrApiKey: '',
-    funasrModel: 'fun-asr-realtime',
+    funasrModel: ASR_MODEL_DEFAULTS.funasr,
     funasrWsUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/inference',
     funasrLanguage: '',
 
     qwenAsrApiKey: '',
     qwenAsrRecognitionMode: 'realtime',
-    qwenAsrModel: 'qwen3-asr-flash-realtime',
-    qwenAsrBatchModel: 'qwen3-asr-flash',
+    qwenAsrModel: ASR_MODEL_DEFAULTS.qwen,
+    qwenAsrBatchModel: ASR_MODEL_DEFAULTS.qwenBatch,
     qwenAsrWsUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime',
     qwenAsrWorkspaceId: '',
     qwenAsrLanguage: '',
@@ -325,14 +327,15 @@ const defaultSettings: AppSettings = {
     qwenAsrMaxSentenceSilenceMs: 1300,
     qwenAsrHeartbeat: false,
     geminiApiKey: '',
-    geminiModel: 'gemini-3.1-flash-lite-preview',
-    geminiLiveModel: 'gemini-3.1-flash-live-preview',
+    geminiModel: ASR_MODEL_DEFAULTS.gemini,
+    geminiLiveModel: ASR_MODEL_DEFAULTS.geminiLive,
     geminiLanguage: 'auto',
     cohereApiKey: '',
-    cohereModel: 'cohere-transcribe-03-2026',
+    cohereModel: ASR_MODEL_DEFAULTS.cohere,
     cohereLanguage: 'zh',
     openaiAsrApiKey: '',
-    openaiAsrModel: 'gpt-transcribe',
+    openaiAsrModel: ASR_MODEL_DEFAULTS.openai,
+    openaiAsrRefineModel: ASR_MODEL_DEFAULTS.openaiRefine,
     openaiAsrBaseUrl: 'https://api.openai.com/v1',
     openaiAsrLanguage: '',
     openaiAsrPrompt: 'Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.',
@@ -342,20 +345,20 @@ const defaultSettings: AppSettings = {
     elevenlabsApiKey: '',
     elevenlabsRecognitionMode: 'realtime',
     elevenlabsPostRecordingRefine: 'off',
-    elevenlabsRealtimeModel: 'scribe_v2_realtime',
-    elevenlabsBatchModel: 'scribe_v2',
+    elevenlabsRealtimeModel: ASR_MODEL_DEFAULTS.elevenlabsRealtime,
+    elevenlabsBatchModel: ASR_MODEL_DEFAULTS.elevenlabsBatch,
     elevenlabsLanguage: '',
     elevenlabsEnableKeyterms: true,
     sonioxApiKey: '',
-    sonioxModel: 'stt-rt-v4',
+    sonioxModel: ASR_MODEL_DEFAULTS.soniox,
     sonioxLanguage: '',
     sonioxMaxEndpointDelayMs: null,
     stepaudioApiKey: '',
-    stepaudioModel: 'stepaudio-2.5-asr',
+    stepaudioModel: ASR_MODEL_DEFAULTS.stepaudio,
     stepaudioBaseUrl: 'https://api.stepfun.com/v1',
     stepaudioLanguage: 'auto',
     mimoApiKey: '',
-    mimoModel: 'mimo-v2.5-asr',
+    mimoModel: ASR_MODEL_DEFAULTS.mimo,
     mimoBaseUrl: 'https://api.xiaomimimo.com/v1',
     mimoLanguage: 'auto',
 

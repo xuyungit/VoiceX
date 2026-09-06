@@ -1,3 +1,4 @@
+import { ASR_MODELS } from './asrModels'
 import type { AppSettings } from '../stores/settings'
 
 export type AsrProviderValue = AppSettings['asrProviderType']
@@ -64,13 +65,13 @@ const COLI_POST_RECORDING_REFINE_LABEL_KEYS: Array<{
   { key: 'asr.refinementWhisper', value: 'whisper' }
 ]
 
-export const ELEVENLABS_REALTIME_MODEL_OPTIONS = [
-  { label: 'scribe_v2_realtime', value: 'scribe_v2_realtime' }
-]
+export const ELEVENLABS_REALTIME_MODEL_OPTIONS = ASR_MODELS
+  .filter(model => model.provider === 'elevenlabs' && model.modes.includes('realtime'))
+  .map(model => ({ label: model.id, value: model.id }))
 
-export const ELEVENLABS_BATCH_MODEL_OPTIONS = [
-  { label: 'scribe_v2', value: 'scribe_v2' }
-]
+export const ELEVENLABS_BATCH_MODEL_OPTIONS = ASR_MODELS
+  .filter(model => model.provider === 'elevenlabs' && model.modes.includes('batch'))
+  .map(model => ({ label: model.id, value: model.id }))
 
 export function buildAsrProviderOptions(
   t: Translate,

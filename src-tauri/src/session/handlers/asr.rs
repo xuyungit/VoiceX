@@ -902,6 +902,10 @@ impl SessionController {
             self.fail_batch_asr_state(state, "批量识别失败：当前 ASR 服务配置不完整".to_string());
             return;
         }
+        if let Err(message) = config.validate_model_selection() {
+            self.fail_batch_asr_state(state, message);
+            return;
+        }
         state.session_asr_model_name =
             crate::services::history_service::HistoryService::resolve_asr_model_name(&settings);
 
@@ -1226,7 +1230,7 @@ impl PostRecordingRefineProvider {
                 &config.elevenlabs_batch_model,
             ),
             Self::OpenAI => crate::services::history_service::HistoryService::openai_realtime_batch_refine_model_name(
-                &config.openai_asr_model,
+                &config.openai_asr_model, &config.openai_asr_refine_model
             ),
             Self::Qwen => crate::services::history_service::HistoryService::qwen_realtime_batch_refine_model_name(
                 &config.qwen_model,
@@ -1263,7 +1267,7 @@ impl PostRecordingRefineProvider {
                 }
             }
             Self::OpenAI => {
-                let client = OpenAITranscriptionClient::new(config);
+                let client = OpenAITranscriptionClient::new(config.openai_refinement_config());
                 let refined = client
                     .transcribe_file(audio_path)
                     .await

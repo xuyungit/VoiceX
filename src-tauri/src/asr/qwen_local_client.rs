@@ -79,6 +79,7 @@ impl QwenLocalAsrClient {
 
         let mut command = Command::new(&program);
         command
+            .kill_on_drop(true)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

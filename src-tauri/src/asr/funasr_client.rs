@@ -1,14 +1,12 @@
 //! DashScope `/inference` realtime ASR client shared by Fun-ASR and Qwen-Audio ASR.
 
+use crate::network::connect_async;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Receiver;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
-};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
 use super::audio_utils::{downmix_to_mono, resample_to_16k, resample_to_8k};
 use super::config::AsrConfig;
@@ -106,7 +104,11 @@ impl FunAsrRealtimeClient {
             headers.insert("Authorization", auth_value);
         }
 
-        let (ws_stream, _) = connect_async(req).await.map_err(|e| {
+        let (ws_stream, _) = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = connect_async(req) => result,
+        }
+        .map_err(|e| {
             AsrError::ConnectionFailed(format!(
                 "DashScope inference WebSocket connect failed: {}",
                 e
@@ -212,11 +214,7 @@ pub fn qwen_uses_inference_protocol(model: &str) -> bool {
 }
 
 async fn wait_for_task_started(
-    ws_read: &mut futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    >,
+    ws_read: &mut futures_util::stream::SplitStream<crate::network::WsStream>,
     task_id: &str,
 ) -> Result<(), AsrError> {
     while let Some(message) = ws_read.next().await {
@@ -281,11 +279,7 @@ async fn wait_for_task_started(
 }
 
 async fn read_events(
-    mut ws_read: futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-    >,
+    mut ws_read: futures_util::stream::SplitStream<crate::network::WsStream>,
     cancel: tokio_util::sync::CancellationToken,
     on_event: Arc<dyn Fn(AsrEvent) + Send + Sync>,
 ) -> Result<(), AsrError> {
@@ -428,12 +422,7 @@ async fn write_audio_and_finish(
     stream_rate: u32,
     mut audio_rx: Receiver<Vec<u8>>,
     cancel: tokio_util::sync::CancellationToken,
-    ws_write: &mut futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        Message,
-    >,
+    ws_write: &mut futures_util::stream::SplitSink<crate::network::WsStream, Message>,
     task_id: &str,
 ) -> Result<(), AsrError> {
     while let Some(chunk) = tokio::select! {

@@ -39,6 +39,7 @@ pub async fn transcribe_audio_path_detailed(
     config: &mut AsrConfig,
     cancel: CancellationToken,
 ) -> Result<AsrTranscriptionOutcome, String> {
+    config.validate_model_selection()?;
     match config.provider_type {
         AsrProviderType::Coli => run_coli_asr(path, config).await,
         AsrProviderType::QwenLocal => run_qwen_local_asr(path, config).await,
@@ -238,7 +239,7 @@ async fn run_openai_asr(
             });
         }
 
-        let client = OpenAITranscriptionClient::new(config.clone());
+        let client = OpenAITranscriptionClient::new(config.openai_refinement_config());
         return match client.transcribe_file(path).await {
             Ok(refined) => {
                 let refined = refined.trim().to_string();
@@ -257,7 +258,7 @@ async fn run_openai_asr(
                     Ok(AsrTranscriptionOutcome {
                         text: refined,
                         model_name: HistoryService::openai_realtime_batch_refine_model_name(
-                            &config.openai_asr_model,
+                            &config.openai_asr_model, &config.openai_asr_refine_model
                         ),
                     })
                 }

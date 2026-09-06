@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import AsrModelSelect from './AsrModelSelect.vue'
 import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
@@ -59,11 +60,7 @@ const mimoLanguageOptions = computed(() => [
           <div class="field-label">{{ t('asr.model') }}</div>
           <div class="field-note">{{ t('asr.mimoModelNote') }}</div>
         </div>
-        <NInput
-          v-model:value="mimoModel"
-          placeholder="mimo-v2.5-asr"
-          class="field-control"
-        />
+        <AsrModelSelect v-model:value="mimoModel" provider="mimo" mode="batch" class="field-control" />
       </div>
       <div class="field-row">
         <div class="field-text">

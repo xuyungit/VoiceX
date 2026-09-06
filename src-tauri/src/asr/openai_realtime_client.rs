@@ -1,3 +1,4 @@
+use crate::network::connect_async;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -8,10 +9,7 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Receiver;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
-};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
 use super::audio_utils::{downmix_to_mono, resample_to_24k};
 use super::config::AsrConfig;
@@ -74,9 +72,11 @@ impl OpenAIRealtimeClient {
             );
         }
 
-        let (ws_stream, _) = connect_async(req)
-            .await
-            .map_err(|e| AsrError::ConnectionFailed(format!("OpenAI Realtime connect: {e}")))?;
+        let (ws_stream, _) = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = connect_async(req) => result,
+        }
+        .map_err(|e| AsrError::ConnectionFailed(format!("OpenAI Realtime connect: {e}")))?;
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
         // The GA API configures the session over the socket rather than at
@@ -394,7 +394,7 @@ fn build_session_update_event(config: &AsrConfig) -> Value {
             transcription["prompt"] = json!(prompt);
         }
         let delay = config.openai_asr_delay.trim();
-        if !delay.is_empty() {
+        if !delay.is_empty() && super::models::supports_delay("openai", model) {
             transcription["delay"] = json!(delay);
         }
     } else {
@@ -780,5 +780,13 @@ mod tests {
             serde_json::to_string(&build_session_update_event(&config("gpt-live-transcribe")))
                 .unwrap()
         );
+    }
+    #[test]
+    fn switching_to_committed_model_does_not_send_saved_live_delay() {
+        let mut settings = config("gpt-transcribe");
+        settings.openai_asr_delay = "low".into();
+        let event = build_session_update_event(&settings);
+        let encoded = serde_json::to_string(&event).unwrap();
+        assert!(!encoded.contains("\"delay\""));
     }
 }

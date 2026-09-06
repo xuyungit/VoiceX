@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { NInput, NSelect, NSwitch } from 'naive-ui'
+import { computed, onMounted, ref, watch } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
+import { NButton, NInput, NSelect, NSwitch } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
 
@@ -27,6 +28,40 @@ const qwenLocalUseDictionary = computed({
   set: (v: boolean) => settingsStore.updateSetting('qwenLocalUseDictionary', v)
 })
 
+interface LocalModel { path: string; label: string; filesReady: boolean; message: string; configured: boolean }
+const localModels = ref<LocalModel[]>([])
+const modelError = ref('')
+const loadingModels = ref(false)
+let refreshGeneration = 0
+async function refreshModels() {
+  const generation = ++refreshGeneration
+  loadingModels.value = true
+  try {
+    const result = await invoke<LocalModel[]>('list_local_qwen_models', { configured: qwenLocalModelDir.value })
+    if (generation !== refreshGeneration) return
+    localModels.value = result
+    modelError.value = ''
+  } catch (error) {
+    if (generation === refreshGeneration) modelError.value = String(error)
+  } finally {
+    if (generation === refreshGeneration) loadingModels.value = false
+  }
+}
+const modelOptions = computed(() => localModels.value.map(model => ({
+  label: model.label + ' · ' + (model.filesReady ? t('asr.localModelFilesReady') : t('asr.localModelIncomplete')),
+  value: model.path,
+  disabled: !model.filesReady
+})))
+const selectedModel = computed(() => localModels.value.find(model => model.configured || model.path === qwenLocalModelDir.value))
+async function chooseDirectory() {
+  try {
+    const path = await invoke<string | null>('choose_local_model_directory')
+    if (path) qwenLocalModelDir.value = path
+  } catch (error) { modelError.value = String(error) }
+}
+onMounted(refreshModels)
+watch(qwenLocalModelDir, refreshModels)
+
 // Leaving this on auto lets the model drift into English mid-utterance, so the
 // blank option is deliberately labelled as not recommended rather than hidden.
 const languageOptions = computed(() => [
@@ -48,11 +83,17 @@ const languageOptions = computed(() => [
           <div class="field-label">{{ t('asr.qwenLocalModelDir') }}</div>
           <div class="field-note">{{ t('asr.qwenLocalModelDirNote') }}</div>
         </div>
-        <NInput
-          v-model:value="qwenLocalModelDir"
-          placeholder="/path/to/qwen3-asr-0.6b"
-          class="field-control"
-        />
+        <div class="field-control local-model-control">
+          <NSelect v-model:value="qwenLocalModelDir" :options="modelOptions" :loading="loadingModels"
+            filterable tag size="small" :placeholder="t('asr.localModelSelect')" />
+          <div class="local-model-actions">
+            <NButton size="small" @click="chooseDirectory">{{ t('asr.localModelChoose') }}</NButton>
+            <NButton size="small" :loading="loadingModels" @click="refreshModels">{{ t('asr.localModelRefresh') }}</NButton>
+          </div>
+          <div class="field-note">{{ qwenLocalModelDir }}</div>
+          <div class="field-note">{{ t('asr.localModelVerifyNote') }}</div>
+          <div v-if="selectedModel?.message || modelError" role="alert">{{ selectedModel?.message || modelError }}</div>
+        </div>
       </div>
       <div class="field-row">
         <div class="field-text">
@@ -87,3 +128,9 @@ const languageOptions = computed(() => [
     </div>
   </div>
 </template>
+
+<style scoped>
+.local-model-control { min-width: 0; display: grid; gap: 6px; }
+.local-model-actions { display: flex; gap: 6px; }
+.field-note { overflow-wrap: anywhere; }
+</style>

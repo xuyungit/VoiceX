@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use reqwest::header::HeaderMap;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use super::{AsrConfig, AsrError};
 
@@ -10,6 +11,82 @@ const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 const FILE_STATE_ACTIVE: &str = "ACTIVE";
 const FILE_STATE_PROCESSING: &str = "PROCESSING";
 const MAX_PROMPT_HOTWORDS: usize = 100;
+
+pub(crate) fn transcription_languages(language: &str) -> Vec<&str> {
+    match language {
+        "zh" => vec!["cmn-Hans-CN"],
+        "en" => vec!["en-US"],
+        "zh-en" => vec!["cmn-Hans-CN", "en-US"],
+        _ => vec![],
+    }
+}
+
+pub(crate) fn transcription_vocabulary(config: &AsrConfig) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    config
+        .hotwords
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.to_string()))
+        .take(MAX_PROMPT_HOTWORDS)
+        .map(str::to_string)
+        .collect()
+}
+
+fn build_transcribe_request(config: &AsrConfig, uri: &str, mime: &str) -> Value {
+    // https://ai.google.dev/gemini-api/docs/transcribe
+    // Keep verbatim defaults: automatic rewriting belongs to the correction stage.
+    json!({
+        "model": config.gemini_model.trim(),
+        "store": false,
+        "input": [{"type": "audio", "uri": uri, "mime_type": mime}],
+        "generation_config": {
+            "transcription_config": {
+                "language_codes": transcription_languages(&config.gemini_language),
+                "custom_vocabulary": transcription_vocabulary(config)
+            }
+        }
+    })
+}
+
+fn parse_transcribe_response(body: &[u8]) -> Result<String, AsrError> {
+    let response: Value = serde_json::from_slice(body)
+        .map_err(|e| AsrError::ProtocolError(format!("Invalid Gemini transcription JSON: {e}")))?;
+    if let Some(status) = response.get("status").and_then(Value::as_str) {
+        if status != "completed" {
+            return Err(AsrError::ServerError(format!(
+                "Gemini transcription did not complete: {status}"
+            )));
+        }
+    }
+    let steps = response
+        .get("steps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            AsrError::ProtocolError("Gemini transcription response is missing steps".into())
+        })?;
+    let mut text = String::new();
+    for step in steps.iter().filter(|step| step["type"] == "model_output") {
+        let content = step
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                AsrError::ProtocolError("Gemini model_output is missing content".into())
+            })?;
+        for part in content.iter().filter(|part| part["type"] == "text") {
+            text.push_str(part.get("text").and_then(Value::as_str).ok_or_else(|| {
+                AsrError::ProtocolError("Gemini text output is missing text".into())
+            })?);
+        }
+    }
+    if text.trim().is_empty() {
+        return Err(AsrError::ServerError(
+            "Gemini transcription returned no text".into(),
+        ));
+    }
+    Ok(text.trim().to_string())
+}
 
 pub struct GeminiTranscriptionClient {
     config: AsrConfig,
@@ -148,7 +225,17 @@ impl GeminiTranscriptionClient {
             if matches!(file.state.as_deref(), Some(FILE_STATE_PROCESSING)) {
                 file = self.wait_until_active(file).await?;
             }
-            self.generate_transcript(&file).await
+            if self.config.gemini_model.trim() == "gemini-3.5-transcribe"
+                || self
+                    .config
+                    .gemini_model
+                    .trim()
+                    .starts_with("gemini-3.5-transcribe-")
+            {
+                self.transcribe_interaction(&file).await
+            } else {
+                self.generate_transcript(&file).await
+            }
         }
         .await;
 
@@ -242,6 +329,32 @@ impl GeminiTranscriptionClient {
         Err(AsrError::ServerError(
             "Gemini file stayed in PROCESSING for too long".to_string(),
         ))
+    }
+
+    async fn transcribe_interaction(&self, file: &GeminiFile) -> Result<String, AsrError> {
+        let response = self
+            .http
+            .post(format!("{GEMINI_BASE_URL}/v1beta/interactions"))
+            .header("x-goog-api-key", &self.config.gemini_api_key)
+            .header("Api-Revision", "2026-05-20")
+            .timeout(Duration::from_secs(120))
+            .json(&build_transcribe_request(
+                &self.config,
+                &file.uri,
+                &file.mime_type,
+            ))
+            .send()
+            .await
+            .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
+        if !status.is_success() {
+            return Err(http_error("Gemini transcription", status.as_u16(), &body));
+        }
+        parse_transcribe_response(&body)
     }
 
     async fn generate_transcript(&self, file: &GeminiFile) -> Result<String, AsrError> {
@@ -512,4 +625,48 @@ fn http_error(context: &str, status: u16, body: &[u8]) -> AsrError {
         status,
         String::from_utf8_lossy(body)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn transcribe_reads_only_model_text_and_rejects_incomplete_responses() {
+        let body = json!({"status":"completed", "steps":[
+            {"type":"user_input", "content":[{"type":"text","text":"ignore me"}]},
+            {"type":"model_output", "content":[{"type":"text","text":"你好，VoiceX。"}]}
+        ]});
+        assert_eq!(
+            parse_transcribe_response(&serde_json::to_vec(&body).unwrap()).unwrap(),
+            "你好，VoiceX。"
+        );
+        for invalid in [
+            json!({"status":"in_progress","steps":[]}),
+            json!({"outputs":[]}),
+            json!({"steps":[{"type":"model_output","content":[]}]}),
+            json!({"steps":[{"type":"model_output"}]}),
+        ] {
+            assert!(parse_transcribe_response(&serde_json::to_vec(&invalid).unwrap()).is_err());
+        }
+    }
+    #[test]
+    fn transcribe_request_uses_audio_and_bounded_deduplicated_vocabulary() {
+        let mut config = AsrConfig::default();
+        config.gemini_model = "gemini-3.5-transcribe".into();
+        config.gemini_language = "zh-en".into();
+        config.hotwords = vec![" VoiceX ".into(), "VoiceX".into(), "".into()];
+        let request = build_transcribe_request(&config, "files/test", "audio/ogg");
+        assert_eq!(request["store"], false);
+        assert_eq!(request["input"][0]["uri"], "files/test");
+        assert_eq!(
+            request["generation_config"]["transcription_config"]["language_codes"],
+            json!(["cmn-Hans-CN", "en-US"])
+        );
+        assert_eq!(
+            request["generation_config"]["transcription_config"]["custom_vocabulary"],
+            json!(["VoiceX"])
+        );
+        config.hotwords = (0..150).map(|i| format!("word{i}")).collect();
+        assert_eq!(transcription_vocabulary(&config).len(), 100);
+    }
 }

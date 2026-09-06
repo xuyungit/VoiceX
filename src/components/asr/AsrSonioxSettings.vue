@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import AsrModelSelect from './AsrModelSelect.vue'
 import { NInput, NInputNumber } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
@@ -53,7 +54,7 @@ const sonioxMaxEndpointDelayMs = computed({
           <div class="field-label">{{ t('asr.model') }}</div>
           <div class="field-note">{{ t('asr.sonioxModelNote') }}</div>
         </div>
-        <NInput v-model:value="sonioxModel" placeholder="stt-rt-v4" class="field-control" />
+        <AsrModelSelect v-model:value="sonioxModel" provider="soniox" mode="realtime" class="field-control" />
       </div>
       <div class="field-row">
         <div class="field-text">

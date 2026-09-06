@@ -38,6 +38,16 @@ impl AsrManager {
             return;
         }
 
+        if let Err(message) = config.validate_model_selection() {
+            let mut failure = AsrFailure::from_error(config.provider_type,
+                &crate::asr::AsrError::ProtocolError(message.clone()));
+            failure.display_message = message;
+            failure.retryable = false;
+            cancel.cancel();
+            on_finished(Some(failure));
+            return;
+        }
+
         // Hotword diagnostics
         log::info!(
             "ASR corpus config: {} inline hotwords, online_hotword_id={}, enable_context={}",

@@ -20,6 +20,7 @@ protoc-bin-vendored = "3"
 tauri = { version = "2", features = ["image-png", "tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+rfd = "0.17"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -59,6 +60,10 @@ ogg = "0.9"
 rand = "0.8"
 tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+tokio-socks = "0.5"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+ipnet = "2"
 
 # gRPC (Google Cloud Speech-to-Text V2)
 tonic = { version = "0.12", features = ["tls", "tls-native-roots", "transport"] }
@@ -93,6 +98,7 @@ rdev = { path = "vendor/rdev" }
 audiopus_sys = { path = "vendor/audiopus_sys" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.5"
 objc2 = "0.6"
 libc = "0.2"
 objc2-app-kit = { version = "0.3", features = [
@@ -122,7 +128,7 @@ core-foundation = "0.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows specific - SendInput API for direct unicode injection
-windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading", "Win32_Networking_WinHttp"] }
 
 # MP3 encoding for MiMo batch ASR. Excluded on Windows: mp3lame-sys builds
 # libmp3lame via autotools, which is unreliable on the GitHub Actions Windows

@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import AsrModelSelect from './AsrModelSelect.vue'
 import { NCheckbox, NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
 import {
   buildElevenLabsPostRecordingRefineOptions,
   buildElevenLabsRecognitionModeOptions,
-  ELEVENLABS_BATCH_MODEL_OPTIONS,
-  ELEVENLABS_REALTIME_MODEL_OPTIONS,
   normalizeBatchCapablePostRecordingRefine
 } from '../../utils/providerOptions'
 
@@ -119,24 +118,14 @@ const batchRefineDisabled = computed(() => elevenlabsRecognitionMode.value === '
           <div class="field-label">{{ t('asr.elevenlabsRealtimeModel') }}</div>
           <div class="field-note">{{ t('asr.elevenlabsRealtimeModelNote') }}</div>
         </div>
-        <NSelect
-          v-model:value="elevenlabsRealtimeModel"
-          :options="ELEVENLABS_REALTIME_MODEL_OPTIONS"
-          size="small"
-          class="field-control"
-        />
+        <AsrModelSelect v-model:value="elevenlabsRealtimeModel" provider="elevenlabs" mode="realtime" class="field-control" />
       </div>
       <div class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.elevenlabsBatchModel') }}</div>
           <div class="field-note">{{ t('asr.elevenlabsBatchModelNote') }}</div>
         </div>
-        <NSelect
-          v-model:value="elevenlabsBatchModel"
-          :options="ELEVENLABS_BATCH_MODEL_OPTIONS"
-          size="small"
-          class="field-control"
-        />
+        <AsrModelSelect v-model:value="elevenlabsBatchModel" provider="elevenlabs" mode="batch" class="field-control" />
       </div>
       <div class="field-row">
         <div class="field-text">

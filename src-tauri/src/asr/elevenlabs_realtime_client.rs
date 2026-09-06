@@ -1,3 +1,4 @@
+use crate::network::connect_async;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -6,10 +7,7 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Receiver;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
-};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
 use super::audio_utils::{downmix_to_mono, resample_to_16k};
 use super::config::AsrConfig;
@@ -76,7 +74,11 @@ impl ElevenLabsRealtimeClient {
             })?,
         );
 
-        let (ws_stream, _) = connect_async(req).await.map_err(|e| {
+        let (ws_stream, _) = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = connect_async(req) => result,
+        }
+        .map_err(|e| {
             AsrError::ConnectionFailed(format!("ElevenLabs Realtime connect: {e}"))
                 .in_phase(AsrPhase::Connect)
         })?;
@@ -354,12 +356,7 @@ impl ElevenLabsRealtimeClient {
 }
 
 async fn send_audio_chunk(
-    ws_write: &mut futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<
-            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-        >,
-        Message,
-    >,
+    ws_write: &mut futures_util::stream::SplitSink<crate::network::WsStream, Message>,
     audio: &[u8],
     commit: bool,
     previous_text: Option<String>,

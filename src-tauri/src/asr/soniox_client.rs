@@ -8,13 +8,14 @@
 //! - Send empty string `""` to signal end-of-audio
 //! - Session ends when response contains `"finished": true`
 
+use crate::network::connect_async;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Receiver;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 
 use super::audio_utils::resample_to_16k;
 use super::config::AsrConfig;
@@ -80,7 +81,11 @@ impl SonioxClient {
             .in_phase(AsrPhase::Connect));
         }
 
-        let (ws_stream, _) = connect_async(&ws_url).await.map_err(|e| {
+        let (ws_stream, _) = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = connect_async(&ws_url) => result,
+        }
+        .map_err(|e| {
             AsrError::ConnectionFailed(format!("Soniox WebSocket connect: {e}"))
                 .in_phase(AsrPhase::Connect)
         })?;

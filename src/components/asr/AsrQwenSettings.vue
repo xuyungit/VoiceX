@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import AsrModelSelect from './AsrModelSelect.vue'
 import { NAlert, NInput, NInputNumber, NSelect, NSwitch, NTag } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
@@ -114,18 +115,7 @@ const qwenAsrHeartbeat = computed({
   set: (v: boolean) => settingsStore.updateSetting('qwenAsrHeartbeat', v)
 })
 
-const qwenModelOptions = computed(() => [
-  { label: t('asr.qwenAudio3Streaming'), value: QWEN_AUDIO_STREAMING_MODEL },
-  { label: t('asr.qwenModelStable'), value: 'qwen3-asr-flash-realtime' },
-  { label: t('asr.qwenModelSnapshot1'), value: 'qwen3-asr-flash-realtime-2026-02-10' },
-  { label: t('asr.qwenModelSnapshot2'), value: 'qwen3-asr-flash-realtime-2025-10-27' },
-])
 
-const qwenBatchModelOptions = computed(() => [
-  { label: t('asr.qwenAudio3Batch'), value: QWEN_AUDIO_BATCH_MODEL },
-  { label: t('asr.qwenBatchModelStable'), value: 'qwen3-asr-flash' },
-  { label: t('asr.qwenBatchModelSnapshot1'), value: 'qwen3-asr-flash-2025-09-08' },
-])
 
 const qwenWsUrlOptions = computed(() => [
   { label: t('asr.qwenEndpointBeijingInference'), value: 'wss://dashscope.aliyuncs.com/api-ws/v1/inference' },
@@ -248,14 +238,7 @@ const showQwenRecordingLimitNotice = computed(() =>
           <div class="field-label">{{ t('asr.model') }}</div>
           <div class="field-note">{{ t('asr.modelNote') }}</div>
         </div>
-        <NSelect
-          v-model:value="qwenAsrModel"
-          :options="qwenModelOptions"
-          filterable
-          tag
-          size="small"
-          class="field-control"
-        />
+        <AsrModelSelect v-model:value="qwenAsrModel" provider="qwen" mode="realtime" class="field-control" />
       </div>
       <div v-if="usesQwenAudioFeatures" class="field-row capability-row">
         <div class="field-text">
@@ -365,14 +348,7 @@ const showQwenRecordingLimitNotice = computed(() =>
           <div class="field-label">{{ t('asr.qwenBatchModel') }}</div>
           <div class="field-note">{{ t('asr.qwenBatchModelNote') }}</div>
         </div>
-        <NSelect
-          v-model:value="qwenAsrBatchModel"
-          :options="qwenBatchModelOptions"
-          filterable
-          tag
-          size="small"
-          class="field-control"
-        />
+        <AsrModelSelect v-model:value="qwenAsrBatchModel" provider="qwen" mode="batch" class="field-control" />
       </div>
       <div v-if="showQwenRecordingLimitNotice" class="notice-box">
         {{

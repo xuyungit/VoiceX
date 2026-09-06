@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import AsrModelSelect from './AsrModelSelect.vue'
+import { findAsrModel } from '../../utils/asrModels'
 import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
@@ -41,6 +43,11 @@ const openaiAsrModel = computed({
   set: (v: string) => settingsStore.updateSetting('openaiAsrModel', v)
 })
 
+const openaiAsrRefineModel = computed({
+  get: () => settingsStore.settings.openaiAsrRefineModel,
+  set: (v: string) => settingsStore.updateSetting('openaiAsrRefineModel', v)
+})
+
 const openaiAsrBaseUrl = computed({
   get: () => settingsStore.settings.openaiAsrBaseUrl,
   set: (v: string) => settingsStore.updateSetting('openaiAsrBaseUrl', v)
@@ -62,13 +69,6 @@ const openaiAsrDelay = computed({
     settingsStore.updateSetting('openaiAsrDelay', v)
 })
 
-const openaiModelOptions = computed(() => [
-  { label: 'GPT Transcribe (batch)', value: 'gpt-transcribe' },
-  { label: 'GPT Live Transcribe (realtime)', value: 'gpt-live-transcribe' },
-  { label: 'GPT-4o Transcribe (legacy)', value: 'gpt-4o-transcribe' },
-  { label: 'GPT-4o Mini Transcribe (legacy)', value: 'gpt-4o-mini-transcribe' },
-  { label: 'Whisper-1 (legacy)', value: 'whisper-1' },
-])
 
 const openaiDelayOptions = computed(() => [
   { label: t('asr.openaiDelayDefault'), value: '' },
@@ -82,7 +82,7 @@ const openaiDelayOptions = computed(() => [
 // `delay` only exists on the realtime transcription session, and only the
 // newer models accept it.
 const delayDisabled = computed(
-  () => openaiAsrMode.value !== 'realtime' || openaiAsrModel.value !== 'gpt-live-transcribe'
+  () => openaiAsrMode.value !== 'realtime' || !findAsrModel('openai', openaiAsrModel.value)?.delay
 )
 
 const openaiModeOptions = computed(() => buildOpenAiRecognitionModeOptions(t))
@@ -140,12 +140,14 @@ const batchRefineDisabled = computed(() => openaiAsrMode.value === 'batch')
           <div class="field-label">{{ t('asr.model') }}</div>
           <div class="field-note">{{ t('asr.openaiModelNote') }}</div>
         </div>
-        <NSelect
-          v-model:value="openaiAsrModel"
-          :options="openaiModelOptions"
-          size="small"
-          class="field-control"
-        />
+        <AsrModelSelect v-model:value="openaiAsrModel" provider="openai" :mode="openaiAsrMode" class="field-control" />
+      </div>
+      <div v-if="openaiAsrMode === 'realtime' && openaiAsrPostRecordingRefine === 'batch_refine'" class="field-row">
+        <div class="field-text">
+          <div class="field-label">{{ t('asr.refineModel') }}</div>
+          <div class="field-note">{{ t('asr.refineModelNote') }}</div>
+        </div>
+        <AsrModelSelect v-model:value="openaiAsrRefineModel" provider="openai" mode="batch" class="field-control" />
       </div>
       <div class="field-row">
         <div class="field-text">

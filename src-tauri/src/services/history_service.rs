@@ -299,7 +299,7 @@ impl HistoryService {
                     Self::format_provider_model("OpenAI Realtime", &config.openai_asr_model)
                 }
                 AsrPipelineMode::RealtimeWithFinalPass => {
-                    Self::openai_realtime_batch_refine_model_name(&config.openai_asr_model)
+                    Self::openai_realtime_batch_refine_model_name(&config.openai_asr_model, &config.openai_asr_refine_model)
                 }
                 AsrPipelineMode::Batch => {
                     Self::format_provider_model("OpenAI", &config.openai_asr_model)
@@ -392,9 +392,9 @@ impl HistoryService {
         ))
     }
 
-    pub fn openai_realtime_batch_refine_model_name(model: &str) -> Option<String> {
+    pub fn openai_realtime_batch_refine_model_name(model: &str, refine_model: &str) -> Option<String> {
         let model = Self::normalize_model_or_default(model, "gpt-4o-transcribe");
-        Some(format!("OpenAI / {} + batch refine({})", model, model))
+        Some(format!("OpenAI / {} + batch refine({})", model, refine_model))
     }
 
     pub fn resolve_llm_model_name(settings: &AppSettings) -> Option<String> {
@@ -520,7 +520,7 @@ mod tests {
 
         assert_eq!(
             HistoryService::resolve_asr_model_name(&settings).as_deref(),
-            Some("OpenAI / gpt-4o-transcribe + batch refine(gpt-4o-transcribe)")
+            Some("OpenAI / gpt-4o-transcribe + batch refine(gpt-transcribe)")
         );
     }
 

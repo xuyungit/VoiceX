@@ -1,5 +1,6 @@
 //! Gemini Live API WebSocket client.
 
+use crate::network::connect_async;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -11,14 +12,14 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Receiver;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 
 use super::audio_utils::resample_to_16k;
 use super::config::AsrConfig;
 use super::protocol::{AsrError, AsrEvent};
 
 const GEMINI_LIVE_WS_URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
-const SETUP_COMPLETE_WAIT_MS: u64 = 1500;
+const SETUP_COMPLETE_WAIT_MS: u64 = 10_000;
 const STREAM_COMPLETION_WAIT_MS: u64 = 10_000;
 const NO_INPUT_TRANSCRIPTION_WAIT_MS: u64 = 4_000;
 
@@ -65,34 +66,37 @@ impl GeminiLiveClient {
             self.config.gemini_live_model,
         );
 
-        let (ws_stream, _) = connect_async(&ws_url)
-            .await
-            .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
+        let (ws_stream, _) = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = tokio::time::timeout(Duration::from_secs(15), connect_async(&ws_url)) => {
+                result.map_err(|_| AsrError::ConnectionFailed("Gemini Live connection timed out".into()))?
+                    .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?
+            }
+        };
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
         let setup_message = build_setup_message(&self.config);
         if diagnostics_enabled {
             log::info!("Gemini Live setup payload: {}", setup_message);
         }
-        ws_write
-            .send(Message::Text(setup_message.to_string()))
-            .await
-            .map_err(|e| {
-                AsrError::ConnectionFailed(format!("Failed to send Gemini Live setup: {e}"))
-            })?;
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = tokio::time::timeout(Duration::from_secs(10), ws_write.send(Message::Text(setup_message.to_string()))) => {
+                result.map_err(|_| AsrError::ConnectionFailed("Gemini Live setup send timed out".into()))?
+                    .map_err(|e| AsrError::ConnectionFailed(format!("Failed to send Gemini Live setup: {e}")))?;
+            }
+        }
 
+        let setup_deadline =
+            tokio::time::Instant::now() + Duration::from_millis(SETUP_COMPLETE_WAIT_MS);
         loop {
             let msg = tokio::select! {
-                _ = cancel.cancelled() => None,
-                v = tokio::time::timeout(Duration::from_millis(SETUP_COMPLETE_WAIT_MS), ws_read.next()) => {
+                _ = cancel.cancelled() => return Ok(()),
+                v = tokio::time::timeout_at(setup_deadline, ws_read.next()) => {
                     match v {
                         Ok(msg) => msg,
                         Err(_) => {
-                            log::warn!(
-                                "Gemini Live setupComplete not received within {} ms; proceeding with audio stream",
-                                SETUP_COMPLETE_WAIT_MS
-                            );
-                            break;
+                            return Err(AsrError::ConnectionFailed("Gemini Live setup timed out".into()));
                         }
                     }
                 },
@@ -153,156 +157,99 @@ impl GeminiLiveClient {
             }
         }
 
+        // A single task owns both socket halves. Reader failures are observed even
+        // while capture continues, and cancellation cannot leave a detached reader.
+        let dedicated = is_transcribe_live(&self.config.gemini_live_model);
         let on_event = Arc::new(on_event);
-        let on_event_reader = on_event.clone();
-        let cancel_reader = cancel.clone();
-        let audio_stream_ended = Arc::new(AtomicBool::new(false));
-        let audio_stream_ended_reader = audio_stream_ended.clone();
-        let saw_input_transcription = Arc::new(AtomicBool::new(false));
-        let saw_input_transcription_reader = saw_input_transcription.clone();
-        let reader_handle = tokio::spawn(async move {
-            let mut transcript = GeminiTranscriptAccumulator::default();
-
-            while let Some(msg) = tokio::select! {
-                _ = cancel_reader.cancelled() => None,
-                v = ws_read.next() => v,
-            } {
-                match msg {
-                    Ok(Message::Text(text)) => {
-                        let payload = parse_json_message(Message::Text(text), "runtime")?;
-                        let should_stop = handle_runtime_payload(
-                            &payload,
-                            &mut transcript,
-                            &on_event_reader,
-                            audio_stream_ended_reader.load(Ordering::SeqCst),
-                            diagnostics_enabled,
-                            &saw_input_transcription_reader,
-                        )?;
-                        if should_stop {
-                            break;
-                        }
-                    }
-                    Ok(Message::Binary(bin)) => {
-                        let payload = parse_json_message(Message::Binary(bin), "runtime")?;
-                        let should_stop = handle_runtime_payload(
-                            &payload,
-                            &mut transcript,
-                            &on_event_reader,
-                            audio_stream_ended_reader.load(Ordering::SeqCst),
-                            diagnostics_enabled,
-                            &saw_input_transcription_reader,
-                        )?;
-                        if should_stop {
-                            break;
-                        }
-                    }
-                    Ok(Message::Close(frame)) => {
-                        log::debug!("Gemini Live WebSocket closed by server: {:?}", frame);
-                        break;
-                    }
-                    Ok(other) => {
-                        log::debug!("Gemini Live received non-text frame: {:?}", other);
-                    }
-                    Err(e) => {
-                        return Err(AsrError::ConnectionFailed(format!(
-                            "Gemini Live read failed: {e}"
-                        )));
-                    }
-                }
-            }
-
-            Ok::<(), AsrError>(())
-        });
-
-        let resample_needed = sample_rate != stream_rate;
-        if resample_needed {
-            log::debug!(
-                "Gemini Live resampling input {} Hz -> {} Hz",
-                sample_rate,
-                stream_rate
-            );
-        }
-
+        let mut transcript = GeminiTranscriptAccumulator::default();
+        let saw_input_transcription = AtomicBool::new(false);
+        let mut ended = false;
+        let mut deadline = None;
         let mut audio_rx = audio_rx;
-        while let Some(chunk) = tokio::select! {
-            _ = cancel.cancelled() => None,
-            v = audio_rx.recv() => v,
-        } {
-            let pcm = if resample_needed {
-                resample_to_16k(&chunk, sample_rate)
-            } else {
-                chunk
-            };
-            if pcm.is_empty() {
-                continue;
-            }
-
-            let audio_message = json!({
-                "realtimeInput": {
-                    "audio": {
-                        "data": STANDARD.encode(pcm),
-                        "mimeType": format!("audio/pcm;rate={}", stream_rate),
-                    }
+        if dedicated {
+            let start = Message::Text(json!({"realtimeInput": {"activityStart": {}}}).to_string());
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                result = tokio::time::timeout(Duration::from_secs(10), ws_write.send(start)) => {
+                    result.map_err(|_| AsrError::ConnectionFailed("Gemini Live activity start timed out".into()))?
+                        .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
                 }
-            });
-            ws_write
-                .send(Message::Text(audio_message.to_string()))
-                .await
-                .map_err(|e| {
-                    AsrError::ConnectionFailed(format!(
-                        "Failed to send Gemini Live audio chunk: {e}"
-                    ))
-                })?;
+            }
         }
-
-        if cancel.is_cancelled() {
-            let _ = ws_write.close().await;
-            let _ = tokio::time::timeout(Duration::from_millis(1000), reader_handle).await;
-            return Ok(());
-        }
-
-        ws_write
-            .send(Message::Text(
-                json!({
-                    "realtimeInput": {
-                        "audioStreamEnd": true,
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = async {
+                    match deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending::<()>().await,
                     }
-                })
-                .to_string(),
-            ))
-            .await
-            .map_err(|e| {
-                AsrError::ConnectionFailed(format!(
-                    "Failed to send Gemini Live audioStreamEnd: {e}"
-                ))
-            })?;
-        audio_stream_ended.store(true, Ordering::SeqCst);
-        log::info!("Gemini Live audioStreamEnd sent");
-
-        let completion_wait_ms = if saw_input_transcription.load(Ordering::SeqCst) {
-            STREAM_COMPLETION_WAIT_MS
-        } else {
-            NO_INPUT_TRANSCRIPTION_WAIT_MS
-        };
-
-        match tokio::time::timeout(Duration::from_millis(completion_wait_ms), reader_handle).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(e)) => Err(AsrError::ConnectionFailed(format!(
-                "Gemini Live reader task failed: {e}"
-            ))),
-            Err(_) => {
-                log::warn!(
-                    "Gemini Live timed out waiting for stream completion ({} ms)",
-                    completion_wait_ms
-                );
-                let _ = ws_write.close().await;
-                Ok(())
+                } => return Err(AsrError::ConnectionFailed("Gemini Live final transcript timed out".into())),
+                chunk = audio_rx.recv(), if !ended => {
+                    let message = match chunk {
+                        Some(chunk) => {
+                            let pcm = if sample_rate != stream_rate { resample_to_16k(&chunk, sample_rate) } else { chunk };
+                            if pcm.is_empty() { continue; }
+                            json!({"realtimeInput": {"audio": {
+                                "data": STANDARD.encode(pcm), "mimeType": "audio/pcm;rate=16000"
+                            }}})
+                        },
+                        None => {
+                            ended = true;
+                            let wait_ms = if dedicated || saw_input_transcription.load(Ordering::SeqCst) {
+                                STREAM_COMPLETION_WAIT_MS
+                            } else { NO_INPUT_TRANSCRIPTION_WAIT_MS };
+                            deadline = Some(tokio::time::Instant::now() + Duration::from_millis(wait_ms));
+                            if dedicated { json!({"realtimeInput": {"activityEnd": {}}}) }
+                            else { json!({"realtimeInput": {"audioStreamEnd": true}}) }
+                        }
+                    };
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Ok(()),
+                        result = tokio::time::timeout(Duration::from_secs(10), ws_write.send(Message::Text(message.to_string()))) => {
+                            result.map_err(|_| AsrError::ConnectionFailed("Gemini Live send timed out".into()))?
+                                .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
+                        }
+                    }
+                },
+                message = ws_read.next() => {
+                    let payload = match message {
+                        Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => parse_json_message(message, "runtime")?,
+                        Some(Ok(Message::Close(_))) | None => return Err(AsrError::ConnectionFailed("Gemini Live closed before final transcript".into())),
+                        Some(Err(e)) => return Err(AsrError::ConnectionFailed(format!("Gemini Live read failed: {e}"))),
+                        Some(Ok(_)) => continue,
+                    };
+                    let done = if dedicated {
+                        handle_transcribe_payload(&payload, &mut transcript, &on_event, ended)?
+                    } else {
+                        handle_runtime_payload(&payload, &mut transcript, &on_event, ended,
+                            diagnostics_enabled, &saw_input_transcription)?
+                    };
+                    if done { return Ok(()); }
+                }
             }
         }
     }
 }
 
+fn is_transcribe_live(model: &str) -> bool {
+    let model = model.trim();
+    model == "gemini-3.5-transcribe-live" || model.starts_with("gemini-3.5-transcribe-live-")
+}
+
 fn build_setup_message(config: &AsrConfig) -> Value {
+    if is_transcribe_live(&config.gemini_live_model) {
+        return json!({"setup": {
+            "model": format!("models/{}", config.gemini_live_model.trim()),
+            "generationConfig": {"responseModalities": ["TEXT"]},
+            "realtimeInputConfig": {"automaticActivityDetection": {"disabled": true}},
+            "inputAudioTranscription": {
+                "languageCodes": super::gemini_client::transcription_languages(&config.gemini_language),
+                "customVocabulary": super::gemini_client::transcription_vocabulary(config),
+                "mode": "VERBATIM"
+            }
+        }});
+    }
     json!({
         "setup": {
             "model": format!("models/{}", config.gemini_live_model.trim()),
@@ -342,6 +289,51 @@ fn build_system_instruction(language: &str) -> String {
         "You are the internal realtime transcription engine for a desktop dictation app.\n{}\nKeep any spoken reply extremely short, ideally a single brief acknowledgement. Do not answer the user's request, do not translate, and do not add extra commentary.",
         language_hint
     )
+}
+
+fn handle_transcribe_payload(
+    payload: &Value,
+    transcript: &mut GeminiTranscriptAccumulator,
+    on_event: &Arc<impl Fn(AsrEvent) + Send + Sync + 'static>,
+    ended: bool,
+) -> Result<bool, AsrError> {
+    if let Some(reason) = extract_server_error(payload) {
+        return Err(AsrError::ServerError(reason));
+    }
+    let content = &payload["serverContent"];
+    // Interim messages replace the hypothesis; finals are authoritative and
+    // must not be merged with the obsolete hypothesis or prefix-deduplicated.
+    let final_text = content["inputTranscription"]["text"].as_str();
+    let interim = content["interimInputTranscription"]["text"].as_str();
+    if let Some(text) = final_text.or(interim) {
+        let text = normalize_transcript_text(text);
+        let is_final = final_text.is_some();
+        transcript.current_partial = text;
+        let combined = combine_segments(&transcript.accumulated_final, &transcript.current_partial);
+        if is_final {
+            transcript.accumulated_final = combined.clone();
+            transcript.current_partial.clear();
+        }
+        if !combined.is_empty() {
+            on_event(AsrEvent {
+                text: combined,
+                is_final,
+                prefetch: false,
+                definite: is_final,
+                confidence: None,
+            });
+        }
+        // Manual VAD makes activityEnd the boundary of this one dictation turn.
+        if ended && is_final {
+            if transcript.accumulated_final.is_empty() {
+                return Err(AsrError::ServerError(
+                    "Gemini Live returned no transcript".into(),
+                ));
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn extract_server_error(payload: &Value) -> Option<String> {
@@ -686,7 +678,7 @@ fn is_cjk(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::GeminiTranscriptAccumulator;
+    use super::*;
 
     #[test]
     fn accumulates_multiple_partials_within_same_turn() {
@@ -722,5 +714,64 @@ mod tests {
             accumulator.commit_turn().as_deref(),
             Some("前面一句后面一句")
         );
+    }
+    #[test]
+    fn dedicated_final_replaces_incorrect_interim() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let callback = Arc::new(move |event: AsrEvent| captured.lock().unwrap().push(event));
+        let mut transcript = GeminiTranscriptAccumulator::default();
+        assert!(!handle_transcribe_payload(
+            &json!({"serverContent":{"interimInputTranscription":{"text":"wrong words"}}}),
+            &mut transcript,
+            &callback,
+            false
+        )
+        .unwrap());
+        assert!(handle_transcribe_payload(
+            &json!({"serverContent":{"inputTranscription":{"text":"right words"}}}),
+            &mut transcript,
+            &callback,
+            true
+        )
+        .unwrap());
+        let events = events.lock().unwrap();
+        assert_eq!(events[1].text, "right words");
+        assert!(events[1].is_final);
+    }
+    #[test]
+    fn dedicated_setup_and_failures_are_explicit() {
+        let mut config = AsrConfig::default();
+        config.gemini_live_model = "gemini-3.5-transcribe-live".into();
+        let setup = build_setup_message(&config);
+        assert_eq!(
+            setup["setup"]["generationConfig"]["responseModalities"],
+            json!(["TEXT"])
+        );
+        assert_eq!(
+            setup["setup"]["inputAudioTranscription"]["mode"],
+            "VERBATIM"
+        );
+        assert_eq!(
+            setup["setup"]["realtimeInputConfig"]["automaticActivityDetection"]["disabled"],
+            true
+        );
+        assert!(setup["setup"].get("systemInstruction").is_none());
+        let callback = Arc::new(|_: AsrEvent| {});
+        let mut transcript = GeminiTranscriptAccumulator::default();
+        assert!(handle_transcribe_payload(
+            &json!({"error":{"message":"quota exhausted"}}),
+            &mut transcript,
+            &callback,
+            false
+        )
+        .is_err());
+        assert!(handle_transcribe_payload(
+            &json!({"serverContent":{"inputTranscription":{"text":""}}}),
+            &mut transcript,
+            &callback,
+            true
+        )
+        .is_err());
     }
 }

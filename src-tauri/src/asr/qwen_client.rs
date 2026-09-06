@@ -1,5 +1,6 @@
 //! Qwen realtime ASR WebSocket client.
 
+use crate::network::connect_async;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,10 +9,7 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Receiver;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
-};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
 use super::audio_utils::resample_to_16k;
 use super::config::AsrConfig;
@@ -78,9 +76,11 @@ impl QwenRealtimeClient {
             headers.insert("OpenAI-Beta", HeaderValue::from_static("realtime=v1"));
         }
 
-        let (ws_stream, _) = connect_async(req)
-            .await
-            .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
+        let (ws_stream, _) = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = connect_async(req) => result,
+        }
+        .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
         // Build corpus text for filtering the phantom echo item that Qwen

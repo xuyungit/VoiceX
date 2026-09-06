@@ -143,7 +143,17 @@ impl AsrFailure {
         let lower = technical_message.to_lowercase();
 
         let (kind, retryable, retry_after_ms) = classify_failure(error.root_cause(), &lower);
-        let display_message = build_display_message(provider, phase, kind);
+        let display_message = if lower.contains("proxy") || lower.contains("macos pac") {
+            if lower.contains("407") || lower.contains("authentication") {
+                "系统代理要求认证，请检查代理账号配置后重试。".to_string()
+            } else if kind == AsrFailureKind::Config {
+                "系统代理配置无法使用，请检查代理地址或自动代理设置。".to_string()
+            } else {
+                "系统代理连接失败，请检查代理服务后重试。".to_string()
+            }
+        } else {
+            build_display_message(provider, phase, kind)
+        };
 
         Self {
             provider,
@@ -173,6 +183,23 @@ fn classify_message(
     lower: &str,
     assume_network_for_connection_errors: bool,
 ) -> (AsrFailureKind, bool, Option<u64>) {
+    if lower.contains("proxy")
+        && contains_any(
+            lower,
+            &[
+                "407",
+                "authentication",
+                "invalid",
+                "unsupported",
+                "not supported",
+                "missing",
+                "no host",
+                "no url",
+            ],
+        )
+    {
+        return (AsrFailureKind::Config, false, None);
+    }
     if contains_any(
         lower,
         &[
@@ -623,5 +650,16 @@ mod tests {
         let err = decode_server_error_frame(&frame).expect("gzip error frame should decode");
         assert_eq!(err.code, 55000031);
         assert_eq!(err.message, String::from_utf8_lossy(message));
+    }
+    #[test]
+    fn proxy_authentication_errors_do_not_blame_the_provider_api_key() {
+        let failure = super::AsrFailure::from_error(
+            super::AsrProviderType::OpenAI,
+            &super::AsrError::ConnectionFailed("Proxy authentication required (407)".into()),
+        );
+        assert_eq!(failure.kind, super::AsrFailureKind::Config);
+        assert!(!failure.retryable);
+        assert!(failure.display_message.contains("系统代理"));
+        assert!(!failure.display_message.contains("API Key"));
     }
 }

@@ -9,6 +9,8 @@ mod client;
 pub mod cohere_client;
 pub mod coli_client;
 mod config;
+pub mod models;
+pub mod local_models;
 pub mod elevenlabs_client;
 pub mod elevenlabs_realtime_client;
 pub mod funasr_client;

@@ -231,7 +231,8 @@ fn migrate_settings_blob(conn: &Connection) {
     let migrated_endpoints = crate::commands::settings::migrate_llm_custom_endpoints(&mut value);
     let migrated_restore =
         crate::commands::settings::migrate_text_injection_override_restore_flag(&mut value);
-    if !migrated_endpoints && !migrated_restore {
+    let migrated_asr = crate::commands::settings::migrate_openai_refine_model(&mut value);
+    if !migrated_endpoints && !migrated_restore && !migrated_asr {
         return;
     }
 
@@ -847,6 +848,7 @@ pub fn get_settings() -> Result<AppSettings, StorageError> {
             match serde_json::from_str::<serde_json::Value>(&json) {
                 Ok(mut raw) => {
                     crate::commands::settings::migrate_llm_custom_endpoints(&mut raw);
+                    crate::commands::settings::migrate_openai_refine_model(&mut raw);
                     crate::commands::settings::migrate_text_injection_override_restore_flag(
                         &mut raw,
                     );

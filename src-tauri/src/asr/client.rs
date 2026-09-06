@@ -1,5 +1,6 @@
 //! ASR WebSocket client (Volcengine bigmodel_async).
 
+use crate::network::connect_async;
 use std::io::{Read, Write};
 use std::time::Duration;
 
@@ -8,10 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
-};
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
 use super::audio_utils::resample_to_16k;
 use super::config::AsrConfig;
@@ -85,9 +83,11 @@ impl AsrClient {
             }
         }
 
-        let (ws_stream, resp) = connect_async(req)
-            .await
-            .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
+        let (ws_stream, resp) = tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = connect_async(req) => result,
+        }
+        .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
 
         if let Some(logid) = resp
             .headers()
