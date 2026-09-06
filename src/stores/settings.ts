@@ -155,7 +155,7 @@ export interface AppSettings {
     // synthesis parameter belongs to a provider block below, rate and volume
     // included: engines differ in baseline speed and loudness.
     ttsEnabled: boolean
-    ttsProviderType: 'system' | 'volcengine' | 'aliyun' | 'mimo'
+    ttsProviderType: 'system' | 'volcengine' | 'aliyun' | 'mimo' | 'azure'
     ttsHotkeyConfig: string | null
     ttsClipboardFallback: boolean
 
@@ -194,6 +194,15 @@ export interface AppSettings {
     mimoTtsInstruction: string
     /** Local playback gain; the API has no volume parameter either. */
     mimoTtsVolume: number
+
+    // TTS Provider: Azure Speech (Microsoft Cognitive Services)
+    azureTtsApiKey: string
+    /** Azure region short name (eastus, eastasia, …) — keys are per region. */
+    azureTtsRegion: string
+    azureTtsVoice: string
+    azureTtsRate: number
+    /** Local playback gain, like the other cloud providers. */
+    azureTtsVolume: number
 
     // Input
     inputDeviceUid: string | null
@@ -412,6 +421,12 @@ const defaultSettings: AppSettings = {
     mimoTtsVoice: 'mimo_default',
     mimoTtsInstruction: '',
     mimoTtsVolume: 1,
+
+    azureTtsApiKey: '',
+    azureTtsRegion: 'eastus',
+    azureTtsVoice: 'zh-CN-XiaoyuMultilingualNeural',
+    azureTtsRate: 0.5,
+    azureTtsVolume: 1,
 
     inputDeviceUid: null,
     textInjectionMode: 'pasteboard',

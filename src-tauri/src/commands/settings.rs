@@ -172,7 +172,7 @@ pub struct AppSettings {
     // between them, and the split removes the "is this shared or specific?"
     // question entirely for every provider added later.
     pub tts_enabled: bool,
-    pub tts_provider_type: String, // "system" | "volcengine" | "aliyun" | "mimo"
+    pub tts_provider_type: String, // "system" | "volcengine" | "aliyun" | "mimo" | "azure"
     /// `None` means the built-in default binding (Option+Command+R).
     pub tts_hotkey_config: Option<String>,
     /// Compatibility mode: fall back to a synthetic Cmd-C when the
@@ -236,6 +236,20 @@ pub struct AppSettings {
     pub mimo_tts_instruction: String,
     /// Local playback gain; the API has no volume parameter either.
     pub mimo_tts_volume: f32,
+
+    // TTS Provider: Azure Speech (Microsoft Cognitive Services)
+    /// A Speech resource key from the Azure portal. Keys are per resource and
+    /// only work in that resource's region.
+    pub azure_tts_api_key: String,
+    /// Azure region short name (`eastus`, `eastasia`, …). Part of the endpoint
+    /// hostname, so a mismatch with the key is a 401 rather than a slow success.
+    pub azure_tts_region: String,
+    pub azure_tts_voice: String,
+    /// Normalized like the system voice's; the backend maps it onto the SSML
+    /// prosody multiplier over the same 0.5..=2.0 span.
+    pub azure_tts_rate: f32,
+    /// Local playback gain, like the other cloud providers.
+    pub azure_tts_volume: f32,
 
     // Input
     pub input_device_uid: Option<String>,
@@ -474,6 +488,11 @@ impl Default for AppSettings {
             mimo_tts_voice: crate::tts::mimo::default_voice().to_string(),
             mimo_tts_instruction: String::new(),
             mimo_tts_volume: 1.0,
+            azure_tts_api_key: String::new(),
+            azure_tts_region: crate::tts::azure::DEFAULT_REGION.to_string(),
+            azure_tts_voice: crate::tts::azure::default_voice().to_string(),
+            azure_tts_rate: 0.5,
+            azure_tts_volume: 1.0,
 
             input_device_uid: None,
             text_injection_mode: "pasteboard".to_string(),

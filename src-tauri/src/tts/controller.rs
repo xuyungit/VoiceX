@@ -14,6 +14,7 @@ use std::thread;
 use tauri::{AppHandle, Emitter};
 
 use super::aliyun::{self, AliyunBackend, AliyunConfig};
+use super::azure::{self, AzureBackend, AzureConfig};
 use super::mimo::{MimoBackend, MimoConfig};
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
@@ -46,6 +47,7 @@ const HUD_ERROR_LINGER_MS: u64 = 2_600;
 const PROVIDER_VOLCENGINE: &str = "volcengine";
 const PROVIDER_ALIYUN: &str = "aliyun";
 const PROVIDER_MIMO: &str = "mimo";
+const PROVIDER_AZURE: &str = "azure";
 
 /// Whether `provider` names one of the network backends. The controller asks
 /// this in several places — voice listing, request building — and a new cloud
@@ -54,7 +56,7 @@ const PROVIDER_MIMO: &str = "mimo";
 fn is_cloud_provider(provider: &str) -> bool {
     matches!(
         provider,
-        PROVIDER_VOLCENGINE | PROVIDER_ALIYUN | PROVIDER_MIMO
+        PROVIDER_VOLCENGINE | PROVIDER_ALIYUN | PROVIDER_MIMO | PROVIDER_AZURE
     )
 }
 
@@ -71,6 +73,7 @@ struct ControllerInner {
     volcengine: Mutex<Option<Arc<VolcengineBackend>>>,
     aliyun: Mutex<Option<Arc<AliyunBackend>>>,
     mimo: Mutex<Option<Arc<MimoBackend>>>,
+    azure: Mutex<Option<Arc<AzureBackend>>>,
     /// Whichever backend owns the current session. `stop` has to reach that
     /// one, not whichever provider the settings happen to name right now.
     active: Mutex<Option<Arc<dyn TtsBackend>>>,
@@ -135,6 +138,12 @@ impl TtsController {
             *slot = Some(Arc::new(MimoBackend::new(MimoConfig {
                 api_key: String::new(),
                 instruction: String::new(),
+            })));
+        }
+        if let Ok(mut slot) = self.inner.azure.lock() {
+            *slot = Some(Arc::new(AzureBackend::new(AzureConfig {
+                api_key: String::new(),
+                region: azure::DEFAULT_REGION.to_string(),
             })));
         }
     }
@@ -293,6 +302,17 @@ impl TtsController {
                     cloud.apply_config(MimoConfig {
                         api_key: settings.mimo_tts_api_key.clone(),
                         instruction: settings.mimo_tts_instruction.clone(),
+                    });
+                    return Some(cloud as Arc<dyn TtsBackend>);
+                }
+                log_event("backend_fallback", &[("provider", provider.to_string())]);
+            }
+            PROVIDER_AZURE => {
+                let cloud = self.inner.azure.lock().ok().and_then(|slot| slot.clone());
+                if let (Some(cloud), Some(settings)) = (cloud, settings) {
+                    cloud.apply_config(AzureConfig {
+                        api_key: settings.azure_tts_api_key.clone(),
+                        region: settings.azure_tts_region.clone(),
                     });
                     return Some(cloud as Arc<dyn TtsBackend>);
                 }
@@ -727,6 +747,12 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
             Some(settings.mimo_tts_volume),
             None,
         ),
+        PROVIDER_AZURE => (
+            settings.azure_tts_voice.clone(),
+            Some(settings.azure_tts_rate),
+            Some(settings.azure_tts_volume),
+            None,
+        ),
         _ => {
             // `say` has no flag for either, so sending them would be sending a
             // value the engine drops on the floor.
@@ -912,6 +938,23 @@ mod tests {
 
         settings.tts_provider_type = "mimo".to_string();
         assert_eq!(voice_request(&settings, "hi".to_string()).pitch, None);
+
+        settings.tts_provider_type = "azure".to_string();
+        assert_eq!(voice_request(&settings, "hi".to_string()).pitch, None);
+    }
+
+    #[test]
+    fn an_azure_request_carries_its_own_voice_rate_and_volume() {
+        let mut settings = AppSettings::default();
+        settings.tts_provider_type = "azure".to_string();
+        settings.azure_tts_voice = "zh-CN-XiaoxiaoNeural".to_string();
+        settings.azure_tts_rate = 0.75;
+        settings.azure_tts_volume = 0.6;
+
+        let request = voice_request(&settings, "hi".to_string());
+        assert_eq!(request.voice.as_deref(), Some("zh-CN-XiaoxiaoNeural"));
+        assert_eq!(request.rate, Some(0.75));
+        assert_eq!(request.volume, Some(0.6));
     }
 
     #[test]

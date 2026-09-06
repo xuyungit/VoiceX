@@ -218,6 +218,12 @@ const enUS = {
     mimoInstructionNote:
       'MiMo has no speed parameter; style is described in natural language, e.g. "read calmly" or "speak faster". Leave empty for the default.',
     mimoInstructionPlaceholder: 'e.g. read in a calm tone',
+    providerAzure: 'Microsoft Azure Speech',
+    azureApiKey: 'API key',
+    azureApiKeyNote: 'From the "Keys and Endpoint" page of your Speech resource in the Azure portal. The free tier includes 500K characters a month; past that it refuses rather than bills.',
+    azureApiKeyPlaceholder: 'Paste the Speech resource key',
+    azureRegion: 'Region',
+    azureRegionNote: 'The short region name of the resource the key belongs to (e.g. eastus, eastasia). A mismatch returns 401.',
     cloudSpeakerNote: 'Cloud voices are not shared with the local engine, nor between providers. Type any other voice id and press Enter, then check it with Preview.',
     cloudPrivacy: 'With a cloud engine, the text you select is sent to that provider to be synthesized. Neither reading history nor synthesized audio is stored.',
     hotkeySystemNote: 'Independent of the built-in macOS Speak Selection (Option + Esc) — both can be used.',

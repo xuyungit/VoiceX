@@ -10,6 +10,7 @@
 //! through [`mac_system`].
 
 pub mod aliyun;
+pub mod azure;
 pub mod controller;
 pub mod decode;
 #[cfg(target_os = "macos")]

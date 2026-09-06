@@ -218,6 +218,12 @@ const zhCN = {
     mimoInstructionNote:
       'MiMo 不提供语速参数，风格靠自然语言描述，如「以平静的语气朗读」「语速快一些」。留空则用默认风格。',
     mimoInstructionPlaceholder: '例如：以平静的语气朗读',
+    providerAzure: '微软 Azure Speech',
+    azureApiKey: 'API Key',
+    azureApiKeyNote: '在 Azure 门户的 Speech 资源「密钥和终结点」页面获取。免费层每月 50 万字符，超出后拒绝服务而不是计费。',
+    azureApiKeyPlaceholder: '粘贴 Speech 资源密钥',
+    azureRegion: '区域',
+    azureRegionNote: '密钥所属资源的区域简称（如 eastus、eastasia）。区域与密钥不匹配会返回 401。',
     cloudSpeakerNote: '云端音色与本机语音不通用，各家云端之间也不通用。列表里没有的可直接输入音色 ID 后回车，再用试听验证。',
     cloudPrivacy: '使用云端引擎时，你选中的文字会发送给该供应商用于合成。朗读历史与合成音频都不保存。',
     hotkeySystemNote: '与 macOS 自带的「朗读所选内容」（Option + Esc）互不影响，两者可以同时使用。',

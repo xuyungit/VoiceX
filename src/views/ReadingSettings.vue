@@ -55,14 +55,15 @@ const ttsEnabled = computed({
   }
 })
 
-type ProviderValue = 'system' | 'volcengine' | 'aliyun' | 'mimo'
+type ProviderValue = 'system' | 'volcengine' | 'aliyun' | 'mimo' | 'azure'
 type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash' | 'cosyvoice-v3-flash'
 
 const providerOptions = computed(() => [
   { label: t('reading.providerSystem'), value: 'system' },
   { label: t('reading.providerVolcengine'), value: 'volcengine' },
   { label: t('reading.providerAliyun'), value: 'aliyun' },
-  { label: t('reading.providerMimo'), value: 'mimo' }
+  { label: t('reading.providerMimo'), value: 'mimo' },
+  { label: t('reading.providerAzure'), value: 'azure' }
 ])
 
 const ttsProviderType = computed({
@@ -77,10 +78,13 @@ const ttsProviderType = computed({
 const isVolcengine = computed(() => settingsStore.settings.ttsProviderType === 'volcengine')
 const isAliyun = computed(() => settingsStore.settings.ttsProviderType === 'aliyun')
 const isMimo = computed(() => settingsStore.settings.ttsProviderType === 'mimo')
+const isAzure = computed(() => settingsStore.settings.ttsProviderType === 'azure')
 // Everything that distinguishes "speaks over the network" from "speaks through
 // macOS" — voice list availability, the missing pitch control, whether the
 // controls work off macOS at all.
-const isCloud = computed(() => isVolcengine.value || isAliyun.value || isMimo.value)
+const isCloud = computed(
+  () => isVolcengine.value || isAliyun.value || isMimo.value || isAzure.value
+)
 // Empty id is the `say` path (Siri / Spoken Content). Compact AVSpeech voices
 // are everything else in the picker; pitch and volume only exist there.
 const isSystemDefaultVoice = computed(
@@ -132,12 +136,14 @@ const ttsVoiceId = computed({
     if (isVolcengine.value) return settingsStore.settings.volcTtsSpeaker
     if (isAliyun.value) return settingsStore.settings[aliyunVoiceKey.value]
     if (isMimo.value) return settingsStore.settings.mimoTtsVoice
+    if (isAzure.value) return settingsStore.settings.azureTtsVoice
     return settingsStore.settings.systemTtsVoiceId
   },
   set: (value: string) => {
     if (isVolcengine.value) settingsStore.updateSetting('volcTtsSpeaker', value)
     else if (isAliyun.value) settingsStore.updateSetting(aliyunVoiceKey.value, value)
     else if (isMimo.value) settingsStore.updateSetting('mimoTtsVoice', value)
+    else if (isAzure.value) settingsStore.updateSetting('azureTtsVoice', value)
     else settingsStore.updateSetting('systemTtsVoiceId', value)
   }
 })
@@ -167,6 +173,16 @@ const mimoTtsInstruction = computed({
   set: (value: string) => settingsStore.updateSetting('mimoTtsInstruction', value)
 })
 
+const azureTtsApiKey = computed({
+  get: () => settingsStore.settings.azureTtsApiKey,
+  set: (value: string) => settingsStore.updateSetting('azureTtsApiKey', value)
+})
+
+const azureTtsRegion = computed({
+  get: () => settingsStore.settings.azureTtsRegion,
+  set: (value: string) => settingsStore.updateSetting('azureTtsRegion', value)
+})
+
 // Rate and volume belong to the provider, not to the feature: engines differ
 // in baseline speed and loudness, so tuning one must not move the other.
 // MiMo is absent here on purpose: its API has no speed parameter, so the rate
@@ -177,13 +193,16 @@ const rateMultiplier = computed({
       ? settingsStore.settings.volcTtsRate
       : isAliyun.value
         ? settingsStore.settings.aliyunTtsRate
-        : settingsStore.settings.systemTtsRate
+        : isAzure.value
+          ? settingsStore.settings.azureTtsRate
+          : settingsStore.settings.systemTtsRate
     return round2(stored / DEFAULT_RATE)
   },
   set: (value: number) => {
     const stored = clamp(value * DEFAULT_RATE, 0, 1)
     if (isVolcengine.value) settingsStore.updateSetting('volcTtsRate', stored)
     else if (isAliyun.value) settingsStore.updateSetting('aliyunTtsRate', stored)
+    else if (isAzure.value) settingsStore.updateSetting('azureTtsRate', stored)
     else settingsStore.updateSetting('systemTtsRate', stored)
   }
 })
@@ -196,7 +215,9 @@ const volumePercent = computed({
         ? settingsStore.settings.aliyunTtsVolume
         : isMimo.value
           ? settingsStore.settings.mimoTtsVolume
-          : settingsStore.settings.systemTtsVolume
+          : isAzure.value
+            ? settingsStore.settings.azureTtsVolume
+            : settingsStore.settings.systemTtsVolume
     return Math.round(stored * 100)
   },
   set: (value: number) => {
@@ -204,6 +225,7 @@ const volumePercent = computed({
     if (isVolcengine.value) settingsStore.updateSetting('volcTtsVolume', stored)
     else if (isAliyun.value) settingsStore.updateSetting('aliyunTtsVolume', stored)
     else if (isMimo.value) settingsStore.updateSetting('mimoTtsVolume', stored)
+    else if (isAzure.value) settingsStore.updateSetting('azureTtsVolume', stored)
     else settingsStore.updateSetting('systemTtsVolume', stored)
   }
 })
@@ -555,6 +577,35 @@ onBeforeUnmount(() => {
               size="small"
               class="field-control"
               :placeholder="t('reading.mimoInstructionPlaceholder')"
+            />
+          </div>
+        </template>
+
+        <template v-if="isAzure">
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.azureApiKey') }}</div>
+              <div class="field-note">{{ t('reading.azureApiKeyNote') }}</div>
+            </div>
+            <NInput
+              v-model:value="azureTtsApiKey"
+              type="password"
+              show-password-on="click"
+              size="small"
+              class="field-control"
+              :placeholder="t('reading.azureApiKeyPlaceholder')"
+            />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.azureRegion') }}</div>
+              <div class="field-note">{{ t('reading.azureRegionNote') }}</div>
+            </div>
+            <NInput
+              v-model:value="azureTtsRegion"
+              size="small"
+              class="field-control"
+              placeholder="eastus"
             />
           </div>
         </template>
