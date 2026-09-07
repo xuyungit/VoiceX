@@ -253,11 +253,22 @@ impl HotkeyManager {
                         }
                         #[cfg(target_os = "macos")]
                         HookEvent::Diag(diag) => {
-                            log::info!(
+                            // Routine presses are debug-only; a desync "should
+                            // never be true again" (see DiagSnapshot) and is the
+                            // regression alarm this diag exists for, so that
+                            // case alone stays loud.
+                            let (level, tag) = if diag.desynced {
+                                (log::Level::Warn, "event=hook_press_desync")
+                            } else {
+                                (log::Level::Debug, "event=hook_press")
+                            };
+                            log::log!(
                                 target: "voicex::hotkey",
-                                "event=hook_press key={} tracked_mods={:#06x} actual_mods={:#06x} \
+                                level,
+                                "{} key={} tracked_mods={:#06x} actual_mods={:#06x} \
                                  tracked_fn={} actual_fn={} desynced={} dict_match={} \
                                  read_match={} read_latched={} suspended={}",
+                                tag,
                                 diag.key_code,
                                 diag.tracked_mods,
                                 diag.actual_mods,
