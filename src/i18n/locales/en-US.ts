@@ -210,6 +210,8 @@ const enUS = {
     aliyunModelQwen3: 'Qwen3-TTS Flash (more voices, incl. dialects)',
     aliyunModelQwenAudio: 'Qwen-Audio 3.0 TTS Flash (longer text per read)',
     aliyunModelCosyVoice: 'CosyVoice v3 Flash (more system voices, incl. dialects)',
+    aliyunModelCosyVoice35: 'CosyVoice v3.5 Flash (designed or cloned voice required)',
+    aliyunCustomVoiceNote: 'This model has no system voices. Paste the voice_id returned by Model Studio Voice Design or Voice Cloning, then check it with Preview. The id is bound to the model it was created for.',
     providerMimo: 'Xiaomi MiMo (free for a limited time)',
     mimoApiKey: 'API key',
     mimoApiKeyNote: 'From the Xiaomi MiMo open platform — the same MiMo key speech recognition uses.',
@@ -707,7 +709,8 @@ const enUS = {
     readingPermissionDenied: 'Accessibility permission missing',
     readingSecureInput: 'Secure input is active',
     readingFocusIsSelf: 'Switch to the target app first',
-    readingUnsupported: 'Cannot read the selection here'
+    readingUnsupported: 'Cannot read the selection here',
+    readingBackendError: 'Speech engine failed; check the reading settings'
   }
 }
 

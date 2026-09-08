@@ -235,6 +235,8 @@ const readingErrorMessages: Record<string, keyof typeof zhCN.hud> = {
   focus_is_self: "readingFocusIsSelf",
   unsupported_control: "readingUnsupported",
   copy_timeout: "readingUnsupported",
+  backend: "readingBackendError",
+  start_timeout: "readingBackendError",
 };
 
 function readingErrorText() {

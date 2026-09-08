@@ -18,7 +18,7 @@ use super::azure::{self, AzureBackend, AzureConfig};
 use super::mimo::{MimoBackend, MimoConfig};
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
-    log_event, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
+    log_event, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoiceList,
 };
 use crate::commands::settings::AppSettings;
 use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest};
@@ -374,7 +374,7 @@ impl TtsController {
         &self,
         provider: Option<&str>,
         model: Option<&str>,
-    ) -> Result<Vec<TtsVoice>, TtsError> {
+    ) -> Result<TtsVoiceList, TtsError> {
         let mut settings = load_settings();
         if let (Some(settings), Some(model)) = (settings.as_mut(), model) {
             if !model.trim().is_empty() {
@@ -387,19 +387,20 @@ impl TtsController {
         // Compact ids come from AVSpeech even when the default speak path is
         // `say`. The picker needs those ids; the empty entry is added in the
         // UI and is not a listed voice.
-        if !is_cloud_provider(provider) {
-            return self
-                .inner
+        let backend = if !is_cloud_provider(provider) {
+            self.inner
                 .system
                 .lock()
                 .ok()
                 .and_then(|slot| slot.clone())
-                .ok_or(TtsError::Unsupported)
-                .and_then(|backend| backend.list_voices());
+        } else {
+            self.backend_for(provider, settings.as_ref())
         }
-        self.backend_for(provider, settings.as_ref())
-            .ok_or(TtsError::Unsupported)
-            .and_then(|backend| backend.list_voices())
+        .ok_or(TtsError::Unsupported)?;
+        Ok(TtsVoiceList {
+            voices: backend.list_voices()?,
+            custom_voice_only: backend.custom_voice_only(),
+        })
     }
 
     /// Speak a fixed sample with the current voice settings.
@@ -662,6 +663,16 @@ impl TtsController {
                                     ("detail", err.to_string()),
                                 ],
                             );
+                            // The backend has already handed the session back
+                            // (its `start` contract), so this lands a hair
+                            // after the driver could see idle; the driver's
+                            // own emits on the way out cover that gap. Without
+                            // it a refused start — no API key, no voice id
+                            // for a designed-voice model — is a HUD that
+                            // flashes "preparing" and vanishes.
+                            if let Ok(mut slot) = failure.lock() {
+                                *slot = Some(err.code().to_string());
+                            }
                         }
                     }
                     Err(err) => {
@@ -783,6 +794,8 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
 fn aliyun_voice(settings: &AppSettings) -> String {
     if settings.aliyun_tts_model == aliyun::MODEL_QWEN_AUDIO {
         settings.aliyun_tts_voice_qwen_audio.clone()
+    } else if settings.aliyun_tts_model == aliyun::MODEL_COSYVOICE_V35 {
+        settings.aliyun_tts_voice_cosy_voice_v35.clone()
     } else if settings.aliyun_tts_model == aliyun::MODEL_COSYVOICE {
         settings.aliyun_tts_voice_cosy_voice.clone()
     } else {
@@ -898,13 +911,17 @@ mod tests {
         // The families reject each other's voice ids, so switching model
         // has to switch voice with it. Carrying one over is not a wrong-sounding
         // voice, it is a guaranteed 400 on the next read.
-        use crate::tts::aliyun::{MODEL_COSYVOICE, MODEL_QWEN3, MODEL_QWEN_AUDIO};
+        use crate::tts::aliyun::{
+            MODEL_COSYVOICE, MODEL_COSYVOICE_V35, MODEL_QWEN3, MODEL_QWEN_AUDIO,
+        };
 
         let mut settings = AppSettings::default();
         settings.tts_provider_type = "aliyun".to_string();
         settings.aliyun_tts_voice_qwen3 = "Dylan".to_string();
         settings.aliyun_tts_voice_qwen_audio = "longanfengyue".to_string();
         settings.aliyun_tts_voice_cosy_voice = "longanyang".to_string();
+        settings.aliyun_tts_voice_cosy_voice_v35 =
+            "cosyvoice-v3.5-flash-vd-test".to_string();
 
         settings.aliyun_tts_model = MODEL_QWEN3.to_string();
         assert_eq!(
@@ -922,6 +939,12 @@ mod tests {
         assert_eq!(
             voice_request(&settings, "hi".to_string()).voice.as_deref(),
             Some("longanyang")
+        );
+
+        settings.aliyun_tts_model = MODEL_COSYVOICE_V35.to_string();
+        assert_eq!(
+            voice_request(&settings, "hi".to_string()).voice.as_deref(),
+            Some("cosyvoice-v3.5-flash-vd-test")
         );
     }
 

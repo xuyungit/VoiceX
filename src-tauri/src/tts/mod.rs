@@ -177,6 +177,14 @@ pub struct TtsVoice {
     pub language: String,
 }
 
+/// What the voice picker gets for one provider and model.
+#[derive(Debug, Clone)]
+pub struct TtsVoiceList {
+    pub voices: Vec<TtsVoice>,
+    /// See [`TtsBackend::custom_voice_only`].
+    pub custom_voice_only: bool,
+}
+
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TtsError {
     #[error("No text-to-speech backend is available on this platform")]
@@ -362,6 +370,12 @@ impl StopReason {
 pub trait TtsBackend: Send + Sync {
     fn name(&self) -> &'static str;
     fn list_voices(&self) -> Result<Vec<TtsVoice>, TtsError>;
+    /// Whether the selected model has no listable voices at all and every
+    /// request needs an id the user supplies (a cloned or designed voice).
+    /// The settings page shows a text field instead of the picker when so.
+    fn custom_voice_only(&self) -> bool {
+        false
+    }
     /// Begin speaking.
     ///
     /// Returns once the engine has accepted the request; completion is reported

@@ -324,7 +324,7 @@ SSML 标签不计入。免费额度均为 1 万字符（仅北京地域，开通
 
 百炼还上架了 MiniMax：speech-2.8-turbo 2 元、speech-2.8-hd 3.5 元（同一 API Key 可用）。
 
-### 8.2 cosyvoice-v3.5-flash：无系统预置音色，不可作朗读引擎
+### 8.2 cosyvoice-v3.5-flash：无系统预置音色，只能配自备音色（见 8.4）
 
 - 实测（2026-08-30，SpeechSynthesizer HTTP 端点）：v3 音色表全量、各种 `_v3.5`
   后缀猜测、以及**不传 voice 参数**，一律返回 `InvalidParameter: [cosyvoice:]
@@ -332,10 +332,11 @@ SSML 标签不计入。免费额度均为 1 万字符（仅北京地域，开通
   cosyvoice-v3-flash + `longanyang` 正常出音频（对照组）。
 - 官方音色列表页无 v3.5 小节；声音复刻 API 文档将 v3.5-flash/plus 仅列为
   **复刻音色的 target_model**（创建复刻音色免费，需 10-20 秒样本音频）。
-- 结论：v3.5 的低价（0.8 元）只对自备复刻/设计音色可用，**预置音色场景不可用**，
-  VoiceX 暂不提供该选项（曾加入后因必然 418 回退）。复查信号：
+- 结论：v3.5 的低价（0.8 元）只对自备复刻/设计音色可用，**预置音色场景不可用**。
+  2026-08-30 时 VoiceX 因此撤掉过该选项（选了就必然 418）；2026-09-08 验证设计音色
+  可用后重新提供，配独立的 voice_id 输入框，见 8.4。复查信号：
   [CosyVoice 音色列表](https://help.aliyun.com/zh/model-studio/cosyvoice-voice-list)
-  页面出现 v3.5 小节。
+  页面出现 v3.5 小节，届时可补回预置音色表。
 - 若将来做「声音复刻」功能，v3.5-flash 是首选合成目标（免费建音色 + 最低合成价）。
 
 ### 8.3 qwen-audio-3.0-tts-flash 音色全量（2026-08-30 核实）
@@ -353,6 +354,23 @@ SSML 标签不计入。免费额度均为 1 万字符（仅北京地域，开通
   其余基础音色可在音色选择器中手输 ID 使用。
 
 ---
+
+### 8.4 补记（2026-09-08）：cosyvoice-v3.5-flash + 声音设计音色可用
+
+声音设计返回的 `voice_id`（`cosyvoice-v3.5-flash-vd-…`，`target_model` 必须是
+`cosyvoice-v3.5-flash`，状态 `OK`）走现有 SpeechSynthesizer HTTP+SSE 即可出声：
+
+| 请求 | 结果 |
+|---|---|
+| v3.5-flash + 设计音色 | SSE 首包 884 ms，ID3 MP3，usage 按字符计费 |
+| v3.5-flash + `longanyang` | `InvalidParameter` 418（与 08-30 一致） |
+| v3-flash + 该设计音色 | 418（音色绑死 target_model） |
+| qwen-audio + 该设计音色 | Engine error 411 |
+
+采样率 16–48 kHz 全部生效；`input.rate` 0.5/1/2 字节长度成比例。静默截断仍在：
+无句号 180 字完整（~5.2 kB/字），200 字只回 ID3 头、`finish_reason=stop` 却照常计费。
+接入沿用 v3 的 120 字切分（同一引擎，数字密集文本尚未在 v3.5 上单独测过）。VoiceX
+已提供该模型选项和独立的 voice_id 输入框；默认留空，因为设计/复刻音色绑定创建它的账号。
 
 ## 参考
 

@@ -210,6 +210,8 @@ const zhCN = {
     aliyunModelQwen3: 'Qwen3-TTS Flash（音色多，含方言）',
     aliyunModelQwenAudio: 'Qwen-Audio 3.0 TTS Flash（单次可读更长）',
     aliyunModelCosyVoice: 'CosyVoice v3 Flash（系统音色多，含方言/有声书）',
+    aliyunModelCosyVoice35: 'CosyVoice v3.5 Flash（需声音设计/复刻音色）',
+    aliyunCustomVoiceNote: '这个模型没有系统预置音色。把百炼「声音设计」或「声音复刻」返回的 voice_id 粘贴到这里，再用试听确认。音色绑定创建时选的模型，换模型会直接失败。',
     providerMimo: '小米 MiMo（限时免费）',
     mimoApiKey: 'API Key',
     mimoApiKeyNote: '在小米 MiMo 开放平台获取，与语音识别用的是同一份 MiMo 密钥。',
@@ -707,7 +709,8 @@ const zhCN = {
     readingPermissionDenied: '缺少辅助功能权限',
     readingSecureInput: '安全输入中，无法取词',
     readingFocusIsSelf: '请先切到目标应用',
-    readingUnsupported: '这个位置读不到选中文字'
+    readingUnsupported: '这个位置读不到选中文字',
+    readingBackendError: '朗读引擎出错，请检查朗读设置'
   }
 }
 

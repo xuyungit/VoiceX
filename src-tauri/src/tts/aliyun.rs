@@ -1,14 +1,17 @@
 //! Alibaba Cloud Model Studio (百炼) speech synthesis backend.
 //!
-//! Covers three model families behind one provider. Qwen3-TTS is its own
+//! Covers four model families behind one provider. Qwen3-TTS is its own
 //! service. Qwen-Audio-3.0-TTS and CosyVoice-v3 share the SpeechSynthesizer
 //! endpoint and the same request spelling — CosyVoice is the engine behind
 //! both, which is why their error messages say `[cosyvoice:]` — but the voice
-//! ids are not interchangeable. Over HTTP with server-sent events they all
-//! hand back the same thing in the same shape: base64 MP3 in
-//! `output.audio.data`, chunk after chunk, with a URL in the final frame that
-//! we discard. That similarity is what makes one backend reasonable;
-//! [`ModelSpec`] holds everything that is genuinely per model.
+//! ids are not interchangeable. CosyVoice-v3.5-flash uses that same path and
+//! spelling, with no system preset voices: every request has to name a cloned
+//! or designed `voice_id` bound to this model, or the engine returns 418.
+//! Over HTTP with server-sent events they all hand back the same thing in the
+//! same shape: base64 MP3 in `output.audio.data`, chunk after chunk, with a
+//! URL in the final frame that we discard. That similarity is what makes one
+//! backend reasonable; [`ModelSpec`] holds everything that is genuinely per
+//! model.
 //!
 //! Chosen over the two WebSocket protocols on the same measurement that settled
 //! the Volcengine backend: the text is fully known before the request goes out,
@@ -45,15 +48,7 @@ const HOST: &str = "https://dashscope.aliyuncs.com";
 pub const MODEL_QWEN3: &str = "qwen3-tts-flash";
 pub const MODEL_QWEN_AUDIO: &str = "qwen-audio-3.0-tts-flash";
 pub const MODEL_COSYVOICE: &str = "cosyvoice-v3-flash";
-
-// cosyvoice-v3.5-flash is deliberately absent despite its lower price
-// (0.8元/万字符 against v3-flash's 1元): probed 2026-08-30, it has no system
-// preset voices at all — every id from the v3 table, every `_v3.5`-suffixed
-// guess, and even omitting `voice` come back `InvalidParameter: 418` (the
-// documented "voice unsupported" code), while the same requests succeed on
-// v3-flash. The clone/design API lists v3.5 only as a target for cloned
-// voices, so offering it here would be a picker entry that always 418s.
-// Revisit if the official voice list ever grows a v3.5 section.
+pub const MODEL_COSYVOICE_V35: &str = "cosyvoice-v3.5-flash";
 
 pub fn default_model() -> &'static str {
     // Qwen-Audio 3.0 over Qwen3: the same 中英混读 quality with the far larger
@@ -90,12 +85,41 @@ struct ModelSpec {
     /// with full stops did not help because the server merges the sentences
     /// straight back into one batch.
     piece_chars: usize,
-    voices: &'static [(&'static str, &'static str, &'static str)],
+    voices: VoiceSource,
     /// Always called with this spec's own `id`, so the body cannot name a
     /// different model than the spec it belongs to — a copy-pasted entry that
     /// forgot to re-thread the constant used to compile fine and send requests
     /// for the wrong model.
     build_body: fn(model: &'static str, s: &Synthesis) -> Value,
+}
+
+/// Where a model's voice ids come from.
+enum VoiceSource {
+    /// System presets the picker can list; the first is the default.
+    Preset(&'static [(&'static str, &'static str, &'static str)]),
+    /// No presets at all: every request has to name a cloned or designed
+    /// voice bound to this model, or the engine returns 418. Those ids belong
+    /// to the account that created them, so there is nothing to ship as a
+    /// default and nothing for the picker to list — the settings page shows a
+    /// text field instead.
+    Custom,
+}
+
+impl ModelSpec {
+    fn presets(&self) -> &'static [(&'static str, &'static str, &'static str)] {
+        match self.voices {
+            VoiceSource::Preset(voices) => voices,
+            VoiceSource::Custom => &[],
+        }
+    }
+
+    fn default_voice(&self) -> Option<&'static str> {
+        self.presets().first().map(|(id, _, _)| *id)
+    }
+
+    fn custom_voice_only(&self) -> bool {
+        matches!(self.voices, VoiceSource::Custom)
+    }
 }
 
 /// The synthesis parameters, already on the provider's own scales.
@@ -190,7 +214,7 @@ fn speech_synthesizer_body(model: &'static str, s: &Synthesis<'_>) -> Value {
     })
 }
 
-const SPECS: [ModelSpec; 3] = [
+const SPECS: [ModelSpec; 4] = [
     ModelSpec {
         id: MODEL_QWEN3,
         path: "/api/v1/services/aigc/multimodal-generation/generation",
@@ -201,7 +225,7 @@ const SPECS: [ModelSpec; 3] = [
         max_chars: 5_000,
         // Renders ~4x realtime and completed every long-text probe intact.
         piece_chars: 5_000,
-        voices: &QWEN3_VOICES,
+        voices: VoiceSource::Preset(&QWEN3_VOICES),
         build_body: |model, s| {
             json!({
                 "model": model,
@@ -232,7 +256,7 @@ const SPECS: [ModelSpec; 3] = [
         // Shares CosyVoice's engine but not its budget: the 163-character
         // single-sentence probe came back complete, ~10x realtime.
         piece_chars: 9_000,
-        voices: &QWEN_AUDIO_VOICES,
+        voices: VoiceSource::Preset(&QWEN_AUDIO_VOICES),
         build_body: speech_synthesizer_body,
     },
     ModelSpec {
@@ -251,7 +275,23 @@ const SPECS: [ModelSpec; 3] = [
         // text a comfortable margin inside it while cutting only once per
         // ~half minute of speech.
         piece_chars: 120,
-        voices: &COSYVOICE_VOICES,
+        voices: VoiceSource::Preset(&COSYVOICE_VOICES),
+        build_body: speech_synthesizer_body,
+    },
+    ModelSpec {
+        id: MODEL_COSYVOICE_V35,
+        path: "/api/v1/services/audio/tts/SpeechSynthesizer",
+        sample_rates: &[48_000, 44_100, 24_000, 22_050, 16_000],
+        max_chars: 9_000,
+        // Same silent-truncation class as v3-flash, measured 2026-09-08 with
+        // a designed voice: a period-free 180-character request returned
+        // complete audio (~5.2 kB/char); 200 characters returned an ID3
+        // header and nothing else, `finish_reason=stop`, billed in full.
+        // That single plain-prose point says nothing about digit-heavy or
+        // slow-rate text, which expands on this engine exactly as on v3, so
+        // v3's 120 applies unchanged until dense text is measured here too.
+        piece_chars: 120,
+        voices: VoiceSource::Custom,
         build_body: speech_synthesizer_body,
     },
 ];
@@ -264,7 +304,7 @@ fn spec_for(model: &str) -> &'static ModelSpec {
 }
 
 pub fn default_voice_for(model: &str) -> &'static str {
-    spec_for(model).voices[0].0
+    spec_for(model).default_voice().unwrap_or("")
 }
 
 #[derive(Debug, Clone)]
@@ -337,7 +377,7 @@ impl TtsBackend for AliyunBackend {
     fn list_voices(&self) -> Result<Vec<TtsVoice>, TtsError> {
         Ok(self
             .spec()
-            .voices
+            .presets()
             .iter()
             .map(|(id, name, language)| TtsVoice {
                 id: id.to_string(),
@@ -345,6 +385,10 @@ impl TtsBackend for AliyunBackend {
                 language: language.to_string(),
             })
             .collect())
+    }
+
+    fn custom_voice_only(&self) -> bool {
+        self.spec().custom_voice_only()
     }
 
     fn start(&self, request: TtsRequest, token: CancelToken) -> Result<(), TtsError> {
@@ -390,11 +434,21 @@ impl AliyunBackend {
         let sample_rate = negotiate_sample_rate_among(spec.sample_rates)
             .map_err(|err| TtsError::Backend(format!("{} ({})", err, err.code())))?;
 
-        let voice = request
-            .voice
-            .clone()
-            .filter(|id| !id.trim().is_empty())
-            .unwrap_or_else(|| spec.voices[0].0.to_string());
+        // Trimmed, not just trim-checked: a designed-voice id is pasted by
+        // hand, and a trailing newline from the console would otherwise reach
+        // the service verbatim and come back as the same 418 a wrong id gets.
+        let voice = match request.voice.as_deref().map(str::trim) {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => spec
+                .default_voice()
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    TtsError::Backend(format!(
+                        "{} has no system voices; configure a cloned or designed voice id",
+                        spec.id
+                    ))
+                })?,
+        };
         // Pitch is deliberately not sent. `pitch_rate` does apply, but halving
         // it stretched the audio to 4.2x rather than the 2x a resampling pitch
         // shift would give, so what it actually changes is unclear and the
@@ -797,6 +851,15 @@ mod tests {
             spec_for(MODEL_COSYVOICE).path,
             spec_for(MODEL_QWEN_AUDIO).path
         );
+
+        let cosy35 = (spec_for(MODEL_COSYVOICE_V35).build_body)(MODEL_COSYVOICE_V35, &synthesis);
+        assert_eq!(cosy35["model"], MODEL_COSYVOICE_V35);
+        assert_eq!(cosy35["input"]["rate"], 1.5);
+        assert_eq!(cosy35["input"]["format"], "mp3");
+        assert_eq!(
+            spec_for(MODEL_COSYVOICE_V35).path,
+            spec_for(MODEL_COSYVOICE).path
+        );
     }
 
     #[test]
@@ -892,6 +955,11 @@ mod tests {
         assert_eq!(default_voice_for("qwen9-tts-imaginary"), "Cherry");
         assert_eq!(default_voice_for(MODEL_QWEN_AUDIO), "longanfengyue");
         assert_eq!(default_voice_for(MODEL_COSYVOICE), "longanyang");
+        assert_eq!(
+            default_voice_for(MODEL_COSYVOICE_V35),
+            "",
+            "v3.5-flash has no system voice to fall back to"
+        );
     }
 
     #[test]
@@ -926,22 +994,40 @@ mod tests {
         assert!(!listed.iter().any(|voice| voice.id == "longanfengyue"));
         assert!(!listed.iter().any(|voice| voice.id == "Cherry"));
 
+        backend.apply_config(AliyunConfig {
+            api_key: "sk-test".to_string(),
+            model: MODEL_COSYVOICE_V35.to_string(),
+        });
+        let listed = backend.list_voices().unwrap();
+        assert!(
+            listed.is_empty(),
+            "v3.5-flash must not list system voices the service will 418"
+        );
+
         // The per-request limit rides along with the model; `begin` splits a
         // longer selection into pieces of at most this size.
         assert_eq!(spec_for(MODEL_COSYVOICE).max_chars, 9_000);
+        assert_eq!(spec_for(MODEL_COSYVOICE_V35).max_chars, 9_000);
     }
 
     #[test]
     fn only_cosyvoice_needs_the_short_piece_limit() {
-        // The ~836-token batch budget was reproduced only on cosyvoice-v3-flash
-        // (2026-08): the same 163-character single-sentence text came back
-        // complete from qwen3-tts-flash and qwen-audio-3.0-tts-flash. Capping
-        // the others would only multiply requests and seams for nothing —
-        // and a cosyvoice limit above ~150 would reintroduce silently
-        // truncated tails.
+        // The ~836-token batch budget was reproduced on cosyvoice-v3-flash
+        // (2026-08) and again on v3.5-flash with a designed voice (2026-09:
+        // 180 characters complete, 200 characters an empty ID3). The same
+        // 163-character single-sentence text came back complete from
+        // qwen3-tts-flash and qwen-audio-3.0-tts-flash. Capping the others
+        // would only multiply requests and seams for nothing — and a
+        // cosyvoice limit above the measured cliff would reintroduce
+        // silently truncated tails.
         assert!(
             spec_for(MODEL_COSYVOICE).piece_chars <= 150,
             "cosyvoice pieces must stay inside the silent output budget"
+        );
+        assert_eq!(
+            spec_for(MODEL_COSYVOICE_V35).piece_chars,
+            spec_for(MODEL_COSYVOICE).piece_chars,
+            "v3.5-flash shares v3's engine and its margin until dense text is measured on it"
         );
         assert_eq!(spec_for(MODEL_QWEN3).piece_chars, 5_000);
         assert_eq!(spec_for(MODEL_QWEN_AUDIO).piece_chars, 9_000);
@@ -974,6 +1060,24 @@ mod tests {
         assert_eq!(backend.status(), TtsStatus::Idle);
     }
 
+    #[test]
+    fn a_v35_start_without_a_voice_id_hands_the_session_back() {
+        // v3.5-flash has an empty voice table, so a missing id cannot fall
+        // back to a preset. The refusal has to release the session the same
+        // way an empty API key does, or the HUD sits on preparing forever.
+        let backend = AliyunBackend::new(AliyunConfig {
+            api_key: "sk-test".to_string(),
+            model: MODEL_COSYVOICE_V35.to_string(),
+        });
+        let slot = crate::tts::SessionSlot::default();
+        let token = slot.claim();
+        let outcome = backend.start(TtsRequest::plain("hi".to_string()), token);
+        let err = outcome.expect_err("a designed-voice model must refuse an empty id");
+        assert!(err.to_string().contains("no system voices"), "{err}");
+        assert!(!slot.is_active(), "a refusal must release the session");
+        assert_eq!(backend.status(), TtsStatus::Idle);
+    }
+
     /// End-to-end against the live service for both models: network, SSE parse,
     /// MP3 decode and playback, in the same arrangement the backend uses. Plays
     /// audio, so it is opt-in:
@@ -990,9 +1094,15 @@ mod tests {
         let api_key = std::env::var("ALIYUN_TTS_API_KEY").expect("ALIYUN_TTS_API_KEY is not set");
 
         for spec in SPECS.iter() {
+            let Some(voice) = spec.default_voice() else {
+                eprintln!(
+                    "\n=== {} skipped (no system voices; designed/cloned id required) ===",
+                    spec.id
+                );
+                continue;
+            };
             let rate = negotiate_sample_rate_among(spec.sample_rates)
                 .expect("no usable output sample rate");
-            let voice = spec.voices[0].0;
             eprintln!("\n=== {} @ {rate} Hz, voice {voice} ===", spec.id);
 
             let text = "阿里云百炼语音合成，端到端链路验证：流式接收、MP3 解码与本地播放。";
@@ -1076,7 +1186,7 @@ mod tests {
         let mut rejected: Vec<String> = Vec::new();
 
         for spec in SPECS.iter() {
-            for (id, name, _) in spec.voices {
+            for (id, name, _) in spec.presets() {
                 let slot = crate::tts::SessionSlot::default();
                 let token = slot.claim();
                 let (tx, rx) = mpsc::channel::<Vec<u8>>();

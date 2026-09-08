@@ -14,6 +14,12 @@ interface TtsVoiceOption {
   language: string
 }
 
+interface TtsVoiceList {
+  voices: TtsVoiceOption[]
+  /** The model lists nothing and takes a typed (cloned or designed) id. */
+  customVoiceOnly: boolean
+}
+
 interface ReadSelectionStatus {
   bound: boolean
   enabled: boolean
@@ -29,6 +35,9 @@ const settingsStore = useSettingsStore()
 const { t } = useI18n()
 
 const voices = ref<TtsVoiceOption[]>([])
+// Declared by the backend with the list, so a model with no presets gets a
+// text field without the view having to know which models those are.
+const customVoiceOnly = ref(false)
 const voicesError = ref('')
 const hotkeyStatus = ref<ReadSelectionStatus | null>(null)
 const isRecording = ref(false)
@@ -56,7 +65,7 @@ const ttsEnabled = computed({
 })
 
 type ProviderValue = 'system' | 'volcengine' | 'aliyun' | 'mimo' | 'azure'
-type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash' | 'cosyvoice-v3-flash'
+type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash' | 'cosyvoice-v3-flash' | 'cosyvoice-v3.5-flash'
 
 const providerOptions = computed(() => [
   { label: t('reading.providerSystem'), value: 'system' },
@@ -94,7 +103,8 @@ const isSystemDefaultVoice = computed(
 const aliyunModelOptions = computed(() => [
   { label: t('reading.aliyunModelQwen3'), value: 'qwen3-tts-flash' },
   { label: t('reading.aliyunModelQwenAudio'), value: 'qwen-audio-3.0-tts-flash' },
-  { label: t('reading.aliyunModelCosyVoice'), value: 'cosyvoice-v3-flash' }
+  { label: t('reading.aliyunModelCosyVoice'), value: 'cosyvoice-v3-flash' },
+  { label: t('reading.aliyunModelCosyVoice35'), value: 'cosyvoice-v3.5-flash' }
 ])
 
 const aliyunTtsModel = computed({
@@ -115,6 +125,8 @@ const aliyunVoiceKey = computed(() => {
       return 'aliyunTtsVoiceQwenAudio' as const
     case 'cosyvoice-v3-flash':
       return 'aliyunTtsVoiceCosyVoice' as const
+    case 'cosyvoice-v3.5-flash':
+      return 'aliyunTtsVoiceCosyVoiceV35' as const
     default:
       return 'aliyunTtsVoiceQwen3' as const
   }
@@ -128,6 +140,12 @@ const voiceOptions = computed(() => {
   // The cloud providers have no default-voice concept, and an empty speaker is
   // not a valid request — so only the local engine gets that entry.
   return isCloud.value ? listed : [{ label: t('reading.voiceDefault'), value: '' }, ...listed]
+})
+
+const voiceNote = computed(() => {
+  if (customVoiceOnly.value) return t('reading.aliyunCustomVoiceNote')
+  if (isCloud.value) return t('reading.cloudSpeakerNote')
+  return isSystemDefaultVoice.value ? t('reading.voiceNoteDefault') : t('reading.voiceNote')
 })
 
 // Voice identifiers do not carry across providers, so each keeps its own.
@@ -295,18 +313,24 @@ async function loadVoices(
   // only the system voice needs macOS.
   if (!isMacOS && provider === 'system') {
     voices.value = []
+    customVoiceOnly.value = false
     return
   }
   // Clear first: a slow reply must not leave the previous provider's voices on
   // screen, which is how system voices used to show up under the cloud engine.
+  // The custom-voice flag is left alone until the reply: clearing it would
+  // flip the control to a picker for the duration of every fetch.
   voices.value = []
   try {
     // Both passed explicitly — the store's save is debounced, so the backend
     // would still read the previous provider and model from the database.
-    voices.value = await invoke<TtsVoiceOption[]>('list_tts_voices', { provider, model })
+    const list = await invoke<TtsVoiceList>('list_tts_voices', { provider, model })
+    voices.value = list.voices
+    customVoiceOnly.value = list.customVoiceOnly
     voicesError.value = ''
   } catch (error) {
     voices.value = []
+    customVoiceOnly.value = false
     voicesError.value = error instanceof Error ? error.message : String(error)
   }
 }
@@ -621,17 +645,17 @@ onBeforeUnmount(() => {
         <div class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.voiceLabel') }}</div>
-            <div class="field-note">
-              {{
-                isCloud
-                  ? t('reading.cloudSpeakerNote')
-                  : isSystemDefaultVoice
-                    ? t('reading.voiceNoteDefault')
-                    : t('reading.voiceNote')
-              }}
-            </div>
+            <div class="field-note">{{ voiceNote }}</div>
           </div>
+          <NInput
+            v-if="customVoiceOnly"
+            v-model:value="ttsVoiceId"
+            size="small"
+            class="field-control"
+            placeholder="cosyvoice-v3.5-flash-vd-..."
+          />
           <NSelect
+            v-else
             v-model:value="ttsVoiceId"
             :options="voiceOptions"
             :disabled="!isMacOS && !isCloud"

@@ -222,6 +222,10 @@ pub struct AppSettings {
     /// `Cosyvoice` and the picker writes a field the backend never reads —
     /// every request then falls back to the default speaker.
     pub aliyun_tts_voice_cosy_voice: String,
+    /// Designed or cloned voice id for `cosyvoice-v3.5-flash`. Same serde
+    /// spelling trap as the v3 field: `cosy_voice_v35` keeps the `V` capital
+    /// so the frontend key is `aliyunTtsVoiceCosyVoiceV35`.
+    pub aliyun_tts_voice_cosy_voice_v35: String,
     /// Normalized like the system voice's. Every family takes the same
     /// 0.5..=2.0 multiplier, so one pair covers them.
     pub aliyun_tts_rate: f32,
@@ -484,6 +488,7 @@ impl Default for AppSettings {
                 crate::tts::aliyun::MODEL_COSYVOICE,
             )
             .to_string(),
+            aliyun_tts_voice_cosy_voice_v35: String::new(),
             aliyun_tts_rate: 0.5,
             aliyun_tts_volume: 1.0,
             mimo_tts_api_key: String::new(),
@@ -1208,6 +1213,8 @@ mod tests {
         settings.volc_tts_rate = 0.3;
         settings.aliyun_tts_model = crate::tts::aliyun::MODEL_COSYVOICE.to_string();
         settings.aliyun_tts_voice_cosy_voice = "longhuhu_v3".to_string();
+        settings.aliyun_tts_voice_cosy_voice_v35 =
+            "cosyvoice-v3.5-flash-vd-test".to_string();
 
         let json = serde_json::to_string(&settings).unwrap();
         let blob: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1221,9 +1228,14 @@ mod tests {
         assert_eq!(blob["volcTtsSpeaker"], "zh_male_liufei_uranus_bigtts");
         assert_eq!(blob["aliyunTtsModel"], "cosyvoice-v3-flash");
         assert_eq!(blob["aliyunTtsVoiceCosyVoice"], "longhuhu_v3");
+        assert_eq!(blob["aliyunTtsVoiceCosyVoiceV35"], "cosyvoice-v3.5-flash-vd-test");
         assert!(
             blob.get("aliyunTtsVoiceCosyvoice").is_none(),
             "serde camelCase of `cosyvoice` as one word is Cosyvoice, which the frontend never writes"
+        );
+        assert!(
+            blob.get("aliyunTtsVoiceCosyvoiceV35").is_none(),
+            "v35 must keep Voice capitalised the same way as the v3 field"
         );
 
         let restored: AppSettings = serde_json::from_str(&json).unwrap();
@@ -1236,6 +1248,10 @@ mod tests {
         );
         assert_eq!(restored.tts_hotkey_config.as_deref(), Some("83|2304|0"));
         assert_eq!(restored.aliyun_tts_voice_cosy_voice, "longhuhu_v3");
+        assert_eq!(
+            restored.aliyun_tts_voice_cosy_voice_v35,
+            "cosyvoice-v3.5-flash-vd-test"
+        );
     }
 
     #[test]
@@ -1248,6 +1264,10 @@ mod tests {
 
         assert_eq!(settings.hold_threshold_ms, 900, "existing values survive");
         assert!(settings.tts_enabled);
+        assert!(
+            settings.aliyun_tts_voice_cosy_voice_v35.is_empty(),
+            "designed-voice ids are per account; the shipped default must be empty"
+        );
         assert_eq!(settings.system_tts_rate, 0.5, "0.5 is the engine's 1x mark");
         assert_eq!(settings.system_tts_pitch, 1.0);
         assert_eq!(settings.volc_tts_rate, 0.5);

@@ -18,6 +18,15 @@ pub struct TtsVoiceOption {
     pub language: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TtsVoiceList {
+    pub voices: Vec<TtsVoiceOption>,
+    /// The model lists no voices and every request needs a typed id (a cloned
+    /// or designed voice); the page shows a text field instead of the picker.
+    pub custom_voice_only: bool,
+}
+
 /// Voices a backend offers, for the voice picker.
 ///
 /// `provider` is explicit because the settings page asks right after the user
@@ -31,22 +40,24 @@ pub async fn list_tts_voices(
     tts: State<'_, TtsController>,
     provider: Option<String>,
     model: Option<String>,
-) -> Result<Vec<TtsVoiceOption>, String> {
+) -> Result<TtsVoiceList, String> {
     let controller = tts.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         controller.list_voices(provider.as_deref(), model.as_deref())
     })
     .await
     .map_err(|err| format!("Failed to list voices: {err}"))?
-    .map(|voices| {
-        voices
+    .map(|list| TtsVoiceList {
+        voices: list
+            .voices
             .into_iter()
             .map(|voice| TtsVoiceOption {
                 id: voice.id,
                 name: voice.name,
                 language: voice.language,
             })
-            .collect()
+            .collect(),
+        custom_voice_only: list.custom_voice_only,
     })
     .map_err(|err| err.to_string())
 }

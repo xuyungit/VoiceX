@@ -180,11 +180,12 @@ export interface AppSettings {
     // TTS Provider: Alibaba Cloud Model Studio (百炼)
     aliyunTtsApiKey: string
     /** The models are separate services; the backend maps between them. */
-    aliyunTtsModel: 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash' | 'cosyvoice-v3-flash'
+    aliyunTtsModel: 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash' | 'cosyvoice-v3-flash' | 'cosyvoice-v3.5-flash'
     /** One voice per model family — each rejects the others' ids outright. */
     aliyunTtsVoiceQwen3: string
     aliyunTtsVoiceQwenAudio: string
     aliyunTtsVoiceCosyVoice: string
+    aliyunTtsVoiceCosyVoiceV35: string
     aliyunTtsRate: number
     aliyunTtsVolume: number
 
@@ -417,6 +418,7 @@ const defaultSettings: AppSettings = {
     aliyunTtsVoiceQwen3: 'Cherry',
     aliyunTtsVoiceQwenAudio: 'longanfengyue',
     aliyunTtsVoiceCosyVoice: 'longanyang',
+    aliyunTtsVoiceCosyVoiceV35: '',
     aliyunTtsRate: 0.5,
     aliyunTtsVolume: 1,
 
