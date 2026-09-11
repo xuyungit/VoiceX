@@ -30,6 +30,17 @@ const MACOS_C_KEYCODE: u16 = 8;
 const COPY_TIMEOUT_MS: u64 = 300;
 const COPY_POLL_INTERVAL_MS: u64 = 10;
 
+/// After a copy timeout, how much longer the pasteboard is watched for the
+/// copy landing anyway.
+///
+/// A timeout does not cancel the Cmd-C that was posted: an application busy
+/// enough to miss the budget still performs the copy once it gets around to
+/// it, and without this the user's clipboard would quietly end up holding the
+/// selection with nobody left to put the snapshot back. The read itself has
+/// already failed by then; this only settles what the clipboard is left with.
+const LATE_COPY_GRACE_MS: u64 = 2_000;
+const LATE_COPY_POLL_INTERVAL_MS: u64 = 25;
+
 /// How long we wait for the user to let go of the hotkey before synthesizing a
 /// copy. Posting Cmd-C while Option is physically down delivers Option+Cmd+C to
 /// the target application, which is somebody else's shortcut.
@@ -245,7 +256,10 @@ pub fn read_via_copy(
             return Err(SelectionError::Cancelled);
         }
         if Instant::now() >= deadline {
-            // Nothing was written, so the user's clipboard is untouched.
+            // Nothing has been written *yet*. The Cmd-C is still in the
+            // target's queue, so keep an eye on the pasteboard a little longer
+            // and restore if the copy lands late.
+            watch_for_late_copy(snapshot, change_count_before);
             return Err(SelectionError::CopyTimeout);
         }
         thread::sleep(Duration::from_millis(COPY_POLL_INTERVAL_MS));
@@ -272,6 +286,61 @@ pub fn read_via_copy(
     };
 
     Ok(CopyReadOutcome { text, restored })
+}
+
+/// Keep watching the pasteboard after a copy timeout and put the snapshot back
+/// if the copy lands within the grace period.
+///
+/// Runs on its own thread so the failed read can report immediately; the
+/// selection worker is free to serve the next hotkey. The same restore rule as
+/// the in-budget path applies: only if nothing else has written since the
+/// change we saw, so a clipboard manager or the user's own copy is never
+/// reverted. Either way the outcome is logged — a clipboard left holding the
+/// selection is something the user should be able to find in the log.
+fn watch_for_late_copy(snapshot: PasteboardSnapshot, change_count_before: isize) {
+    let spawned = thread::Builder::new()
+        .name("voicex-late-copy".to_string())
+        .spawn(move || {
+            let pasteboard = NSPasteboard::generalPasteboard();
+            let deadline = Instant::now() + Duration::from_millis(LATE_COPY_GRACE_MS);
+            let landed = loop {
+                let now = pasteboard.changeCount();
+                if now != change_count_before {
+                    break Some(now);
+                }
+                if Instant::now() >= deadline {
+                    break None;
+                }
+                thread::sleep(Duration::from_millis(LATE_COPY_POLL_INTERVAL_MS));
+            };
+
+            let Some(landed) = landed else {
+                crate::tts::log_event("copy_landed_late", &[("landed", "false".to_string())]);
+                return;
+            };
+
+            let restored = if may_restore(landed, pasteboard.changeCount()) {
+                match snapshot.restore(&pasteboard) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        log::warn!("Failed to restore the clipboard after a late copy: {err}");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            crate::tts::log_event(
+                "copy_landed_late",
+                &[
+                    ("landed", "true".to_string()),
+                    ("restored", restored.to_string()),
+                ],
+            );
+        });
+    if let Err(err) = spawned {
+        log::warn!("Could not watch for a late copy; the clipboard may hold the selection: {err}");
+    }
 }
 
 /// Post Command+C as a raw CGEvent sourced from `HIDSystemState`, the same
