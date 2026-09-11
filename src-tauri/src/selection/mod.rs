@@ -23,9 +23,11 @@ mod macos;
 pub enum SelectionSource {
     /// `kAXSelectedTextAttribute` read directly off the focused element.
     Ax,
-    /// `kAXSelectedTextRangeAttribute` + parameterized attribute. Phase 1.
-    #[allow(dead_code)]
-    AxRange,
+    /// WebKit's `AXSelectedTextMarkerRange` resolved through the parameterized
+    /// `AXStringForTextMarkerRange`. Web areas advertise neither
+    /// `AXSelectedText` nor `AXSelectedTextRange`, so this is the only
+    /// Accessibility read that works for Safari (plan §5.1).
+    AxMarkerRange,
     /// Synthetic Cmd-C with clipboard snapshot/restore.
     ClipboardCopy,
 }
@@ -34,7 +36,7 @@ impl SelectionSource {
     pub fn as_str(self) -> &'static str {
         match self {
             SelectionSource::Ax => "ax",
-            SelectionSource::AxRange => "ax_range",
+            SelectionSource::AxMarkerRange => "ax_marker_range",
             SelectionSource::ClipboardCopy => "clipboard_copy",
         }
     }
@@ -69,6 +71,11 @@ pub struct SelectionProbe {
     pub advertises_selected_text: Option<bool>,
     pub advertises_selected_text_range: Option<bool>,
     pub advertises_marker_range: Option<bool>,
+    /// What the WebKit marker-range read produced, same vocabulary as
+    /// `ax_attribute`. `None` when the control did not advertise the marker
+    /// range and the layer was skipped.
+    pub marker_attribute: Option<String>,
+    pub marker_status: Option<i32>,
     /// We asked this application to build its accessibility tree.
     pub enabled_manual_accessibility: bool,
     pub used_clipboard_fallback: bool,

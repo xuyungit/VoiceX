@@ -45,6 +45,12 @@ extern "C" {
         value: *mut CFTypeRef,
     ) -> AXError;
     fn AXUIElementCopyAttributeNames(element: AXUIElementRef, names: *mut CFArrayRef) -> AXError;
+    fn AXUIElementCopyParameterizedAttributeValue(
+        element: AXUIElementRef,
+        parameterized_attribute: CFStringRef,
+        parameter: CFTypeRef,
+        result: *mut CFTypeRef,
+    ) -> AXError;
     fn AXUIElementGetTypeID() -> CFTypeID;
 }
 
@@ -118,6 +124,18 @@ pub fn enable_manual_accessibility(pid: i32) -> bool {
 
 /// Owned `AXUIElementRef`. Releases on drop.
 struct AxElement(AXUIElementRef);
+
+/// Any owned CoreFoundation object we never inspect, only hand back to the
+/// API that produced it (the opaque `AXTextMarkerRange`). Releases on drop.
+struct OwnedCfType(CFTypeRef);
+
+impl Drop for OwnedCfType {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { CFRelease(self.0) };
+        }
+    }
+}
 
 impl Drop for AxElement {
     fn drop(&mut self) {
@@ -251,6 +269,39 @@ impl FocusedElement {
         }))
     }
 
+    /// The focused element of one application, asked through its application
+    /// element instead of the system-wide one.
+    ///
+    /// Test-only: the system-wide query needs a window-server session, which a
+    /// test binary launched from a shell does not always have
+    /// (`kAXErrorCannotComplete`), while the per-application query works from
+    /// anywhere the process is trusted. The app itself keeps the system-wide
+    /// read, which is what defines "the focused control" for a hotkey.
+    #[cfg(test)]
+    fn read_in_application(pid: i32) -> Option<Self> {
+        let app = unsafe { AXUIElementCreateApplication(pid) };
+        if app.is_null() {
+            return None;
+        }
+        let app = AxElement(app);
+        let attribute = CFString::new("AXFocusedUIElement");
+        let mut value: CFTypeRef = std::ptr::null();
+        let status =
+            unsafe { AXUIElementCopyAttributeValue(app.0, attribute.as_concrete_TypeRef(), &mut value) };
+        println!("application AXFocusedUIElement status={status}");
+        if status != K_AX_ERROR_SUCCESS || value.is_null() {
+            return None;
+        }
+        let element = AxElement(value as AXUIElementRef);
+        let role = copy_string_attribute(&element, "AXRole");
+        let subrole = copy_string_attribute(&element, "AXSubrole");
+        Some(Self {
+            element,
+            role,
+            subrole,
+        })
+    }
+
     pub fn role(&self) -> Option<&str> {
         self.role.as_deref()
     }
@@ -261,6 +312,80 @@ impl FocusedElement {
 
     pub fn selected_text(&self) -> AttributeRead {
         read_string_attribute(&self.element, "AXSelectedText")
+    }
+
+    /// Read the selection the WebKit way: `AXSelectedTextMarkerRange`, then
+    /// the parameterized `AXStringForTextMarkerRange` to turn the opaque range
+    /// into text.
+    ///
+    /// A web area answers `AXSelectedText` with `kAXErrorNoValue` whether or
+    /// not anything is selected, so for WebKit content this is the only
+    /// Accessibility read that says anything (plan §5.1). Only meaningful on an
+    /// element whose attribute list includes the marker range; the caller
+    /// checks [`SelectionAttributes::selected_text_marker_range`] first rather
+    /// than paying for a round trip that every non-WebKit control refuses.
+    ///
+    /// The marker range is an opaque `AXTextMarkerRange` that only the owning
+    /// process can interpret, so it is handed straight back without being
+    /// looked at. Both steps report through [`AttributeRead`]: a missing range
+    /// is `Empty` (nothing selected — WebKit answers `kAXErrorNoValue` for a
+    /// collapsed selection), and a refusal at either step is `Unsupported` with
+    /// the raw status.
+    pub fn selected_text_via_marker_range(&self) -> AttributeRead {
+        let range_name = CFString::new("AXSelectedTextMarkerRange");
+        let mut range: CFTypeRef = std::ptr::null();
+        let status = unsafe {
+            AXUIElementCopyAttributeValue(
+                self.element.0,
+                range_name.as_concrete_TypeRef(),
+                &mut range,
+            )
+        };
+        if status != K_AX_ERROR_SUCCESS || range.is_null() {
+            if !range.is_null() {
+                unsafe { CFRelease(range) };
+            }
+            return match status {
+                K_AX_ERROR_API_DISABLED => AttributeRead::ApiDisabled,
+                K_AX_ERROR_NO_VALUE => AttributeRead::Empty(status),
+                _ => AttributeRead::Unsupported(status),
+            };
+        }
+        let range = OwnedCfType(range);
+
+        let string_name = CFString::new("AXStringForTextMarkerRange");
+        let mut value: CFTypeRef = std::ptr::null();
+        let status = unsafe {
+            AXUIElementCopyParameterizedAttributeValue(
+                self.element.0,
+                string_name.as_concrete_TypeRef(),
+                range.0,
+                &mut value,
+            )
+        };
+        if status != K_AX_ERROR_SUCCESS || value.is_null() {
+            if !value.is_null() {
+                unsafe { CFRelease(value) };
+            }
+            return match status {
+                K_AX_ERROR_API_DISABLED => AttributeRead::ApiDisabled,
+                // The range exists but resolves to nothing; treat like an
+                // empty string rather than a dead end.
+                K_AX_ERROR_NO_VALUE => AttributeRead::Empty(status),
+                _ => AttributeRead::Unsupported(status),
+            };
+        }
+        if unsafe { CFGetTypeID(value) } != CFString::type_id() {
+            unsafe { CFRelease(value) };
+            return AttributeRead::Unsupported(WRONG_TYPE_STATUS);
+        }
+
+        let text = unsafe { CFString::wrap_under_create_rule(value as CFStringRef) }.to_string();
+        if text.is_empty() {
+            AttributeRead::Empty(K_AX_ERROR_SUCCESS)
+        } else {
+            AttributeRead::Text(text)
+        }
     }
 
     /// Enumerate the element's attributes and report the selection-related ones.
@@ -284,6 +409,67 @@ impl FocusedElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Live read of whatever is frontmost, through the same layers the app uses.
+    ///
+    /// Ignored because it needs a frontmost application with a selection and
+    /// the Accessibility permission for the test binary. Driven by
+    /// `scripts/tts/marker_range_probe.sh`, which stages a Safari fixture and
+    /// runs `cargo test -- --ignored live_marker_range_read --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_marker_range_read() {
+        // Raw status first: `read()` folds every failure but API-disabled into
+        // `None`, and "not trusted" versus "nothing focused" is the first thing
+        // to know when this fails.
+        extern "C" {
+            fn AXIsProcessTrusted() -> bool;
+        }
+        println!("AXIsProcessTrusted={}", unsafe { AXIsProcessTrusted() });
+        let system_wide = AxElement(unsafe { AXUIElementCreateSystemWide() });
+        let attribute = CFString::new("AXFocusedUIElement");
+        let mut value: CFTypeRef = std::ptr::null();
+        let status = unsafe {
+            AXUIElementCopyAttributeValue(system_wide.0, attribute.as_concrete_TypeRef(), &mut value)
+        };
+        println!("AXFocusedUIElement status={status} null={}", value.is_null());
+        if !value.is_null() {
+            unsafe { CFRelease(value) };
+        }
+        let element = match std::env::var("VOICEX_LIVE_PID") {
+            Ok(pid) => FocusedElement::read_in_application(pid.parse().expect("pid"))
+                .expect("no focused element in that application"),
+            Err(_) => FocusedElement::read()
+                .unwrap_or_else(|_| panic!("accessibility API disabled for the test binary"))
+                .expect("no focused element"),
+        };
+        println!(
+            "focused role={:?} subrole={:?}",
+            element.role(),
+            element.subrole()
+        );
+        let direct = element.selected_text();
+        println!(
+            "AXSelectedText: {} status={}",
+            direct.kind(),
+            direct.status()
+        );
+        let attributes = element.selection_attributes();
+        println!("attributes: {attributes:?}");
+        let marker = element.selected_text_via_marker_range();
+        println!("marker range: {} status={}", marker.kind(), marker.status());
+        if let AttributeRead::Text(text) = &marker {
+            println!("marker text ({} chars): {:?}", text.chars().count(), text);
+        }
+        assert!(
+            attributes.selected_text_marker_range,
+            "the focused element does not advertise AXSelectedTextMarkerRange"
+        );
+        assert!(
+            matches!(marker, AttributeRead::Text(_)),
+            "marker range produced no text"
+        );
+    }
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

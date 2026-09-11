@@ -583,3 +583,4 @@ Body:    { "user": {"uid": "..."},
 - ~~敏感度三态判定重做~~ —— 整套机制删除（§3.4）。
 - ~~阶段 4 前的浏览器 `Unknown` 四选一决策~~ —— 随上一条一并消失。
 - **AX 范围读取**：已不是通用第 2 层，**建议整层不做**。对 Safari 无效（不公布 `AXSelectedTextRange`，只有 marker range），唯一有现实收益的目标是 VS Code，而 VS Code 走 Copy 也是通的（110 ms）。真要做也应先量收益。
+  **2026-09-11 补充**：这条说的是通用的 `AXSelectedTextRange` 层，仍然不做。**WebKit 专用的 marker range 层已经实现**（`SelectionSource::AxMarkerRange`，`macos/ax.rs` 的 `selected_text_via_marker_range`）：焦点元素公布 `AXSelectedTextMarkerRange` 时，用参数化属性 `AXStringForTextMarkerRange` 直接取字符串，Safari 因此不再合成 ⌘C。起因、实测与边界见 `docs/selection-safari-failure-and-clipboard-fallback-2026-09-11.md`；探针脚本 `scripts/tts/marker_range_probe.sh`。

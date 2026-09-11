@@ -118,6 +118,36 @@ pub fn read_selection(
             AttributeRead::ApiDisabled => return Err(SelectionError::PermissionDenied),
             AttributeRead::Unsupported(_) => {}
         }
+
+        // WebKit layer. A web area advertises only the marker range, and its
+        // `AXSelectedText` answer above is `kAXErrorNoValue` regardless of
+        // whether text is selected — so that "empty" was never evidence, and
+        // the marker read below is the first one that is (plan §5.1).
+        if attributes.selected_text_marker_range {
+            let marker = element.selected_text_via_marker_range();
+            probe.marker_attribute = Some(marker.kind().to_string());
+            probe.marker_status = Some(marker.status());
+            log_event(
+                "selection_ax_marker",
+                &[
+                    ("role", element.role().unwrap_or_default().to_string()),
+                    ("attr", marker.kind().to_string()),
+                    ("status", marker.status().to_string()),
+                ],
+            );
+            match marker {
+                AttributeRead::Text(raw) => {
+                    let text = normalize_text(&strip_object_replacements(&raw));
+                    if !text.is_empty() {
+                        return finish(text, SelectionSource::AxMarkerRange, None);
+                    }
+                    ax_reported_empty = true;
+                }
+                AttributeRead::Empty(_) => ax_reported_empty = true,
+                AttributeRead::ApiDisabled => return Err(SelectionError::PermissionDenied),
+                AttributeRead::Unsupported(_) => {}
+            }
+        }
     } else {
         log_event("selection_ax", &[("focused", "none".to_string())]);
     }
@@ -164,6 +194,16 @@ pub fn read_selection(
     }
 
     finish(text, SelectionSource::ClipboardCopy, Some(copied.restored))
+}
+
+/// Drop the U+FFFC placeholders WebKit emits for replaced elements.
+///
+/// `AXStringForTextMarkerRange` stands in an object replacement character for
+/// every image, attachment or embedded frame inside the range. Those are not
+/// text the user selected, and a speech backend either reads them as garbage
+/// or rejects the request; nothing else in the pipeline expects them.
+fn strip_object_replacements(raw: &str) -> String {
+    raw.replace('\u{FFFC}', "")
 }
 
 /// Set `AXManualAccessibility` at most once per process.
@@ -219,4 +259,21 @@ fn log_ax_probe(
         fields.push(("has_value", attributes.value.to_string()));
     }
     log_event("selection_ax", &fields);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webkit_object_replacement_characters_do_not_reach_the_speech_backend() {
+        // A Safari selection spanning an inline image comes back as
+        // "… image \u{FFFC} inline …"; the placeholder is layout, not text.
+        assert_eq!(
+            strip_object_replacements("an image \u{FFFC} inline"),
+            "an image  inline"
+        );
+        assert_eq!(strip_object_replacements("\u{FFFC}"), "");
+        assert_eq!(strip_object_replacements("plain"), "plain");
+    }
 }
