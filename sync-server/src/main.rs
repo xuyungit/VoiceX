@@ -26,8 +26,8 @@ use tokio::sync::broadcast;
 use tower_http::trace::TraceLayer;
 use tracing::{debug, info, warn};
 use tracing_subscriber::filter::LevelFilter;
-use tracing_subscriber::{EnvFilter, Registry};
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, Registry};
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -159,8 +159,74 @@ async fn main() -> Result<(), anyhow::Error> {
 
     info!("sync-server listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
-    Ok(())
+    serve(listener, app).await
+}
+
+/// How long a connection may sit without delivering a full request head. This
+/// covers both a fresh connection that never sends anything (port scanners) and
+/// an HTTP/1.1 keep-alive connection idling between requests, since hyper
+/// restarts the header-read timer for every request on the connection.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// TCP keepalive: probe after 60 s of silence, every 15 s, give up after 4
+/// misses. A peer that vanished without a FIN (sleeping laptop, NAT mapping
+/// dropped) is torn down in about two minutes instead of never.
+const TCP_KEEPALIVE: socket2::TcpKeepalive = socket2::TcpKeepalive::new()
+    .with_time(Duration::from_secs(60))
+    .with_interval(Duration::from_secs(15))
+    .with_retries(4);
+
+/// Accept loop in place of `axum::serve`, which neither sets a header-read
+/// timeout (hyper only arms one when given a timer) nor enables TCP keepalive.
+/// Without both, sockets whose peer silently disappeared stay ESTABLISHED for
+/// the life of the process.
+async fn serve(listener: tokio::net::TcpListener, app: Router) -> Result<(), anyhow::Error> {
+    use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+    use hyper_util::server::conn::auto::Builder;
+    use tower::ServiceExt as _;
+
+    loop {
+        let (stream, remote_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                // Transient (EMFILE, ECONNABORTED, ...); back off briefly rather than spin.
+                warn!("accept failed: {}", err);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+
+        if let Err(err) = socket2::SockRef::from(&stream).set_tcp_keepalive(&TCP_KEEPALIVE) {
+            warn!("failed to set TCP keepalive on {}: {}", remote_addr, err);
+        }
+
+        let app = app.clone();
+        tokio::spawn(async move {
+            let service =
+                hyper::service::service_fn(move |mut req: Request<hyper::body::Incoming>| {
+                    req.extensions_mut().insert(ConnectInfo(remote_addr));
+                    app.clone().oneshot(req.map(axum::body::Body::new))
+                });
+
+            // HTTP/1.1 only: the auto builder would first sniff for an HTTP/2
+            // preface, and that read has no timeout, so a client that connects
+            // and never sends a byte would hang there forever. Clients speak
+            // plain-HTTP/1.1 (h2 over cleartext needs prior knowledge).
+            let mut builder = Builder::new(TokioExecutor::new()).http1_only();
+            builder
+                .http1()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HEADER_READ_TIMEOUT);
+
+            if let Err(err) = builder
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+            {
+                // Idle timeouts and clients hanging up mid-stream land here; not actionable.
+                debug!("connection {} closed: {}", remote_addr, err);
+            }
+        });
+    }
 }
 
 async fn healthz() -> &'static str {
@@ -208,7 +274,9 @@ async fn log_failed_requests(req: Request<axum::body::Body>, next: Next) -> Resp
 
 async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // Basic pragmas for local dev / low traffic usage.
-    let _ = sqlx::query("PRAGMA journal_mode = WAL;").execute(db).await?;
+    let _ = sqlx::query("PRAGMA journal_mode = WAL;")
+        .execute(db)
+        .await?;
     let _ = sqlx::query("PRAGMA foreign_keys = ON;").execute(db).await?;
 
     // NOTE: Keep schema SQLite-friendly. `payload` stored as JSON text.
@@ -516,12 +584,11 @@ async fn get_account(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthedAccount>,
 ) -> Result<Json<AccountResponse>, ApiError> {
-    let account_row = sqlx::query(
-        "SELECT text_retention_days FROM accounts WHERE account_id = ?1 LIMIT 1",
-    )
-    .bind(&auth.account_id)
-    .fetch_one(&state.db)
-    .await?;
+    let account_row =
+        sqlx::query("SELECT text_retention_days FROM accounts WHERE account_id = ?1 LIMIT 1")
+            .bind(&auth.account_id)
+            .fetch_one(&state.db)
+            .await?;
 
     let text_retention_days = account_row.get::<i64, _>(0);
 
@@ -533,17 +600,18 @@ async fn get_account(
     .fetch_one(&state.db)
     .await?;
 
-    let last_seq = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT MAX(seq) FROM events WHERE account_id = ?1",
-    )
-    .bind(&auth.account_id)
-    .fetch_one(&state.db)
-    .await?;
+    let last_seq =
+        sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(seq) FROM events WHERE account_id = ?1")
+            .bind(&auth.account_id)
+            .fetch_one(&state.db)
+            .await?;
 
     Ok(Json(AccountResponse {
         server_id: state.server_id.clone(),
         account_id: auth.account_id.clone(),
-        config: AccountConfig { text_retention_days },
+        config: AccountConfig {
+            text_retention_days,
+        },
         usage: UsageStats {
             total_duration_ms: usage_row.get::<i64, _>(0),
             total_characters: usage_row.get::<i64, _>(1),
@@ -576,7 +644,9 @@ async fn put_device(
         return Err(ApiError::BadRequest("deviceName is required".to_string()));
     }
     if name.chars().count() > 64 {
-        return Err(ApiError::BadRequest("deviceName too long (max 64)".to_string()));
+        return Err(ApiError::BadRequest(
+            "deviceName too long (max 64)".to_string(),
+        ));
     }
 
     let now = Utc::now().to_rfc3339();
@@ -588,6 +658,26 @@ async fn put_device(
     });
 
     let mut tx = state.db.begin().await?;
+
+    // Every client session start calls this endpoint, so only publish an event
+    // when something other devices care about actually changed. `last_seen_at`
+    // is bookkeeping and is refreshed unconditionally below.
+    let previous: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT device_name, platform, app_version
+        FROM devices
+        WHERE account_id = ?1 AND device_id = ?2
+        "#,
+    )
+    .bind(&auth.account_id)
+    .bind(payload["deviceId"].as_str().unwrap())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let changed = previous
+        .as_ref()
+        .is_none_or(|(prev_name, prev_platform, prev_version)| {
+            prev_name != name || *prev_platform != req.platform || *prev_version != req.app_version
+        });
 
     // Upsert device registry.
     sqlx::query(
@@ -610,6 +700,17 @@ async fn put_device(
     .execute(&mut *tx)
     .await?;
 
+    if !changed {
+        tx.commit().await?;
+        debug!(
+            "device seen account={} device_id={} name={}",
+            auth.account_id, req.device_id, name
+        );
+        return Ok(Json(
+            json!({ "ok": true, "seq": Value::Null, "changed": false }),
+        ));
+    }
+
     // Record an event so other devices can update their name map.
     let event_id = Uuid::new_v4().to_string();
     let (seq, ev) = insert_event(
@@ -627,10 +728,10 @@ async fn put_device(
     broadcast_event(&state, &auth.account_id, ev).await;
 
     info!(
-        "device updated account={} device_id={} name={}",
-        auth.account_id, req.device_id, name
+        "device updated account={} device_id={} name={} seq={}",
+        auth.account_id, req.device_id, name, seq
     );
-    Ok(Json(json!({ "ok": true, "seq": seq })))
+    Ok(Json(json!({ "ok": true, "seq": seq, "changed": true })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -717,9 +818,9 @@ async fn apply_client_event(
 
     let (maybe_seq, bus_ev) = match ev.event_type.as_str() {
         "history.upsert" => {
-            let record = ev
-                .record
-                .ok_or_else(|| ApiError::BadRequest("record is required for history.upsert".to_string()))?;
+            let record = ev.record.ok_or_else(|| {
+                ApiError::BadRequest("record is required for history.upsert".to_string())
+            })?;
             if record.source_device_id != request_device_id {
                 return Err(ApiError::BadRequest(
                     "record.sourceDeviceId must match request deviceId".to_string(),
@@ -727,7 +828,8 @@ async fn apply_client_event(
             }
 
             // Insert the event first (idempotency by event_id).
-            let payload = serde_json::to_value(&record).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+            let payload =
+                serde_json::to_value(&record).map_err(|e| ApiError::BadRequest(e.to_string()))?;
             let inserted = insert_event_if_new(
                 &mut tx,
                 account_id,
@@ -799,9 +901,9 @@ async fn apply_client_event(
             (Some(seq), bus_ev)
         }
         "history.delete" => {
-            let record_id = ev
-                .record_id
-                .ok_or_else(|| ApiError::BadRequest("recordId is required for history.delete".to_string()))?;
+            let record_id = ev.record_id.ok_or_else(|| {
+                ApiError::BadRequest("recordId is required for history.delete".to_string())
+            })?;
             let payload = json!({ "recordId": record_id });
             let inserted = insert_event_if_new(
                 &mut tx,
@@ -898,7 +1000,10 @@ async fn insert_event(
     record_id: Option<&str>,
     payload: &Value,
 ) -> Result<(i64, BusEvent), ApiError> {
-    let inserted = insert_event_if_new(tx, account_id, device_id, event_id, event_type, record_id, payload).await?;
+    let inserted = insert_event_if_new(
+        tx, account_id, device_id, event_id, event_type, record_id, payload,
+    )
+    .await?;
     inserted.ok_or_else(|| ApiError::BadRequest("eventId already exists".to_string()))
 }
 

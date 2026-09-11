@@ -19,6 +19,36 @@ Environment variables (optional):
 
 Logs are written to `${VOICEX_SYNC_LOG_DIR}/voicex-sync.log`.
 
+## Production deployment (systemd)
+
+`deploy/voicex-sync.service` runs the release binary as a systemd unit with
+`Restart=always`, so it comes back after crashes and reboots. Configuration
+lives in `/etc/voicex-sync/env` (template: `deploy/env.example`; holds the
+shared secret, keep it mode 600).
+
+```bash
+cd sync-server
+cargo build --release
+cp deploy/voicex-sync.service /etc/systemd/system/
+mkdir -p /etc/voicex-sync && chmod 700 /etc/voicex-sync
+cp deploy/env.example /etc/voicex-sync/env && chmod 600 /etc/voicex-sync/env  # then edit
+systemctl daemon-reload
+systemctl enable --now voicex-sync
+```
+
+Day to day:
+
+```bash
+systemctl status voicex-sync           # running? since when? memory?
+journalctl -u voicex-sync -f           # live INFO log (stdout)
+journalctl -u voicex-sync --since -1h  # recent history
+git pull && cargo build --release && systemctl restart voicex-sync
+```
+
+Connections whose peer silently disappears are reclaimed by TCP keepalive
+(~2 min) and a 60 s idle timeout between requests; long-lived SSE streams
+are unaffected as long as the client keeps reading.
+
 ## Quick smoke test (curl)
 
 ```bash

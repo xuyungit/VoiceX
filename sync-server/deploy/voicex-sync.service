@@ -1,0 +1,31 @@
+# VoiceX sync server as a systemd unit.
+#
+# Install (as root on the server):
+#   cp deploy/voicex-sync.service /etc/systemd/system/
+#   mkdir -p /etc/voicex-sync && chmod 700 /etc/voicex-sync
+#   $EDITOR /etc/voicex-sync/env        # see deploy/env.example
+#   systemctl daemon-reload && systemctl enable --now voicex-sync
+#
+# Redeploy after a git pull:
+#   cargo build --release && systemctl restart voicex-sync
+#
+# Logs: `journalctl -u voicex-sync -f` (INFO and up, from stdout);
+# WARN and up are also written to ${VOICEX_SYNC_LOG_DIR}/voicex-sync.log.
+
+[Unit]
+Description=VoiceX sync server
+Documentation=https://github.com/xuyungit/VoiceX/tree/main/sync-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/VoiceX/sync-server
+EnvironmentFile=/etc/voicex-sync/env
+ExecStart=/root/VoiceX/sync-server/target/release/voicex-sync-server
+Restart=always
+RestartSec=2s
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
