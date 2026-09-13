@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.15.0] - 2026-09-14
+
+### Added
+- **Streaming ASR now honours the system proxy** — Qwen, Fun-ASR, OpenAI Realtime, Gemini Live, Soniox and ElevenLabs opened a raw TCP socket and ignored HTTP(S)/SOCKS settings, so a Windows machine (or a Mac) behind a corporate proxy could not reach DashScope at all. Connections now follow environment variables and the OS proxy: WinHTTP on Windows, including PAC/WPAD; System Configuration plus PAC on macOS. A failed proxy is an error, not a silent fallback onto a direct route.
+- **Shared ASR model catalogue** — Settings → ASR lists models from one table, with legacy / preview / unavailable tags and a typed custom id. Newly surfaced options include Soniox `stt-rt-v5` (now the default; `stt-rt-v4` stays as legacy), Gemini `gemini-3.5-flash-lite` / `gemini-3.5-transcribe` / `gemini-3.5-transcribe-live`, Cohere `cohere-transcribe-arabic-07-2026`, and the Qwen batch snapshot `qwen3-asr-flash-2026-02-10`. Qwen-Audio 3.0 (`qwen-audio-3.0-asr-flash-streaming` / `qwen-audio-3.0-asr-flash`) was already selectable in v0.13.0; this release is what was missing from the v0.14.0 Windows build after that — the proxy path and the updated catalogue, not the model family itself.
+- **Microsoft Azure Speech as a reading engine** *(macOS)* — Settings → Reading can now use an Azure Speech resource (region + key). The free tier is 500K characters a month and refuses rather than billing past that. Voice, rate and volume are stored on this engine alone.
+- **Xiaomi MiMo TTS** *(macOS)* — the same MiMo open-platform key as MiMo ASR. Streaming is raw PCM at 24 kHz (MP3 chunks stuttered), resampled to the device rate; there is no speed parameter, so the rate slider is hidden and a style-instruction field is offered instead.
+- **CosyVoice-v3-flash and CosyVoice v3.5 Flash on Alibaba Cloud TTS** *(macOS)* — v3 ships system preset voices; v3.5 has none, so the picker becomes a `voice_id` field for Model Studio Voice Design or Voice Cloning. v3.5 shares v3's 120-character piece size.
+- **Optional translucent HUD** — Input Settings can fade the overlay (window alpha on macOS, WebView2 CSS alpha on Windows). Off by default.
+
+### Changed
+- **Alibaba Cloud TTS defaults to Qwen-Audio 3.0** *(macOS)* — new installs use `qwen-audio-3.0-tts-flash` (larger roster, 9000-character pieces). `qwen3-tts-flash` stays in the picker for its dialect voices. Four missing flash voices (龙泡泡, 龙火火, 龙川叔, loongeva) and seven verified basic voices were added; a typed id still reaches the rest of the catalogue.
+- **Long reads are split, not truncated** *(macOS)* — cloud engines cut at sentence boundaries and stream piece after piece into the same decode pipeline, so a long selection is read in full. Cancellation still stops immediately. The HUD "trimmed" chip is gone because nothing is trimmed any more.
+- Gemini batch now defaults to `gemini-3.5-flash-lite`. Soniox defaults to `stt-rt-v5`.
+
+### Fixed
+- **Safari selections came back empty** *(macOS)* — WebKit web areas answer `AXSelectedText` with `kAXErrorNoValue` whether or not anything is selected, so every Safari read fell through to a synthetic Command + C and failed if the page was slow. When the focused element advertises `AXSelectedTextMarkerRange`, the text is now read through `AXStringForTextMarkerRange`: no key synthesis, no clipboard, not blocked by secure input.
+- **A late Command + C could overwrite the clipboard** *(macOS)* — the 300 ms copy budget does not cancel the key that was posted, so a busy application that missed it still wrote the selection later, with nobody left to put the snapshot back. The change count is watched for another two seconds and restored under the same rule.
+- **Pasteboard injection left recognised text on the clipboard, and RDP pasted stale content** — clipboard backup → paste → restore now applies to every target again (restore runs on a detached thread so the HUD does not linger for the restore delay). Per-app overrides can opt out with `skipClipboardRestore`; those targets bounce activation through VoiceX first, which is what makes a remote-desktop client re-announce the Mac clipboard.
+- The HUD now opens on the screen under the cursor rather than a stale display.
+- A refused cloud-TTS start (missing key or voice id) now reaches the HUD instead of vanishing from "preparing" in silence.
+- Transient cloud-TTS failures are retried; CosyVoice's silent-output budget no longer drops fast speech; a held hotkey chord is tolerated before the copy fallback; the system `SpeechSynthesizer` text limit is measured rather than guessed.
+- Hotkey modifier matching is seeded from the session's authoritative flags. `FlagsChanged` is classified without leftover state, and a disabled event tap is revived *(macOS)*.
+- Gemini thinking is constrained to the lowest supported level, so correction no longer spends the thinking budget on a short rewrite.
+- The sync server reaps peers that vanish without a FIN (TCP keepalive + HTTP/1.1 idle timeout) and skips `device.updated` events when name, platform and app version did not change.
+
 ## [0.14.0] - 2026-08-13
 
 ### Changed

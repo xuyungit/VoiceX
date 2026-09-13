@@ -16,7 +16,7 @@ VoiceX is a cross-platform desktop voice input tool. Its overall pipeline is: re
 
 - **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
 - **Multiple ASR backends** — switch between fourteen cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
-- **Read selection** — select text in any application and one hotkey reads it aloud, through the system voice or either of two cloud TTS providers (macOS only for now).
+- **Read selection** — select text in any application and one hotkey reads it aloud, through the system voice or any of the cloud TTS providers (macOS only for now).
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
 - **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status, and on macOS it follows the active Space when triggered from another desktop.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
@@ -49,7 +49,7 @@ press **Escape**, to stop immediately.
 | | Detail |
 |---|---|
 | **How text is read** | Straight from the Accessibility API where possible (8–15 ms); otherwise it falls back to a synthetic Command + C and restores your clipboard afterwards. The fallback can be switched off, at the cost of Safari and VS Code support |
-| **Speech engines** | The system voice (offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS), Volcengine Doubao Seed-TTS 2.0, or Alibaba Cloud Model Studio (`qwen3-tts-flash`, 48 voices including Beijing, Shanghai, Sichuan and Cantonese; `qwen-audio-3.0-tts-flash` for longer text per read). Both cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey. Voice, rate and volume are stored per engine |
+| **Speech engines** | The system voice (offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS); or, in the cloud, Volcengine Doubao Seed-TTS 2.0, Alibaba Cloud Model Studio (default `qwen-audio-3.0-tts-flash` for longer text; `qwen3-tts-flash` for dialect voices; `cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`, the latter taking a Voice Design / cloned `voice_id`), Xiaomi MiMo, or Microsoft Azure Speech. Cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey; long selections are split at sentence boundaries instead of being truncated. Voice, rate and volume are stored per engine |
 | **Yields to dictation** | Starting dictation stops reading — otherwise the microphone would record the speech and transcribe it back |
 
 ### How this differs from the built-in "Speak selection"
@@ -88,10 +88,10 @@ working in places we cannot reach such as the login window.
 | Google Cloud Speech-to-Text V2 | Cloud streaming (gRPC) | Multi-language, phrase boost, configurable endpointing |
 | Fun-ASR Realtime | Cloud streaming (WebSocket) | DashScope; `fun-asr-realtime` / `fun-asr-flash-8k-realtime`; tuned for low-latency live dictation; selected models accept the dictionary as recognition context |
 | Qwen (DashScope ASR) | Cloud streaming / batch file upload | Alibaba Cloud; both model generations — the new `qwen-audio-3.0-asr-flash(-streaming)` and the existing Qwen3-ASR; supports `Realtime`, `Batch`, and `Realtime + Batch Refine`; the new generation adds inline hotwords with a weight, precompiled vocabularies, context, and semantic endpointing; batch paths currently inherit a 5-minute short-audio API cap |
-| Gemini Audio Transcription | Cloud batch file upload | `gemini-3.1-flash-lite-preview`; starts after recording stops; supports auto / zh / en / zh+en hints |
-| Gemini Live Realtime | Cloud streaming (WebSocket) | `gemini-3.1-flash-live-preview`; realtime input-audio transcription with language hints |
+| Gemini Audio Transcription | Cloud batch file upload | Default `gemini-3.5-flash-lite`; also `gemini-3.5-transcribe` and preview `gemini-3.1-flash-lite-preview`; starts after recording stops; supports auto / zh / en / zh+en hints |
+| Gemini Live Realtime | Cloud streaming (WebSocket) | Default `gemini-3.1-flash-live-preview`, also `gemini-3.5-transcribe-live`; realtime input-audio transcription with language hints |
 | Cohere Audio Transcription | Cloud batch file upload | `cohere-transcribe-03-2026`; whole-file transcription with explicit ISO-639-1 language hint |
-| Soniox Realtime | Cloud streaming (WebSocket) | `stt-rt-v4`; token-based streaming with hotword support and language hints |
+| Soniox Realtime | Cloud streaming (WebSocket) | Default `stt-rt-v5` (`stt-rt-v4` remains selectable); token-based streaming with hotword support and language hints |
 | StepAudio 2.5 ASR | Cloud batch file upload (HTTP + SSE) | StepFun; `stepaudio-2.5-asr`; uploads the full recording after capture stops, supports up to 30 minutes, and returns incremental SSE events |
 | Xiaomi MiMo ASR | Cloud batch file upload (HTTP + JSON) | Xiaomi; `mimo-v2.5-asr`; OpenAI-compatible chat/completions endpoint; uploads the full recording after capture stops, compressed to MP3 (macOS/Linux) or WAV (Windows) to fit the 10 MB input limit |
 | OpenAI ASR | Cloud batch / streaming (WebSocket) | `gpt-transcribe` / `gpt-live-transcribe`; dual-mode — batch file upload or realtime WebSocket streaming. The dictionary is sent through the native `keywords` parameter, with multi-language `languages` and a Realtime latency tier |
@@ -101,7 +101,7 @@ working in places we cannot reach such as the login window.
 
 At the moment, Doubao, Qwen, ElevenLabs, Soniox, and Coli are the recommended options. Still, results vary from person to person: pronunciation, wording, and domain-specific vocabulary all affect the final experience.
 
-> **Note:** Cloud ASR services require API keys from their respective providers. Coli must be [installed separately](https://www.npmjs.com/package/@marswave/coli) (`npm i -g @marswave/coli`) before use.
+> **Note:** Cloud ASR services require API keys from their respective providers. Coli must be [installed separately](https://www.npmjs.com/package/@marswave/coli) (`npm i -g @marswave/coli`) before use. Streaming recognition (including Qwen-Audio 3.0) follows the system proxy: WinHTTP (with PAC/WPAD) on Windows, System Configuration plus PAC on macOS.
 
 For the offline option, see [Local offline recognition (Qwen3-ASR)](#local-offline-recognition-qwen3-asr) below.
 
