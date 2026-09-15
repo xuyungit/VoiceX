@@ -8,7 +8,8 @@ edition = "2021"
 
 [lib]
 name = "voicex_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop only (macOS/Windows): the bin links the rlib; staticlib/cdylib are only needed for iOS/Android.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -135,3 +136,7 @@ windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse",
 # runners. Windows falls back to 16 kHz mono WAV (see asr/mimo_client.rs).
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 mp3lame-encoder = "0.2.4"
+
+[profile.dev]
+# No step-debugging in this project: keep file:line in panic backtraces, drop the rest of the debuginfo.
+debug = "line-tables-only"
