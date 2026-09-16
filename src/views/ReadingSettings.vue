@@ -4,8 +4,11 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { NButton, NInput, NSelect, NSlider, NSwitch } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 import { useSettingsStore } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
+import { buildLlmProviderOptions } from '../utils/llmOptions'
+import { getDefaultPrompt } from '../utils/llmPrompts'
 import { isMacOS } from '../utils/platform'
 
 interface TtsVoiceOption {
@@ -24,6 +27,8 @@ interface ReadSelectionStatus {
   bound: boolean
   enabled: boolean
   conflictsWithDictation: boolean
+  /** Lost to the plain reading key. Only ever set on the translate binding. */
+  conflictsWithReading: boolean
   display: string | null
 }
 
@@ -32,7 +37,8 @@ interface ReadSelectionStatus {
 const DEFAULT_RATE = 0.5
 
 const settingsStore = useSettingsStore()
-const { t } = useI18n()
+const { t, locale } = useI18n()
+const router = useRouter()
 
 const voices = ref<TtsVoiceOption[]>([])
 // Declared by the backend with the list, so a model with no presets gets a
@@ -41,6 +47,8 @@ const customVoiceOnly = ref(false)
 const voicesError = ref('')
 const hotkeyStatus = ref<ReadSelectionStatus | null>(null)
 const isRecording = ref(false)
+const translateHotkeyStatus = ref<ReadSelectionStatus | null>(null)
+const isRecordingTranslate = ref(false)
 const previewLoading = ref(false)
 const previewError = ref('')
 // Speech is in progress. Known because the backend reports the end now; before
@@ -268,6 +276,218 @@ const displayHotkey = computed(
 
 const showConflict = computed(() => hotkeyStatus.value?.conflictsWithDictation ?? false)
 
+// --- Translate and read -----------------------------------------------------
+
+// Mirrors `LANGUAGES` in src-tauri/src/tts/llm_stage.rs. The code is what is
+// stored; the Rust side turns it into the language name the prompt receives.
+const TRANSLATE_LANGUAGES = ['zh-CN', 'zh-TW', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'pt'] as const
+type TranslateLanguage = (typeof TRANSLATE_LANGUAGES)[number]
+const LANGUAGE_LABEL_KEYS: Record<TranslateLanguage, string> = {
+  'zh-CN': 'reading.langZhCN',
+  'zh-TW': 'reading.langZhTW',
+  en: 'reading.langEn',
+  ja: 'reading.langJa',
+  ko: 'reading.langKo',
+  fr: 'reading.langFr',
+  de: 'reading.langDe',
+  es: 'reading.langEs',
+  ru: 'reading.langRu',
+  pt: 'reading.langPt'
+}
+// `TRANSLATE_MAX_CHARS` in llm_stage.rs; shown in the note, enforced there.
+const TRANSLATE_MAX_CHARS = 3000
+
+type PromptLocale = Parameters<typeof getDefaultPrompt>[1]
+const resolvedLocale = computed<PromptLocale>(() => (locale.value === 'zh-CN' ? 'zh-CN' : 'en-US'))
+
+const languageOptions = computed(() =>
+  TRANSLATE_LANGUAGES.map((code) => ({ label: t(LANGUAGE_LABEL_KEYS[code]), value: code }))
+)
+const sourceLanguageOptions = computed(() => [
+  { label: t('reading.langAuto'), value: 'auto' },
+  ...languageOptions.value
+])
+
+const translateEnabled = computed({
+  get: () => settingsStore.settings.ttsTranslateEnabled,
+  set: (value: boolean) => {
+    settingsStore.updateSetting('ttsTranslateEnabled', value)
+    void applyTranslateHotkey()
+  }
+})
+
+const translateSourceLanguage = computed({
+  get: () => settingsStore.settings.ttsTranslateSourceLanguage,
+  set: (value: string) => settingsStore.updateSetting('ttsTranslateSourceLanguage', value)
+})
+
+const translateTargetLanguage = computed({
+  get: () => settingsStore.settings.ttsTranslateTargetLanguage,
+  set: (value: string) => settingsStore.updateSetting('ttsTranslateTargetLanguage', value)
+})
+
+const translatePromptTemplate = computed({
+  get: () => settingsStore.settings.ttsTranslatePromptTemplate,
+  set: (value: string) => settingsStore.updateSetting('ttsTranslatePromptTemplate', value)
+})
+
+const translateCopyToClipboard = computed({
+  get: () => settingsStore.settings.ttsTranslateCopyToClipboard,
+  set: (value: boolean) => settingsStore.updateSetting('ttsTranslateCopyToClipboard', value)
+})
+
+const translateSaveHistory = computed({
+  get: () => settingsStore.settings.ttsTranslateSaveHistory,
+  set: (value: boolean) => settingsStore.updateSetting('ttsTranslateSaveHistory', value)
+})
+
+const ttsLlmProviderKey = computed({
+  get: () => settingsStore.settings.ttsLlmProviderKey,
+  set: (value: string) => settingsStore.updateSetting('ttsLlmProviderKey', value)
+})
+
+const preprocessEnabled = computed({
+  get: () => settingsStore.settings.ttsPreprocessEnabled,
+  set: (value: boolean) => settingsStore.updateSetting('ttsPreprocessEnabled', value)
+})
+
+const preprocessPromptTemplate = computed({
+  get: () => settingsStore.settings.ttsPreprocessPromptTemplate,
+  set: (value: string) => settingsStore.updateSetting('ttsPreprocessPromptTemplate', value)
+})
+
+// The same list as the LLM page, plus "follow": credentials and model names
+// stay there, this page only picks which one reading uses.
+const llmProviderOptions = computed(() => [
+  { label: t('reading.llmFollow'), value: 'follow' },
+  ...buildLlmProviderOptions(t, settingsStore.settings.llmCustomEndpoints)
+])
+
+// One override slot per provider, Aliyun per model — the scheme of
+// `translate_voice_key` in src-tauri/src/tts/controller.rs.
+const translateVoiceKey = computed(() =>
+  isAliyun.value
+    ? `aliyun:${settingsStore.settings.aliyunTtsModel}`
+    : settingsStore.settings.ttsProviderType
+)
+
+const translateVoiceOverride = computed({
+  get: () => settingsStore.settings.ttsTranslateVoiceOverrides[translateVoiceKey.value] ?? '',
+  set: (value: string) => {
+    const next = { ...settingsStore.settings.ttsTranslateVoiceOverrides }
+    if (value.trim()) next[translateVoiceKey.value] = value
+    else delete next[translateVoiceKey.value]
+    settingsStore.updateSetting('ttsTranslateVoiceOverrides', next)
+  }
+})
+
+function primaryLanguage(tag: string) {
+  return tag.toLowerCase().replace('_', '-').split('-')[0]
+}
+
+function voiceSpeaks(voice: TtsVoiceOption, language: string) {
+  return primaryLanguage(voice.language) === primaryLanguage(language)
+}
+
+const translateVoiceOptions = computed(() => {
+  const target = translateTargetLanguage.value
+  const matching = voices.value
+    .filter((voice) => voiceSpeaks(voice, target))
+    .map((voice) => ({ label: `${voice.name} · ${voice.language}`, value: voice.id }))
+  // A selection that no longer matches the target stays visible: hiding it
+  // would leave a voice in effect that the picker denies exists.
+  const selected = translateVoiceOverride.value
+  if (selected && !matching.some((option) => option.value === selected)) {
+    const voice = voices.value.find((candidate) => candidate.id === selected)
+    matching.unshift({
+      label: voice ? `${voice.name} · ${voice.language}` : selected,
+      value: selected
+    })
+  }
+  return [{ label: t('reading.translateVoiceFollow'), value: '' }, ...matching]
+})
+
+// The voice a translate-and-read session will actually use.
+const effectiveTranslateVoice = computed(() => translateVoiceOverride.value || ttsVoiceId.value)
+
+const translateVoiceHint = computed(() => {
+  const id = effectiveTranslateVoice.value
+  if (!id) {
+    // Cloud engines always name a voice; only the system engine falls back to
+    // `say`, whose voice follows the OS language, not the target.
+    return isCloud.value ? '' : t('reading.translateVoiceSayNote')
+  }
+  const voice = voices.value.find((candidate) => candidate.id === id)
+  // A hand-typed id has no language on record, so there is nothing to check.
+  if (!voice || voiceSpeaks(voice, translateTargetLanguage.value)) return ''
+  return t('reading.translateVoiceMismatch', { voice: voice.name, language: voice.language })
+})
+
+const displayTranslateHotkey = computed(
+  () =>
+    translateHotkeyStatus.value?.display ??
+    formatHotkey(settingsStore.settings.ttsTranslateHotkeyConfig) ??
+    'Option + Command + T'
+)
+
+const translateConflict = computed<'dictation' | 'reading' | null>(() => {
+  const status = translateHotkeyStatus.value
+  if (!status) return null
+  if (status.conflictsWithDictation) return 'dictation'
+  if (status.conflictsWithReading) return 'reading'
+  return null
+})
+
+async function applyTranslateHotkey() {
+  try {
+    translateHotkeyStatus.value = await invoke<ReadSelectionStatus>(
+      'apply_translate_selection_hotkey',
+      {
+        config: settingsStore.settings.ttsTranslateHotkeyConfig,
+        enabled: settingsStore.settings.ttsTranslateEnabled
+      }
+    )
+  } catch (error) {
+    console.error('Failed to apply the translate hotkey', error)
+  }
+}
+
+async function refreshTranslateHotkeyStatus() {
+  try {
+    translateHotkeyStatus.value = await invoke<ReadSelectionStatus>(
+      'translate_selection_hotkey_status'
+    )
+  } catch (error) {
+    console.error('Failed to read the translate hotkey status', error)
+  }
+}
+
+async function startRecordingTranslate() {
+  isRecordingTranslate.value = true
+  try {
+    const result = await invoke<{ storage: string; display: string }>('record_hotkey')
+    settingsStore.updateSetting('ttsTranslateHotkeyConfig', result.storage)
+    await applyTranslateHotkey()
+  } catch (error) {
+    console.error('Hotkey record failed', error)
+  } finally {
+    isRecordingTranslate.value = false
+  }
+}
+
+async function resetTranslateHotkey() {
+  settingsStore.updateSetting('ttsTranslateHotkeyConfig', null)
+  await applyTranslateHotkey()
+}
+
+function resetTranslatePrompt() {
+  translatePromptTemplate.value = getDefaultPrompt('ttsTranslate', resolvedLocale.value)
+}
+
+function resetPreprocessPrompt() {
+  preprocessPromptTemplate.value = getDefaultPrompt('ttsPreprocess', resolvedLocale.value)
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value))
 }
@@ -285,6 +505,9 @@ async function applyHotkey() {
   } catch (error) {
     console.error('Failed to apply the reading hotkey', error)
   }
+  // Reading outranks translate, so this may have taken the translate key
+  // away or handed it back.
+  await refreshTranslateHotkeyStatus()
 }
 
 async function startRecording() {
@@ -414,6 +637,7 @@ onMounted(async () => {
   } catch (error) {
     console.error('Failed to read the reading hotkey status', error)
   }
+  await refreshTranslateHotkeyStatus()
   await loadVoices()
   unlistenPreviewEnded = await listen('tts:preview_ended', () => {
     previewSpeaking.value = false
@@ -636,6 +860,196 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!-- Translate-and-read. Its LLM and prompt live here, not on the LLM
+         page: nothing but reading ever uses them. -->
+    <div class="surface-card asr-card">
+      <div class="card-header">
+        <div class="card-title">{{ t('reading.translateTitle') }}</div>
+        <div class="card-sub">{{ t('reading.translateSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.translateEnabled') }}</div>
+            <div class="field-note">{{ t('reading.translateEnabledNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <NSwitch v-model:value="translateEnabled" :disabled="!isMacOS" />
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.translateHotkey') }}</div>
+            <div class="field-note">{{ t('reading.translateHotkeyNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <div class="hotkey-display" :class="{ recording: isRecordingTranslate }">
+              {{ isRecordingTranslate ? t('reading.pressHotkey') : displayTranslateHotkey }}
+            </div>
+            <div class="hotkey-actions">
+              <NButton
+                :disabled="isRecordingTranslate || !translateEnabled || !isMacOS"
+                size="small"
+                @click="startRecordingTranslate"
+              >
+                {{ t('reading.record') }}
+              </NButton>
+              <NButton
+                v-if="settingsStore.settings.ttsTranslateHotkeyConfig && !isRecordingTranslate"
+                quaternary
+                size="small"
+                @click="resetTranslateHotkey"
+              >
+                {{ t('reading.clear') }}
+              </NButton>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="translateConflict === 'dictation'" class="warning-box">
+          {{ t('reading.translateHotkeyConflictDictation') }}
+        </div>
+        <div v-else-if="translateConflict === 'reading'" class="warning-box">
+          {{ t('reading.translateHotkeyConflictReading') }}
+        </div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.sourceLanguage') }}</div>
+            <div class="field-note">{{ t('reading.sourceLanguageNote') }}</div>
+          </div>
+          <NSelect
+            v-model:value="translateSourceLanguage"
+            :options="sourceLanguageOptions"
+            size="small"
+            class="field-control"
+          />
+        </div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.targetLanguage') }}</div>
+            <div class="field-note">{{ t('reading.targetLanguageNote') }}</div>
+          </div>
+          <NSelect
+            v-model:value="translateTargetLanguage"
+            :options="languageOptions"
+            size="small"
+            class="field-control"
+          />
+        </div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.llmProvider') }}</div>
+            <div class="field-note">
+              {{ t('reading.llmProviderNote') }}
+              <NButton text size="tiny" class="inline-link" @click="router.push('/llm-settings')">
+                {{ t('reading.llmProviderLink') }}
+              </NButton>
+            </div>
+          </div>
+          <NSelect
+            v-model:value="ttsLlmProviderKey"
+            :options="llmProviderOptions"
+            size="small"
+            class="field-control"
+          />
+        </div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.translateVoice') }}</div>
+            <div class="field-note">{{ t('reading.translateVoiceNote') }}</div>
+          </div>
+          <NInput
+            v-if="customVoiceOnly"
+            v-model:value="translateVoiceOverride"
+            size="small"
+            class="field-control"
+            :placeholder="t('reading.translateVoiceFollow')"
+          />
+          <NSelect
+            v-else
+            v-model:value="translateVoiceOverride"
+            :options="translateVoiceOptions"
+            :disabled="!isMacOS && !isCloud"
+            :tag="isCloud"
+            filterable
+            size="small"
+            class="field-control"
+          />
+        </div>
+        <div v-if="translateVoiceHint" class="notice-box">{{ translateVoiceHint }}</div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.translateClipboard') }}</div>
+            <div class="field-note">{{ t('reading.translateClipboardNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <NSwitch v-model:value="translateCopyToClipboard" />
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.translateHistory') }}</div>
+            <div class="field-note">{{ t('reading.translateHistoryNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <NSwitch v-model:value="translateSaveHistory" />
+          </div>
+        </div>
+
+        <div class="prompt-block">
+          <div class="prompt-header">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.translatePrompt') }}</div>
+              <div class="field-note">
+                {{ t('reading.translatePromptNote', { max: TRANSLATE_MAX_CHARS }) }}
+              </div>
+            </div>
+            <NButton size="small" quaternary @click="resetTranslatePrompt">
+              {{ t('reading.resetPrompt') }}
+            </NButton>
+          </div>
+          <NInput v-model:value="translatePromptTemplate" type="textarea" :rows="10" />
+        </div>
+      </div>
+    </div>
+
+    <div class="surface-card asr-card">
+      <div class="card-header">
+        <div class="card-title">{{ t('reading.preprocessTitle') }}</div>
+        <div class="card-sub">{{ t('reading.preprocessSub') }}</div>
+      </div>
+      <div class="field-list">
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.preprocessEnabled') }}</div>
+            <div class="field-note">{{ t('reading.preprocessEnabledNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <NSwitch v-model:value="preprocessEnabled" />
+          </div>
+        </div>
+
+        <div v-if="preprocessEnabled" class="prompt-block">
+          <div class="prompt-header">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.preprocessPrompt') }}</div>
+            </div>
+            <NButton size="small" quaternary @click="resetPreprocessPrompt">
+              {{ t('reading.resetPrompt') }}
+            </NButton>
+          </div>
+          <NInput v-model:value="preprocessPromptTemplate" type="textarea" :rows="8" />
+        </div>
+      </div>
+    </div>
+
     <div class="surface-card asr-card">
       <div class="card-header">
         <div class="card-title">{{ t('reading.voice') }}</div>
@@ -853,6 +1267,23 @@ onBeforeUnmount(() => {
 .hotkey-actions {
   display: flex;
   gap: var(--spacing-sm);
+}
+
+.prompt-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.prompt-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+}
+
+.inline-link {
+  vertical-align: baseline;
 }
 
 .slider {

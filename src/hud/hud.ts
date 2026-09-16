@@ -63,8 +63,16 @@ let currentMode:
   // 300-700 ms to produce its first audio and that silence otherwise looks
   // exactly like the hotkey having done nothing.
   | "reading_prepare"
+  // The LLM stage before speech: translation, or preprocessing of a plain
+  // read. The wand is the only signal in compact presentation, so it gets a
+  // mode of its own rather than a flag on prepare.
+  | "reading_translate"
   | "reading_speak"
   | "error" = "idle";
+/// What the current read is. Decides the chip: a translate-and-read session
+/// keeps its green "翻译朗读" label through every phase, a plain read (even
+/// one that is being preprocessed by the LLM) stays "朗读".
+let readingKind: "read" | "translate" = "read";
 /// When a real output level last arrived. Reading only draws the waveform
 /// while one is flowing: the macOS voice never reports a level, and bars
 /// standing still read as a broken widget rather than as silence.
@@ -237,6 +245,12 @@ const readingErrorMessages: Record<string, keyof typeof zhCN.hud> = {
   copy_timeout: "readingUnsupported",
   backend: "readingBackendError",
   start_timeout: "readingBackendError",
+  // LLM stage failures. The read is refused outright — never a fallback to
+  // the untranslated text.
+  llm_not_configured: "readingLlmNotConfigured",
+  llm_failed: "readingLlmFailed",
+  llm_timeout: "readingLlmTimeout",
+  text_too_long: "readingTextTooLong",
 };
 
 function readingErrorText() {
@@ -261,7 +275,11 @@ function isCompactBatchMode() {
 }
 
 function isReadingMode() {
-  return currentMode === "reading_prepare" || currentMode === "reading_speak";
+  return (
+    currentMode === "reading_prepare" ||
+    currentMode === "reading_translate" ||
+    currentMode === "reading_speak"
+  );
 }
 
 function hasRecentLevel() {
@@ -342,6 +360,14 @@ function updateStatus(mode: typeof currentMode) {
       showIcon("speaking");
       statusIcon?.classList.add("animating");
       lastActiveIcon = "speaking";
+      break;
+    // Same wand and colour as dictation correction: it is the same kind of
+    // wait, on the same kind of model.
+    case "reading_translate":
+      document.body.classList.add("correcting");
+      showIcon("wand");
+      statusIcon?.classList.add("animating");
+      lastActiveIcon = "wand";
       break;
     case "reading_speak":
       document.body.classList.add("recording");
@@ -727,6 +753,8 @@ function renderTranscript() {
           ? t("recognizing")
           : currentMode === "reading_prepare"
             ? t("readingPrepare")
+          : currentMode === "reading_translate"
+            ? (readingKind === "translate" ? t("readingTranslating") : t("readingPreprocessing"))
           : currentMode === "reading_speak"
             ? t("reading")
           : currentMode === "push_to_talk" || currentMode === "hands_free"
@@ -824,8 +852,13 @@ function renderIntentChip() {
   if (!intentChip) return;
 
   if (isReadingMode()) {
-    intentChip.textContent = t("readingChip");
-    intentChip.classList.remove("translate");
+    if (readingKind === "translate") {
+      intentChip.textContent = t("translateReadChip");
+      intentChip.classList.add("translate");
+    } else {
+      intentChip.textContent = t("readingChip");
+      intentChip.classList.remove("translate");
+    }
     return;
   }
 
@@ -913,16 +946,18 @@ async function initListeners() {
 
   await add(
     "state:reading",
-    (event: { payload?: { phase?: string } }) => {
+    (event: { payload?: { phase?: string; kind?: string } }) => {
     const phase = event.payload?.phase;
+    // The kind arrives with every phase of a session; it is set before the
+    // status so the chip drawn by updateStatus is already the right one.
+    readingKind = event.payload?.kind === "translate" ? "translate" : "read";
     if (phase === "preparing") {
       updateStatus("reading_prepare");
+    } else if (phase === "translating") {
+      updateStatus("reading_translate");
     } else if (phase === "speaking") {
       updateStatus("reading_speak");
-    } else if (
-      currentMode === "reading_prepare" ||
-      currentMode === "reading_speak"
-    ) {
+    } else if (isReadingMode()) {
       // Only clear a mode we own. A read ending after dictation already took
       // over must not wipe the dictation state off the HUD.
       updateStatus("idle");

@@ -49,6 +49,18 @@ impl HotkeyConfiguration {
         }
     }
 
+    /// Translate-and-read: next to the reading key, same modifiers, so the
+    /// two are learned as a pair. Option-Command-T is unclaimed by macOS
+    /// itself (Command-T alone is "new tab" nearly everywhere, which is why
+    /// the Option is not optional).
+    pub fn default_translate_selection() -> Self {
+        Self {
+            key_code: 'T' as u32,
+            modifiers: 0x0800 | 0x0100, // option | cmd
+            uses_fn: false,
+        }
+    }
+
     pub fn is_fn_only(&self) -> bool {
         self.uses_fn && self.key_code == 63 && self.modifiers == 0 // kVK_Function = 63
     }

@@ -196,6 +196,21 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         log::info!("Selected-text reading is switched off in settings");
     }
+    #[cfg(target_os = "macos")]
+    if persisted_settings.tts_translate_enabled {
+        let translate_hotkey = persisted_settings
+            .tts_translate_hotkey_config
+            .as_deref()
+            .and_then(HotkeyConfiguration::from_storage)
+            .unwrap_or_else(HotkeyConfiguration::default_translate_selection);
+        log::info!(
+            "Translate-and-read hotkey: {}",
+            translate_hotkey.display_string()
+        );
+        manager.set_translate_selection_config(Some(translate_hotkey));
+    } else {
+        log::info!("Translate-and-read is switched off in settings");
+    }
     #[cfg(not(target_os = "macos"))]
     log::info!("Selected-text reading is not available on this platform yet");
 
@@ -344,6 +359,8 @@ pub fn run() {
             commands::tts::stop_tts,
             commands::tts::apply_read_selection_hotkey,
             commands::tts::read_selection_hotkey_status,
+            commands::tts::apply_translate_selection_hotkey,
+            commands::tts::translate_selection_hotkey_status,
             commands::tts::diagnose_selection,
             commands::settings::get_settings,
             commands::settings::get_recent_target_apps,

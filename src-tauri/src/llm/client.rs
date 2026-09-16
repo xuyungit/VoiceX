@@ -58,20 +58,36 @@ impl LLMClient {
 
         let system_prompt = build_system_prompt(prompt_template, dictionary_text, history, options);
         let user_message = format!("原文：\n{}", text);
+        self.dispatch(&system_prompt, &user_message).await
+    }
 
+    /// One system prompt, one user message, the reply. The reading features
+    /// use this: their prompt is complete as written, and the user message is
+    /// the selected text with nothing prepended — a "原文：" label in front of
+    /// a document to translate would end up in the translation.
+    pub async fn complete(
+        &self,
+        system_prompt: &str,
+        user_message: &str,
+    ) -> Result<String, LLMError> {
+        if !self.config.is_valid() {
+            return Err(LLMError::InvalidConfig("Missing API key".to_string()));
+        }
+        self.dispatch(system_prompt, user_message).await
+    }
+
+    async fn dispatch(&self, system_prompt: &str, user_message: &str) -> Result<String, LLMError> {
         if self.config.provider_type == super::config::LLMProviderType::Gemini {
-            return self
-                .correct_with_gemini(&system_prompt, &user_message)
-                .await;
+            return self.correct_with_gemini(system_prompt, user_message).await;
         }
 
         match self.config.api_mode {
             LLMApiMode::ChatCompletions => {
-                self.correct_with_chat_completions(&system_prompt, &user_message)
+                self.correct_with_chat_completions(system_prompt, user_message)
                     .await
             }
             LLMApiMode::Responses => {
-                self.correct_with_responses(&system_prompt, &user_message)
+                self.correct_with_responses(system_prompt, user_message)
                     .await
             }
         }
@@ -104,6 +120,9 @@ impl LLMClient {
         let bytes = self.send_json_request(&url, &payload).await?;
         let parsed: ChatResponse =
             serde_json::from_slice(&bytes).map_err(|e| LLMError::InvalidResponse(e.to_string()))?;
+        if chat_reply_truncated(&parsed) {
+            return Err(LLMError::Truncated);
+        }
         extract_chat_response_text(&parsed).ok_or(LLMError::EmptyResponse)
     }
 
@@ -120,11 +139,14 @@ impl LLMClient {
         let body_text = String::from_utf8_lossy(&bytes).to_string();
 
         if body_text.trim_start().starts_with("event:") || body_text.contains("\ndata: ") {
-            return parse_responses_sse(&body_text).ok_or(LLMError::EmptyResponse);
+            return parse_responses_sse(&body_text)?.ok_or(LLMError::EmptyResponse);
         }
 
         let parsed: ResponsesResponse =
             serde_json::from_slice(&bytes).map_err(|e| LLMError::InvalidResponse(e.to_string()))?;
+        if responses_reply_truncated(&parsed) {
+            return Err(LLMError::Truncated);
+        }
         extract_responses_output(parsed.output.as_deref()).ok_or(LLMError::EmptyResponse)
     }
 
@@ -164,6 +186,9 @@ impl LLMClient {
         let bytes = self.send_json_request(&url, &payload).await?;
         let parsed: GeminiResponse =
             serde_json::from_slice(&bytes).map_err(|e| LLMError::InvalidResponse(e.to_string()))?;
+        if gemini_reply_truncated(&parsed) {
+            return Err(LLMError::Truncated);
+        }
         extract_gemini_response_text(&parsed).ok_or(LLMError::EmptyResponse)
     }
 
@@ -269,6 +294,13 @@ pub enum LLMError {
 
     #[error("Empty response from LLM")]
     EmptyResponse,
+
+    /// The model hit its output token limit before finishing. Reasoning
+    /// models can spend the whole budget thinking and return nothing, or stop
+    /// mid-sentence; either way the reply is not the answer, and reading a
+    /// truncated one aloud would hide that.
+    #[error("Reply cut off at the model's output token limit")]
+    Truncated,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +311,7 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ResponseMessage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -294,6 +327,8 @@ struct GeminiResponse {
 #[derive(Debug, Deserialize)]
 struct GeminiCandidate {
     content: Option<GeminiContentResponse>,
+    #[serde(rename = "finishReason")]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,6 +344,52 @@ struct GeminiPartResponse {
 #[derive(Debug, Deserialize)]
 struct ResponsesResponse {
     output: Option<Vec<ResponsesOutputItem>>,
+    status: Option<String>,
+    incomplete_details: Option<ResponsesIncompleteDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesIncompleteDetails {
+    reason: Option<String>,
+}
+
+/// `finish_reason: "length"` in the chat completions shape.
+fn chat_reply_truncated(parsed: &ChatResponse) -> bool {
+    parsed
+        .choices
+        .first()
+        .and_then(|c| c.finish_reason.as_deref())
+        == Some("length")
+}
+
+/// `finishReason: "MAX_TOKENS"` in Gemini's shape.
+fn gemini_reply_truncated(parsed: &GeminiResponse) -> bool {
+    parsed
+        .candidates
+        .as_ref()
+        .and_then(|c| c.first())
+        .and_then(|c| c.finish_reason.as_deref())
+        == Some("MAX_TOKENS")
+}
+
+/// A Responses API object that stopped for `max_output_tokens`, whether it
+/// arrived as the whole response or inside a `response.incomplete` event.
+fn responses_object_truncated(value: &Value) -> bool {
+    value.get("status").and_then(Value::as_str) == Some("incomplete")
+        && value
+            .get("incomplete_details")
+            .and_then(|d| d.get("reason"))
+            .and_then(Value::as_str)
+            == Some("max_output_tokens")
+}
+
+fn responses_reply_truncated(parsed: &ResponsesResponse) -> bool {
+    parsed.status.as_deref() == Some("incomplete")
+        && parsed
+            .incomplete_details
+            .as_ref()
+            .and_then(|d| d.reason.as_deref())
+            == Some("max_output_tokens")
 }
 
 #[derive(Debug, Deserialize)]
@@ -378,14 +459,19 @@ fn extract_responses_output(output: Option<&[ResponsesOutputItem]>) -> Option<St
     result
 }
 
-fn parse_responses_sse(body: &str) -> Option<String> {
+/// `Ok(None)` is an empty stream; `Err(Truncated)` is a stream whose
+/// `response.incomplete` event says the output limit was hit, however much
+/// text arrived before it.
+fn parse_responses_sse(body: &str) -> Result<Option<String>, LLMError> {
     let mut delta_output = String::new();
     let mut fallback_output: Option<String> = None;
+    let mut truncated = false;
     let mut event_data_lines: Vec<&str> = Vec::new();
 
     let flush_event = |event_data_lines: &mut Vec<&str>,
                        delta_output: &mut String,
-                       fallback_output: &mut Option<String>| {
+                       fallback_output: &mut Option<String>,
+                       truncated: &mut bool| {
         if event_data_lines.is_empty() {
             return;
         }
@@ -400,6 +486,13 @@ fn parse_responses_sse(body: &str) -> Option<String> {
         let Ok(event_json) = serde_json::from_str::<Value>(&payload) else {
             return;
         };
+
+        if event_json.get("type").and_then(Value::as_str) == Some("response.incomplete") {
+            if let Some(response) = event_json.get("response") {
+                *truncated |= responses_object_truncated(response);
+            }
+            return;
+        }
 
         if let Some(delta) = event_json.get("delta").and_then(|value| value.as_str()) {
             delta_output.push_str(delta);
@@ -417,6 +510,7 @@ fn parse_responses_sse(body: &str) -> Option<String> {
                 &mut event_data_lines,
                 &mut delta_output,
                 &mut fallback_output,
+                &mut truncated,
             );
             continue;
         }
@@ -430,7 +524,12 @@ fn parse_responses_sse(body: &str) -> Option<String> {
         &mut event_data_lines,
         &mut delta_output,
         &mut fallback_output,
+        &mut truncated,
     );
+
+    if truncated {
+        return Err(LLMError::Truncated);
+    }
 
     let result = if delta_output.trim().is_empty() {
         fallback_output.and_then(|text| {
@@ -441,7 +540,7 @@ fn parse_responses_sse(body: &str) -> Option<String> {
         Some(delta_output.trim().to_string())
     };
     log_response_text(&result);
-    result
+    Ok(result)
 }
 
 fn extract_responses_output_from_value(value: &Value) -> Option<String> {
@@ -537,7 +636,7 @@ mod tests {
             "data: {\"type\":\"response.completed\"}\n\n"
         );
 
-        assert_eq!(parse_responses_sse(sse).as_deref(), Some("Hello"));
+        assert_eq!(parse_responses_sse(sse).unwrap().as_deref(), Some("Hello"));
     }
 
     #[test]
@@ -577,6 +676,73 @@ mod tests {
             super::extract_gemini_response_text(&parsed).as_deref(),
             Some("Corrected Gemini text")
         );
+    }
+
+    // --- output-limit truncation is an error, not a shorter answer ---
+
+    #[test]
+    fn a_chat_reply_that_stopped_for_length_is_truncated() {
+        let parsed: super::ChatResponse = serde_json::from_str(
+            r#"{"choices":[{"message":{"role":"assistant","content":"Half a sen"},"finish_reason":"length"}]}"#,
+        )
+        .unwrap();
+        assert!(super::chat_reply_truncated(&parsed));
+
+        // A reasoning model that spent the whole budget thinking: no content,
+        // still "length" — reported as truncation rather than an empty reply.
+        let parsed: super::ChatResponse = serde_json::from_str(
+            r#"{"choices":[{"message":{"role":"assistant","reasoning":"..."},"finish_reason":"length"}]}"#,
+        )
+        .unwrap();
+        assert!(super::chat_reply_truncated(&parsed));
+
+        let parsed: super::ChatResponse = serde_json::from_str(
+            r#"{"choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}]}"#,
+        )
+        .unwrap();
+        assert!(!super::chat_reply_truncated(&parsed));
+    }
+
+    #[test]
+    fn a_gemini_candidate_that_hit_max_tokens_is_truncated() {
+        let parsed: super::GeminiResponse = serde_json::from_str(
+            r#"{"candidates":[{"content":{"parts":[{"text":"Half"}]},"finishReason":"MAX_TOKENS"}]}"#,
+        )
+        .unwrap();
+        assert!(super::gemini_reply_truncated(&parsed));
+        let parsed: super::GeminiResponse = serde_json::from_str(
+            r#"{"candidates":[{"content":{"parts":[{"text":"Done"}]},"finishReason":"STOP"}]}"#,
+        )
+        .unwrap();
+        assert!(!super::gemini_reply_truncated(&parsed));
+    }
+
+    #[test]
+    fn an_incomplete_responses_object_is_truncated_only_for_the_token_limit() {
+        let parsed: super::ResponsesResponse = serde_json::from_str(
+            r#"{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[]}"#,
+        )
+        .unwrap();
+        assert!(super::responses_reply_truncated(&parsed));
+        let parsed: super::ResponsesResponse = serde_json::from_str(
+            r#"{"status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[]}"#,
+        )
+        .unwrap();
+        assert!(!super::responses_reply_truncated(&parsed));
+        let parsed: super::ResponsesResponse =
+            serde_json::from_str(r#"{"status":"completed","output":[]}"#).unwrap();
+        assert!(!super::responses_reply_truncated(&parsed));
+    }
+
+    #[test]
+    fn a_responses_stream_ending_in_incomplete_is_truncated_despite_its_text() {
+        let sse = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Half a sen\"}\n\n",
+            "event: response.incomplete\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+        );
+        assert!(matches!(parse_responses_sse(sse), Err(super::LLMError::Truncated)));
     }
 }
 

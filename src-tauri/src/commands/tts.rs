@@ -216,3 +216,39 @@ pub async fn read_selection_hotkey_status(
 ) -> Result<ReadSelectionStatus, String> {
     Ok(manager.read_selection_status())
 }
+
+/// Bind or unbind the translate-and-read hotkey. Same platform rule and same
+/// "tell the caller what happened" contract as the reading one; the status
+/// additionally reports a collision with the reading key.
+#[tauri::command]
+pub async fn apply_translate_selection_hotkey(
+    manager: State<'_, HotkeyManager>,
+    config: Option<String>,
+    enabled: bool,
+) -> Result<ReadSelectionStatus, String> {
+    #[cfg(not(target_os = "macos"))]
+    let (config, enabled) = {
+        let _ = (config, enabled);
+        (None::<String>, false)
+    };
+
+    let binding = if enabled {
+        Some(
+            config
+                .and_then(|value| HotkeyConfiguration::from_storage(&value))
+                .unwrap_or_else(HotkeyConfiguration::default_translate_selection),
+        )
+    } else {
+        None
+    };
+
+    manager.set_translate_selection_config(binding);
+    Ok(manager.translate_selection_status())
+}
+
+#[tauri::command]
+pub async fn translate_selection_hotkey_status(
+    manager: State<'_, HotkeyManager>,
+) -> Result<ReadSelectionStatus, String> {
+    Ok(manager.translate_selection_status())
+}

@@ -161,6 +161,25 @@ export interface AppSettings {
     ttsHotkeyConfig: string | null
     ttsClipboardFallback: boolean
 
+    // Translate-and-read: one LLM call between the selection and the engine.
+    // `ttsTranslate*` is deliberately not `translation*` — that prefix belongs
+    // to dictation's translate mode, a different feature.
+    ttsTranslateEnabled: boolean
+    ttsTranslateHotkeyConfig: string | null
+    /** 'auto' or a code from TTS_LANGUAGES */
+    ttsTranslateSourceLanguage: string
+    ttsTranslateTargetLanguage: string
+    ttsTranslatePromptTemplate: string
+    /** provider or `aliyun:<model>` → voice id; missing entry reuses the reading voice */
+    ttsTranslateVoiceOverrides: Record<string, string>
+    ttsTranslateCopyToClipboard: boolean
+    ttsTranslateSaveHistory: boolean
+    /** 'follow' (the LLM page's active provider), a provider key, or `custom:<id>` */
+    ttsLlmProviderKey: string
+    ttsPreprocessEnabled: boolean
+    ttsPreprocessPromptTemplate: string
+    ttsCaptionsEnabled: boolean
+
     // TTS Provider: macOS system voice
     systemTtsVoiceId: string
     /** Normalized 0..1. The UI shows it as a 0.5x–2x multiplier of 0.5. */
@@ -401,6 +420,19 @@ const defaultSettings: AppSettings = {
     ttsProviderType: 'system',
     ttsHotkeyConfig: null,
     ttsClipboardFallback: true,
+
+    ttsTranslateEnabled: true,
+    ttsTranslateHotkeyConfig: null,
+    ttsTranslateSourceLanguage: 'auto',
+    ttsTranslateTargetLanguage: 'en',
+    ttsTranslatePromptTemplate: getDefaultPrompt('ttsTranslate', 'zh-CN'),
+    ttsTranslateVoiceOverrides: {},
+    ttsTranslateCopyToClipboard: false,
+    ttsTranslateSaveHistory: true,
+    ttsLlmProviderKey: 'follow',
+    ttsPreprocessEnabled: false,
+    ttsPreprocessPromptTemplate: getDefaultPrompt('ttsPreprocess', 'zh-CN'),
+    ttsCaptionsEnabled: true,
 
     systemTtsVoiceId: '',
     systemTtsRate: 0.5,

@@ -24,6 +24,9 @@ pub struct HudService {
 pub enum ReadingPhase {
     /// Reading the selection and waiting for the engine's first audio.
     Preparing,
+    /// The LLM stage (translation or preprocessing) is in flight. Shown
+    /// distinctly because it is the one wait that can run for seconds.
+    Translating,
     /// Audio is actually coming out.
     Speaking,
 }
@@ -32,7 +35,25 @@ impl ReadingPhase {
     pub fn as_str(self) -> &'static str {
         match self {
             ReadingPhase::Preparing => "preparing",
+            ReadingPhase::Translating => "translating",
             ReadingPhase::Speaking => "speaking",
+        }
+    }
+}
+
+/// Which reading feature owns the session; the HUD chip names it so a user
+/// can tell "翻译朗读" from "朗读" at a glance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadingKind {
+    Read,
+    Translate,
+}
+
+impl ReadingKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReadingKind::Read => "read",
+            ReadingKind::Translate => "translate",
         }
     }
 }
@@ -218,9 +239,10 @@ impl HudService {
     }
 
     /// Report the state of a selected-text read. `None` means it ended.
-    pub fn emit_reading(&self, phase: Option<ReadingPhase>) {
+    pub fn emit_reading(&self, kind: ReadingKind, phase: Option<ReadingPhase>) {
         let payload = json!({
             "phase": phase.map(ReadingPhase::as_str),
+            "kind": kind.as_str(),
         });
         self.cache_event("state:reading", &payload);
         let _ = self.app_handle.emit("state:reading", payload.clone());
@@ -250,7 +272,7 @@ impl HudService {
 
 #[cfg(test)]
 mod tests {
-    use super::ReadingPhase;
+    use super::{ReadingKind, ReadingPhase};
 
     #[test]
     fn reading_phase_tokens_match_what_the_hud_switches_on() {
@@ -258,6 +280,9 @@ mod tests {
         // renaming it there leaves the HUD stuck on its previous state with no
         // error anywhere.
         assert_eq!(ReadingPhase::Preparing.as_str(), "preparing");
+        assert_eq!(ReadingPhase::Translating.as_str(), "translating");
         assert_eq!(ReadingPhase::Speaking.as_str(), "speaking");
+        assert_eq!(ReadingKind::Read.as_str(), "read");
+        assert_eq!(ReadingKind::Translate.as_str(), "translate");
     }
 }

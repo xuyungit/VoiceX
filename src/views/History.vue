@@ -191,8 +191,14 @@ function openDetails(record: HistoryRecord) {
   detailVisible.value = true
 }
 
+/// A translate-and-read session: the text is the translation, the original
+/// is the selection it came from, and there is no recording behind it.
+function isTranslateRead(record: HistoryRecord): boolean {
+  return record.mode === 'translate_read'
+}
+
 function isTranslateMode(record: HistoryRecord): boolean {
-  return record.mode.startsWith('translate_en')
+  return record.mode.startsWith('translate_en') || isTranslateRead(record)
 }
 
 function isFailedRecord(record: HistoryRecord): boolean {
@@ -232,6 +238,9 @@ function canCompare(record: HistoryRecord) {
 function modeBadge(record: HistoryRecord): string | null {
   if (isFailedRecord(record)) {
     return null
+  }
+  if (isTranslateRead(record)) {
+    return t('history.translateRead')
   }
   if (record.mode.startsWith('translate_en')) {
     return t('history.englishTranslation')
@@ -301,6 +310,9 @@ function modeLabel(record: HistoryRecord): string {
   if (isFailedRecord(record)) {
     return t('history.transcriptionFailed')
   }
+  if (isTranslateRead(record)) {
+    return t('history.translateRead')
+  }
   if (record.mode.startsWith('translate_en')) {
     return t('history.englishTranslation')
   }
@@ -315,6 +327,16 @@ function modelLabel(value: string | null | undefined, fallback?: string): string
   if (!value) return fallbackText
   const trimmed = value.trim()
   return trimmed || fallbackText
+}
+
+// Nothing was recognised for a translate-and-read; showing "not recorded"
+// there would read as a missing value rather than an inapplicable one.
+function asrModelLabel(record: HistoryRecord): string {
+  return isTranslateRead(record) ? t('common.none') : modelLabel(record.asrModelName)
+}
+
+function originalHeading(record: HistoryRecord): string {
+  return isTranslateRead(record) ? t('history.sourceText') : t('history.originalRecognition')
 }
 
 function llmModelLabel(record: HistoryRecord): string {
@@ -576,11 +598,11 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
             </span>
           </div>
           <div class="detail-summary-row detail-summary-models">
-            <span class="detail-item detail-item-model" :title="`ASR ${modelLabel(detailRecord.asrModelName)}`">
+            <span class="detail-item detail-item-model" :title="`ASR ${asrModelLabel(detailRecord)}`">
               <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14" aria-hidden="true">
                 <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11z" />
               </svg>
-              <span class="detail-text">{{ modelLabel(detailRecord.asrModelName) }}</span>
+              <span class="detail-text">{{ asrModelLabel(detailRecord) }}</span>
             </span>
             <span class="detail-item detail-item-model" :title="`LLM ${llmModelLabel(detailRecord)}`">
               <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14" aria-hidden="true">
@@ -622,7 +644,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
         <div class="detail-section">
           <div class="detail-header">
-            <div class="detail-title">{{ t('history.originalRecognition') }}</div>
+            <div class="detail-title">{{ originalHeading(detailRecord) }}</div>
             <NButton
               quaternary
               size="tiny"

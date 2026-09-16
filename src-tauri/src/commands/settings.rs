@@ -1,6 +1,6 @@
 //! Settings-related commands
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -10,6 +10,8 @@ use tokio::time::timeout;
 
 use crate::foreground_app::{RecentTargetApp, TextInjectionAppOverride};
 use crate::llm::{LLMClient, PromptBuildOptions};
+use crate::services::llm_service::LLM_PROVIDER_FOLLOW;
+use crate::tts::llm_stage;
 use crate::services::{
     asr_debug_service::{AsrDebugService, SonioxDebugHarnessStatus, SonioxMockScenario},
     llm_service::build_llm_config_from_settings,
@@ -180,6 +182,33 @@ pub struct AppSettings {
     /// Accessibility path comes up empty. Turning it off loses Safari and
     /// VS Code (plan §5.1); every other P0 application reads via AX.
     pub tts_clipboard_fallback: bool,
+
+    // Translate-and-read: one LLM call between the selection and the engine.
+    // Prefixed `tts_translate_*` to stay apart from dictation's
+    // `translation_*`, a different feature with its own prompt and pipeline.
+    pub tts_translate_enabled: bool,
+    /// `None` means the built-in default binding (Option+Command+T).
+    pub tts_translate_hotkey_config: Option<String>,
+    /// `auto`, or a code from `tts::llm_stage::LANGUAGES`.
+    pub tts_translate_source_language: String,
+    pub tts_translate_target_language: String,
+    pub tts_translate_prompt_template: String,
+    /// Voice for the translated text, keyed by provider name or
+    /// `aliyun:<model>`. A missing or empty entry reuses the reading voice.
+    pub tts_translate_voice_overrides: BTreeMap<String, String>,
+    pub tts_translate_copy_to_clipboard: bool,
+    pub tts_translate_save_history: bool,
+    /// Which LLM the reading features call: `follow` (the LLM page's active
+    /// provider), a provider name, or `custom:<id>`. Shared by translate-and-
+    /// read and the plain-reading preprocessor.
+    pub tts_llm_provider_key: String,
+    /// Plain reading sends the text through the LLM first (format cleanup,
+    /// no translation). Off by default: it adds a round trip before speech.
+    pub tts_preprocess_enabled: bool,
+    pub tts_preprocess_prompt_template: String,
+    /// Captions during a read. Persisted from M1 on; the HUD acts on it from
+    /// M3 (translate-read requirements, docs/).
+    pub tts_captions_enabled: bool,
 
     // TTS Provider: macOS system voice
     /// Voice identifier; empty means "whatever the engine picks".
@@ -461,6 +490,19 @@ impl Default for AppSettings {
             tts_provider_type: "system".to_string(),
             tts_hotkey_config: None,
             tts_clipboard_fallback: true,
+
+            tts_translate_enabled: true,
+            tts_translate_hotkey_config: None,
+            tts_translate_source_language: llm_stage::SOURCE_LANGUAGE_AUTO.to_string(),
+            tts_translate_target_language: llm_stage::DEFAULT_TARGET_LANGUAGE.to_string(),
+            tts_translate_prompt_template: llm_stage::DEFAULT_TRANSLATE_PROMPT_ZH.to_string(),
+            tts_translate_voice_overrides: BTreeMap::new(),
+            tts_translate_copy_to_clipboard: false,
+            tts_translate_save_history: true,
+            tts_llm_provider_key: LLM_PROVIDER_FOLLOW.to_string(),
+            tts_preprocess_enabled: false,
+            tts_preprocess_prompt_template: llm_stage::DEFAULT_PREPROCESS_PROMPT_ZH.to_string(),
+            tts_captions_enabled: true,
 
             system_tts_voice_id: String::new(),
             // 0.5 is AVSpeechUtteranceDefaultSpeechRate, i.e. the 1x mark.
@@ -1280,6 +1322,77 @@ mod tests {
             settings.tts_hotkey_config.is_none(),
             "no stored binding means the built-in default"
         );
+    }
+
+    #[test]
+    fn translate_read_settings_survive_the_persistence_round_trip() {
+        // Same contract as the reading settings: every key the frontend store
+        // writes must come back out of the blob under its camelCase name.
+        let mut settings = AppSettings::default();
+        settings.tts_translate_enabled = false;
+        settings.tts_translate_hotkey_config = Some("84|2304|0".to_string());
+        settings.tts_translate_source_language = "zh-CN".to_string();
+        settings.tts_translate_target_language = "ja".to_string();
+        settings.tts_translate_prompt_template = "custom {{TARGET_LANGUAGE}}".to_string();
+        settings
+            .tts_translate_voice_overrides
+            .insert("aliyun:cosyvoice-v3-flash".to_string(), "longhuhu_v3".to_string());
+        settings.tts_translate_copy_to_clipboard = true;
+        settings.tts_translate_save_history = false;
+        settings.tts_llm_provider_key = "custom:abc".to_string();
+        settings.tts_preprocess_enabled = true;
+        settings.tts_preprocess_prompt_template = "clean".to_string();
+        settings.tts_captions_enabled = false;
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let blob: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(blob["ttsTranslateEnabled"], false);
+        assert_eq!(blob["ttsTranslateHotkeyConfig"], "84|2304|0");
+        assert_eq!(blob["ttsTranslateSourceLanguage"], "zh-CN");
+        assert_eq!(blob["ttsTranslateTargetLanguage"], "ja");
+        assert_eq!(blob["ttsTranslatePromptTemplate"], "custom {{TARGET_LANGUAGE}}");
+        assert_eq!(
+            blob["ttsTranslateVoiceOverrides"]["aliyun:cosyvoice-v3-flash"],
+            "longhuhu_v3"
+        );
+        assert_eq!(blob["ttsTranslateCopyToClipboard"], true);
+        assert_eq!(blob["ttsTranslateSaveHistory"], false);
+        assert_eq!(blob["ttsLlmProviderKey"], "custom:abc");
+        assert_eq!(blob["ttsPreprocessEnabled"], true);
+        assert_eq!(blob["ttsPreprocessPromptTemplate"], "clean");
+        assert_eq!(blob["ttsCaptionsEnabled"], false);
+
+        let restored: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.tts_translate_voice_overrides, settings.tts_translate_voice_overrides);
+        assert_eq!(restored.tts_llm_provider_key, "custom:abc");
+    }
+
+    #[test]
+    fn a_blob_saved_before_translate_read_existed_gets_its_defaults() {
+        // Doc §8: translate on, target English, source auto, LLM follows the
+        // LLM page, history on, clipboard off, preprocessing off, captions on.
+        let legacy = r#"{"uiLanguage": "zh-CN", "ttsEnabled": false}"#;
+        let settings: AppSettings = serde_json::from_str(legacy).unwrap();
+
+        assert!(!settings.tts_enabled, "existing values survive");
+        assert!(settings.tts_translate_enabled);
+        assert!(settings.tts_translate_hotkey_config.is_none());
+        assert_eq!(settings.tts_translate_source_language, "auto");
+        assert_eq!(settings.tts_translate_target_language, "en");
+        assert_eq!(
+            settings.tts_translate_prompt_template,
+            crate::tts::llm_stage::DEFAULT_TRANSLATE_PROMPT_ZH
+        );
+        assert!(settings.tts_translate_voice_overrides.is_empty());
+        assert!(!settings.tts_translate_copy_to_clipboard);
+        assert!(settings.tts_translate_save_history);
+        assert_eq!(settings.tts_llm_provider_key, "follow");
+        assert!(!settings.tts_preprocess_enabled);
+        assert_eq!(
+            settings.tts_preprocess_prompt_template,
+            crate::tts::llm_stage::DEFAULT_PREPROCESS_PROMPT_ZH
+        );
+        assert!(settings.tts_captions_enabled);
     }
 
     #[test]

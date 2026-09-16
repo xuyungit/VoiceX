@@ -13,6 +13,7 @@ pub mod aliyun;
 pub mod azure;
 pub mod controller;
 pub mod decode;
+pub mod llm_stage;
 #[cfg(target_os = "macos")]
 pub mod mac_say;
 #[cfg(target_os = "macos")]

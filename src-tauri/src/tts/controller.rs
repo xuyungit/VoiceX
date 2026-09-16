@@ -20,9 +20,12 @@ use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
     log_event, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoiceList,
 };
+use super::llm_stage::{self, LlmStageError, TRANSLATE_MAX_CHARS};
 use crate::commands::settings::AppSettings;
 use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest};
-use crate::services::hud_service::{HudService, ReadingPhase};
+use crate::services::history_service::HistoryService;
+use crate::services::hud_service::{HudService, ReadingKind, ReadingPhase};
+use crate::services::llm_service::{build_llm_config_for_key, settings_for_llm_key};
 
 /// Longest preview we will speak. The settings page sends a short fixed
 /// sentence; the cap only stops a malformed call from starting a long read.
@@ -48,6 +51,41 @@ const PROVIDER_VOLCENGINE: &str = "volcengine";
 const PROVIDER_ALIYUN: &str = "aliyun";
 const PROVIDER_MIMO: &str = "mimo";
 const PROVIDER_AZURE: &str = "azure";
+
+/// History `mode` of a translate-and-read record: the translation is the
+/// text, the selection is the original, and there is no audio.
+pub const HISTORY_MODE_TRANSLATE_READ: &str = "translate_read";
+
+/// What a reading session does with the selection before speaking it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadKind {
+    /// Speak the selection (through the preprocessor when that is on).
+    Read,
+    /// Translate the selection with the LLM, then speak the translation.
+    Translate,
+}
+
+impl ReadKind {
+    fn action(self) -> &'static str {
+        match self {
+            ReadKind::Read => "read_selection",
+            ReadKind::Translate => "translate_selection",
+        }
+    }
+
+    fn hud_kind(self) -> ReadingKind {
+        match self {
+            ReadKind::Read => ReadingKind::Read,
+            ReadKind::Translate => ReadingKind::Translate,
+        }
+    }
+}
+
+/// What the LLM stage handed back for speaking.
+struct StagedText {
+    text: String,
+    llm_invoked: bool,
+}
 
 /// Whether `provider` names one of the network backends. The controller asks
 /// this in several places — voice listing, request building — and a new cloud
@@ -176,8 +214,15 @@ impl TtsController {
     /// `failure` is how the read reports a problem: the driver owns the HUD for
     /// the whole read, so letting anyone else write to it would race the hide it
     /// schedules on the way out.
-    fn spawn_hud_driver(&self, backend: Arc<dyn TtsBackend>, failure: Arc<Mutex<Option<String>>>) {
+    fn spawn_hud_driver(
+        &self,
+        kind: ReadKind,
+        backend: Arc<dyn TtsBackend>,
+        failure: Arc<Mutex<Option<String>>>,
+        llm_busy: Arc<AtomicBool>,
+    ) {
         let Some(hud) = self.hud() else { return };
+        let hud_kind = kind.hud_kind();
         let session = self.inner.session.clone();
         let yielded = self.inner.hud_yielded.clone();
         // A leftover yield from a previous handoff must not suppress hide on
@@ -190,7 +235,7 @@ impl TtsController {
         // streaming transcripts.
         hud.show(true);
         hud.emit_error(None);
-        hud.emit_reading(Some(ReadingPhase::Preparing));
+        hud.emit_reading(hud_kind, Some(ReadingPhase::Preparing));
 
         thread::Builder::new()
             .name("voicex-tts-hud".to_string())
@@ -199,11 +244,17 @@ impl TtsController {
                 while session.is_active() {
                     let phase = match backend.status() {
                         TtsStatus::Speaking => ReadingPhase::Speaking,
+                        // The engine is idle both while the selection is
+                        // read and while the LLM works; only the read worker
+                        // knows which, and it says so through the flag.
+                        TtsStatus::Idle if llm_busy.load(Ordering::SeqCst) => {
+                            ReadingPhase::Translating
+                        }
                         TtsStatus::Idle => ReadingPhase::Preparing,
                     };
                     if phase != shown {
                         shown = phase;
-                        hud.emit_reading(Some(phase));
+                        hud.emit_reading(hud_kind, Some(phase));
                     }
                     // Only backends that render audio themselves have a level;
                     // the system voice reports none and the HUD then shows just
@@ -214,7 +265,7 @@ impl TtsController {
                     thread::sleep(HUD_POLL);
                 }
 
-                hud.emit_reading(None);
+                hud.emit_reading(hud_kind, None);
                 // Dictation already owns the window. Hiding here would take the
                 // recording HUD down a moment after it appeared, and the next
                 // dictation tap would stop a session the user thought never
@@ -489,6 +540,17 @@ impl TtsController {
     /// the clipboard fallback can block for hundreds of milliseconds and this
     /// is called from the hotkey hook's worker.
     pub fn handle_read_selection_hotkey(&self) {
+        self.handle_hotkey(ReadKind::Read);
+    }
+
+    pub fn handle_translate_selection_hotkey(&self) {
+        self.handle_hotkey(ReadKind::Translate);
+    }
+
+    /// Either reading hotkey while a session is active stops it, whichever
+    /// kind started it: the user wants silence, not a second read queued
+    /// behind the first.
+    fn handle_hotkey(&self, kind: ReadKind) {
         let active = self.is_active();
         // Dictation keeps the microphone. A new read would be inaudible and
         // would get transcribed, so the key is swallowed. An already-running
@@ -497,7 +559,7 @@ impl TtsController {
             log_event(
                 "hotkey_action",
                 &[
-                    ("action", "read_selection".to_string()),
+                    ("action", kind.action().to_string()),
                     ("state", "recording".to_string()),
                 ],
             );
@@ -507,7 +569,7 @@ impl TtsController {
         log_event(
             "hotkey_action",
             &[
-                ("action", "read_selection".to_string()),
+                ("action", kind.action().to_string()),
                 ("state", if active { "active" } else { "idle" }.to_string()),
             ],
         );
@@ -515,7 +577,7 @@ impl TtsController {
         if active {
             self.stop(StopReason::Hotkey);
         } else {
-            self.start();
+            self.start(kind);
         }
     }
 
@@ -574,7 +636,7 @@ impl TtsController {
         }
     }
 
-    fn start(&self) {
+    fn start(&self, kind: ReadKind) {
         if self.is_recording() {
             // Dictation wins: reading aloud during recording would feed the
             // speech straight back into the microphone.
@@ -590,7 +652,15 @@ impl TtsController {
         // Settings decide which backend speaks, so they have to be read before
         // the session is claimed. This runs on the hotkey hook's worker, and a
         // database read is cheap enough not to matter there.
-        let settings = load_settings();
+        let mut settings = load_settings();
+        if kind == ReadKind::Translate {
+            // Applied before the backend is picked: for the system provider
+            // the voice id decides between `say` and AVSpeech.
+            if let Some(voice) = settings.as_mut().and_then(apply_translate_voice_override) {
+                log_event("translate_voice", &[("voice", voice)]);
+            }
+        }
+        let settings = settings;
         let provider = settings
             .as_ref()
             .map(|s| s.tts_provider_type.clone())
@@ -603,12 +673,14 @@ impl TtsController {
         let token = self.inner.session.claim();
         self.set_active_backend(Some(backend.clone()));
         let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        self.spawn_hud_driver(backend.clone(), failure.clone());
+        let llm_busy = Arc::new(AtomicBool::new(false));
+        self.spawn_hud_driver(kind, backend.clone(), failure.clone(), llm_busy.clone());
+        let app_for_history = app.clone();
 
         thread::Builder::new()
             .name("voicex-tts-read".to_string())
             .spawn(move || {
-                log_event("selection_start", &[]);
+                log_event("selection_start", &[("kind", kind.action().to_string())]);
                 let result = selection::read_selection(SelectionRequest {
                     app,
                     // Compatibility mode, off by choice in the reading settings.
@@ -640,20 +712,59 @@ impl TtsController {
                 match result {
                     Ok(outcome) => {
                         log_selection_ok(&outcome);
+                        let source = outcome.text;
+                        let staged = match stage_text(
+                            kind,
+                            settings.as_ref(),
+                            source.clone(),
+                            &token,
+                            &llm_busy,
+                        ) {
+                            Ok(staged) => staged,
+                            Err(LlmStageError::Cancelled) => {
+                                // Esc or a hotkey during the LLM wait. The
+                                // session is already released; the reply,
+                                // if it ever arrives, is nobody's.
+                                log_event(
+                                    "selection_discarded",
+                                    &[("reason", "cancelled_during_llm".to_string())],
+                                );
+                                return;
+                            }
+                            Err(err) => {
+                                // Nothing to speak. The HUD shows the code
+                                // for the same reason a selection failure
+                                // does: a hotkey that does nothing at all is
+                                // the worst outcome.
+                                if let Ok(mut slot) = failure.lock() {
+                                    *slot = Some(err.code().to_string());
+                                }
+                                token.finish();
+                                return;
+                            }
+                        };
+                        if kind == ReadKind::Translate {
+                            if let Some(settings) = settings.as_ref() {
+                                retain_translation(settings, &source, &staged.text, &app_for_history);
+                            }
+                        }
                         log_event(
                             "speak_start",
                             &[
+                                ("kind", kind.action().to_string()),
                                 ("backend", backend.name().to_string()),
-                                ("chars", outcome.text.chars().count().to_string()),
+                                ("chars", staged.text.chars().count().to_string()),
+                                ("llm", staged.llm_invoked.to_string()),
                             ],
                         );
-                        // No length gate: a cloud backend splits an oversized
-                        // selection into per-request pieces itself, so the
-                        // whole selection is read rather than a truncated
-                        // prefix of it.
+                        // No length gate on the plain path: a cloud backend
+                        // splits an oversized selection into per-request
+                        // pieces itself, so the whole selection is read rather
+                        // than a truncated prefix of it. (Translate has its
+                        // own cap, applied before the LLM call.)
                         let request = match settings {
-                            Some(settings) => voice_request(&settings, outcome.text),
-                            None => TtsRequest::plain(outcome.text),
+                            Some(settings) => voice_request(&settings, staged.text),
+                            None => TtsRequest::plain(staged.text),
                         };
                         if let Err(err) = backend.start(request, token) {
                             log_event(
@@ -689,6 +800,182 @@ impl TtsController {
                 }
             })
             .expect("failed to spawn the TTS read worker");
+    }
+}
+
+/// Run the LLM stage the kind calls for, or pass the text through.
+///
+/// Translate needs the stage to succeed: there is nothing sensible to say in
+/// the wrong language. Preprocessing is best-effort by design (requirements
+/// doc §4.3): its failure is logged by the stage and the raw text is read,
+/// because "read this" still has an answer without the cleanup.
+fn stage_text(
+    kind: ReadKind,
+    settings: Option<&AppSettings>,
+    text: String,
+    token: &super::CancelToken,
+    llm_busy: &AtomicBool,
+) -> Result<StagedText, LlmStageError> {
+    match kind {
+        ReadKind::Translate => {
+            let chars = text.chars().count();
+            if chars > TRANSLATE_MAX_CHARS {
+                let err = LlmStageError::TooLong { chars };
+                log_event(
+                    "llm_stage_err",
+                    &[
+                        ("stage", "translate".to_string()),
+                        ("error", err.code().to_string()),
+                        ("detail", err.to_string()),
+                    ],
+                );
+                return Err(err);
+            }
+            let Some(settings) = settings else {
+                log_event(
+                    "speak_err",
+                    &[("error", "settings_unavailable".to_string())],
+                );
+                return Err(LlmStageError::NotConfigured);
+            };
+            let prompt = llm_stage::fill_translate_prompt(
+                &settings.tts_translate_prompt_template,
+                &settings.tts_translate_source_language,
+                &settings.tts_translate_target_language,
+            );
+            let config = build_llm_config_for_key(settings, &settings.tts_llm_provider_key);
+            run_stage("translate", config, &prompt, &text, token, llm_busy).map(|translated| {
+                StagedText {
+                    text: translated,
+                    llm_invoked: true,
+                }
+            })
+        }
+        ReadKind::Read => {
+            let Some(settings) = settings.filter(|s| s.tts_preprocess_enabled) else {
+                return Ok(StagedText {
+                    text,
+                    llm_invoked: false,
+                });
+            };
+            let config = build_llm_config_for_key(settings, &settings.tts_llm_provider_key);
+            match run_stage(
+                "preprocess",
+                config,
+                &settings.tts_preprocess_prompt_template,
+                &text,
+                token,
+                llm_busy,
+            ) {
+                Ok(cleaned) => Ok(StagedText {
+                    text: cleaned,
+                    llm_invoked: true,
+                }),
+                Err(LlmStageError::Cancelled) => Err(LlmStageError::Cancelled),
+                Err(_) => Ok(StagedText {
+                    text,
+                    llm_invoked: false,
+                }),
+            }
+        }
+    }
+}
+
+fn run_stage(
+    stage: &str,
+    config: crate::llm::LLMConfig,
+    prompt: &str,
+    text: &str,
+    token: &super::CancelToken,
+    llm_busy: &AtomicBool,
+) -> Result<String, LlmStageError> {
+    llm_busy.store(true, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    let result = llm_stage::run_llm_stage(config, prompt, text, token);
+    llm_busy.store(false, Ordering::SeqCst);
+    llm_stage::log_stage_result(
+        stage,
+        text.chars().count(),
+        started.elapsed().as_millis(),
+        &result,
+    );
+    result
+}
+
+/// Key of the translate voice override for the current provider. Aliyun's
+/// model families reject each other's voice ids, so the model is part of the
+/// key there; `ReadingSettings.vue` builds the same string.
+pub fn translate_voice_key(settings: &AppSettings) -> String {
+    if settings.tts_provider_type == PROVIDER_ALIYUN {
+        format!("{}:{}", PROVIDER_ALIYUN, settings.aliyun_tts_model)
+    } else {
+        settings.tts_provider_type.clone()
+    }
+}
+
+/// Write the translate voice, if one is set, onto the provider's own voice
+/// field, so backend selection and `voice_request` see it without either
+/// learning about overrides. Returns the voice that was applied. An empty or
+/// missing override means "same voice as reading" and changes nothing.
+fn apply_translate_voice_override(settings: &mut AppSettings) -> Option<String> {
+    let key = translate_voice_key(settings);
+    let voice = settings
+        .tts_translate_voice_overrides
+        .get(&key)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())?;
+    let slot = match settings.tts_provider_type.as_str() {
+        PROVIDER_VOLCENGINE => &mut settings.volc_tts_speaker,
+        PROVIDER_ALIYUN => {
+            if settings.aliyun_tts_model == aliyun::MODEL_QWEN_AUDIO {
+                &mut settings.aliyun_tts_voice_qwen_audio
+            } else if settings.aliyun_tts_model == aliyun::MODEL_COSYVOICE_V35 {
+                &mut settings.aliyun_tts_voice_cosy_voice_v35
+            } else if settings.aliyun_tts_model == aliyun::MODEL_COSYVOICE {
+                &mut settings.aliyun_tts_voice_cosy_voice
+            } else {
+                &mut settings.aliyun_tts_voice_qwen3
+            }
+        }
+        PROVIDER_MIMO => &mut settings.mimo_tts_voice,
+        PROVIDER_AZURE => &mut settings.azure_tts_voice,
+        _ => &mut settings.system_tts_voice_id,
+    };
+    *slot = voice.clone();
+    Some(voice)
+}
+
+/// Keep the translation where the settings say to: the clipboard, history,
+/// both or neither. Runs before speech starts so the text is there even if
+/// the user stops the read a second in.
+fn retain_translation(settings: &AppSettings, source: &str, translated: &str, app: &AppHandle) {
+    if settings.tts_translate_copy_to_clipboard {
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(translated)) {
+            Ok(()) => log_event("translate_clipboard", &[("chars", translated.chars().count().to_string())]),
+            Err(err) => log_event(
+                "translate_clipboard_err",
+                &[("detail", err.to_string())],
+            ),
+        }
+    }
+    if settings.tts_translate_save_history {
+        let llm_model_name = HistoryService::resolve_llm_model_name(&settings_for_llm_key(
+            settings,
+            &settings.tts_llm_provider_key,
+        ));
+        HistoryService::new().persist(
+            translated.to_string(),
+            Some(source.to_string()),
+            true,
+            true,
+            HISTORY_MODE_TRANSLATE_READ.to_string(),
+            None,
+            None,
+            None,
+            llm_model_name,
+            Some(app.clone()),
+        );
+        log_event("translate_history", &[]);
     }
 }
 
@@ -1127,5 +1414,171 @@ mod tests {
         controller.stop_for_dictation();
         assert!(!controller.inner.hud_yielded.load(Ordering::SeqCst));
         assert!(!controller.is_active());
+    }
+
+    // --- translate-and-read ---
+
+    use super::super::llm_stage::{LlmStageError, TRANSLATE_MAX_CHARS};
+    use super::{apply_translate_voice_override, stage_text, translate_voice_key, ReadKind};
+
+    #[test]
+    fn the_translate_hotkey_stops_a_plain_read_and_vice_versa() {
+        // Any reading hotkey during a session means "stop"; the kind that
+        // started it does not matter (requirements §2.2).
+        let controller = TtsController::default();
+        let _token = controller.inner.session.claim();
+        assert!(controller.is_active());
+        controller.handle_translate_selection_hotkey();
+        assert!(!controller.is_active());
+
+        let _token = controller.inner.session.claim();
+        controller.handle_read_selection_hotkey();
+        assert!(!controller.is_active());
+    }
+
+    #[test]
+    fn the_translate_hotkey_is_ignored_while_dictation_is_recording() {
+        let controller = TtsController::default();
+        controller.attach_recording_flag(Arc::new(AtomicBool::new(true)));
+        controller.handle_translate_selection_hotkey();
+        assert!(!controller.is_active(), "no session may start into a live microphone");
+    }
+
+    #[test]
+    fn the_voice_override_key_carries_the_aliyun_model() {
+        let mut settings = AppSettings::default();
+        settings.tts_provider_type = "volcengine".to_string();
+        assert_eq!(translate_voice_key(&settings), "volcengine");
+        settings.tts_provider_type = "aliyun".to_string();
+        settings.aliyun_tts_model = crate::tts::aliyun::MODEL_COSYVOICE.to_string();
+        assert_eq!(
+            translate_voice_key(&settings),
+            format!("aliyun:{}", crate::tts::aliyun::MODEL_COSYVOICE)
+        );
+    }
+
+    #[test]
+    fn a_missing_or_blank_override_keeps_the_reading_voice() {
+        let mut settings = AppSettings::default();
+        settings.tts_provider_type = "volcengine".to_string();
+        settings.volc_tts_speaker = "reader".to_string();
+        assert_eq!(apply_translate_voice_override(&mut settings), None);
+        assert_eq!(settings.volc_tts_speaker, "reader");
+
+        settings
+            .tts_translate_voice_overrides
+            .insert("volcengine".to_string(), "   ".to_string());
+        assert_eq!(apply_translate_voice_override(&mut settings), None);
+        assert_eq!(settings.volc_tts_speaker, "reader");
+    }
+
+    #[test]
+    fn an_override_lands_on_the_providers_own_voice_field() {
+        let mut settings = AppSettings::default();
+        settings.tts_provider_type = "aliyun".to_string();
+        settings.aliyun_tts_model = crate::tts::aliyun::MODEL_COSYVOICE_V35.to_string();
+        settings.aliyun_tts_voice_cosy_voice_v35 = "reader".to_string();
+        settings.aliyun_tts_voice_cosy_voice = "other-family".to_string();
+        settings.tts_translate_voice_overrides.insert(
+            format!("aliyun:{}", crate::tts::aliyun::MODEL_COSYVOICE_V35),
+            "translator".to_string(),
+        );
+        // A key for a different model must not apply.
+        settings.tts_translate_voice_overrides.insert(
+            format!("aliyun:{}", crate::tts::aliyun::MODEL_COSYVOICE),
+            "wrong".to_string(),
+        );
+
+        assert_eq!(
+            apply_translate_voice_override(&mut settings).as_deref(),
+            Some("translator")
+        );
+        assert_eq!(settings.aliyun_tts_voice_cosy_voice_v35, "translator");
+        assert_eq!(settings.aliyun_tts_voice_cosy_voice, "other-family");
+        assert_eq!(
+            voice_request(&settings, "x".to_string()).voice.as_deref(),
+            Some("translator"),
+            "the request is built from the overridden field"
+        );
+    }
+
+    #[test]
+    fn a_system_override_switches_say_to_avspeech() {
+        // The empty reading voice means `say`; an override id can only be
+        // spoken by AVSpeech, and that choice is made from the same field.
+        let mut settings = AppSettings::default();
+        assert!(super::uses_say_voice(&settings));
+        settings.tts_translate_voice_overrides.insert(
+            "system".to_string(),
+            "com.apple.voice.compact.en-US.Samantha".to_string(),
+        );
+        apply_translate_voice_override(&mut settings);
+        assert!(!super::uses_say_voice(&settings));
+    }
+
+    #[test]
+    fn an_oversized_selection_is_refused_before_any_llm_call() {
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        let busy = AtomicBool::new(false);
+        let text = "字".repeat(TRANSLATE_MAX_CHARS + 1);
+        let result = stage_text(ReadKind::Translate, None, text, &token, &busy);
+        assert!(matches!(
+            result,
+            Err(LlmStageError::TooLong { chars }) if chars == TRANSLATE_MAX_CHARS + 1
+        ));
+    }
+
+    #[test]
+    fn translate_without_an_api_key_is_not_configured() {
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        let busy = AtomicBool::new(false);
+        let settings = AppSettings::default();
+        let result = stage_text(ReadKind::Translate, Some(&settings), "hi".to_string(), &token, &busy);
+        assert_eq!(result.err(), Some(LlmStageError::NotConfigured));
+        assert!(!busy.load(Ordering::SeqCst), "the busy flag never leaks past the stage");
+    }
+
+    #[test]
+    fn plain_reading_passes_the_text_through_when_preprocessing_is_off() {
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        let busy = AtomicBool::new(false);
+        let settings = AppSettings::default();
+        assert!(!settings.tts_preprocess_enabled);
+        let staged = stage_text(ReadKind::Read, Some(&settings), "raw".to_string(), &token, &busy)
+            .expect("no LLM involved");
+        assert_eq!(staged.text, "raw");
+        assert!(!staged.llm_invoked);
+    }
+
+    #[test]
+    fn a_failed_preprocess_reads_the_raw_text() {
+        // Requirements §4.3: preprocessing is best-effort. No key configured
+        // is the failure that needs no network to reproduce.
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        let busy = AtomicBool::new(false);
+        let mut settings = AppSettings::default();
+        settings.tts_preprocess_enabled = true;
+        let staged = stage_text(ReadKind::Read, Some(&settings), "raw".to_string(), &token, &busy)
+            .expect("falls back to the raw text");
+        assert_eq!(staged.text, "raw");
+        assert!(!staged.llm_invoked);
+    }
+
+    #[test]
+    fn a_cancelled_preprocess_is_not_read_at_all() {
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        slot.release();
+        let busy = AtomicBool::new(false);
+        let mut settings = AppSettings::default();
+        settings.tts_preprocess_enabled = true;
+        settings.llm_volcengine_api_key = "key".to_string();
+        settings.llm_volcengine_base_url = "http://127.0.0.1:9".to_string();
+        let result = stage_text(ReadKind::Read, Some(&settings), "raw".to_string(), &token, &busy);
+        assert_eq!(result.err(), Some(LlmStageError::Cancelled));
     }
 }

@@ -25,10 +25,12 @@ enum HookEvent {
     Pressed(HotkeyConfiguration),
     Released(HotkeyConfiguration),
     EscapePressed,
-    /// Selected-text reading hotkey. Phase 0 binds this to a hardcoded
-    /// combination; phase 2 generalises the hook into an action map with
-    /// conflict detection. There is still exactly one system-level listener.
+    /// Selected-text reading hotkey. There is still exactly one system-level
+    /// listener; every reading action is a branch inside it.
     ReadSelectionPressed,
+    /// Translate-and-read hotkey: same selection path, one LLM call before
+    /// the engine.
+    TranslateSelectionPressed,
     /// Escape while reading aloud. Kept separate from `EscapePressed` so the
     /// dictation cancel path is untouched.
     ReadSelectionEscape,
@@ -62,6 +64,7 @@ struct DiagSnapshot {
     dictation_match: bool,
     read_match: bool,
     read_latched: bool,
+    translate_match: bool,
     suspended: u32,
 }
 
@@ -107,7 +110,8 @@ fn authoritative_modifier_bits() -> (u32, bool) {
     (bits, flags & 0x0080_0000 != 0)
 }
 
-/// State of the selected-text reading binding, as the settings page sees it.
+/// State of a reading binding (read or translate), as the settings page sees
+/// it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadSelectionStatus {
@@ -117,7 +121,92 @@ pub struct ReadSelectionStatus {
     pub enabled: bool,
     /// Bound but suppressed because it duplicates the dictation hotkey.
     pub conflicts_with_dictation: bool,
+    /// Bound but suppressed because it duplicates the plain reading hotkey.
+    /// Only the translate binding can report this.
+    pub conflicts_with_reading: bool,
     pub display: Option<String>,
+}
+
+impl ReadSelectionStatus {
+    fn unbound() -> Self {
+        Self {
+            bound: false,
+            enabled: false,
+            conflicts_with_dictation: false,
+            conflicts_with_reading: false,
+            display: None,
+        }
+    }
+}
+
+/// One hotkey-triggered reading action: the binding the user asked for, and
+/// the lock-free copy the tap callback matches against. The two differ when
+/// the binding is refused for colliding with a higher-priority one — the
+/// request is kept so the status can explain, the atomics stay disabled so
+/// the hook never swallows the key for nothing.
+#[derive(Clone)]
+struct ActionBinding {
+    requested: Arc<Mutex<Option<HotkeyConfiguration>>>,
+    key_code: Arc<AtomicU32>,
+    modifiers: Arc<AtomicU32>,
+    uses_fn: Arc<AtomicBool>,
+    enabled: Arc<AtomicBool>,
+}
+
+impl ActionBinding {
+    fn new() -> Self {
+        Self {
+            requested: Arc::new(Mutex::new(None)),
+            key_code: Arc::new(AtomicU32::new(0)),
+            modifiers: Arc::new(AtomicU32::new(0)),
+            uses_fn: Arc::new(AtomicBool::new(false)),
+            enabled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn requested(&self) -> Option<HotkeyConfiguration> {
+        self.requested.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    fn set_requested(&self, config: Option<HotkeyConfiguration>) {
+        if let Ok(mut guard) = self.requested.lock() {
+            *guard = config;
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+
+    fn activate(&self, cfg: &HotkeyConfiguration) {
+        self.key_code.store(cfg.key_code, Ordering::SeqCst);
+        self.modifiers.store(cfg.modifiers_bits(), Ordering::SeqCst);
+        self.uses_fn.store(cfg.uses_fn, Ordering::SeqCst);
+        self.enabled.store(true, Ordering::SeqCst);
+    }
+
+    fn deactivate(&self) {
+        self.enabled.store(false, Ordering::SeqCst);
+    }
+
+    /// Whether `cfg` is the combination this binding currently acts on.
+    /// A disabled binding claims nothing, so a refused binding cannot in turn
+    /// refuse another.
+    fn is_active_binding(&self, cfg: &HotkeyConfiguration) -> bool {
+        self.is_enabled()
+            && cfg.key_code == self.key_code.load(Ordering::SeqCst)
+            && cfg.modifiers_bits() == self.modifiers.load(Ordering::SeqCst)
+            && cfg.uses_fn == self.uses_fn.load(Ordering::SeqCst)
+    }
+
+    /// Called from the tap callback: no locks, atomics only.
+    fn matches(&self, snapshot: &HotkeySnapshot) -> bool {
+        snapshot.matches_active(
+            self.key_code.load(Ordering::SeqCst),
+            self.modifiers.load(Ordering::SeqCst),
+            self.uses_fn.load(Ordering::SeqCst),
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -127,11 +216,8 @@ pub struct HotkeyManager {
     active_modifiers: Arc<AtomicU32>,
     active_uses_fn: Arc<AtomicBool>,
     active_enabled: Arc<AtomicBool>,
-    read_selection_config: Arc<Mutex<Option<HotkeyConfiguration>>>,
-    read_selection_key_code: Arc<AtomicU32>,
-    read_selection_modifiers: Arc<AtomicU32>,
-    read_selection_uses_fn: Arc<AtomicBool>,
-    read_selection_enabled: Arc<AtomicBool>,
+    read_selection: ActionBinding,
+    translate_selection: ActionBinding,
     suspension_count: Arc<AtomicU32>,
     listener_started: Arc<AtomicBool>,
     recording_sender: Arc<Mutex<Option<Sender<HotkeyConfiguration>>>>,
@@ -150,11 +236,8 @@ impl HotkeyManager {
             active_modifiers: Arc::new(AtomicU32::new(0)),
             active_uses_fn: Arc::new(AtomicBool::new(false)),
             active_enabled: Arc::new(AtomicBool::new(false)),
-            read_selection_config: Arc::new(Mutex::new(None)),
-            read_selection_key_code: Arc::new(AtomicU32::new(0)),
-            read_selection_modifiers: Arc::new(AtomicU32::new(0)),
-            read_selection_uses_fn: Arc::new(AtomicBool::new(false)),
-            read_selection_enabled: Arc::new(AtomicBool::new(false)),
+            read_selection: ActionBinding::new(),
+            translate_selection: ActionBinding::new(),
             suspension_count: Arc::new(AtomicU32::new(0)),
             listener_started: Arc::new(AtomicBool::new(false)),
             recording_sender: Arc::new(Mutex::new(None)),
@@ -182,10 +265,8 @@ impl HotkeyManager {
         let active_modifiers = self.active_modifiers.clone();
         let active_uses_fn = self.active_uses_fn.clone();
         let active_enabled = self.active_enabled.clone();
-        let read_selection_key_code = self.read_selection_key_code.clone();
-        let read_selection_modifiers = self.read_selection_modifiers.clone();
-        let read_selection_uses_fn = self.read_selection_uses_fn.clone();
-        let read_selection_enabled = self.read_selection_enabled.clone();
+        let read_selection = self.read_selection.clone();
+        let translate_selection = self.translate_selection.clone();
         let suspension_count = self.suspension_count.clone();
         let recording_sender = self.recording_sender.clone();
         let swallow_escape = self.swallow_escape.clone();
@@ -199,7 +280,10 @@ impl HotkeyManager {
             let last_key_for_config: RefCell<Option<Key>> = RefCell::new(None);
             let last_active_config: RefCell<Option<HotkeyConfiguration>> = RefCell::new(None);
             let active_hotkey_pressed = RefCell::new(false);
+            // Latched key of a reading action whose press we ate, so the
+            // release is eaten too and key repeat does not re-fire it.
             let read_selection_key: RefCell<Option<Key>> = RefCell::new(None);
+            let translate_selection_key: RefCell<Option<Key>> = RefCell::new(None);
             let (hook_tx, hook_rx) = mpsc::channel::<HookEvent>();
 
             // Worker thread to process hotkey actions off the hook callback.
@@ -241,6 +325,11 @@ impl HotkeyManager {
                                 controller.handle_read_selection_hotkey();
                             }
                         }
+                        HookEvent::TranslateSelectionPressed => {
+                            if let Some(controller) = worker_tts.as_ref() {
+                                controller.handle_translate_selection_hotkey();
+                            }
+                        }
                         HookEvent::ReadSelectionEscape => {
                             if let Some(controller) = worker_tts.as_ref() {
                                 controller.stop(crate::tts::StopReason::Escape);
@@ -267,7 +356,7 @@ impl HotkeyManager {
                                 level,
                                 "{} key={} tracked_mods={:#06x} actual_mods={:#06x} \
                                  tracked_fn={} actual_fn={} desynced={} dict_match={} \
-                                 read_match={} read_latched={} suspended={}",
+                                 read_match={} read_latched={} translate_match={} suspended={}",
                                 tag,
                                 diag.key_code,
                                 diag.tracked_mods,
@@ -278,6 +367,7 @@ impl HotkeyManager {
                                 diag.dictation_match,
                                 diag.read_match,
                                 diag.read_latched,
+                                diag.translate_match,
                                 diag.suspended,
                             );
                         }
@@ -346,11 +436,10 @@ impl HotkeyManager {
                                 active_uses_fn.load(Ordering::SeqCst),
                             );
 
-                            let read_selection_match = snapshot.matches_active(
-                                read_selection_key_code.load(Ordering::SeqCst),
-                                read_selection_modifiers.load(Ordering::SeqCst),
-                                read_selection_uses_fn.load(Ordering::SeqCst),
-                            );
+                            let read_selection_match =
+                                read_selection.is_enabled() && read_selection.matches(&snapshot);
+                            let translate_selection_match = translate_selection.is_enabled()
+                                && translate_selection.matches(&snapshot);
 
                             // Diagnostics for the modifier-state desync class of
                             // bug: whenever a key goes down that looks like a
@@ -382,6 +471,7 @@ impl HotkeyManager {
                                         dictation_match: active_match,
                                         read_match: read_selection_match,
                                         read_latched: read_selection_key.borrow().is_some(),
+                                        translate_match: translate_selection_match,
                                         suspended: suspension_count.load(Ordering::SeqCst),
                                     }));
                                 }
@@ -407,8 +497,7 @@ impl HotkeyManager {
                                     let _ = hook_tx.send(HookEvent::Pressed(cfg));
                                 }
                                 suppress = true;
-                            } else if read_selection_enabled.load(Ordering::SeqCst)
-                                && read_selection_match
+                            } else if read_selection_match
                                 && suspension_count.load(Ordering::SeqCst) == 0
                             {
                                 // Fire once per physical press; key repeat while
@@ -416,6 +505,14 @@ impl HotkeyManager {
                                 if read_selection_key.borrow().is_none() {
                                     *read_selection_key.borrow_mut() = Some(key);
                                     let _ = hook_tx.send(HookEvent::ReadSelectionPressed);
+                                }
+                                suppress = true;
+                            } else if translate_selection_match
+                                && suspension_count.load(Ordering::SeqCst) == 0
+                            {
+                                if translate_selection_key.borrow().is_none() {
+                                    *translate_selection_key.borrow_mut() = Some(key);
+                                    let _ = hook_tx.send(HookEvent::TranslateSelectionPressed);
                                 }
                                 suppress = true;
                             }
@@ -466,10 +563,10 @@ impl HotkeyManager {
                         // Swallow the matching release so the target app never
                         // sees a stray key-up for a hotkey whose press we ate.
                         // Cleared regardless of suspension to avoid a stuck latch.
-                        let read_selection_key_opt = *read_selection_key.borrow();
-                        if let Some(pressed_key) = read_selection_key_opt {
-                            if key == pressed_key {
-                                *read_selection_key.borrow_mut() = None;
+                        for latch in [&read_selection_key, &translate_selection_key] {
+                            let latched = *latch.borrow();
+                            if latched == Some(key) {
+                                *latch.borrow_mut() = None;
                                 suppress = true;
                             }
                         }
@@ -506,8 +603,8 @@ impl HotkeyManager {
         }
 
         // The dictation key can change at runtime, so re-evaluate the reading
-        // binding against it rather than only at registration time.
-        self.refresh_read_selection_binding();
+        // bindings against it rather than only at registration time.
+        self.refresh_reading_bindings();
     }
 
     /// Get current configuration.
@@ -518,10 +615,14 @@ impl HotkeyManager {
     /// Set the selected-text reading binding. `None` unbinds it, which is how
     /// the master switch in the reading settings turns the feature off.
     pub fn set_read_selection_config(&self, config: Option<HotkeyConfiguration>) {
-        if let Ok(mut guard) = self.read_selection_config.lock() {
-            *guard = config;
-        }
-        self.refresh_read_selection_binding();
+        self.read_selection.set_requested(config);
+        self.refresh_reading_bindings();
+    }
+
+    /// Set the translate-and-read binding. Same contract as the reading one.
+    pub fn set_translate_selection_config(&self, config: Option<HotkeyConfiguration>) {
+        self.translate_selection.set_requested(config);
+        self.refresh_reading_bindings();
     }
 
     /// What actually happened to the reading binding, for the settings page.
@@ -531,63 +632,77 @@ impl HotkeyManager {
     /// second one needs explaining in the UI. Recomputed rather than cached so
     /// it stays right after the dictation key changes from the other page.
     pub fn read_selection_status(&self) -> ReadSelectionStatus {
-        let config = self
-            .read_selection_config
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone());
-
-        let Some(config) = config else {
-            return ReadSelectionStatus {
-                bound: false,
-                enabled: false,
-                conflicts_with_dictation: false,
-                display: None,
-            };
+        let Some(config) = self.read_selection.requested() else {
+            return ReadSelectionStatus::unbound();
         };
-
         ReadSelectionStatus {
             bound: true,
-            enabled: self.read_selection_enabled.load(Ordering::SeqCst),
+            enabled: self.read_selection.is_enabled(),
             conflicts_with_dictation: self.conflicts_with_dictation(&config),
+            conflicts_with_reading: false,
             display: Some(config.display_string()),
         }
     }
 
-    /// Re-apply the reading binding, disabling it when it collides with the
-    /// dictation key.
-    ///
-    /// The dictation branch is checked first in the hook, so an identical
-    /// binding would make reading unreachable with no sign of why. Refusing the
-    /// binding loudly beats swallowing the key and doing nothing.
-    fn refresh_read_selection_binding(&self) {
-        let Some(cfg) = self
-            .read_selection_config
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
-        else {
-            self.read_selection_enabled.store(false, Ordering::SeqCst);
-            return;
+    /// Same for the translate binding, which can also lose to plain reading.
+    pub fn translate_selection_status(&self) -> ReadSelectionStatus {
+        let Some(config) = self.translate_selection.requested() else {
+            return ReadSelectionStatus::unbound();
         };
+        let conflicts_with_dictation = self.conflicts_with_dictation(&config);
+        ReadSelectionStatus {
+            bound: true,
+            enabled: self.translate_selection.is_enabled(),
+            conflicts_with_dictation,
+            // Reported only when dictation is not already the reason, so the
+            // page shows one explanation rather than two for the same key.
+            conflicts_with_reading: !conflicts_with_dictation
+                && self.read_selection.is_active_binding(&config),
+            display: Some(config.display_string()),
+        }
+    }
 
-        if self.conflicts_with_dictation(&cfg) {
-            log::warn!(
-                "Selected-text reading hotkey ({}) is also the dictation hotkey; \
-                 reading is disabled until one of them changes",
-                cfg.display_string()
-            );
-            self.read_selection_enabled.store(false, Ordering::SeqCst);
-            return;
+    /// Re-apply both reading bindings in priority order, disabling each one
+    /// that collides with a binding checked before it: dictation, then read,
+    /// then translate — the same order the hook tests them in.
+    ///
+    /// An identical binding would make the later action unreachable with no
+    /// sign of why. Refusing it loudly beats swallowing the key and doing
+    /// nothing.
+    fn refresh_reading_bindings(&self) {
+        match self.read_selection.requested() {
+            Some(cfg) if self.conflicts_with_dictation(&cfg) => {
+                log::warn!(
+                    "Selected-text reading hotkey ({}) is also the dictation hotkey; \
+                     reading is disabled until one of them changes",
+                    cfg.display_string()
+                );
+                self.read_selection.deactivate();
+            }
+            Some(cfg) => self.read_selection.activate(&cfg),
+            None => self.read_selection.deactivate(),
         }
 
-        self.read_selection_key_code
-            .store(cfg.key_code, Ordering::SeqCst);
-        self.read_selection_modifiers
-            .store(cfg.modifiers_bits(), Ordering::SeqCst);
-        self.read_selection_uses_fn
-            .store(cfg.uses_fn, Ordering::SeqCst);
-        self.read_selection_enabled.store(true, Ordering::SeqCst);
+        match self.translate_selection.requested() {
+            Some(cfg) if self.conflicts_with_dictation(&cfg) => {
+                log::warn!(
+                    "Translate-and-read hotkey ({}) is also the dictation hotkey; \
+                     translate-and-read is disabled until one of them changes",
+                    cfg.display_string()
+                );
+                self.translate_selection.deactivate();
+            }
+            Some(cfg) if self.read_selection.is_active_binding(&cfg) => {
+                log::warn!(
+                    "Translate-and-read hotkey ({}) is also the reading hotkey; \
+                     translate-and-read is disabled until one of them changes",
+                    cfg.display_string()
+                );
+                self.translate_selection.deactivate();
+            }
+            Some(cfg) => self.translate_selection.activate(&cfg),
+            None => self.translate_selection.deactivate(),
+        }
     }
 
     fn conflicts_with_dictation(&self, cfg: &HotkeyConfiguration) -> bool {
@@ -793,7 +908,11 @@ mod tests {
     use super::*;
 
     fn read_selection_enabled(manager: &HotkeyManager) -> bool {
-        manager.read_selection_enabled.load(Ordering::SeqCst)
+        manager.read_selection.is_enabled()
+    }
+
+    fn translate_selection_enabled(manager: &HotkeyManager) -> bool {
+        manager.translate_selection.is_enabled()
     }
 
     #[test]
@@ -804,7 +923,7 @@ mod tests {
 
         assert!(read_selection_enabled(&manager));
         assert_eq!(
-            manager.read_selection_key_code.load(Ordering::SeqCst),
+            manager.read_selection.key_code.load(Ordering::SeqCst),
             'R' as u32
         );
     }
@@ -862,6 +981,7 @@ mod tests {
         assert!(clash.bound, "the user did configure a binding");
         assert!(!clash.enabled, "but the hook will not act on it");
         assert!(clash.conflicts_with_dictation);
+        assert!(!clash.conflicts_with_reading, "reading never conflicts with itself");
         assert_eq!(clash.display.as_deref(), Some("Option + Command + R"));
     }
 
@@ -889,6 +1009,118 @@ mod tests {
 
         manager.set_read_selection_config(None);
         assert!(!read_selection_enabled(&manager));
+    }
+
+    // --- translate-and-read: third binding, lowest priority ---
+
+    fn manager_with_all_three_defaults() -> HotkeyManager {
+        let manager = HotkeyManager::new();
+        manager.set_config(Some(HotkeyConfiguration::default_primary()));
+        manager.set_read_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+        manager.set_translate_selection_config(Some(
+            HotkeyConfiguration::default_translate_selection(),
+        ));
+        manager
+    }
+
+    #[test]
+    fn the_three_default_bindings_are_all_live() {
+        let manager = manager_with_all_three_defaults();
+        assert!(read_selection_enabled(&manager));
+        assert!(translate_selection_enabled(&manager));
+        assert_eq!(
+            manager.translate_selection.key_code.load(Ordering::SeqCst),
+            'T' as u32
+        );
+        let status = manager.translate_selection_status();
+        assert!(status.bound && status.enabled);
+        assert!(!status.conflicts_with_dictation && !status.conflicts_with_reading);
+        assert_eq!(status.display.as_deref(), Some("Option + Command + T"));
+    }
+
+    #[test]
+    fn translate_identical_to_reading_is_refused_and_says_why() {
+        let manager = manager_with_all_three_defaults();
+        manager.set_translate_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+
+        assert!(read_selection_enabled(&manager), "reading keeps its key");
+        assert!(!translate_selection_enabled(&manager));
+        let status = manager.translate_selection_status();
+        assert!(status.bound && !status.enabled);
+        assert!(status.conflicts_with_reading);
+        assert!(!status.conflicts_with_dictation);
+    }
+
+    #[test]
+    fn translate_identical_to_dictation_reports_dictation_only() {
+        let manager = manager_with_all_three_defaults();
+        manager.set_translate_selection_config(Some(HotkeyConfiguration::default_primary()));
+
+        assert!(!translate_selection_enabled(&manager));
+        let status = manager.translate_selection_status();
+        assert!(status.conflicts_with_dictation);
+        assert!(
+            !status.conflicts_with_reading,
+            "one explanation per key, and dictation is the higher-priority one"
+        );
+    }
+
+    #[test]
+    fn moving_reading_onto_the_translate_key_demotes_translate_not_reading() {
+        // Read outranks translate, so it is translate that goes dark.
+        let manager = manager_with_all_three_defaults();
+        manager.set_read_selection_config(Some(HotkeyConfiguration::default_translate_selection()));
+
+        assert!(read_selection_enabled(&manager));
+        assert!(!translate_selection_enabled(&manager));
+        assert!(manager.translate_selection_status().conflicts_with_reading);
+
+        manager.set_read_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+        assert!(translate_selection_enabled(&manager), "re-enabled once reading moves away");
+        assert!(!manager.translate_selection_status().conflicts_with_reading);
+    }
+
+    #[test]
+    fn a_refused_reading_binding_does_not_refuse_translate() {
+        // Reading is dead because it equals dictation; translate on the same
+        // key is refused for the dictation reason, but translate on reading's
+        // *default* key must not be refused by a binding that is not live.
+        let manager = HotkeyManager::new();
+        manager.set_config(Some(HotkeyConfiguration::default_read_selection()));
+        manager.set_read_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+        assert!(!read_selection_enabled(&manager));
+
+        manager.set_translate_selection_config(Some(
+            HotkeyConfiguration::default_translate_selection(),
+        ));
+        assert!(translate_selection_enabled(&manager));
+
+        manager.set_translate_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+        let status = manager.translate_selection_status();
+        assert!(!status.enabled);
+        assert!(status.conflicts_with_dictation);
+        assert!(!status.conflicts_with_reading);
+    }
+
+    #[test]
+    fn switching_reading_off_frees_its_key_for_translate() {
+        let manager = manager_with_all_three_defaults();
+        manager.set_translate_selection_config(Some(HotkeyConfiguration::default_read_selection()));
+        assert!(!translate_selection_enabled(&manager));
+
+        manager.set_read_selection_config(None);
+        assert!(translate_selection_enabled(&manager));
+        assert!(!manager.translate_selection_status().conflicts_with_reading);
+    }
+
+    #[test]
+    fn clearing_the_translate_binding_disables_it_and_reports_unbound() {
+        let manager = manager_with_all_three_defaults();
+        manager.set_translate_selection_config(None);
+        assert!(!translate_selection_enabled(&manager));
+        let status = manager.translate_selection_status();
+        assert!(!status.bound && !status.enabled && status.display.is_none());
+        assert!(read_selection_enabled(&manager), "reading is untouched");
     }
 }
 
