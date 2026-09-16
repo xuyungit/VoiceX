@@ -62,8 +62,17 @@ pub struct LLMConfig {
     pub api_key: String,
     pub model_name: String,
     pub api_mode: LLMApiMode,
-    /// Volcengine-specific: reasoning effort level
-    pub volcengine_reasoning_effort: Option<String>,
+    /// Reasoning effort, sent as the provider's own knob (`reasoning_effort`
+    /// on chat completions, `reasoning.effort` on the Responses API).
+    /// `None` sends nothing and leaves the server default in place; which
+    /// values a model accepts (`none`, `minimal`, `low`, ...) is up to it.
+    pub reasoning_effort: Option<String>,
+    /// Extra JSON object merged into every request body, the way llm-bench's
+    /// `[provider.extra]` works. This is how endpoint-specific thinking knobs
+    /// reach the wire (`enable_thinking: false` on DashScope,
+    /// `thinking: {"type": "disabled"}` on DeepSeek, ...). Keys here override
+    /// the fields the provider builds.
+    pub extra_body: Option<String>,
 }
 
 impl Default for LLMConfig {
@@ -74,7 +83,8 @@ impl Default for LLMConfig {
             api_key: String::new(),
             model_name: "doubao-seed-2-0-mini-260215".to_string(),
             api_mode: LLMApiMode::default(),
-            volcengine_reasoning_effort: Some("minimal".to_string()),
+            reasoning_effort: Some("minimal".to_string()),
+            extra_body: None,
         }
     }
 }

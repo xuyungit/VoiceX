@@ -10,10 +10,12 @@
 # locked console neither activates TextEdit nor delivers the injected keys.
 #
 # Usage:
-#   scripts/tts/translate_read.sh [--db PATH] [--case success|toolong|cancel|stop|all]
+#   scripts/tts/translate_read.sh [--db PATH] [--case success|long|toolong|cancel|stop|all]
 #
 # Cases:
 #   success  short Chinese sentence → one translate_read row, no audio path
+#   long     ~2900 chars, just under the cap → one translate_read row whose
+#            translation is not cut short (no fixed output-token cap upstream)
 #   toolong  > 3000 chars → refused before the LLM call, no row
 #   cancel   Esc while the LLM request is in flight → no row
 #   stop     second hotkey press during speech → row exists (the translation
@@ -43,7 +45,7 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[ "$CASES" = all ] && CASES="success toolong cancel stop"
+[ "$CASES" = all ] && CASES="success long toolong cancel stop"
 
 [ -r "$DB" ] || { echo "history database not readable: $DB" >&2; exit 2; }
 
@@ -53,9 +55,27 @@ screen_locked() {
   ioreg -n Root -d1 -a 2>/dev/null | grep -A1 IOConsoleLocked | grep -q '<true/>'
 }
 
+# Distinct numbered sections instead of one repeated sentence, so a translation
+# that stops early is visible as missing section numbers, not as fewer copies.
+long_fixture_body() {
+  python3 - <<'PY'
+para = ("桥梁健康监测系统在过去一年里积累了大量的时序数据，其中包括主梁挠度、支座反力、索力以及环境温度。"
+        "为了从这些数据中识别结构状态的变化，我们先对原始信号做了去噪和重采样，然后按照温度区间分组，"
+        "比较不同季节下同一测点的响应分布。结果显示，夏季高温时段主梁的竖向变形明显增大，但支座反力的变化幅度较小，"
+        "说明温度效应主要通过材料膨胀影响几何形状，而不是通过边界条件的改变影响受力。下一步计划引入有限元模型进行反演，"
+        "用实测的模态参数修正刚度系数，并把修正后的模型用于预测极端荷载工况下的安全裕度。")
+parts, i = [], 1
+while sum(len(p) for p in parts) < 2850:
+    parts.append(f"第{i}节 " + para)
+    i += 1
+print("\n\n".join(parts)[:2850], end="")
+PY
+}
+
 fixture_for() {
   case "$1" in
     success) printf '翻译朗读测试 %s：今天天气很好，我们去公园散步吧。' "$RUN_ID" ;;
+    long)    printf '翻译朗读测试 %s %s' "$RUN_ID" "$(long_fixture_body)" ;;
     toolong) printf '翻译朗读测试 %s %s' "$RUN_ID" "$(python3 -c 'print("这是一段很长的文字。"*320)')" ;;
     cancel)  printf '翻译朗读测试 %s %s' "$RUN_ID" "$(python3 -c 'print("这是一段需要较长时间翻译的文字，用来测试取消。"*100)')" ;;
     stop)    printf '翻译朗读测试 %s：这是一段足够长的文字，用来验证第二次按下热键会停止朗读。我们会在朗读开始后再次触发同一个热键，然后确认朗读被打断。' "$RUN_ID" ;;
@@ -133,13 +153,24 @@ run_case() {
   close_fixture
 
   case "$name" in
-    success|stop)
+    success|long|stop)
       if [ -z "$rowid" ]; then fail "$name: no history row within ${ROW_TIMEOUT_S}s"; return; fi
       mode="$(row_field "$rowid" mode)"
       if [ "$mode" != "translate_read" ]; then fail "$name: row $rowid has mode '$mode'"; return; fi
       [ "$(row_field "$rowid" llm_invoked)" = 1 ] || fail "$name: llm_invoked is not 1"
       [ -z "$(row_field "$rowid" audio_path)" ] || fail "$name: audio_path should be empty"
       [ "$(row_field "$rowid" original_text)" = "$fixture" ] || fail "$name: original_text is not the selection"
+      if [ "$name" = long ]; then
+        # The fixture numbers its sections; the last number must survive.
+        last="$(printf '%s' "$fixture" | grep -o '第[0-9]*节' | tail -1 | tr -dc '0-9')"
+        translated="$(row_field "$rowid" text)"
+        if printf '%s' "$translated" | grep -qiE "(section|part|chapter) $last([^0-9]|$)|第${last}节"; then
+          pass "$name: row $rowid after $(( $(date +%s) - t0 ))s, model=$(row_field "$rowid" llm_model_name), $(python3 -c 'import sys; print(len(sys.argv[1]))' "$translated") chars, section $last present"
+        else
+          fail "$name: translation lacks the last section ($last): …$(printf '%s' "$translated" | tail -c 160)"
+        fi
+        return
+      fi
       pass "$name: row $rowid after $(( $(date +%s) - t0 ))s, model=$(row_field "$rowid" llm_model_name)"
       note "text: $(row_field "$rowid" text)"
       ;;

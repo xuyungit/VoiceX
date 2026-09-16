@@ -335,7 +335,8 @@ mod tests {
             api_key: api_key.to_string(),
             model_name: "test".to_string(),
             api_mode: LLMApiMode::ChatCompletions,
-            volcengine_reasoning_effort: None,
+            reasoning_effort: None,
+            extra_body: None,
         }
     }
 

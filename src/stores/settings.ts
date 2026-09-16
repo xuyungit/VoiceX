@@ -13,6 +13,12 @@ export interface CustomLlmEndpoint {
     apiKey: string
     model: string
     apiMode: LlmApiModeValue
+    // `reasoning_effort` to send; '' sends nothing. Endpoints differ in what
+    // they accept (`none` on Cerebras, `minimal` on OpenAI, ...).
+    reasoningEffort: string
+    // JSON object merged into every request body, for knobs with no standard
+    // spelling: `{"enable_thinking": false}`, `{"thinking": {"type": "disabled"}}`.
+    extraBody: string
 }
 
 export interface AppSettings {
@@ -133,6 +139,7 @@ export interface AppSettings {
     llmOpenaiBaseUrl: string
     llmOpenaiApiKey: string
     llmOpenaiModel: string
+    llmOpenaiReasoningEffort: string | null
 
     // LLM Provider: Qwen (DashScope)
     llmQwenBaseUrl: string
@@ -400,6 +407,7 @@ const defaultSettings: AppSettings = {
     llmOpenaiBaseUrl: 'https://api.openai.com/v1',
     llmOpenaiApiKey: '',
     llmOpenaiModel: 'gpt-4o-mini',
+    llmOpenaiReasoningEffort: null,
 
     llmQwenBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     llmQwenApiKey: '',

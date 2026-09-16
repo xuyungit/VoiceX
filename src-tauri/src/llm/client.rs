@@ -116,7 +116,8 @@ impl LLMClient {
             },
         ];
 
-        let payload = self.provider.build_chat_request(messages, &self.config);
+        let mut payload = self.provider.build_chat_request(messages, &self.config);
+        merge_extra_body(&mut payload, self.config.extra_body.as_deref())?;
         let bytes = self.send_json_request(&url, &payload).await?;
         let parsed: ChatResponse =
             serde_json::from_slice(&bytes).map_err(|e| LLMError::InvalidResponse(e.to_string()))?;
@@ -132,9 +133,10 @@ impl LLMClient {
         user_message: &str,
     ) -> Result<String, LLMError> {
         let url = format!("{}/responses", self.config.base_url.trim_end_matches('/'));
-        let payload =
+        let mut payload =
             self.provider
                 .build_responses_request(system_prompt, user_message, &self.config);
+        merge_extra_body(&mut payload, self.config.extra_body.as_deref())?;
         let bytes = self.send_json_request(&url, &payload).await?;
         let body_text = String::from_utf8_lossy(&bytes).to_string();
 
@@ -182,7 +184,8 @@ impl LLMClient {
             },
         ];
 
-        let payload = self.provider.build_chat_request(messages, &self.config);
+        let mut payload = self.provider.build_chat_request(messages, &self.config);
+        merge_extra_body(&mut payload, self.config.extra_body.as_deref())?;
         let bytes = self.send_json_request(&url, &payload).await?;
         let parsed: GeminiResponse =
             serde_json::from_slice(&bytes).map_err(|e| LLMError::InvalidResponse(e.to_string()))?;
@@ -351,6 +354,33 @@ struct ResponsesResponse {
 #[derive(Debug, Deserialize)]
 struct ResponsesIncompleteDetails {
     reason: Option<String>,
+}
+
+/// Merge the endpoint's extra request fields into `payload`. The text must
+/// be a JSON object; its keys override whatever the provider built, so an
+/// endpoint can set `max_tokens` or `enable_thinking` without a code change.
+/// Malformed text is a configuration error, not something to skip quietly.
+fn merge_extra_body(payload: &mut Value, extra_body: Option<&str>) -> Result<(), LLMError> {
+    let Some(raw) = extra_body.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(());
+    };
+    let parsed: Value = serde_json::from_str(raw).map_err(|e| {
+        LLMError::InvalidConfig(format!("Extra request fields are not valid JSON: {e}"))
+    })?;
+    let Value::Object(extra) = parsed else {
+        return Err(LLMError::InvalidConfig(
+            "Extra request fields must be a JSON object".to_string(),
+        ));
+    };
+    let Value::Object(body) = payload else {
+        return Err(LLMError::InvalidRequest(
+            "Request body is not a JSON object".to_string(),
+        ));
+    };
+    for (key, value) in extra {
+        body.insert(key, value);
+    }
+    Ok(())
 }
 
 /// `finish_reason: "length"` in the chat completions shape.
@@ -743,6 +773,38 @@ mod tests {
             "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
         );
         assert!(matches!(parse_responses_sse(sse), Err(super::LLMError::Truncated)));
+    }
+
+    #[test]
+    fn extra_body_overrides_provider_fields_and_adds_new_ones() {
+        let mut payload = serde_json::json!({ "model": "m", "temperature": 0.2 });
+        super::merge_extra_body(
+            &mut payload,
+            Some(r#"{"temperature": 0.7, "enable_thinking": false, "thinking": {"type": "disabled"}}"#),
+        )
+        .unwrap();
+        assert_eq!(payload["model"], "m");
+        assert_eq!(payload["temperature"], 0.7);
+        assert_eq!(payload["enable_thinking"], false);
+        assert_eq!(payload["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn blank_extra_body_leaves_the_payload_alone() {
+        let mut payload = serde_json::json!({ "model": "m" });
+        super::merge_extra_body(&mut payload, None).unwrap();
+        super::merge_extra_body(&mut payload, Some("  \n")).unwrap();
+        assert_eq!(payload, serde_json::json!({ "model": "m" }));
+    }
+
+    #[test]
+    fn malformed_extra_body_is_a_configuration_error() {
+        let mut payload = serde_json::json!({ "model": "m" });
+        let not_json = super::merge_extra_body(&mut payload, Some("{enable_thinking: false}"));
+        assert!(matches!(not_json, Err(super::LLMError::InvalidConfig(msg)) if msg.contains("valid JSON")));
+        let not_object = super::merge_extra_body(&mut payload, Some("[1, 2]"));
+        assert!(matches!(not_object, Err(super::LLMError::InvalidConfig(msg)) if msg.contains("JSON object")));
+        assert_eq!(payload, serde_json::json!({ "model": "m" }));
     }
 }
 

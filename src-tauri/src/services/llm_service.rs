@@ -52,7 +52,8 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             api_key: settings.llm_volcengine_api_key.clone(),
             model_name: settings.llm_volcengine_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
-            volcengine_reasoning_effort: settings.llm_volcengine_reasoning_effort.clone(),
+            reasoning_effort: settings.llm_volcengine_reasoning_effort.clone(),
+            extra_body: None,
         },
         LLMProviderType::Openai => LLMConfig {
             provider_type: LLMProviderType::Openai,
@@ -60,7 +61,8 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             api_key: settings.llm_openai_api_key.clone(),
             model_name: settings.llm_openai_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
-            volcengine_reasoning_effort: None,
+            reasoning_effort: non_empty(settings.llm_openai_reasoning_effort.as_deref()),
+            extra_body: None,
         },
         LLMProviderType::Qwen => LLMConfig {
             provider_type: LLMProviderType::Qwen,
@@ -68,7 +70,8 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             api_key: settings.llm_qwen_api_key.clone(),
             model_name: settings.llm_qwen_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
-            volcengine_reasoning_effort: None,
+            reasoning_effort: None,
+            extra_body: None,
         },
         LLMProviderType::Gemini => LLMConfig {
             provider_type: LLMProviderType::Gemini,
@@ -76,7 +79,8 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             api_key: settings.llm_gemini_api_key.clone(),
             model_name: settings.llm_gemini_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
-            volcengine_reasoning_effort: None,
+            reasoning_effort: None,
+            extra_body: None,
         },
         LLMProviderType::Custom => {
             let endpoint = crate::commands::settings::active_custom_endpoint(settings);
@@ -88,10 +92,19 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
                 api_mode: endpoint
                     .map(|e| LLMApiMode::from_str(&e.api_mode))
                     .unwrap_or_default(),
-                volcengine_reasoning_effort: None,
+                reasoning_effort: endpoint.and_then(|e| non_empty(Some(&e.reasoning_effort))),
+                extra_body: endpoint.and_then(|e| non_empty(Some(&e.extra_body))),
             }
         }
     }
+}
+
+/// A settings string as an optional value: blank means "not set".
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, Clone)]
@@ -260,8 +273,29 @@ mod llm_key_tests {
             api_key: "custom-key".to_string(),
             model: "local-model".to_string(),
             api_mode: "responses".to_string(),
+            reasoning_effort: "  ".to_string(),
+            extra_body: String::new(),
         });
         settings
+    }
+
+    #[test]
+    fn blank_endpoint_knobs_send_nothing() {
+        let config = build_llm_config_for_key(&settings_with_two_providers(), "custom:ep1");
+        assert_eq!(config.reasoning_effort, None);
+        assert_eq!(config.extra_body, None);
+    }
+
+    #[test]
+    fn openai_reasoning_effort_is_optional() {
+        let mut settings = settings_with_two_providers();
+        settings.llm_provider_type = "openai".to_string();
+        assert_eq!(build_llm_config_from_settings(&settings).reasoning_effort, None);
+        settings.llm_openai_reasoning_effort = Some("minimal".to_string());
+        assert_eq!(
+            build_llm_config_from_settings(&settings).reasoning_effort.as_deref(),
+            Some("minimal")
+        );
     }
 
     #[test]

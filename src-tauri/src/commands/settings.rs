@@ -148,6 +148,10 @@ pub struct AppSettings {
     pub llm_openai_base_url: String,
     pub llm_openai_api_key: String,
     pub llm_openai_model: String,
+    /// `reasoning_effort` for the OpenAI provider; `None`/blank sends nothing,
+    /// since models that do not reason (gpt-4o) reject the field.
+    #[serde(default)]
+    pub llm_openai_reasoning_effort: Option<String>,
 
     // LLM Provider: Qwen (DashScope)
     pub llm_qwen_base_url: String,
@@ -334,6 +338,14 @@ pub struct CustomLlmEndpoint {
     pub api_key: String,
     pub model: String,
     pub api_mode: String, // "chat_completions" | "responses"
+    /// `reasoning_effort` to send; blank sends nothing. Endpoints differ in
+    /// what they accept (`none` on Cerebras, `minimal` on OpenAI, ...).
+    #[serde(default)]
+    pub reasoning_effort: String,
+    /// JSON object merged into every request body, for knobs that have no
+    /// standard spelling (`enable_thinking`, `thinking`, `max_tokens`, ...).
+    #[serde(default)]
+    pub extra_body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -470,6 +482,7 @@ impl Default for AppSettings {
             llm_openai_base_url: "https://api.openai.com/v1".to_string(),
             llm_openai_api_key: String::new(),
             llm_openai_model: "gpt-4o-mini".to_string(),
+            llm_openai_reasoning_effort: None,
 
             llm_qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             llm_qwen_api_key: String::new(),
@@ -1574,6 +1587,8 @@ mod tests {
                 api_key: "ka".to_string(),
                 model: "deepseek-v4-flash".to_string(),
                 api_mode: "chat_completions".to_string(),
+                reasoning_effort: String::new(),
+                extra_body: String::new(),
             },
             super::CustomLlmEndpoint {
                 id: "b".to_string(),
@@ -1582,6 +1597,8 @@ mod tests {
                 api_key: "kb".to_string(),
                 model: "llama-3.3-70b".to_string(),
                 api_mode: "chat_completions".to_string(),
+                reasoning_effort: "none".to_string(),
+                extra_body: "{\"max_tokens\": 8192}".to_string(),
             },
         ];
         settings.llm_active_custom_endpoint_id = "b".to_string();
@@ -1590,6 +1607,8 @@ mod tests {
         assert_eq!(config.base_url, "https://api.groq.com/openai/v1");
         assert_eq!(config.model_name, "llama-3.3-70b");
         assert_eq!(config.api_key, "kb");
+        assert_eq!(config.reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(config.extra_body.as_deref(), Some("{\"max_tokens\": 8192}"));
     }
 
     #[test]

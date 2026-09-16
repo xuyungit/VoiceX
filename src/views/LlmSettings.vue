@@ -40,6 +40,18 @@ const reasoningEffortOptions = computed(() => [
   { label: t('llm.high'), value: 'high' }
 ])
 
+// OpenAI-style endpoints: '' sends no `reasoning_effort` at all, because a
+// model that does not reason rejects the field, and each vendor accepts its
+// own subset of the rest.
+const optionalReasoningEffortOptions = computed(() => [
+  { label: t('llm.reasoningNotSent'), value: '' },
+  { label: t('llm.reasoningNone'), value: 'none' },
+  { label: t('llm.reasoningMinimal'), value: 'minimal' },
+  { label: t('llm.low'), value: 'low' },
+  { label: t('llm.medium'), value: 'medium' },
+  { label: t('llm.high'), value: 'high' }
+])
+
 // Common settings
 const enableLlmCorrection = computed({
   get: () => settingsStore.settings.enableLlmCorrection,
@@ -101,6 +113,10 @@ const llmOpenaiApiKey = computed({
 const llmOpenaiModel = computed({
   get: () => settingsStore.settings.llmOpenaiModel,
   set: (v: string) => settingsStore.updateSetting('llmOpenaiModel', v)
+})
+const llmOpenaiReasoningEffort = computed({
+  get: () => settingsStore.settings.llmOpenaiReasoningEffort ?? '',
+  set: (v: string) => settingsStore.updateSetting('llmOpenaiReasoningEffort', v || null)
 })
 
 // Qwen-specific
@@ -171,6 +187,33 @@ const llmCustomApiMode = computed({
     if (activeCustomEndpoint.value) activeCustomEndpoint.value.apiMode = v
   }
 })
+const llmCustomReasoningEffort = computed({
+  get: () => activeCustomEndpoint.value?.reasoningEffort ?? '',
+  set: (v: string) => {
+    if (activeCustomEndpoint.value) activeCustomEndpoint.value.reasoningEffort = v
+  }
+})
+const llmCustomExtraBody = computed({
+  get: () => activeCustomEndpoint.value?.extraBody ?? '',
+  set: (v: string) => {
+    if (activeCustomEndpoint.value) activeCustomEndpoint.value.extraBody = v
+  }
+})
+// The backend refuses to send a request whose extra fields do not parse, so
+// say so here, where the user can still fix it.
+const llmCustomExtraBodyError = computed(() => {
+  const raw = llmCustomExtraBody.value.trim()
+  if (!raw) return ''
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return t('llm.extraBodyNotObject')
+    }
+    return ''
+  } catch (error) {
+    return `${t('llm.extraBodyInvalid')}: ${(error as Error).message}`
+  }
+})
 
 // Dropdown selection: maps built-in providers and `custom:<id>` keys onto the
 // persisted (llmProviderType, llmActiveCustomEndpointId) pair.
@@ -204,7 +247,9 @@ function addCustomEndpoint() {
     baseUrl: '',
     apiKey: '',
     model: '',
-    apiMode: 'chat_completions'
+    apiMode: 'chat_completions',
+    reasoningEffort: '',
+    extraBody: ''
   })
   settingsStore.updateSetting('llmProviderType', 'custom')
   settingsStore.updateSetting('llmActiveCustomEndpointId', id)
@@ -371,6 +416,17 @@ async function runLlmProviderProbe() {
             </div>
             <NInput v-model:value="llmOpenaiModel" class="field-control short" />
           </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
+              <div class="field-sub">{{ t('llm.reasoningEffortOptionalSub') }}</div>
+            </div>
+            <NSelect
+              v-model:value="llmOpenaiReasoningEffort"
+              :options="optionalReasoningEffortOptions"
+              class="field-control short"
+            />
+          </div>
         </template>
 
         <!-- Qwen Settings -->
@@ -481,6 +537,32 @@ async function runLlmProviderProbe() {
               v-model:value="llmCustomApiMode"
               :options="apiModeOptions"
               class="field-control short"
+            />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
+              <div class="field-sub">{{ t('llm.reasoningEffortOptionalSub') }}</div>
+            </div>
+            <NSelect
+              v-model:value="llmCustomReasoningEffort"
+              :options="optionalReasoningEffortOptions"
+              class="field-control short"
+            />
+          </div>
+          <div class="field-row align-start">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.extraBody') }}</div>
+              <div class="field-sub">{{ t('llm.extraBodySub') }}</div>
+              <div v-if="llmCustomExtraBodyError" class="field-error">{{ llmCustomExtraBodyError }}</div>
+            </div>
+            <NInput
+              v-model:value="llmCustomExtraBody"
+              type="textarea"
+              :rows="3"
+              :status="llmCustomExtraBodyError ? 'error' : undefined"
+              :placeholder="t('llm.extraBodyPlaceholder')"
+              class="field-control mono"
             />
           </div>
           <div class="field-row">
@@ -655,6 +737,16 @@ async function runLlmProviderProbe() {
 
 .field-control.short {
   width: 260px;
+}
+
+.field-control.mono :deep(textarea) {
+  font-family: ui-monospace, monospace;
+  font-size: var(--font-xs);
+}
+
+.field-error {
+  font-size: var(--font-xs);
+  color: var(--color-error, #f87171);
 }
 
 .probe-actions {

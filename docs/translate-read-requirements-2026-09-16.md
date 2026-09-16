@@ -164,6 +164,14 @@
 | `ttsPreprocessPromptTemplate` | string | 默认提示词 | |
 | `ttsCaptionsEnabled` | boolean | true | 字幕开关，M3 起生效 |
 
+大模型设置页同时新增推理控制（附录 B 的实测结论），不带 `ttsTranslate` 前缀，因为听写整理同样受益：
+
+| 键 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `llmCustomEndpoints[].reasoningEffort` | string | `''` | 空串不发送；否则原样作为 `reasoning_effort` 发给自定义端点 |
+| `llmCustomEndpoints[].extraBody` | string | `''` | JSON 对象，合并进每个请求体，同名键覆盖；不是合法 JSON 对象时请求报错而不是静默忽略 |
+| `llmOpenaiReasoningEffort` | string \| null | null | OpenAI 官方端点的 `reasoning_effort`，null 不发送 |
+
 命名用 `ttsTranslate*` 前缀，与听写翻译的 `translation*` 区分。现有 `translationTargetLanguage` 属于听写翻译且未被使用，本需求不动它。
 
 ## 5. 涉及模块与改动点
@@ -251,5 +259,19 @@
 - `llm_stage` 的 opt-in 实测（`VOICEX_DB=... cargo test --lib llm_stage::tests::live -- --ignored --nocapture`）：Markdown 标题、加粗、链接 URL 被正确去掉，短文本约 0.9 秒返回。
 - 实测发现：当前配置的三个自定义端点（Cerebras Qwen3.8 27B、Deepseek v4 flash、Xiaomi mimo v2.5）都是推理模型。长选区（约 800–2900 字）下推理过程可能耗尽 4096 的 `max_tokens`：Cerebras 返回空内容或译文被截断，Deepseek 在 2900 字时截断，mimo 能完成但约 44 秒。关掉推理（Cerebras 的 `reasoning_effort: none`）后 2900 字约 1.4 秒完成。
 - 应对（已实现）：LLM 客户端把「达到输出上限」（chat 的 `finish_reason: length`、Gemini 的 `MAX_TOKENS`、Responses 的 `max_output_tokens`）当作错误，翻译朗读显示 `llm_failed` 而不是朗读半截译文。
-- 后续（不在 M1/M2 内）：为自定义端点增加推理开关，并考虑按输入长度放宽翻译阶段的输出 token 上限。
-- 未做：HUD 与设置页的截图核对（开发版进程没有 bundle id，后台截图工具无法定位；全屏截图需要的 TextEdit 授权被拒绝）。
+- 未做：HUD 与设置页的截图核对（开发版进程没有 bundle id，后台截图工具无法定位；全屏控制的授权弹窗当时无人应答）。
+
+### B.1 推理预算与输出上限（2026-09-16 补充）
+
+- 根因修正：截断不是模型上下文不够，而是应用自己给 OpenAI / Qwen / Gemini / 自定义端点硬编码了 4096 的输出上限（`max_tokens` / `max_completion_tokens` / `maxOutputTokens`），推理模型把它花在思考上，正文就没了。火山引擎一直没发上限，所以从未出现。
+- 已实现：删掉所有固定输出上限；按 `tools/llm-bench` 的做法，自定义端点各自带 `reasoning_effort` 与 `extra_body`（JSON 对象合并进请求体、同名键覆盖、非法 JSON 报 `InvalidConfig`），OpenAI 官方端点带可选 `reasoning_effort`。默认都不发送，尊重服务端默认。
+- 逐端点实测（走应用自己的请求构造，`VOICEX_DB` 指向设置库副本，2900 字中文）：
+
+| 端点 | 不发开关 | 有效开关 | 结果 |
+|---|---|---|---|
+| Cerebras `qwen-3.8-27b` | 3.2 秒，完整 | `reasoning_effort: none` | 1.4 秒 |
+| Deepseek `deepseek-v4-flash` | 8.8 秒，完整（默认思考，短文本 583 个推理 token） | `reasoning_effort: none` 或 `{"thinking": {"type": "disabled"}}` | 6.2 秒；短文本推理 token 0，1.6 秒 |
+| Xiaomi `mimo-v2.5` | 60 秒超时 | 文档只认 `{"thinking": {"type": "disabled"}}` | 探测当天 `mimo-v2.5` 对任何请求都返回 HTTP 500，改用 `mimo-v2.5-pro` 验证：关思考 2900 字 11 秒；开思考 600 字 17 秒 |
+
+- 小米不认 `reasoning_effort`（`mimo-v2.5-pro` 同样只认 `thinking`）；Deepseek 两种都认。设置页的「额外请求字段」就是为这种各家私有开关准备的。
+- `scripts/tts/translate_read.sh` 新增 `long` 用例：约 2850 字、分节编号的选区，判据是译文里保留了最后一节的编号，用来抓输出被截断。
