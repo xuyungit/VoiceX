@@ -17,7 +17,8 @@
 #   long     ~2900 chars, just under the cap → one translate_read row whose
 #            translation is not cut short (no fixed output-token cap upstream)
 #   toolong  > 3000 chars → refused before the LLM call, no row
-#   cancel   Esc while the LLM request is in flight → no row
+#   cancel   Esc while the LLM request is in flight → no row (Esc goes out
+#            CANCEL_ESC_DELAY_S after the hotkey, see below)
 #   stop     second hotkey press during speech → row exists (the translation
 #            finished), speech is cut short; judged by ear, the row is reported
 #
@@ -41,6 +42,11 @@ CASES="success"
 KEYCODE_T=17
 KEYCODE_ESC=53
 ROW_TIMEOUT_S=40
+# The cancel case must land its Esc while the LLM reply is still pending:
+# after the selection read (tens of milliseconds) and before the fastest
+# reply seen. Cerebras answered the 2320-character fixture in 1.1 s, so an
+# Esc at 1.2 s stopped the speech of an already-saved translation instead.
+CANCEL_ESC_DELAY_S=0.5
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -181,7 +187,7 @@ run_case() {
   t0=$(date +%s)
 
   case "$name" in
-    cancel) sleep 1.2; inject_key "$KEYCODE_ESC"; note "Esc sent 1.2 s after the hotkey" ;;
+    cancel) sleep "$CANCEL_ESC_DELAY_S"; inject_key "$KEYCODE_ESC"; note "Esc sent $CANCEL_ESC_DELAY_S s after the hotkey" ;;
     stop)   sleep 9; inject_key "$KEYCODE_T" option,command; note "second hotkey sent 9 s after the first" ;;
   esac
 
