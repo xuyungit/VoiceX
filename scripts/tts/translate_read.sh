@@ -24,6 +24,11 @@
 # The translate hotkey must be at its default (Option+Command+T) and
 # "翻译并朗读" enabled in Reading settings. Injection needs Accessibility for
 # the calling terminal (see cgevent_key.py).
+#
+# A reading hotkey pressed while a session is active stops that session instead
+# of starting another (tts/controller.rs), so every case first makes sure no
+# read is in progress, and stops its own read once judged: the long fixture
+# would otherwise speak for about ten minutes and swallow the next case's hotkey.
 
 set -uo pipefail
 
@@ -53,6 +58,36 @@ max_rowid() { sqlite3 "$DB" "select coalesce(max(rowid),0) from history_record;"
 
 screen_locked() {
   ioreg -n Root -d1 -a 2>/dev/null | grep -A1 IOConsoleLocked | grep -q '<true/>'
+}
+
+# The HUD window is on screen only while a session runs, so its presence in the
+# app's window list is the one idle signal readable from outside. Dev builds run
+# as "voicex", packaged ones as "VoiceX".
+hud_visible() {
+  osa1 5 'tell application "System Events" to return name of windows of (first application process whose name is "voicex" or name is "VoiceX")' \
+    | grep -q 'VoiceX HUD'
+}
+
+wait_hud_hidden() {
+  local deadline=$(( $(date +%s) + $1 ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    hud_visible || return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+# Stop a read that is still going. A HUD that only lingers after a session
+# ended hides by itself within a couple of seconds, so give it that long first:
+# the hotkey sent to an idle app would start a read of whatever is selected.
+stop_if_reading() {
+  wait_hud_hidden 3 && return 0
+  inject_key "$KEYCODE_T" option,command
+  if wait_hud_hidden 5; then
+    note "stopped the read still in progress"
+  else
+    note "HUD still visible 5 s after the stop hotkey"
+  fi
 }
 
 # Distinct numbered sections instead of one repeated sentence, so a translation
@@ -124,13 +159,14 @@ wait_for_row() {
 row_field() { sqlite3 "$DB" "select $2 from history_record where rowid=$1;"; }
 
 run_case() {
-  local name="$1" fixture before rowid front t0 mode
+  local name="$1" fixture before rowid front t0 t_row mode translated
   fixture="$(fixture_for "$name")" || { fail "$name: unknown case"; return; }
   # ${#fixture} counts bytes under the C locale a non-interactive shell may
   # have, which would make the 3000-character cap look wrong in the output.
   info "case $name (run $RUN_ID, $(python3 -c 'import sys; print(len(sys.argv[1]))' "$fixture") chars)"
 
   if screen_locked; then invalid "$name: the screen is locked"; return; fi
+  stop_if_reading
   before="$(max_rowid)"
   open_fixture "$fixture" || { invalid "$name: could not open the TextEdit fixture"; return; }
 
@@ -150,7 +186,9 @@ run_case() {
   esac
 
   rowid="$(wait_for_row "$before")" || rowid=""
+  t_row=$(date +%s)
   close_fixture
+  stop_if_reading
 
   case "$name" in
     success|long|stop)
@@ -170,13 +208,13 @@ run_case() {
 import re, sys
 t = sys.stdin.read(); tail = t[int(len(t) * 0.7):]
 sys.exit(0 if re.search(r"12|十二|twelve", tail, re.I) else 1)'; then
-          pass "$name: row $rowid after $(( $(date +%s) - t0 ))s, model=$(row_field "$rowid" llm_model_name), $(python3 -c 'import sys; print(len(sys.argv[1]))' "$translated") chars, section 12 present"
+          pass "$name: row $rowid after $(( t_row - t0 ))s, model=$(row_field "$rowid" llm_model_name), $(python3 -c 'import sys; print(len(sys.argv[1]))' "$translated") chars, section 12 present"
         else
           fail "$name: section 12 missing from the tail: …$(printf '%s' "$translated" | python3 -c 'import sys; print(sys.stdin.read()[-120:])')"
         fi
         return
       fi
-      pass "$name: row $rowid after $(( $(date +%s) - t0 ))s, model=$(row_field "$rowid" llm_model_name)"
+      pass "$name: row $rowid after $(( t_row - t0 ))s, model=$(row_field "$rowid" llm_model_name)"
       note "text: $(row_field "$rowid" text)"
       ;;
     toolong|cancel)
