@@ -13,6 +13,11 @@ use crate::storage::HistoryRecord;
 pub const HISTORY_ERROR_NONE: i32 = 0;
 pub const HISTORY_ERROR_ASR_FAILED: i32 = 1;
 
+/// History `mode` of a translate-and-read record: the translation is the
+/// text, the selection is the original, and there is no audio. Rows with this
+/// mode never leave the machine, see [`HistoryService::translate_read_behavior`].
+pub const HISTORY_MODE_TRANSLATE_READ: &str = "translate_read";
+
 #[derive(Clone, Default)]
 pub struct HistoryService;
 
@@ -82,7 +87,8 @@ impl HistoryService {
             llm_model_name,
         };
 
-        self.persist_record(record, Self::completed_behavior(&settings), app_handle);
+        let behavior = Self::behavior_for_mode(&record.mode, &settings);
+        self.persist_record(record, behavior, app_handle);
     }
 
     pub fn persist_failed_asr(
@@ -252,6 +258,33 @@ impl HistoryService {
                 settings.text_retention_days
             },
             audio_retention_days: settings.audio_retention_days,
+        }
+    }
+
+    fn behavior_for_mode(mode: &str, settings: &AppSettings) -> PersistBehavior {
+        if mode == HISTORY_MODE_TRANSLATE_READ {
+            Self::translate_read_behavior(settings)
+        } else {
+            Self::completed_behavior(settings)
+        }
+    }
+
+    /// Translations stay on this machine and out of the counters.
+    ///
+    /// The usage counters (total input characters, AI corrections, and the
+    /// characters-per-minute rate derived from them) describe dictation. A
+    /// 3000-character translation with zero duration would distort all three,
+    /// on this device and on the sync server, which adds every uploaded row to
+    /// its account totals without looking at the mode and cannot be taught
+    /// otherwise without a redeploy. So these rows are neither uploaded nor
+    /// counted. Retention keeps the normal rule: this persist must never prune
+    /// synced rows that the dictation path would keep.
+    fn translate_read_behavior(settings: &AppSettings) -> PersistBehavior {
+        PersistBehavior {
+            update_stats: false,
+            update_device_stats: false,
+            enqueue_sync: false,
+            ..Self::completed_behavior(settings)
         }
     }
 
@@ -461,8 +494,50 @@ impl HistoryService {
 
 #[cfg(test)]
 mod tests {
-    use super::HistoryService;
+    use super::{HistoryService, HISTORY_MODE_TRANSLATE_READ};
     use crate::commands::settings::AppSettings;
+
+    fn sync_ready_settings() -> AppSettings {
+        let mut settings = AppSettings::default();
+        settings.sync_enabled = true;
+        settings.sync_server_url = "https://sync.example".to_string();
+        settings.sync_token = "token".to_string();
+        settings.sync_shared_secret = "secret".to_string();
+        settings.sync_device_name = "mac".to_string();
+        settings.text_retention_days = 30;
+        settings
+    }
+
+    #[test]
+    fn translate_read_rows_stay_local_and_uncounted_when_sync_is_ready() {
+        let settings = sync_ready_settings();
+        let translate = HistoryService::behavior_for_mode(HISTORY_MODE_TRANSLATE_READ, &settings);
+        let dictation = HistoryService::behavior_for_mode("assistant_corrected", &settings);
+
+        assert!(dictation.enqueue_sync && dictation.update_device_stats);
+        assert!(!translate.enqueue_sync);
+        assert!(!translate.update_stats);
+        assert!(!translate.update_device_stats);
+        // Same retention as the dictation path, so a translation persist never
+        // prunes synced rows that dictation would keep.
+        assert_eq!(translate.text_retention_days, dictation.text_retention_days);
+        assert_eq!(
+            translate.audio_retention_days,
+            dictation.audio_retention_days
+        );
+    }
+
+    #[test]
+    fn translate_read_rows_are_uncounted_without_sync_too() {
+        let settings = AppSettings::default();
+        let translate = HistoryService::behavior_for_mode(HISTORY_MODE_TRANSLATE_READ, &settings);
+        let dictation = HistoryService::behavior_for_mode("assistant_raw", &settings);
+
+        assert!(dictation.update_stats && dictation.update_device_stats && !dictation.enqueue_sync);
+        assert!(
+            !translate.update_stats && !translate.update_device_stats && !translate.enqueue_sync
+        );
+    }
 
     #[test]
     fn elevenlabs_refine_snapshot_uses_defaults_when_models_are_empty() {

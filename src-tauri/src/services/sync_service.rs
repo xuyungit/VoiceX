@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::commands::settings::AppSettings;
-use crate::services::history_service::HISTORY_ERROR_NONE;
+use crate::services::history_service::{HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ};
 use crate::storage::{self, HistoryRecord, UsageStats};
 
 #[derive(Clone, Default)]
@@ -110,7 +110,7 @@ impl SyncService {
         if !inner.config.is_valid() {
             return;
         }
-        if record.error_code != HISTORY_ERROR_NONE {
+        if !record_leaves_this_machine(&record.mode, record.error_code) {
             return;
         }
 
@@ -735,6 +735,17 @@ fn emit_sync_state(app: &AppHandle, device_id_override: Option<&str>) {
     }
 }
 
+/// Whether a local history record may ever be uploaded.
+///
+/// Failed recordings stay local, and so do translate-and-read rows: the sync
+/// server adds every row it receives to the account's dictation counters
+/// without looking at the mode, and cannot be taught otherwise without a
+/// redeploy (see `HistoryService::translate_read_behavior`). Both upload
+/// paths, the live upsert and the startup seed, go through this check.
+fn record_leaves_this_machine(mode: &str, error_code: i32) -> bool {
+    error_code == HISTORY_ERROR_NONE && mode != HISTORY_MODE_TRANSLATE_READ
+}
+
 fn seed_outbox_from_history(
     device_id: &str,
     server_state: &storage::SyncServerState,
@@ -753,7 +764,7 @@ fn seed_outbox_from_history(
         }
 
         for record in records {
-            if record.error_code != HISTORY_ERROR_NONE {
+            if !record_leaves_this_machine(&record.mode, record.error_code) {
                 continue;
             }
             let source_device_id = record
@@ -916,4 +927,32 @@ fn hmac_sha256_hex(secret: &str, payload: &str) -> Result<String, String> {
     mac.update(payload.as_bytes());
     let result = mac.finalize().into_bytes();
     Ok(hex::encode(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::record_leaves_this_machine;
+    use crate::services::history_service::{
+        HISTORY_ERROR_ASR_FAILED, HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ,
+    };
+
+    #[test]
+    fn only_successful_dictation_rows_leave_this_machine() {
+        assert!(record_leaves_this_machine(
+            "assistant_corrected",
+            HISTORY_ERROR_NONE
+        ));
+        assert!(record_leaves_this_machine(
+            "assistant_raw",
+            HISTORY_ERROR_NONE
+        ));
+        assert!(!record_leaves_this_machine(
+            "assistant_corrected",
+            HISTORY_ERROR_ASR_FAILED
+        ));
+        assert!(!record_leaves_this_machine(
+            HISTORY_MODE_TRANSLATE_READ,
+            HISTORY_ERROR_NONE
+        ));
+    }
 }

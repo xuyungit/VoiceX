@@ -1,5 +1,6 @@
 //! History-related commands
 
+use crate::services::history_service::HISTORY_MODE_TRANSLATE_READ;
 use crate::services::sync_service::SyncService;
 use crate::storage::{HistoryRecord, UsageStats};
 use tauri::State;
@@ -26,8 +27,13 @@ pub fn get_history(limit: u32, offset: u32) -> Result<Vec<HistoryRecord>, String
 /// Delete a history record
 #[tauri::command]
 pub fn delete_history_record(id: String, sync: State<'_, SyncService>) -> Result<(), String> {
+    // Translate-and-read rows are never uploaded (history_service), so there
+    // is nothing on the server to delete and no event to send.
+    let mode = crate::storage::history_record_mode(&id).map_err(|e| e.to_string())?;
     crate::storage::delete_history_record(&id).map_err(|e| e.to_string())?;
-    sync.enqueue_history_delete(&id);
+    if mode.as_deref() != Some(HISTORY_MODE_TRANSLATE_READ) {
+        sync.enqueue_history_delete(&id);
+    }
     Ok(())
 }
 

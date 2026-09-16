@@ -23,7 +23,7 @@ use super::{
 use super::llm_stage::{self, LlmStageError, TRANSLATE_MAX_CHARS};
 use crate::commands::settings::AppSettings;
 use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest};
-use crate::services::history_service::HistoryService;
+use crate::services::history_service::{HistoryService, HISTORY_MODE_TRANSLATE_READ};
 use crate::services::hud_service::{HudService, ReadingKind, ReadingPhase};
 use crate::services::llm_service::{build_llm_config_for_key, settings_for_llm_key};
 
@@ -51,10 +51,6 @@ const PROVIDER_VOLCENGINE: &str = "volcengine";
 const PROVIDER_ALIYUN: &str = "aliyun";
 const PROVIDER_MIMO: &str = "mimo";
 const PROVIDER_AZURE: &str = "azure";
-
-/// History `mode` of a translate-and-read record: the translation is the
-/// text, the selection is the original, and there is no audio.
-pub const HISTORY_MODE_TRANSLATE_READ: &str = "translate_read";
 
 /// What a reading session does with the selection before speaking it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

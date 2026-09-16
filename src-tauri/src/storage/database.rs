@@ -494,6 +494,21 @@ pub fn insert_history_record_with_stats(
     })
 }
 
+/// The `mode` of one history record, or `None` when there is no such row.
+pub fn history_record_mode(id: &str) -> Result<Option<String>, StorageError> {
+    with_db(|conn| history_record_mode_in(conn, id))
+}
+
+fn history_record_mode_in(conn: &Connection, id: &str) -> Result<Option<String>, StorageError> {
+    conn.query_row(
+        "SELECT mode FROM history_record WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))
+}
+
 /// Delete a history record
 pub fn delete_history_record(id: &str) -> Result<(), StorageError> {
     delete_history_record_internal(id, true)
@@ -1316,6 +1331,31 @@ mod tests {
             )
             .unwrap();
         serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn history_record_mode_reads_one_row_and_reports_missing_ids() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE history_record (id TEXT PRIMARY KEY, mode TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history_record (id, mode) VALUES ('a', 'translate_read'), ('b', 'assistant_raw')",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            history_record_mode_in(&conn, "a").unwrap().as_deref(),
+            Some("translate_read")
+        );
+        assert_eq!(
+            history_record_mode_in(&conn, "b").unwrap().as_deref(),
+            Some("assistant_raw")
+        );
+        assert_eq!(history_record_mode_in(&conn, "missing").unwrap(), None);
     }
 
     #[test]

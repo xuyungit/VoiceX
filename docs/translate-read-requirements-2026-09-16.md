@@ -128,7 +128,7 @@
 ### 3.9 译文留存
 
 - 复制到剪贴板：开关，默认关。翻译成功后把译文以纯文本写入剪贴板，不恢复。取词的剪贴板降级在翻译之前已完成快照与恢复，两者不冲突。
-- 写入历史：开关，默认开。记录 `mode` 为 `translate_read`，`text` 为译文，`originalText` 为原文，`llmModelName` 为所用模型，无音频。历史页需要为该 mode 增加展示分支。历史同步按普通记录透传，旧版本客户端遇到未知 mode 按普通记录显示。
+- 写入历史：开关，默认开。记录 `mode` 为 `translate_read`，`text` 为译文，`originalText` 为原文，`llmModelName` 为所用模型，无音频。历史页需要为该 mode 增加展示分支。译文只存本机：不进同步队列，不计入总输入字符数、AI 纠错次数和本机设备统计，删除时也不发同步事件（2026-09-16 决定，见附录 B.2）。
 - 普通朗读及其预处理不写历史。
 
 ### 3.10 普通朗读的大模型预处理
@@ -158,7 +158,7 @@
 | `ttsTranslatePromptTemplate` | string | 默认提示词 | 含占位符 |
 | `ttsTranslateVoiceOverrides` | Record<string, string> | `{}` | 键为 provider，阿里云为 `aliyun:<model>`；值为音色 id；缺省沿用朗读音色 |
 | `ttsTranslateCopyToClipboard` | boolean | false | 译文复制到剪贴板 |
-| `ttsTranslateSaveHistory` | boolean | true | 译文写入历史 |
+| `ttsTranslateSaveHistory` | boolean | true | 译文写入本机历史（不同步、不计统计） |
 | `ttsLlmProviderKey` | string | `follow` | `follow`、内置 provider 名，或 `custom:<id>` |
 | `ttsPreprocessEnabled` | boolean | false | 普通朗读前大模型整理 |
 | `ttsPreprocessPromptTemplate` | string | 默认提示词 | |
@@ -275,3 +275,11 @@
 
 - 小米不认 `reasoning_effort`（`mimo-v2.5-pro` 同样只认 `thinking`）；Deepseek 两种都认。设置页的「额外请求字段」就是为这种各家私有开关准备的。
 - `scripts/tts/translate_read.sh` 新增 `long` 用例：约 2850 字、分节编号的选区，判据是输出尾部保留了最后一节的编号（数字可能被写成「十二」或 twelve，目标语言随设置），用来抓输出被截断。开发版应用实测（Cerebras，目标语言当时设为 zh-CN）：不发开关 4 秒出历史行；在设置页把该端点的推理强度设为「关闭（none）」后 2 秒出历史行，均为 2870 字，第十二节在。五次运行里有两次没出历史行，原因是脚本自身：上一轮 2870 字的朗读要读十来分钟，朗读进行中再按朗读热键是「停止」而不是「开始」（`tts/controller.rs`），热键被当成了停止。脚本已改为：注入前以 HUD 窗口是否在窗口列表里判断有没有朗读在进行，有则先停；用例判定后也主动停掉本次朗读，避免拖到下一个用例。改后 `--case all`（success / long / toolong / cancel / stop）一次全部通过，success 1 秒、long 2 秒出历史行。
+
+### B.2 译文历史只存本机（2026-09-16 补充）
+
+同步链路本身能透传 `translate_read` 行：客户端上传只按 `error_code` 过滤，服务器把 `mode` 当自由字符串存，事件原样分发给其他设备。问题在用量计数器：服务器每收到一条新记录就把 `text` 长度加进总输入字符数、`llm_invoked` 加进 AI 纠错次数（`sync-server/src/main.rs`），客户端从同步事件和本机设备统计也做同样的累加。译文时长为 0、动辄两三千字，会把概览页的总字数、AI 纠错和字/分钟都推高。今天的测试已经有 12 条译文行（12,580 字、12 次 AI 纠错）上传并计入账户总量，这部分不会自动回退。
+
+要在服务器端排除需要重新编译部署 voicex-sync，服务器很久没升级、是否有 Rust 环境不确定，所以决定译文只存本机：`history_service.rs` 里 `translate_read` 走单独的落库行为，不进 outbox、不加任何计数器，保留期规则和听写记录一致；删除这类行时不发 `history.delete` 事件，因为服务器从没见过它。同步代码不会整表重建本地历史，本机译文行不会丢。
+
+实机验证时发现第二条出口：同步服务每次启动都会把 `seeded_at` 之后的本地记录补进 outbox（`seed_outbox_from_history`），只按 `error_code` 过滤。落库不进 outbox 的译文行，会在下一次启动时被这条路径补传——第一次验证就是这样又上传了一条 36 字的译文（服务器计数 +36 字、+1 次 AI 纠错、+1 次录音）。所以过滤放在同步服务的出口上：`enqueue_history_upsert` 和启动补传都跳过 `translate_read`，落库时的 `enqueue_sync=false` 只是不再多此一举。
