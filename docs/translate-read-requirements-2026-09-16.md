@@ -274,4 +274,4 @@
 | Xiaomi `mimo-v2.5` | 60 秒超时 | 文档只认 `{"thinking": {"type": "disabled"}}` | 探测当天 `mimo-v2.5` 对任何请求都返回 HTTP 500，改用 `mimo-v2.5-pro` 验证：关思考 2900 字 11 秒；开思考 600 字 17 秒 |
 
 - 小米不认 `reasoning_effort`（`mimo-v2.5-pro` 同样只认 `thinking`）；Deepseek 两种都认。设置页的「额外请求字段」就是为这种各家私有开关准备的。
-- `scripts/tts/translate_read.sh` 新增 `long` 用例：约 2850 字、分节编号的选区，判据是译文里保留了最后一节的编号，用来抓输出被截断。
+- `scripts/tts/translate_read.sh` 新增 `long` 用例：约 2850 字、分节编号的选区，判据是输出尾部保留了最后一节的编号（数字可能被写成「十二」或 twelve，目标语言随设置），用来抓输出被截断。开发版应用实测（Cerebras，不发开关，目标语言当时设为 zh-CN）：4 秒出历史行，2870 字，第十二节在。三次运行里有一次没有出历史行，当时观察到 loginwindow 曾短暂在前台，没能从日志确认原因。
