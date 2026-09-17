@@ -155,12 +155,33 @@ body.hud-windows.hud-translucent .hud-container {
     /* exactly 2 lines; truncation is handled by fitText() in hud.ts */
 }
 
-/* A caption is the sentence being spoken: a third line and a little more
-   contrast than a transcript, whose tail is only glanced at. */
+/* A caption is the sentence being spoken and nothing else: no status row,
+   no chip, no bars, no frame — text large enough to read from across the
+   room. Four lines at this size hold a 120-character piece, the caption
+   piece limit, so truncation only happens for a piece that wraps past that. */
+body.caption-mode .hud-container {
+    padding: 14px 24px;
+    gap: 0;
+    border: none;
+    justify-content: center;
+}
+
+body.caption-mode .status-area,
+body.caption-mode .waveform-bars,
+body.caption-mode .waveform-hybrid {
+    display: none;
+}
+
 body.caption-mode .text-area {
-    line-height: 1.45;
-    max-height: calc(12px * 1.45 * 3 + 2px);
-    color: rgba(255, 255, 255, 0.82);
+    font-size: 20px;
+    line-height: 1.4;
+    max-height: calc(20px * 1.4 * 4 + 2px);
+    color: rgba(255, 255, 255, 0.92);
+    text-align: center;
+}
+
+body.caption-mode .text-area .placeholder {
+    color: rgba(255, 255, 255, 0.5);
 }
 
 .text-area.is-placeholder {

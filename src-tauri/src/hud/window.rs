@@ -9,17 +9,19 @@ pub const STREAM_HUD_HEIGHT: f64 = 100.0;
 /// Batch-mode HUD content size (logical points).
 pub const BATCH_HUD_WIDTH: f64 = 204.0;
 pub const BATCH_HUD_HEIGHT: f64 = 78.0;
-/// A read with captions: the stream layout's status row over up to three
-/// lines of the sentence being spoken, widened so a 120-character piece is
-/// mostly legible rather than mostly ellipsis.
-pub const CAPTION_HUD_WIDTH: f64 = 400.0;
-pub const CAPTION_HUD_HEIGHT: f64 = 108.0;
+/// A read with captions: the sentence being spoken and nothing else, at a
+/// font readable from across the room; wide enough that four lines hold a
+/// 120-character piece (the caption piece limit) without truncation.
+pub const CAPTION_HUD_WIDTH: f64 = 680.0;
+pub const CAPTION_HUD_HEIGHT: f64 = 140.0;
 
 const HUD_BOTTOM_MARGIN: f64 = 120.0;
+// The clamps bound what any presentation may ask for; a size outside them
+// would be shown smaller than its stylesheet lays out, and silently so.
 const HUD_MIN_WIDTH: f64 = 128.0;
-const HUD_MAX_WIDTH: f64 = 560.0;
+const HUD_MAX_WIDTH: f64 = CAPTION_HUD_WIDTH;
 const HUD_MIN_HEIGHT: f64 = 56.0;
-const HUD_MAX_HEIGHT: f64 = 120.0;
+const HUD_MAX_HEIGHT: f64 = CAPTION_HUD_HEIGHT;
 /// macOS whole-window opacity via `NSWindow::setAlphaValue` when the setting
 /// is on. Windows does not read this: it keeps the native window
 /// composition-transparent and changes CSS alpha instead (see
@@ -485,4 +487,23 @@ pub enum HudError {
 
     #[error("Failed to position HUD window: {0}")]
     PositionFailed(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A presentation asking for more than the clamp allows would be shown
+    /// smaller than its stylesheet lays out, and the clamp never says so.
+    #[test]
+    fn every_presentation_size_survives_the_clamp() {
+        for (width, height) in [
+            (STREAM_HUD_WIDTH, STREAM_HUD_HEIGHT),
+            (BATCH_HUD_WIDTH, BATCH_HUD_HEIGHT),
+            (CAPTION_HUD_WIDTH, CAPTION_HUD_HEIGHT),
+        ] {
+            assert_eq!(width.clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH), width);
+            assert_eq!(height.clamp(HUD_MIN_HEIGHT, HUD_MAX_HEIGHT), height);
+        }
+    }
 }

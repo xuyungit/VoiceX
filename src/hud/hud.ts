@@ -97,9 +97,10 @@ let waveformFrameId = 0;
 let waveformLastFrameTime = 0;
 let waveformShiftAccumulator = 0;
 const MAX_LINES = 2;
-/// A caption is a whole sentence rather than the tail of a transcript, so it
-/// gets a third line; the window is sized for it in `hud/window.rs`.
-const CAPTION_MAX_LINES = 3;
+// A caption is read, not glanced at, and drawn large (hud.css): four
+// lines hold a 120-character piece, the caption piece limit, so only a
+// piece that wraps past that loses its head to the ellipsis.
+const CAPTION_MAX_LINES = 4;
 const ELLIPSIS = "\u2026";
 const WAVEFORM_ATTACK = 0.4;
 const WAVEFORM_RELEASE = 0.15;
@@ -325,10 +326,18 @@ function applyWaveformVisibility(compactBatchMode: boolean) {
 function setBatchLayoutMode(batchWaveMode: boolean, compactBatchMode: boolean) {
   document.body.classList.toggle("batch-wave-mode", batchWaveMode);
   document.body.classList.toggle("compact-batch-mode", compactBatchMode);
+  const wasCaptionMode = document.body.classList.contains("caption-mode");
   document.body.classList.toggle("caption-mode", isCaptionMode());
 
   if (textArea) {
     textArea.hidden = compactBatchMode;
+  }
+  if (wasCaptionMode !== isCaptionMode()) {
+    // The caption font is larger than the transcript's, and text is fitted
+    // against a measure element styled like the text area: refresh it with
+    // the class, not at the next window resize, or the first caption is
+    // fitted at the small font and clipped instead of ellipsized.
+    updateTextAreaMaxWidth();
   }
   applyWaveformVisibility(compactBatchMode);
   if (waveformHybridCanvas) {

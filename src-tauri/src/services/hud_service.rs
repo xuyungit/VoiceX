@@ -19,8 +19,8 @@ pub enum HudPresentation {
     /// Batch dictation and reads without captions: the compact card, where
     /// the waveform or the reading icon is all there is to show.
     Batch,
-    /// A read with captions: the stream layout, widened, showing the sentence
-    /// being spoken where the transcript would be.
+    /// A read with captions: the sentence being spoken, drawn large, and
+    /// nothing else — no status row, no chip, no bars.
     Caption,
 }
 
