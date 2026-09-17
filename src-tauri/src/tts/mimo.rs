@@ -19,7 +19,7 @@
 //! service actually does.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -27,10 +27,12 @@ use base64::Engine;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
+use super::cloud_playback::{self, PieceStream};
+use super::decode::RECV_POLL;
 use super::playback::{negotiate_sample_rate, Playback, PlaybackHandle};
 use super::{
-    cloud_http_client, log_cloud_retry, log_event, split_for_backend, CancelToken,
-    CloudStreamError, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
+    cloud_http_client, log_cloud_retry, log_event, piece_limit_for, CancelToken, CloudStreamError,
+    SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
 };
 
 const ENDPOINT: &str = "https://api.xiaomimimo.com/v1/chat/completions";
@@ -91,6 +93,9 @@ pub struct MimoBackend {
     /// `start` returns.
     playback: Arc<Mutex<Option<PlaybackHandle>>>,
     speaking: Arc<AtomicBool>,
+    /// The current request's text as the pieces it was synthesized in,
+    /// which is what `progress` reports on.
+    pieces: Mutex<Vec<String>>,
 }
 
 impl MimoBackend {
@@ -99,6 +104,7 @@ impl MimoBackend {
             config: Mutex::new(config),
             playback: Arc::new(Mutex::new(None)),
             speaking: Arc::new(AtomicBool::new(false)),
+            pieces: Mutex::new(Vec::new()),
         }
     }
 
@@ -171,6 +177,13 @@ impl TtsBackend for MimoBackend {
             .and_then(|slot| slot.as_ref().and_then(|handle| handle.level()))
     }
 
+    fn reports_progress(&self) -> bool {
+        true
+    }
+
+    fn progress(&self) -> Option<SpeechProgress> {
+        cloud_playback::progress(&self.speaking, &self.pieces, &self.playback)
+    }
 }
 
 impl MimoBackend {
@@ -191,7 +204,18 @@ impl MimoBackend {
         // provider so an ignored value cannot look like a broken one.
         let gain = request.volume.unwrap_or(1.0);
 
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        // One request per piece, all feeding the same PCM pipeline: the
+        // service silently truncates past MAX_CHARS, so splitting is the only
+        // way a long selection is read in full. The pieces end on sentence
+        // boundaries, so a seam is just an ordinary pause. Split before
+        // anything starts, so `progress` can name the piece the sink is on.
+        let pieces = cloud_playback::split_pieces(
+            &request.text,
+            piece_limit_for(request.piece_limit, MAX_CHARS),
+            &self.pieces,
+        );
+
+        let (tx, rx) = mpsc::channel::<PieceStream>();
         // Lets the decode side tell "the provider failed" apart from "the audio
         // ended", which otherwise both look like a closed channel.
         let network_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -226,26 +250,27 @@ impl MimoBackend {
             })
             .map_err(|err| TtsError::Backend(format!("failed to spawn the decoder: {err}")))?;
 
-        let text = request.text;
         let http_token = token;
         let http_error = network_error;
         tauri::async_runtime::spawn(async move {
-            // One request per piece, all feeding the same PCM pipeline: the
-            // service silently truncates past MAX_CHARS, so splitting is the
-            // only way a long selection is read in full. The pieces end on
-            // sentence boundaries, so a seam is just an ordinary pause.
-            let pieces = split_for_backend(&text, MAX_CHARS);
-            if pieces.len() > 1 {
-                log_event("speak_chunked", &[("pieces", pieces.len().to_string())]);
-            }
             for piece in &pieces {
+                // Handed over before any of its bytes, so the sink can mark
+                // where the piece begins in the sample stream.
+                let (piece_tx, piece_rx) = mpsc::channel::<Vec<u8>>();
+                if tx.send(piece_rx).is_err() {
+                    // The sink is gone — it could not open the device, or the
+                    // read was stopped — so nobody would hear the rest.
+                    break;
+                }
                 let outcome = stream_audio_with_retry(
                     &config.api_key,
                     &build_body(piece, &voice, &config.instruction),
-                    &tx,
+                    &piece_tx,
                     &http_token,
                 )
                 .await;
+                // Closing the piece is what lets the sink move on to the next.
+                drop(piece_tx);
                 match outcome {
                     Ok(true) => {}
                     // Cancelled, or the decoder hung up: synthesizing the
@@ -259,7 +284,7 @@ impl MimoBackend {
                     }
                 }
             }
-            // Closing the channel is what ends the decode loop.
+            // Closing the channel is what ends the sink's loop.
             drop(tx);
         });
 
@@ -404,7 +429,7 @@ impl LinearResampler {
 /// decoder sits in this path — raw PCM has nothing to decode, which is the
 /// point (see the module docs).
 fn run_playback(
-    rx: Receiver<Vec<u8>>,
+    pieces: Receiver<PieceStream>,
     device_rate: u32,
     gain: f32,
     token: CancelToken,
@@ -439,24 +464,41 @@ fn run_playback(
     let mut samples = Vec::new();
     let mut resampler = LinearResampler::new(STREAM_RATE, device_rate);
     let mut resampled = Vec::new();
-    // Ends when the network side drops the sender — after the last event or on
-    // failure — or when playback is stopped under us.
-    for chunk in rx.iter() {
-        if token.is_cancelled() {
-            break;
-        }
-        converter.process(&chunk, &mut samples);
-        if samples.is_empty() {
-            continue;
-        }
-        if !started {
-            started = true;
-            speaking.store(true, Ordering::SeqCst);
-            log_event("speak_started", &[]);
-        }
-        resampler.process(&samples, &mut resampled);
-        if !playback.push(&resampled) {
-            break;
+    // Ends when the network side drops the outer sender — after the last piece
+    // or on failure — or when playback is stopped under us. The converter and
+    // resampler carry across pieces: the stream is one continuous signal that
+    // merely arrived in several requests.
+    'pieces: loop {
+        let piece = match pieces.recv_timeout(RECV_POLL) {
+            Ok(piece) => piece,
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                if token.is_cancelled() {
+                    break;
+                }
+                continue;
+            }
+        };
+        // Marked before the piece's first byte, so the boundary is exactly
+        // where the previous piece's samples ended.
+        playback.begin_piece();
+        for chunk in piece.iter() {
+            if token.is_cancelled() {
+                break 'pieces;
+            }
+            converter.process(&chunk, &mut samples);
+            if samples.is_empty() {
+                continue;
+            }
+            if !started {
+                started = true;
+                speaking.store(true, Ordering::SeqCst);
+                log_event("speak_started", &[]);
+            }
+            resampler.process(&samples, &mut resampled);
+            if !playback.push(&resampled) {
+                break 'pieces;
+            }
         }
     }
 

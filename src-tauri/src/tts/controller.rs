@@ -18,13 +18,14 @@ use super::azure::{self, AzureBackend, AzureConfig};
 use super::mimo::{MimoBackend, MimoConfig};
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
-    log_event, SessionSlot, StopReason, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoiceList,
+    log_event, SessionSlot, SpeechProgress, StopReason, TtsBackend, TtsError, TtsRequest,
+    TtsStatus, TtsVoiceList,
 };
 use super::llm_stage::{self, LlmStageError, TRANSLATE_MAX_CHARS};
 use crate::commands::settings::AppSettings;
 use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest};
 use crate::services::history_service::{HistoryService, HISTORY_MODE_TRANSLATE_READ};
-use crate::services::hud_service::{HudService, ReadingKind, ReadingPhase};
+use crate::services::hud_service::{HudPresentation, HudService, ReadingKind, ReadingPhase};
 use crate::services::llm_service::{build_llm_config_for_key, settings_for_llm_key};
 
 /// Longest preview we will speak. The settings page sends a short fixed
@@ -45,6 +46,21 @@ const HUD_LINGER_MS: u64 = 400;
 /// How long an error stays on screen. Longer, because it is the only place a
 /// failed read is visible at all.
 const HUD_ERROR_LINGER_MS: u64 = 2_600;
+
+/// Longest piece a read with captions is synthesized in, in characters.
+///
+/// A caption is the piece being spoken, so the piece has to be about a
+/// sentence: long enough that a normal sentence is not cut, short enough
+/// that the HUD's three lines hold most of it. CosyVoice already ran at this
+/// size; for the other providers it means more, smaller requests per read.
+const CAPTION_PIECE_LIMIT: usize = 120;
+
+/// Sentence-sized pieces cost extra requests, so a read is only split that
+/// way when captions will show them: a translate-and-read with the setting
+/// on. Every other read keeps its backend's own piece size.
+fn caption_piece_limit(kind: ReadKind, captions_enabled: bool) -> Option<usize> {
+    (kind == ReadKind::Translate && captions_enabled).then_some(CAPTION_PIECE_LIMIT)
+}
 
 /// Settings values selecting a cloud backend.
 const PROVIDER_VOLCENGINE: &str = "volcengine";
@@ -216,6 +232,7 @@ impl TtsController {
         backend: Arc<dyn TtsBackend>,
         failure: Arc<Mutex<Option<String>>>,
         llm_busy: Arc<AtomicBool>,
+        captions: bool,
     ) {
         let Some(hud) = self.hud() else { return };
         let hud_kind = kind.hud_kind();
@@ -226,17 +243,23 @@ impl TtsController {
         yielded.store(false, Ordering::SeqCst);
 
         hud.cancel_hide();
-        // Compact presentation: a read has nothing to display but its own
-        // existence, so it gets the small HUD rather than the one sized for
-        // streaming transcripts.
-        hud.show(true);
+        // A read without captions has nothing to display but its own
+        // existence, so it gets the compact card rather than the layout sized
+        // for text; with captions the sentence being spoken needs the room.
+        hud.show(if captions {
+            HudPresentation::Caption
+        } else {
+            HudPresentation::Batch
+        });
         hud.emit_error(None);
+        hud.emit_caption(None);
         hud.emit_reading(hud_kind, Some(ReadingPhase::Preparing));
 
         thread::Builder::new()
             .name("voicex-tts-hud".to_string())
             .spawn(move || {
                 let mut shown = ReadingPhase::Preparing;
+                let mut caption: Option<SpeechProgress> = None;
                 while session.is_active() {
                     let phase = match backend.status() {
                         TtsStatus::Speaking => ReadingPhase::Speaking,
@@ -258,9 +281,31 @@ impl TtsController {
                     if let Some(level) = backend.audio_level() {
                         hud.emit_audio_level(level);
                     }
+                    // The same poll carries the caption: the backend says
+                    // which piece is being heard, and only a change is worth
+                    // an event.
+                    if captions {
+                        let now = backend.progress();
+                        if now != caption {
+                            if let Some(progress) = &now {
+                                log_event(
+                                    "caption",
+                                    &[
+                                        ("index", progress.index.to_string()),
+                                        ("total", progress.total.to_string()),
+                                    ],
+                                );
+                            }
+                            hud.emit_caption(now.as_ref());
+                            caption = now;
+                        }
+                    }
                     thread::sleep(HUD_POLL);
                 }
 
+                if captions {
+                    hud.emit_caption(None);
+                }
                 hud.emit_reading(hud_kind, None);
                 // Dictation already owns the window. Hiding here would take the
                 // recording HUD down a moment after it appeared, and the next
@@ -666,11 +711,27 @@ impl TtsController {
             return;
         };
 
+        // Captions follow the piece being spoken, so they need sentence-sized
+        // pieces and a backend that can say which piece it is on; `say` has
+        // no such signal and keeps the compact HUD. Decided here, before the
+        // HUD is shown, because the layout is fixed for the session.
+        let piece_limit = caption_piece_limit(
+            kind,
+            settings.as_ref().is_some_and(|s| s.tts_captions_enabled),
+        );
+        let captions = piece_limit.is_some() && backend.reports_progress();
+
         let token = self.inner.session.claim();
         self.set_active_backend(Some(backend.clone()));
         let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let llm_busy = Arc::new(AtomicBool::new(false));
-        self.spawn_hud_driver(kind, backend.clone(), failure.clone(), llm_busy.clone());
+        self.spawn_hud_driver(
+            kind,
+            backend.clone(),
+            failure.clone(),
+            llm_busy.clone(),
+            captions,
+        );
         let app_for_history = app.clone();
 
         thread::Builder::new()
@@ -758,10 +819,11 @@ impl TtsController {
                         // pieces itself, so the whole selection is read rather
                         // than a truncated prefix of it. (Translate has its
                         // own cap, applied before the LLM call.)
-                        let request = match settings {
+                        let mut request = match settings {
                             Some(settings) => voice_request(&settings, staged.text),
                             None => TtsRequest::plain(staged.text),
                         };
+                        request.piece_limit = piece_limit;
                         if let Err(err) = backend.start(request, token) {
                             log_event(
                                 "speak_err",
@@ -1066,6 +1128,7 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
         rate,
         volume,
         pitch,
+        piece_limit: None,
     }
 }
 
@@ -1415,7 +1478,17 @@ mod tests {
     // --- translate-and-read ---
 
     use super::super::llm_stage::{LlmStageError, TRANSLATE_MAX_CHARS};
-    use super::{apply_translate_voice_override, stage_text, translate_voice_key, ReadKind};
+    use super::{
+        apply_translate_voice_override, caption_piece_limit, stage_text, translate_voice_key,
+        ReadKind,
+    };
+
+    #[test]
+    fn only_a_translate_read_with_captions_on_is_split_into_sentences() {
+        assert_eq!(caption_piece_limit(ReadKind::Translate, true), Some(120));
+        assert_eq!(caption_piece_limit(ReadKind::Translate, false), None);
+        assert_eq!(caption_piece_limit(ReadKind::Read, true), None);
+    }
 
     #[test]
     fn the_translate_hotkey_stops_a_plain_read_and_vice_versa() {

@@ -3,9 +3,45 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter};
 
 use crate::hud::{
-    self, BATCH_HUD_HEIGHT, BATCH_HUD_WIDTH, STREAM_HUD_HEIGHT, STREAM_HUD_WIDTH,
+    self, BATCH_HUD_HEIGHT, BATCH_HUD_WIDTH, CAPTION_HUD_HEIGHT, CAPTION_HUD_WIDTH,
+    STREAM_HUD_HEIGHT, STREAM_HUD_WIDTH,
 };
 use crate::state::{ProcessingIntent, RecordingStyle};
+use crate::tts::SpeechProgress;
+
+/// Which layout the HUD window shows. Chosen when the window is shown and
+/// fixed for that session: the window is sized to match, and resizing it
+/// mid-session would jump under the user's eyes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HudPresentation {
+    /// Streaming dictation: a status row over the live transcript.
+    Stream,
+    /// Batch dictation and reads without captions: the compact card, where
+    /// the waveform or the reading icon is all there is to show.
+    Batch,
+    /// A read with captions: the stream layout, widened, showing the sentence
+    /// being spoken where the transcript would be.
+    Caption,
+}
+
+impl HudPresentation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HudPresentation::Stream => "stream",
+            HudPresentation::Batch => "batch",
+            HudPresentation::Caption => "caption",
+        }
+    }
+
+    /// Content size in logical points.
+    fn bounds(self) -> (f64, f64) {
+        match self {
+            HudPresentation::Stream => (STREAM_HUD_WIDTH, STREAM_HUD_HEIGHT),
+            HudPresentation::Batch => (BATCH_HUD_WIDTH, BATCH_HUD_HEIGHT),
+            HudPresentation::Caption => (CAPTION_HUD_WIDTH, CAPTION_HUD_HEIGHT),
+        }
+    }
+}
 
 /// HUD helper to centralize window show/hide and event emissions.
 #[derive(Clone)]
@@ -72,13 +108,13 @@ impl HudService {
         }
     }
 
-    pub fn show(&self, is_batch: bool) {
+    pub fn show(&self, presentation: HudPresentation) {
         // Recreate/position in case display changed.
         if let Err(err) = hud::create_hud_window(&self.app_handle) {
             log::warn!("Failed to create HUD window: {}", err);
         }
-        self.emit_presentation_mode(is_batch);
-        self.sync_bounds(is_batch);
+        self.emit_presentation_mode(presentation);
+        self.sync_bounds(presentation);
         hud::show_hud(&self.app_handle);
     }
 
@@ -172,9 +208,9 @@ impl HudService {
         let _ = self.app_handle.emit("state:recording_style", payload);
     }
 
-    pub fn emit_presentation_mode(&self, is_batch: bool) {
+    pub fn emit_presentation_mode(&self, presentation: HudPresentation) {
         let payload = json!({
-            "mode": if is_batch { "batch" } else { "stream" }
+            "mode": presentation.as_str()
         });
         self.cache_event("state:hud_presentation", &payload);
         let _ = self
@@ -182,12 +218,8 @@ impl HudService {
             .emit_to("hud", "state:hud_presentation", payload);
     }
 
-    pub fn sync_bounds(&self, is_batch: bool) {
-        let (width, height) = if is_batch {
-            (BATCH_HUD_WIDTH, BATCH_HUD_HEIGHT)
-        } else {
-            (STREAM_HUD_WIDTH, STREAM_HUD_HEIGHT)
-        };
+    pub fn sync_bounds(&self, presentation: HudPresentation) {
+        let (width, height) = presentation.bounds();
         let _ = hud::set_hud_content_bounds(&self.app_handle, width, height);
     }
 
@@ -249,6 +281,19 @@ impl HudService {
         let _ = self.app_handle.emit_to("hud", "state:reading", payload);
     }
 
+    /// The sentence being spoken, for the caption presentation. `None` clears
+    /// it: before the first piece is audible the HUD shows the phase
+    /// placeholder instead, and after the read nothing.
+    pub fn emit_caption(&self, caption: Option<&SpeechProgress>) {
+        let payload = json!({
+            "text": caption.map(|c| c.text.as_str()),
+            "index": caption.map(|c| c.index),
+            "total": caption.map(|c| c.total),
+        });
+        self.cache_event("state:caption", &payload);
+        let _ = self.app_handle.emit_to("hud", "state:caption", payload);
+    }
+
     pub fn emit_error(&self, message: Option<&str>) {
         let payload = json!({
             "message": message,
@@ -272,7 +317,7 @@ impl HudService {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReadingKind, ReadingPhase};
+    use super::{HudPresentation, ReadingKind, ReadingPhase};
 
     #[test]
     fn reading_phase_tokens_match_what_the_hud_switches_on() {
@@ -284,5 +329,8 @@ mod tests {
         assert_eq!(ReadingPhase::Speaking.as_str(), "speaking");
         assert_eq!(ReadingKind::Read.as_str(), "read");
         assert_eq!(ReadingKind::Translate.as_str(), "translate");
+        assert_eq!(HudPresentation::Stream.as_str(), "stream");
+        assert_eq!(HudPresentation::Batch.as_str(), "batch");
+        assert_eq!(HudPresentation::Caption.as_str(), "caption");
     }
 }

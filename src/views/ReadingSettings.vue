@@ -341,6 +341,11 @@ const translateSaveHistory = computed({
   set: (value: boolean) => settingsStore.updateSetting('ttsTranslateSaveHistory', value)
 })
 
+const captionsEnabled = computed({
+  get: () => settingsStore.settings.ttsCaptionsEnabled,
+  set: (value: boolean) => settingsStore.updateSetting('ttsCaptionsEnabled', value)
+})
+
 const ttsLlmProviderKey = computed({
   get: () => settingsStore.settings.ttsLlmProviderKey,
   set: (value: string) => settingsStore.updateSetting('ttsLlmProviderKey', value)
@@ -1000,6 +1005,16 @@ onBeforeUnmount(() => {
           </div>
           <div class="field-control end">
             <NSwitch v-model:value="translateSaveHistory" />
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.captions') }}</div>
+            <div class="field-note">{{ t('reading.captionsNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <NSwitch v-model:value="captionsEnabled" />
           </div>
         </div>
 

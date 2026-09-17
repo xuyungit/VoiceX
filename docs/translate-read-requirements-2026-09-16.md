@@ -46,7 +46,7 @@
 | M4 字幕打磨 | 大字体、无外框、位置与透明度 | 视觉迭代，可多轮 |
 | M5 流式 | 大模型流式输出 → 逐句 TTS → 字幕；取消字数上限；直接朗读也可显示字幕 | 高级功能 |
 
-每个里程碑单独成 PR。M1 与 M2 可以合并为一个 PR，如果改动量可控。
+每个里程碑单独成 PR。M1 与 M2 可以合并为一个 PR，如果改动量可控。M1、M2 的验证记录见附录 B，M3 的实现与验证见附录 B.3。
 
 ## 3. 功能需求
 
@@ -110,20 +110,20 @@
 
 适用范围：M3 起只在翻译朗读时显示；后续开放给直接朗读，开关不区分朗读种类。
 
-同步机制：
+同步机制（M3 已实现）：
 
-- 待朗读文本按句切成小段，段长上限约 120 字符，沿用 `split_for_backend` 的"先句末、后子句"规则。每段作为一个 TTS 请求或一个 AVSpeech utterance。
-- 云端后端记录每段音频在播放流中的起始采样位置，播放器已知已消费采样数，两者比较得出当前段。四家云端后端同一套机制，不依赖厂商时间戳接口。
-- AVSpeech 后端每段一个 utterance，用 delegate 的开始回调标记当前段。
-- `say` 后端没有进度信号，不显示字幕，HUD 保持紧凑版。
-- HUD 驱动线程按现有 60 ms 轮询读取后端当前段，变化时发字幕事件，载荷为当前句文本、下标、总数。
+- 待朗读文本按句切成小段：翻译朗读且字幕开启时 `TtsRequest.piece_limit` 为 120 字符，沿用 `split_for_backend` 的"先句末、后子句"规则；其他朗读保持各后端自己的分段上限。每段作为一个 TTS 请求或一个 AVSpeech utterance。
+- 云端后端记录每段音频在播放流中的起始采样位置，播放器已知已消费采样数，两者比较得出当前段。四家云端后端同一套机制，不依赖厂商时间戳接口：阿里云、Azure、火山共用 `tts/cloud_playback.rs` 的逐段 MP3 解码播放端，小米走自己的 PCM 播放端但用同一个进度函数。当前段取"起点严格小于已播放采样数"的最后一段，刚登记、还没出声的段仍算上一段；`speaking` 置位前不回报，字幕不会比声音先跳。
+- AVSpeech 后端每段一个 utterance、一次全部入队，delegate 的 `didStart` 标记当前段；只有最后一个 utterance 的 `didFinish` 结束本次朗读，任一 utterance 的 `didCancel` 都按停止处理。
+- `say` 后端没有进度信号（`reports_progress` 为 false），不显示字幕，HUD 保持紧凑版。
+- HUD 驱动线程按现有 60 ms 轮询读取后端当前段，变化时发 `state:caption` 事件，载荷为当前句文本、下标、总数，结束时清空；日志 `event=caption index=… total=…`。
 
 版式：
 
-- M3：新增一种带文字的 HUD 呈现，窗口加宽到 400 左右，两到三行，显示当前句。
+- M3（已实现）：新增 `caption` 呈现，窗口 400×108，正文 12px、行高 1.45、最多三行，显示当前句；翻译阶段文字区显示"正在翻译..."，译文返回到第一段出声之间显示"正在准备朗读..."。已知限制：超过三行的段只显示尾部、开头是省略号（`fitText` 沿用保尾规则），中文约 90 字以上会截掉开头；分段按句不按段落，一段可能跨过段落换行。两点都留给 M4 的版式打磨。
 - M4：加大字体，无外框只显示文字，位置与透明度可调，与现有 `hudTransparent` 设置协调。这一步以视觉效果为准，允许多轮迭代。
 
-风险：句级分块让云端请求数增加。CosyVoice 已经以 120 字分块运行，衔接没有问题；其他后端在实现时验证请求频率是否触发限流。
+风险：句级分块让云端请求数增加。CosyVoice 已经以 120 字分块运行，衔接没有问题；其他后端在实现时验证请求频率是否触发限流。M3 实测见附录 B.3：请求按段顺序发出，不受播放节奏约束，2870 字 35 段在阿里云上没有出现 `cloud_retry`。
 
 ### 3.9 译文留存
 
@@ -179,7 +179,7 @@
 - 快捷键 `src-tauri/src/hotkey/`：第三个绑定、三方冲突、状态结构扩展、新的 hook 事件。
 - 朗读控制 `src-tauri/src/tts/controller.rs`：朗读种类枚举；在取词与朗读之间插入大模型阶段，运行在会话令牌下可取消；音色覆盖解析；字幕段的切分与当前段回报。
 - 大模型 `src-tauri/src/llm/`、`services/llm_service.rs`：按 provider key 构建配置；独立于 `correct` 的通用补全入口，不注入词典与"原文："前缀；M5 增加流式。
-- TTS 后端 `src-tauri/src/tts/*.rs`、`playback.rs`：按段请求、记录段起始采样、暴露当前段；AVSpeech 每段一个 utterance。
+- TTS 后端 `src-tauri/src/tts/*.rs`、`playback.rs`、`cloud_playback.rs`：按段请求、记录段起始采样、暴露当前段，云端共用的逐段解码与进度回报在 `cloud_playback.rs`；AVSpeech 每段一个 utterance。
 - HUD `src-tauri/src/services/hud_service.rs`、`src/hud/`：`translating` 阶段与 `kind`；字幕事件；带文字的朗读呈现与尺寸；M4 视觉打磨。
 - 历史 `services/history_service.rs`、`src/views/History.vue`：`translate_read` 记录与展示。
 - 设置 `commands/settings.rs`、`src/stores/settings.ts`、`src/views/ReadingSettings.vue`、`src/i18n/locales/`：第 4 节的键、朗读页新小节、中英文案。
@@ -259,7 +259,7 @@
 - `llm_stage` 的 opt-in 实测（`VOICEX_DB=... cargo test --lib llm_stage::tests::live -- --ignored --nocapture`）：Markdown 标题、加粗、链接 URL 被正确去掉，短文本约 0.9 秒返回。
 - 实测发现：当前配置的三个自定义端点（Cerebras Qwen3.8 27B、Deepseek v4 flash、Xiaomi mimo v2.5）都是推理模型。长选区（约 800–2900 字）下推理过程可能耗尽 4096 的 `max_tokens`：Cerebras 返回空内容或译文被截断，Deepseek 在 2900 字时截断，mimo 能完成但约 44 秒。关掉推理（Cerebras 的 `reasoning_effort: none`）后 2900 字约 1.4 秒完成。
 - 应对（已实现）：LLM 客户端把「达到输出上限」（chat 的 `finish_reason: length`、Gemini 的 `MAX_TOKENS`、Responses 的 `max_output_tokens`）当作错误，翻译朗读显示 `llm_failed` 而不是朗读半截译文。
-- 未做：HUD 与设置页的截图核对（开发版进程没有 bundle id，后台截图工具无法定位；全屏控制的授权弹窗当时无人应答）。
+- 未做：HUD 与设置页的截图核对（开发版进程没有 bundle id，后台截图工具无法定位；全屏控制的授权弹窗当时无人应答）。M3 找到了可行的截图方法，见 B.3。
 
 ### B.1 推理预算与输出上限（2026-09-16 补充）
 
@@ -283,3 +283,16 @@
 要在服务器端排除需要重新编译部署 voicex-sync，服务器很久没升级、是否有 Rust 环境不确定，所以决定译文只存本机：`history_service.rs` 里 `translate_read` 走单独的落库行为，不进 outbox、不加任何计数器，保留期规则和听写记录一致；删除这类行时不发 `history.delete` 事件，因为服务器从没见过它。同步代码不会整表重建本地历史，本机译文行不会丢。
 
 实机验证时发现第二条出口：同步服务每次启动都会把 `seeded_at` 之后的本地记录补进 outbox（`seed_outbox_from_history`），只按 `error_code` 过滤。落库不进 outbox 的译文行，会在下一次启动时被这条路径补传——第一次验证就是这样又上传了一条 36 字的译文（服务器计数 +36 字、+1 次 AI 纠错、+1 次录音）。所以过滤放在同步服务的出口上：`enqueue_history_upsert` 和启动补传都跳过 `translate_read`，落库时的 `enqueue_sync=false` 只是不再多此一举。
+
+### B.3 M3 字幕基础（2026-09-17）
+
+- `cargo test --lib` 357 通过、9 个 ignored（新增：mac_system 多 utterance 的段映射与只有最后一段结束朗读、cloud_playback 的分段与当前段、hud_service 的三种呈现字符串、controller 的分段决策）；`pnpm build` 通过。
+- 开发版应用实测（阿里云，Cerebras 翻译，目标语言 zh-CN）：
+  - 36 字：单段，`caption index=0 total=1`，8 秒读完，`speak_finished`。
+  - 2870 字分节长文：翻译 1.25–2.3 秒；`speak_chunked pieces=35`；`speak_start` 到 `speak_started`（第一段请求、解码、出声）1 秒；字幕每段 10–14 秒推进，index 0→3 分别在出声后 0、14、24、37 秒；45 秒时按热键停止，`speak_stop` → `speak_stopped` → `speak_cancelled`，HUD 当秒隐藏。四次长文运行都没有 `cloud_retry`。
+  - 同一长文有一次 Cerebras 只返回 1309 字（11 段），是模型输出不稳定，`translate_read.sh` 的 long 用例会把它判成第十二节缺失；与字幕无关，本次记录以备后查。
+  - HUD 截图（方法见下）：热键后 0.4 秒魔法棒 + "正在翻译..."，1.4 秒朗读图标 + "正在准备朗读..."，2.4 秒起显示第一句，之后按段推进；跨段落的长段只剩尾部、开头是省略号，即 3.8 记录的已知限制。截图留在会话临时目录，没有进仓库。
+- 请求频率：云端生产者按段顺序请求，一段音频流收完立刻发下一段，不等播放。按代码推断（没有逐段请求日志），阿里云每段约 1 秒返回，35 段大约在出声后 40 秒内全部请求完毕，其余六分多钟只是本地播放。没有触发限流；若某家后端限流，改成按播放进度节流（例如领先两段）即可，`cloud_playback` 的 channel 已经是逐段交接。
+- `scripts/tts/translate_read.sh --case all`：success 1 秒、long 2 秒（2871 字，第十二节在）、toolong、stop 通过；cancel 那一轮被判 INVALID，因为注入前微信恰好成了前台应用，脚本按设计拒绝向别的应用注入，单独重跑 cancel 通过。
+- 截图方法：开发版进程没有 bundle id，按应用截图的工具找不到它（`app_list_windows` 为空）；Bash 工具进程没有屏幕录制权限，`screencapture` 直接报 could not create image。可行的路径是从桌面应用的终端面板（有屏幕录制权限）跑探测脚本，用 System Events 取 "VoiceX HUD" 窗口的 position 与 size，再 `screencapture -R x,y,w,h`。另一个坑：后台运行的 Bash 作业没有按键注入权限，热键静默丢失、应用一条日志都没有，探测脚本要在前台 shell 里启动。
+- 未做：`say` 后端保持紧凑版只由单元测试覆盖（`reports_progress` 默认 false），没有切换 provider 实测；设置页的"朗读字幕"开关没有截图。

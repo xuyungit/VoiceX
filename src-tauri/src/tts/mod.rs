@@ -11,6 +11,7 @@
 
 pub mod aliyun;
 pub mod azure;
+pub mod cloud_playback;
 pub mod controller;
 pub mod decode;
 pub mod llm_stage;
@@ -85,6 +86,13 @@ pub struct TtsRequest {
     /// 1.0 is the neutral value and both ends are meaningful, so squashing it
     /// into 0..1 would only hide where "unchanged" sits.
     pub pitch: Option<f32>,
+    /// Longest piece, in characters, the backend may hand to one synthesis
+    /// unit — one cloud request or one AVSpeech utterance. `None` leaves the
+    /// backend at its own cap. Callers that show captions ask for a
+    /// sentence-sized value: the piece is what a backend reports progress on
+    /// (see [`SpeechProgress`]), and only a short piece makes "the sentence
+    /// being spoken" true rather than "the paragraph containing it".
+    pub piece_limit: Option<usize>,
 }
 
 impl TtsRequest {
@@ -96,7 +104,39 @@ impl TtsRequest {
             rate: None,
             volume: None,
             pitch: None,
+            piece_limit: None,
         }
+    }
+}
+
+/// The piece cap a backend splits at: its own, tightened to what the request
+/// asks for when that is smaller. A request can only ask for shorter pieces;
+/// the provider's own limit is a hard one.
+pub fn piece_limit_for(requested: Option<usize>, own: usize) -> usize {
+    requested.map_or(own, |limit| limit.min(own))
+}
+
+/// Which piece of a request is being heard, for captions.
+///
+/// `index` counts pieces from zero and `total` is how many the request was
+/// split into; `text` is the piece itself, so the HUD needs no copy of the
+/// split. Equality is what the HUD driver polls on: a new value means a new
+/// caption event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeechProgress {
+    pub index: usize,
+    pub total: usize,
+    pub text: String,
+}
+
+impl SpeechProgress {
+    /// The record for piece `index` of `pieces`; `None` past the end.
+    pub fn at(index: usize, pieces: &[String]) -> Option<Self> {
+        Some(Self {
+            index,
+            total: pieces.len(),
+            text: pieces.get(index)?.clone(),
+        })
     }
 }
 
@@ -398,6 +438,22 @@ pub trait TtsBackend: Send + Sync {
         None
     }
 
+    /// Whether [`progress`](Self::progress) ever reports anything. The HUD
+    /// picks its layout before speech starts — captions need the wide one —
+    /// so this has to be known up front rather than inferred from the first
+    /// `Some`.
+    fn reports_progress(&self) -> bool {
+        false
+    }
+
+    /// The piece currently being heard: `None` before the first one is
+    /// audible and again once the read has ended. Backends that render audio
+    /// themselves compare consumed samples against each piece's start; the
+    /// AVSpeech backend takes the engine's per-utterance start callback. The
+    /// `say` backend has no signal at all and keeps the default.
+    fn progress(&self) -> Option<SpeechProgress> {
+        None
+    }
 }
 
 /// Split `text` into pieces of at most `limit` characters, cutting at a

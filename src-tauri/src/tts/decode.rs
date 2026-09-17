@@ -26,7 +26,7 @@ use super::CancelToken;
 
 /// How long to park in `recv` before re-checking cancellation. Short enough
 /// that stopping feels immediate, long enough not to spin.
-const RECV_POLL: Duration = Duration::from_millis(120);
+pub const RECV_POLL: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum DecodeError {

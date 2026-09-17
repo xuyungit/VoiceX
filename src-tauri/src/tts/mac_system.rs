@@ -16,7 +16,7 @@
 //! hotkey until the app restarts.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -32,12 +32,17 @@ use objc2_avf_audio::{
 use objc2_foundation::NSString;
 use tauri::AppHandle;
 
-use super::{log_event, CancelToken, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice};
+use super::{
+    log_event, split_for_backend, CancelToken, SpeechProgress, TtsBackend, TtsError, TtsRequest,
+    TtsStatus, TtsVoice,
+};
 
 /// How long a main-thread hop may take before we treat the engine as wedged.
 const MAIN_THREAD_TIMEOUT_MS: u64 = 2_000;
 /// How long the engine has to call back before the watchdog gives up on it.
 const START_TIMEOUT_MS: u64 = 2_000;
+/// `BackendState::current` while no piece is being spoken.
+const NO_PIECE: usize = usize::MAX;
 
 thread_local! {
     /// Owned by the main thread. Every access goes through [`on_main`].
@@ -48,7 +53,7 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-/// The utterance the synthesizer is currently working on.
+/// The read the synthesizer is currently working on.
 ///
 /// Carried through a shared slot rather than captured per-utterance because the
 /// delegate object is created once and reused; each `start` replaces this.
@@ -58,20 +63,28 @@ struct Speaking {
     /// Whether the engine reported that it began. Distinguishes "finished
     /// normally" from "never started", which the watchdog needs.
     started: AtomicBool,
-    /// Address of the utterance this describes, used only to tell callbacks
-    /// apart — never dereferenced, and `AVSpeechUtterance` is not `Send`, so it
-    /// cannot be held here anyway.
+    /// Addresses of the read's utterances, one per piece and in speaking
+    /// order, used only to tell callbacks apart — never dereferenced, and
+    /// `AVSpeechUtterance` is not `Send`, so they cannot be held here anyway.
+    /// A callback's position in this list is the piece it is about.
     ///
     /// Needed because starting a read stops the previous one, and the resulting
-    /// `didCancel` is delivered *after* the new utterance is registered. Without
-    /// matching, that stale callback would clear the new registration and the
-    /// session would never be released.
+    /// `didCancel` is delivered *after* the new utterances are registered.
+    /// Without matching, that stale callback would clear the new registration
+    /// and the session would never be released.
     ///
-    /// Comparing addresses is sound here: the registered utterance is retained
+    /// Comparing addresses is sound here: a registered utterance is retained
     /// by the synthesizer for as long as it can still be the subject of a
     /// callback, so its address cannot be handed to a later allocation while we
     /// still care about it.
-    utterance: usize,
+    utterances: Vec<usize>,
+}
+
+/// Whether the utterance at `index` is the read's last, whose finish is the
+/// read's finish. An earlier one finishing only means the engine is moving on
+/// to the next piece, which its start callback reports.
+fn is_last(speaking: &Speaking, index: usize) -> bool {
+    index + 1 == speaking.utterances.len()
 }
 
 fn address_of(utterance: &AVSpeechUtterance) -> usize {
@@ -101,24 +114,35 @@ define_class!(
     unsafe impl AVSpeechSynthesizerDelegate for SpeechDelegate {
         #[unsafe(method(speechSynthesizer:didStartSpeechUtterance:))]
         fn did_start(&self, _synthesizer: &AVSpeechSynthesizer, utterance: &AVSpeechUtterance) {
-            let Some(speaking) = self.matching(utterance) else {
+            let Some((speaking, index)) = self.matching(utterance) else {
                 return;
             };
             if speaking.token.is_cancelled() {
                 return;
             }
-            speaking.started.store(true, Ordering::SeqCst);
-            // Only now is it audible, which is what `status` reports and what
-            // the HUD uses to tell waiting apart from speaking.
-            speaking.state.speaking.store(true, Ordering::SeqCst);
-            log_event("speak_started", &[]);
+            // The engine's own "now speaking this one" is the progress signal
+            // captions follow; there is no sample stream to measure here.
+            speaking.state.current.store(index, Ordering::SeqCst);
+            if !speaking.started.swap(true, Ordering::SeqCst) {
+                // Only now is it audible, which is what `status` reports and
+                // what the HUD uses to tell waiting apart from speaking.
+                speaking.state.speaking.store(true, Ordering::SeqCst);
+                log_event("speak_started", &[]);
+            }
         }
 
         #[unsafe(method(speechSynthesizer:didFinishSpeechUtterance:))]
         fn did_finish(&self, _synthesizer: &AVSpeechSynthesizer, utterance: &AVSpeechUtterance) {
-            let Some(speaking) = self.take_matching(utterance) else {
+            let Some((speaking, index)) = self.matching(utterance) else {
                 return;
             };
+            // Between pieces the registration stays: the next utterance is
+            // already queued and its start callback moves `current` on.
+            if !is_last(&speaking, index) {
+                return;
+            }
+            self.take_matching(utterance);
+            speaking.state.current.store(NO_PIECE, Ordering::SeqCst);
             if speaking.token.finish() {
                 speaking.state.speaking.store(false, Ordering::SeqCst);
                 log_event("speak_finished", &[]);
@@ -139,9 +163,14 @@ define_class!(
             // Supersession does not reach here: `start` cancels the previous
             // utterance before registering the new one, so the stale callback
             // fails the identity check above and returns (see `Speaking`).
+            //
+            // Stopping cancels every queued utterance, each with its own
+            // callback; the first one takes the registration and the rest
+            // find nothing, so the read is reported cancelled once.
             let Some(speaking) = self.take_matching(utterance) else {
                 return;
             };
+            speaking.state.current.store(NO_PIECE, Ordering::SeqCst);
             speaking.state.speaking.store(false, Ordering::SeqCst);
             log_event("speak_cancelled", &[]);
         }
@@ -154,25 +183,29 @@ impl SpeechDelegate {
         unsafe { msg_send![super(this), init] }
     }
 
-    /// The registration for `utterance`, or `None` when the callback is about
-    /// an utterance we have already moved past.
-    fn matching(&self, utterance: &AVSpeechUtterance) -> Option<Arc<Speaking>> {
+    /// The registration `utterance` belongs to and its piece index, or `None`
+    /// when the callback is about a read we have already moved past.
+    fn matching(&self, utterance: &AVSpeechUtterance) -> Option<(Arc<Speaking>, usize)> {
         self.address_matches(address_of(utterance))
     }
 
-    fn address_matches(&self, address: usize) -> Option<Arc<Speaking>> {
-        self.ivars()
-            .current
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
-            .filter(|speaking| speaking.utterance == address)
+    fn address_matches(&self, address: usize) -> Option<(Arc<Speaking>, usize)> {
+        let speaking = self.ivars().current.lock().ok()?.clone()?;
+        let index = speaking.utterances.iter().position(|&a| a == address)?;
+        Some((speaking, index))
     }
 
     fn take_matching(&self, utterance: &AVSpeechUtterance) -> Option<Arc<Speaking>> {
-        let address = address_of(utterance);
+        self.take_address(address_of(utterance))
+    }
+
+    /// Remove the registration if `address` is one of its utterances.
+    fn take_address(&self, address: usize) -> Option<Arc<Speaking>> {
         let mut slot = self.ivars().current.lock().ok()?;
-        if slot.as_ref().is_some_and(|s| s.utterance == address) {
+        if slot
+            .as_ref()
+            .is_some_and(|s| s.utterances.contains(&address))
+        {
             slot.take()
         } else {
             None
@@ -221,11 +254,26 @@ fn with_synthesizer<T>(body: impl FnOnce(&AVSpeechSynthesizer, &SpeechDelegate) 
     })
 }
 
-#[derive(Default)]
 struct BackendState {
     /// Whether audio is actually coming out. Raised by the delegate when the
     /// engine reports it began, not when the utterance was accepted.
     speaking: AtomicBool,
+    /// The current request's text as the pieces it was queued in, one
+    /// utterance each, which is what `progress` reports on.
+    pieces: Mutex<Vec<String>>,
+    /// Index into `pieces` of the utterance the engine reported starting
+    /// last, or [`NO_PIECE`].
+    current: AtomicUsize,
+}
+
+impl Default for BackendState {
+    fn default() -> Self {
+        Self {
+            speaking: AtomicBool::new(false),
+            pieces: Mutex::new(Vec::new()),
+            current: AtomicUsize::new(NO_PIECE),
+        }
+    }
 }
 
 pub struct MacSystemBackend {
@@ -298,15 +346,42 @@ mod tests {
             token: slot.claim(),
             state: state.clone(),
             started: AtomicBool::new(false),
-            utterance: 0x1000,
+            utterances: vec![0x1000],
         });
         delegate.set(current);
 
         // A callback carrying some other utterance's address finds nothing.
         assert!(delegate.address_matches(0x2000).is_none());
+        assert!(delegate.take_address(0x2000).is_none());
         // And leaves the registration in place.
         assert!(delegate.address_matches(0x1000).is_some());
         assert!(slot.is_active(), "the live read must still own the session");
+    }
+
+    #[test]
+    fn each_utterance_maps_to_its_piece_and_only_the_last_ends_the_read() {
+        // A read with captions queues one utterance per piece. The engine's
+        // callbacks carry the utterance, so the piece index has to come from
+        // its position in the registration — and a middle piece finishing
+        // must not be mistaken for the read finishing.
+        let delegate = SpeechDelegate::new();
+        let slot = crate::tts::SessionSlot::default();
+        delegate.set(Arc::new(Speaking {
+            token: slot.claim(),
+            state: Arc::new(BackendState::default()),
+            started: AtomicBool::new(false),
+            utterances: vec![0x1000, 0x2000, 0x3000],
+        }));
+
+        let (speaking, index) = delegate
+            .address_matches(0x2000)
+            .expect("the middle utterance is registered");
+        assert_eq!(index, 1);
+        assert!(!is_last(&speaking, index));
+        assert!(is_last(&speaking, 2));
+        // A cancel for any queued utterance takes the whole read down.
+        assert!(delegate.take_address(0x3000).is_some());
+        assert!(delegate.address_matches(0x1000).is_none());
     }
 }
 
@@ -335,7 +410,23 @@ impl TtsBackend for MacSystemBackend {
             rate,
             volume,
             pitch,
+            piece_limit,
         } = request;
+
+        // One utterance per piece: the engine reports each utterance's start,
+        // and that is the progress signal captions follow. Without a limit the
+        // whole text is one utterance, as it always was.
+        let pieces = match piece_limit {
+            Some(limit) => split_for_backend(&text, limit),
+            None => vec![text],
+        };
+        if pieces.len() > 1 {
+            log_event("speak_chunked", &[("pieces", pieces.len().to_string())]);
+        }
+        if let Ok(mut slot) = self.state.pieces.lock() {
+            *slot = pieces.clone();
+        }
+        self.state.current.store(NO_PIECE, Ordering::SeqCst);
 
         // `run_on_main_thread` cannot be un-queued: if the wait below times out,
         // the closure still runs later. It therefore re-checks the token itself
@@ -352,37 +443,52 @@ impl TtsBackend for MacSystemBackend {
                 // Replace whatever is queued; a new request cancels the old one.
                 synthesizer.stopSpeakingAtBoundary(AVSpeechBoundary::Immediate);
 
-                let utterance =
-                    AVSpeechUtterance::speechUtteranceWithString(&NSString::from_str(&text));
-                if let Some(rate) = rate {
-                    utterance.setRate(rate.clamp(0.0, 1.0));
-                }
-                if let Some(volume) = volume {
-                    utterance.setVolume(volume.clamp(0.0, 1.0));
-                }
-                if let Some(pitch) = pitch {
-                    utterance.setPitchMultiplier(pitch.clamp(0.5, 2.0));
-                }
-                if let Some(identifier) = voice.as_deref() {
-                    match AVSpeechSynthesisVoice::voiceWithIdentifier(&NSString::from_str(
+                let voice = voice.as_deref().and_then(|identifier| {
+                    let voice = AVSpeechSynthesisVoice::voiceWithIdentifier(&NSString::from_str(
                         identifier,
-                    )) {
-                        Some(voice) => utterance.setVoice(Some(&voice)),
-                        None => log::warn!("Unknown system voice identifier: {identifier}"),
+                    ));
+                    if voice.is_none() {
+                        log::warn!("Unknown system voice identifier: {identifier}");
                     }
-                }
+                    voice
+                });
+                let utterances: Vec<_> = pieces
+                    .iter()
+                    .map(|piece| {
+                        let utterance = AVSpeechUtterance::speechUtteranceWithString(
+                            &NSString::from_str(piece),
+                        );
+                        if let Some(rate) = rate {
+                            utterance.setRate(rate.clamp(0.0, 1.0));
+                        }
+                        if let Some(volume) = volume {
+                            utterance.setVolume(volume.clamp(0.0, 1.0));
+                        }
+                        if let Some(pitch) = pitch {
+                            utterance.setPitchMultiplier(pitch.clamp(0.5, 2.0));
+                        }
+                        if let Some(voice) = voice.as_deref() {
+                            utterance.setVoice(Some(voice));
+                        }
+                        utterance
+                    })
+                    .collect();
 
-                // Registered only once the utterance exists, so its address
-                // can identify the callbacks that belong to it.
+                // Registered only once the utterances exist, so their
+                // addresses can identify the callbacks that belong to them,
+                // and before any is queued, so no callback can precede it.
                 let speaking = Arc::new(Speaking {
                     token: speak_token.clone(),
                     state,
                     started: AtomicBool::new(false),
-                    utterance: address_of(&utterance),
+                    utterances: utterances.iter().map(|u| address_of(u)).collect(),
                 });
                 delegate.set(speaking.clone());
 
-                synthesizer.speakUtterance(&utterance);
+                // The synthesizer queues them and speaks them back to back.
+                for utterance in &utterances {
+                    synthesizer.speakUtterance(utterance);
+                }
                 Some(speaking)
             })
         });
@@ -409,6 +515,7 @@ impl TtsBackend for MacSystemBackend {
 
     fn stop(&self) -> Result<(), TtsError> {
         self.state.speaking.store(false, Ordering::SeqCst);
+        self.state.current.store(NO_PIECE, Ordering::SeqCst);
 
         // Queue the engine stop and return. Waiting for the main thread here
         // (as `start` must) would stall the hotkey worker for up to
@@ -431,5 +538,18 @@ impl TtsBackend for MacSystemBackend {
         } else {
             TtsStatus::Idle
         }
+    }
+
+    fn reports_progress(&self) -> bool {
+        true
+    }
+
+    fn progress(&self) -> Option<SpeechProgress> {
+        let index = self.state.current.load(Ordering::SeqCst);
+        if index == NO_PIECE {
+            return None;
+        }
+        let pieces = self.state.pieces.lock().ok()?;
+        SpeechProgress::at(index, &pieces)
     }
 }

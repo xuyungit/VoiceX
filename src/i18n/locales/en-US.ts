@@ -273,6 +273,8 @@ const enUS = {
     translateClipboardNote: 'Writes the translation to the clipboard once it is ready, replacing what is there',
     translateHistory: 'Save to history',
     translateHistoryNote: 'Keeps the source and the translation on the History page; no audio is saved',
+    captions: 'Captions while reading',
+    captionsNote: 'Shows the sentence being spoken on the HUD; the default system voice reports no progress, so it shows none',
     translatePrompt: 'Translation prompt',
     translatePromptNote: 'The SOURCE_LANGUAGE and TARGET_LANGUAGE placeholders are filled from the settings above at run time; if they are removed a language line is appended. Selections over {max} characters are not sent.',
     resetPrompt: 'Restore default',

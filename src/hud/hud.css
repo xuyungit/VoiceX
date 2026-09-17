@@ -155,6 +155,14 @@ body.hud-windows.hud-translucent .hud-container {
     /* exactly 2 lines; truncation is handled by fitText() in hud.ts */
 }
 
+/* A caption is the sentence being spoken: a third line and a little more
+   contrast than a transcript, whose tail is only glanced at. */
+body.caption-mode .text-area {
+    line-height: 1.45;
+    max-height: calc(12px * 1.45 * 3 + 2px);
+    color: rgba(255, 255, 255, 0.82);
+}
+
 .text-area.is-placeholder {
     -webkit-line-clamp: unset;
     line-clamp: unset;

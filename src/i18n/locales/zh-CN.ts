@@ -273,6 +273,8 @@ const zhCN = {
     translateClipboardNote: '翻译完成后把译文写入剪贴板，会覆盖当前剪贴板内容',
     translateHistory: '记录到历史',
     translateHistoryNote: '在历史页保存原文与译文，不保存音频',
+    captions: '朗读字幕',
+    captionsNote: '朗读时在 HUD 显示当前句子；系统默认语音没有进度信号，不显示字幕',
     translatePrompt: '翻译提示词',
     translatePromptNote: '模板里的 SOURCE_LANGUAGE 与 TARGET_LANGUAGE 占位符在运行时按上面的设置填入；删掉占位符时会在末尾自动补一行语言说明。超过 {max} 字的选区不会发送。',
     resetPrompt: '恢复默认',

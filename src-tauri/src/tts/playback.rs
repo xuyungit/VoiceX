@@ -179,9 +179,23 @@ struct PlaybackShared {
     /// from the samples the callback is already walking, so it costs nothing
     /// extra and is a real level rather than an animation pretending to be one.
     level: AtomicU32,
+    /// Where each piece of the request begins, as a `pushed` count, in the
+    /// order the pieces were pushed. Captions follow the piece being heard,
+    /// which only the sink can place: it is the one party that knows both
+    /// where a piece's samples went and how many the device has consumed.
+    piece_starts: Mutex<Vec<u64>>,
 }
 
 impl PlaybackShared {
+    /// The piece being heard: the last one at least one sample of which has
+    /// been written to the device. `None` until the first piece's first
+    /// sample has, so a caption never appears ahead of its audio.
+    fn current_piece(&self) -> Option<usize> {
+        let played = self.played.load(Ordering::SeqCst);
+        let starts = self.piece_starts.lock().ok()?;
+        starts.iter().rposition(|&start| start < played)
+    }
+
     fn take_staged(&self, local: &mut VecDeque<f32>) {
         // Never block the audio thread. If the decoder happens to hold the lock
         // we play from what we already took rather than inserting a gap; the
@@ -209,6 +223,11 @@ impl PlaybackHandle {
 
     pub fn stop(&self) {
         self.shared.stopped.store(true, Ordering::SeqCst);
+    }
+
+    /// Index of the piece being heard; see [`Playback::begin_piece`].
+    pub fn current_piece(&self) -> Option<usize> {
+        self.shared.current_piece()
     }
 
     pub fn set_gain(&self, gain: f32) {
@@ -332,6 +351,16 @@ impl Playback {
                 .fetch_add(samples.len() as u64, Ordering::SeqCst);
         }
         true
+    }
+
+    /// Mark that the samples pushed from now on belong to the next piece of
+    /// the request. Called by the producer before it decodes a piece, so the
+    /// recorded start is exactly the previous piece's end.
+    pub fn begin_piece(&self) {
+        let start = self.shared.pushed.load(Ordering::SeqCst);
+        if let Ok(mut starts) = self.shared.piece_starts.lock() {
+            starts.push(start);
+        }
     }
 
     pub fn mark_end_of_stream(&self) {
@@ -473,6 +502,22 @@ fn fill<T, W>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_current_piece_is_the_last_one_the_device_has_started_on() {
+        // Strictly "started on", not "reached": with the second piece
+        // starting at sample 4, having played exactly 4 samples means the
+        // first piece just ended and nothing of the second has been heard,
+        // so its caption would be early by one callback.
+        let shared = PlaybackShared::default();
+        for start in [0, 4] {
+            shared.piece_starts.lock().unwrap().push(start);
+        }
+        for (played, expected) in [(0, None), (1, Some(0)), (4, Some(0)), (5, Some(1))] {
+            shared.played.store(played, Ordering::SeqCst);
+            assert_eq!(shared.current_piece(), expected, "played={played}");
+        }
+    }
 
     fn drain_into<T: Copy + Default + std::fmt::Debug>(
         shared: &Arc<PlaybackShared>,

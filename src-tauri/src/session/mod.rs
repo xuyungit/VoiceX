@@ -627,7 +627,11 @@ impl SessionController {
             let is_batch = crate::storage::get_settings()
                 .map(|s| crate::asr::AsrConfig::from(&s).is_batch())
                 .unwrap_or(false);
-            hud.show(is_batch);
+            hud.show(if is_batch {
+                crate::services::hud_service::HudPresentation::Batch
+            } else {
+                crate::services::hud_service::HudPresentation::Stream
+            });
         }
         self.set_escape_swallowing(true);
     }

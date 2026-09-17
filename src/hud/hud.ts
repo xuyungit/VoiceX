@@ -81,7 +81,11 @@ let lastLevelAt = 0;
 // Stable error code from the backend, mapped to display text at render time.
 let currentErrorCode: string | null = null;
 let currentIntent: "assistant" | "translate_en" = "assistant";
-let hudPresentation: "stream" | "batch" = "stream";
+/// Fixed for a session by the backend: the window is sized to match.
+let hudPresentation: "stream" | "batch" | "caption" = "stream";
+/// The sentence being spoken, shown in place of the transcript while a read
+/// runs with captions. Empty between sentences' arrival and after the read.
+let captionText = "";
 let lastActiveIcon: keyof typeof icons = "mic";
 let partialText = "";
 let lastNonEmptyText = "";
@@ -93,6 +97,9 @@ let waveformFrameId = 0;
 let waveformLastFrameTime = 0;
 let waveformShiftAccumulator = 0;
 const MAX_LINES = 2;
+/// A caption is a whole sentence rather than the tail of a transcript, so it
+/// gets a third line; the window is sized for it in `hud/window.rs`.
+const CAPTION_MAX_LINES = 3;
 const ELLIPSIS = "\u2026";
 const WAVEFORM_ATTACK = 0.4;
 const WAVEFORM_RELEASE = 0.15;
@@ -178,10 +185,14 @@ function updateTextAreaMaxWidth() {
   measureEl.style.textTransform = style.textTransform;
 }
 
+function maxLines() {
+  return isCaptionMode() ? CAPTION_MAX_LINES : MAX_LINES;
+}
+
 function fitText(text: string): string {
   if (!text) return text;
   const measureEl = getTextMeasureEl();
-  const maxHeight = textAreaLineHeight * MAX_LINES + 1;
+  const maxHeight = textAreaLineHeight * maxLines() + 1;
   const fits = (candidate: string) => {
     measureEl.textContent = candidate;
     return measureEl.scrollHeight <= maxHeight;
@@ -270,8 +281,13 @@ function isBatchWaveMode() {
   );
 }
 
+/// A read showing its captions uses the text layout, not the compact card.
+function isCaptionMode() {
+  return hudPresentation === "caption";
+}
+
 function isCompactBatchMode() {
-  return hudPresentation === "batch" || isReadingMode();
+  return hudPresentation === "batch" || (isReadingMode() && !isCaptionMode());
 }
 
 function isReadingMode() {
@@ -309,6 +325,7 @@ function applyWaveformVisibility(compactBatchMode: boolean) {
 function setBatchLayoutMode(batchWaveMode: boolean, compactBatchMode: boolean) {
   document.body.classList.toggle("batch-wave-mode", batchWaveMode);
   document.body.classList.toggle("compact-batch-mode", compactBatchMode);
+  document.body.classList.toggle("caption-mode", isCaptionMode());
 
   if (textArea) {
     textArea.hidden = compactBatchMode;
@@ -721,8 +738,12 @@ function handleAudioSpectrumUpdate(bands: number[] | undefined) {
 }
 
 function renderTranscript() {
-  const rawText = partialText.trim() || lastNonEmptyText.trim();
   const showError = currentMode === "error";
+  // An error is carried in the transcript slots whatever the layout.
+  const rawText =
+    isCaptionMode() && !showError
+      ? captionText.trim()
+      : partialText.trim() || lastNonEmptyText.trim();
   const batchWaveMode = isBatchWaveMode();
   const compactBatchMode = isCompactBatchMode() && !showError;
 
@@ -741,6 +762,16 @@ function renderTranscript() {
   }
 
   let display = fitText(rawText);
+
+  if (!display && isCaptionMode() && !isReadingMode() && !showError) {
+    // The read is over and its last caption cleared; while the HUD lingers
+    // there is nothing to announce, least of all the dictation prompt.
+    textArea?.classList.remove("is-placeholder");
+    if (textArea) {
+      textArea.textContent = "";
+    }
+    return;
+  }
 
   if (!display) {
     textArea?.classList.add("is-placeholder");
@@ -967,6 +998,16 @@ async function initListeners() {
   );
 
   await add(
+    "state:caption",
+    (event: { payload?: { text?: string | null } }) => {
+      captionText = event.payload?.text ?? "";
+      if (isCaptionMode()) {
+        renderTranscript();
+      }
+    },
+  );
+
+  await add(
     "asr:event",
     (event: { payload?: { text?: string; isFinal?: boolean; clear?: boolean } }) => {
       const { text, isFinal, clear } = event.payload || {};
@@ -1006,7 +1047,9 @@ async function initListeners() {
   await add(
     "state:hud_presentation",
     (event: { payload?: { mode?: string } }) => {
-      hudPresentation = event.payload?.mode === "batch" ? "batch" : "stream";
+      const mode = event.payload?.mode;
+      hudPresentation =
+        mode === "batch" ? "batch" : mode === "caption" ? "caption" : "stream";
       if (!isCompactBatchMode()) {
         currentAudioLevel = 0;
         smoothedAudioLevel = 0;

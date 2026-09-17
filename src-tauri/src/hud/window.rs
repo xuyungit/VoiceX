@@ -9,6 +9,11 @@ pub const STREAM_HUD_HEIGHT: f64 = 100.0;
 /// Batch-mode HUD content size (logical points).
 pub const BATCH_HUD_WIDTH: f64 = 204.0;
 pub const BATCH_HUD_HEIGHT: f64 = 78.0;
+/// A read with captions: the stream layout's status row over up to three
+/// lines of the sentence being spoken, widened so a 120-character piece is
+/// mostly legible rather than mostly ellipsis.
+pub const CAPTION_HUD_WIDTH: f64 = 400.0;
+pub const CAPTION_HUD_HEIGHT: f64 = 108.0;
 
 const HUD_BOTTOM_MARGIN: f64 = 120.0;
 const HUD_MIN_WIDTH: f64 = 128.0;

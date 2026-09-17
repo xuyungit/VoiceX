@@ -29,13 +29,11 @@ use base64::Engine;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
-use super::decode::{decode_mp3_stream, ChunkSource};
-use super::playback::{
-    negotiate_sample_rate_among, prebuffer_samples, Playback, PlaybackHandle,
-};
+use super::cloud_playback::{self, PieceStream};
+use super::playback::{negotiate_sample_rate_among, prebuffer_samples, PlaybackHandle};
 use super::{
-    cloud_http_client, log_cloud_retry, log_event, split_for_backend, CancelToken,
-    CloudStreamError, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
+    cloud_http_client, log_cloud_retry, piece_limit_for, CancelToken, CloudStreamError,
+    SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
 };
 
 /// Region host. The workspace-scoped `{id}.cn-beijing.maas.aliyuncs.com` form
@@ -332,6 +330,9 @@ pub struct AliyunBackend {
     /// `start` returns.
     playback: Arc<Mutex<Option<PlaybackHandle>>>,
     speaking: Arc<AtomicBool>,
+    /// The current request's text as the pieces it was synthesized in,
+    /// which is what `progress` reports on.
+    pieces: Mutex<Vec<String>>,
 }
 
 impl AliyunBackend {
@@ -340,6 +341,7 @@ impl AliyunBackend {
             config: Mutex::new(config),
             playback: Arc::new(Mutex::new(None)),
             speaking: Arc::new(AtomicBool::new(false)),
+            pieces: Mutex::new(Vec::new()),
         }
     }
 
@@ -425,6 +427,13 @@ impl TtsBackend for AliyunBackend {
             .and_then(|slot| slot.as_ref().and_then(|handle| handle.level()))
     }
 
+    fn reports_progress(&self) -> bool {
+        true
+    }
+
+    fn progress(&self) -> Option<SpeechProgress> {
+        cloud_playback::progress(&self.speaking, &self.pieces, &self.playback)
+    }
 }
 
 impl AliyunBackend {
@@ -461,12 +470,25 @@ impl AliyunBackend {
         // for underruns that pause cleanly instead of crackling.
         let prebuffer = prebuffer_samples(speed, sample_rate);
 
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        // One request per piece, all feeding the same sink: the service caps
+        // a request, not a read, and the pieces end on sentence or clause
+        // boundaries, so a seam is audible only as an ordinary pause.
+        // `piece_chars` leads because CosyVoice's silent per-batch output
+        // budget bites thousands of characters before `max_chars` would get
+        // the request rejected outright; the `min` only guards a future spec
+        // whose two limits drift past each other. Split before anything
+        // starts, so `progress` can name the piece the sink is on.
+        let pieces = cloud_playback::split_pieces(
+            &request.text,
+            piece_limit_for(request.piece_limit, spec.piece_chars.min(spec.max_chars)),
+            &self.pieces,
+        );
+
+        let (tx, rx) = mpsc::channel::<PieceStream>();
         // Lets the decode side tell "the provider failed" apart from "the audio
         // ended", which otherwise both look like a closed channel.
         let network_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
-        let source = ChunkSource::new(rx, token.clone());
         let decode_token = token.clone();
         let decode_error = network_error.clone();
 
@@ -484,8 +506,8 @@ impl AliyunBackend {
         thread::Builder::new()
             .name("voicex-tts-cloud".to_string())
             .spawn(move || {
-                run_playback(
-                    source,
+                cloud_playback::run_playback(
+                    rx,
                     sample_rate,
                     gain,
                     prebuffer,
@@ -498,22 +520,18 @@ impl AliyunBackend {
             })
             .map_err(|err| TtsError::Backend(format!("failed to spawn the decoder: {err}")))?;
 
-        let text = request.text;
         let http_token = token;
         let http_error = network_error;
         tauri::async_runtime::spawn(async move {
-            // One request per piece, all feeding the same decoder: the service
-            // caps a request, not a read, and the pieces end on sentence or
-            // clause boundaries, so a seam is audible only as an ordinary
-            // pause. `piece_chars` leads because CosyVoice's silent per-batch
-            // output budget bites thousands of characters before `max_chars`
-            // would get the request rejected outright; the `min` only guards
-            // a future spec whose two limits drift past each other.
-            let pieces = split_for_backend(&text, spec.piece_chars.min(spec.max_chars));
-            if pieces.len() > 1 {
-                log_event("speak_chunked", &[("pieces", pieces.len().to_string())]);
-            }
             for piece in &pieces {
+                // Handed over before any of its bytes, so the sink can mark
+                // where the piece begins in the sample stream.
+                let (piece_tx, piece_rx) = mpsc::channel::<Vec<u8>>();
+                if tx.send(piece_rx).is_err() {
+                    // The sink is gone — it could not open the device, or the
+                    // read was stopped — so nobody would hear the rest.
+                    break;
+                }
                 let outcome = stream_audio_with_retry(
                     &config.api_key,
                     spec,
@@ -523,10 +541,12 @@ impl AliyunBackend {
                         sample_rate,
                         rate: speed,
                     },
-                    &tx,
+                    &piece_tx,
                     &http_token,
                 )
                 .await;
+                // Closing the piece is what lets the sink move on to the next.
+                drop(piece_tx);
                 match outcome {
                     Ok(true) => {}
                     // Cancelled, or the decoder hung up: synthesizing the
@@ -540,100 +560,11 @@ impl AliyunBackend {
                     }
                 }
             }
-            // Closing the channel is what ends the decode loop.
+            // Closing the channel is what ends the sink's loop.
             drop(tx);
         });
 
         Ok(())
-    }
-}
-
-/// Decode and play, on a thread of its own because both block and because the
-/// output stream may not cross threads.
-#[allow(clippy::too_many_arguments)]
-fn run_playback(
-    source: ChunkSource,
-    sample_rate: u32,
-    gain: f32,
-    prebuffer: u64,
-    token: CancelToken,
-    network_error: Arc<Mutex<Option<String>>>,
-    handle_slot: Arc<Mutex<Option<PlaybackHandle>>>,
-    speaking: Arc<AtomicBool>,
-) {
-    let playback = match Playback::open(sample_rate, gain, prebuffer) {
-        Ok(playback) => playback,
-        Err(err) => {
-            if token.finish() {
-                log_event(
-                    "speak_err",
-                    &[
-                        ("error", err.code().to_string()),
-                        ("detail", err.to_string()),
-                    ],
-                );
-            }
-            return;
-        }
-    };
-
-    if let Ok(mut slot) = handle_slot.lock() {
-        *slot = Some(playback.handle());
-    }
-
-    let mut started = false;
-    let decoded = decode_mp3_stream(source, sample_rate, |samples| {
-        if !started {
-            started = true;
-            speaking.store(true, Ordering::SeqCst);
-            log_event("speak_started", &[]);
-        }
-        playback.push(samples)
-    });
-
-    let failure = network_error.lock().ok().and_then(|slot| slot.clone());
-
-    match decoded {
-        Ok(_) if failure.is_none() => {
-            playback.mark_end_of_stream();
-            match playback.wait_until_drained(&token) {
-                Ok(true) => {
-                    if token.finish() {
-                        log_event("speak_finished", &[]);
-                    }
-                }
-                // Cancelled: whoever cancelled owns the session now, but they
-                // cannot report this part. `speak_stopped` fires when the stop
-                // is accepted; only here is the audio actually finished, which
-                // is what the smoke scripts need to assert on.
-                Ok(false) => log_event("speak_cancelled", &[]),
-                Err(err) => {
-                    if token.finish() {
-                        log_event(
-                            "speak_err",
-                            &[
-                                ("error", err.code().to_string()),
-                                ("detail", err.to_string()),
-                            ],
-                        );
-                    }
-                }
-            }
-        }
-        // A network failure reads as a truncated stream, so report the real
-        // cause rather than the decoder's confusion about it.
-        _ => {
-            let detail = failure.unwrap_or_else(|| match &decoded {
-                Err(err) => err.to_string(),
-                Ok(_) => "the audio stream ended early".to_string(),
-            });
-            if token.finish() {
-                log_event(
-                    "speak_err",
-                    &[("error", "backend".to_string()), ("detail", detail)],
-                );
-            }
-        }
     }
 }
 
@@ -1088,6 +1019,8 @@ mod tests {
     #[test]
     #[ignore = "requires network access and credentials"]
     fn live_synthesis_decodes_and_plays() {
+        use crate::tts::decode::{decode_mp3_stream, ChunkSource};
+        use crate::tts::playback::Playback;
         use crate::tts::SessionSlot;
         use std::time::Instant;
 
