@@ -108,6 +108,22 @@ const isSystemDefaultVoice = computed(
   () => !isCloud.value && !settingsStore.settings.systemTtsVoiceId
 )
 
+// Which delivery controls the selected engine honours — the same table as
+// `voice_request` in src-tauri/src/tts/controller.rs. A slider for a parameter
+// the engine drops would look like a broken setting, so the row is not shown.
+//   - MiMo has no speed parameter; its only delivery control is the
+//     instruction text. Volume is local playback gain, so that one is real.
+//   - The other cloud engines take a rate and no pitch; volume is again local
+//     playback gain, not a synthesis parameter.
+//   - `say` (the system default voice) takes rate only. The compact AVSpeech
+//     voices take all three.
+const engineControls = computed(() => {
+  if (isMimo.value) return { rate: false, pitch: false, volume: true }
+  if (isCloud.value) return { rate: true, pitch: false, volume: true }
+  const compact = !isSystemDefaultVoice.value
+  return { rate: true, pitch: compact, volume: compact }
+})
+
 const aliyunModelOptions = computed(() => [
   { label: t('reading.aliyunModelQwen3'), value: 'qwen3-tts-flash' },
   { label: t('reading.aliyunModelQwenAudio'), value: 'qwen-audio-3.0-tts-flash' },
@@ -670,10 +686,14 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- The feature itself comes first — whether it is on, and which key. Both
-         are independent of the engine, so leaving them between the engine and
-         the engine's own parameters split one subject across two cards with an
-         unrelated one wedged in the middle. -->
+         are independent of the engine, which follows as one card together
+         with everything that belongs to it. -->
     <div class="surface-card asr-card">
+      <!-- Both ways of triggering a read, one row each with its own switch.
+           The two keys compete with each other (reading outranks translate)
+           and with dictation, so they and their conflict warnings are read
+           side by side. What a translate-and-read then does with the text is
+           its own card further down. -->
       <div class="card-header">
         <div class="card-title">{{ t('reading.general') }}</div>
         <div class="card-sub">{{ t('reading.generalSub') }}</div>
@@ -681,19 +701,8 @@ onBeforeUnmount(() => {
       <div class="field-list">
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">{{ t('reading.enabled') }}</div>
-            <div class="field-note">{{ t('reading.enabledNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSwitch v-model:value="ttsEnabled" :disabled="!isMacOS" />
-          </div>
-        </div>
-
-        <div class="field-row">
-          <div class="field-text">
             <div class="field-label">{{ t('reading.hotkey') }}</div>
             <div class="field-note">{{ t('reading.hotkeyNote') }}</div>
-            <div class="field-note">{{ t('reading.hotkeySystemNote') }}</div>
           </div>
           <div class="field-control end">
             <div class="hotkey-display" :class="{ recording: isRecording }">
@@ -708,19 +717,57 @@ onBeforeUnmount(() => {
                 {{ t('reading.record') }}
               </NButton>
               <NButton
-                v-if="settingsStore.settings.ttsHotkeyConfig && !isRecording"
-                quaternary
+                :disabled="!settingsStore.settings.ttsHotkeyConfig || isRecording"
+                text
                 size="small"
                 @click="resetHotkey"
               >
                 {{ t('reading.clear') }}
               </NButton>
             </div>
+            <NSwitch v-model:value="ttsEnabled" :disabled="!isMacOS" size="small" />
           </div>
         </div>
 
         <div v-if="showConflict" class="warning-box">
           {{ t('reading.hotkeyConflict') }}
+        </div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.translateHotkey') }}</div>
+            <div class="field-note">{{ t('reading.translateHotkeyNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <div class="hotkey-display" :class="{ recording: isRecordingTranslate }">
+              {{ isRecordingTranslate ? t('reading.pressHotkey') : displayTranslateHotkey }}
+            </div>
+            <div class="hotkey-actions">
+              <NButton
+                :disabled="isRecordingTranslate || !translateEnabled || !isMacOS"
+                size="small"
+                @click="startRecordingTranslate"
+              >
+                {{ t('reading.record') }}
+              </NButton>
+              <NButton
+                :disabled="!settingsStore.settings.ttsTranslateHotkeyConfig || isRecordingTranslate"
+                text
+                size="small"
+                @click="resetTranslateHotkey"
+              >
+                {{ t('reading.clear') }}
+              </NButton>
+            </div>
+            <NSwitch v-model:value="translateEnabled" :disabled="!isMacOS" size="small" />
+          </div>
+        </div>
+
+        <div v-if="translateConflict === 'dictation'" class="warning-box">
+          {{ t('reading.translateHotkeyConflictDictation') }}
+        </div>
+        <div v-else-if="translateConflict === 'reading'" class="warning-box">
+          {{ t('reading.translateHotkeyConflictReading') }}
         </div>
       </div>
     </div>
@@ -742,10 +789,6 @@ onBeforeUnmount(() => {
             class="field-control"
           />
         </div>
-
-        <!-- Plan §3.4: told once, when the engine is chosen, rather than
-             asked on every read. -->
-        <div v-if="isCloud" class="notice-box">{{ t('reading.cloudPrivacy') }}</div>
 
         <template v-if="isVolcengine">
           <div class="field-row">
@@ -862,63 +905,134 @@ onBeforeUnmount(() => {
             />
           </div>
         </template>
+
+        <!-- The voice and its delivery parameters sit under the engine that
+             owns them: the list is per engine (per model on Alibaba Cloud),
+             the ids do not carry across, and which sliders exist is the
+             engine's call. They used to be a card of their own two cards
+             further down, which hid that the two pickers move together. -->
+        <div class="subsection-header">
+          <div class="subsection-title">{{ t('reading.voice') }}</div>
+          <div class="card-sub">{{ t('reading.voiceSub') }}</div>
+        </div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.voiceLabel') }}</div>
+            <div class="field-note">{{ voiceNote }}</div>
+          </div>
+          <NInput
+            v-if="customVoiceOnly"
+            v-model:value="ttsVoiceId"
+            size="small"
+            class="field-control"
+            placeholder="cosyvoice-v3.5-flash-vd-..."
+          />
+          <NSelect
+            v-else
+            v-model:value="ttsVoiceId"
+            :options="voiceOptions"
+            :disabled="!isMacOS && !isCloud"
+            :tag="isCloud"
+            filterable
+            size="small"
+            class="field-control"
+          />
+        </div>
+
+        <div v-if="voicesError" class="warning-box">
+          {{ t('reading.voiceLoadFailed') }} — {{ voicesError }}
+        </div>
+
+        <!-- Which of the three sliders exist is the engine's call; see
+             engineControls for the table. -->
+        <div v-if="engineControls.rate" class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.rate') }}</div>
+          </div>
+          <div class="field-control end">
+            <NSlider
+              v-model:value="rateMultiplier"
+              :min="0.5"
+              :max="2"
+              :step="0.05"
+              :disabled="!isMacOS && !isCloud"
+              class="slider"
+            />
+            <span class="slider-value">{{ rateMultiplier.toFixed(2) }}x</span>
+          </div>
+        </div>
+
+        <div v-if="engineControls.pitch" class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.pitch') }}</div>
+          </div>
+          <div class="field-control end">
+            <NSlider
+              v-model:value="pitchMultiplier"
+              :min="0.5"
+              :max="2"
+              :step="0.05"
+              :disabled="!isMacOS"
+              class="slider"
+            />
+            <span class="slider-value">{{ pitchMultiplier.toFixed(2) }}x</span>
+          </div>
+        </div>
+
+        <div v-if="engineControls.volume" class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.volume') }}</div>
+            <div v-if="isCloud" class="field-note">{{ t('reading.volumeCloudNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <NSlider
+              v-model:value="volumePercent"
+              :min="0"
+              :max="100"
+              :step="5"
+              :disabled="!isMacOS && !isCloud"
+              class="slider"
+            />
+            <span class="slider-value">{{ volumePercent }}%</span>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.preview') }}</div>
+            <div class="field-note">{{ t('reading.previewNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <NButton
+              :loading="previewLoading"
+              :disabled="!isMacOS && !isCloud"
+              :type="previewSpeaking ? 'default' : 'primary'"
+              secondary
+              size="small"
+              @click="togglePreview"
+            >
+              {{ previewSpeaking ? t('reading.previewStop') : t('reading.preview') }}
+            </NButton>
+          </div>
+        </div>
+
+        <div v-if="previewError" class="warning-box">
+          {{ t('reading.previewFailed') }} — {{ previewError }}
+        </div>
       </div>
     </div>
 
-    <!-- Translate-and-read. Its LLM and prompt live here, not on the LLM
-         page: nothing but reading ever uses them. -->
+    <!-- Translate-and-read: what happens to the text between the key and the
+         voice. Its switch and hotkey are in the first card next to the plain
+         reading key; its LLM and prompt live here, not on the LLM page,
+         because nothing but reading ever uses them. -->
     <div class="surface-card asr-card">
       <div class="card-header">
         <div class="card-title">{{ t('reading.translateTitle') }}</div>
         <div class="card-sub">{{ t('reading.translateSub') }}</div>
       </div>
       <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.translateEnabled') }}</div>
-            <div class="field-note">{{ t('reading.translateEnabledNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSwitch v-model:value="translateEnabled" :disabled="!isMacOS" />
-          </div>
-        </div>
-
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.translateHotkey') }}</div>
-            <div class="field-note">{{ t('reading.translateHotkeyNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <div class="hotkey-display" :class="{ recording: isRecordingTranslate }">
-              {{ isRecordingTranslate ? t('reading.pressHotkey') : displayTranslateHotkey }}
-            </div>
-            <div class="hotkey-actions">
-              <NButton
-                :disabled="isRecordingTranslate || !translateEnabled || !isMacOS"
-                size="small"
-                @click="startRecordingTranslate"
-              >
-                {{ t('reading.record') }}
-              </NButton>
-              <NButton
-                v-if="settingsStore.settings.ttsTranslateHotkeyConfig && !isRecordingTranslate"
-                quaternary
-                size="small"
-                @click="resetTranslateHotkey"
-              >
-                {{ t('reading.clear') }}
-              </NButton>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="translateConflict === 'dictation'" class="warning-box">
-          {{ t('reading.translateHotkeyConflictDictation') }}
-        </div>
-        <div v-else-if="translateConflict === 'reading'" class="warning-box">
-          {{ t('reading.translateHotkeyConflictReading') }}
-        </div>
-
         <div class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.sourceLanguage') }}</div>
@@ -1065,124 +1179,6 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div class="surface-card asr-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('reading.voice') }}</div>
-        <div class="card-sub">{{ t('reading.voiceSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.voiceLabel') }}</div>
-            <div class="field-note">{{ voiceNote }}</div>
-          </div>
-          <NInput
-            v-if="customVoiceOnly"
-            v-model:value="ttsVoiceId"
-            size="small"
-            class="field-control"
-            placeholder="cosyvoice-v3.5-flash-vd-..."
-          />
-          <NSelect
-            v-else
-            v-model:value="ttsVoiceId"
-            :options="voiceOptions"
-            :disabled="!isMacOS && !isCloud"
-            :tag="isCloud"
-            filterable
-            size="small"
-            class="field-control"
-          />
-        </div>
-
-        <div v-if="voicesError" class="warning-box">
-          {{ t('reading.voiceLoadFailed') }} — {{ voicesError }}
-        </div>
-
-        <!-- MiMo has no speed parameter — its only delivery control is the
-             instruction text — so the slider is hidden there rather than
-             shown doing nothing. -->
-        <div v-if="!isMimo" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.rate') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSlider
-              v-model:value="rateMultiplier"
-              :min="0.5"
-              :max="2"
-              :step="0.05"
-              :disabled="!isMacOS && !isCloud"
-              class="slider"
-            />
-            <span class="slider-value">{{ rateMultiplier.toFixed(2) }}x</span>
-          </div>
-        </div>
-
-        <!-- Pitch and volume exist on compact AVSpeech voices, not on `say`.
-             Hiding the rows when the system default is selected is honest:
-             `say` has no flags for either, and a slider that does nothing
-             would look like a broken setting. Cloud volume is local playback
-             gain, so that row stays. -->
-        <div v-if="!isCloud && !isSystemDefaultVoice" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.pitch') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSlider
-              v-model:value="pitchMultiplier"
-              :min="0.5"
-              :max="2"
-              :step="0.05"
-              :disabled="!isMacOS"
-              class="slider"
-            />
-            <span class="slider-value">{{ pitchMultiplier.toFixed(2) }}x</span>
-          </div>
-        </div>
-
-        <div v-if="isCloud || !isSystemDefaultVoice" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.volume') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSlider
-              v-model:value="volumePercent"
-              :min="0"
-              :max="100"
-              :step="5"
-              :disabled="!isMacOS && !isCloud"
-              class="slider"
-            />
-            <span class="slider-value">{{ volumePercent }}%</span>
-          </div>
-        </div>
-
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.preview') }}</div>
-            <div class="field-note">{{ t('reading.previewNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NButton
-              :loading="previewLoading"
-              :disabled="!isMacOS && !isCloud"
-              :type="previewSpeaking ? 'default' : 'primary'"
-              secondary
-              size="small"
-              @click="togglePreview"
-            >
-              {{ previewSpeaking ? t('reading.previewStop') : t('reading.preview') }}
-            </NButton>
-          </div>
-        </div>
-
-        <div v-if="previewError" class="warning-box">
-          {{ t('reading.previewFailed') }} — {{ previewError }}
-        </div>
-      </div>
-    </div>
-
     <div v-if="settingsStore.settings.enableDiagnostics" class="surface-card asr-card">
       <div class="card-header">
         <div class="card-title">{{ t('reading.diagnostics') }}</div>
@@ -1260,14 +1256,17 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
 }
 
+/* Sized so a three-modifier combo ("Control + Option + Command + R") stays on
+   one line beside the two buttons and the switch inside the 420px control;
+   a longer combo wraps rather than being clipped. */
 .hotkey-display {
   flex: 1;
-  padding: 6px var(--spacing-lg);
+  padding: 6px var(--spacing-md);
   background-color: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   font-family: ui-monospace, monospace;
-  font-size: var(--font-md);
+  font-size: var(--font-sm);
   color: var(--color-text-primary);
   min-height: 28px;
   display: flex;
@@ -1299,6 +1298,20 @@ onBeforeUnmount(() => {
 
 .inline-link {
   vertical-align: baseline;
+}
+
+.subsection-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: var(--spacing-sm);
+  padding-top: var(--spacing-lg);
+  border-top: 1px solid var(--color-divider);
+}
+
+.subsection-title {
+  font-size: var(--font-md);
+  font-weight: 600;
 }
 
 .slider {
