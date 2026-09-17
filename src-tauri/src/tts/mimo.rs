@@ -527,18 +527,23 @@ fn run_playback(
                                 ("detail", err.to_string()),
                             ],
                         );
+                    } else {
+                        log_event("speak_cancelled", &[]);
                     }
                 }
             }
         }
         // A network failure reads as a truncated stream, so report the real
-        // cause rather than silence that simply ends early.
+        // cause rather than silence that simply ends early. A stop is not a
+        // failure, whatever the request it aborted recorded.
         Some(detail) => {
             if token.finish() {
                 log_event(
                     "speak_err",
                     &[("error", "backend".to_string()), ("detail", detail)],
                 );
+            } else {
+                log_event("speak_cancelled", &[]);
             }
         }
     }

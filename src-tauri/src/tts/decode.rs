@@ -80,27 +80,19 @@ impl ChunkSource {
             finished: false,
         }
     }
-}
 
-impl Read for ChunkSource {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-
+    /// Pull chunks until one has unread bytes, the producer hangs up, or the
+    /// read is cancelled: `true` means `current` has bytes to serve. An empty
+    /// chunk (a keepalive, an empty audio field) is skipped, not taken for
+    /// the end.
+    fn fill(&mut self) -> bool {
         loop {
-            // Serve from the chunk in hand first. A caller asking for more than
-            // one chunk holds gets a short read, which `Read` allows and
-            // symphonia's buffered reader handles.
             if self.offset < self.current.len() {
-                let n = (self.current.len() - self.offset).min(buf.len());
-                buf[..n].copy_from_slice(&self.current[self.offset..self.offset + n]);
-                self.offset += n;
-                return Ok(n);
+                return true;
             }
 
             if self.finished {
-                return Ok(0);
+                return false;
             }
 
             let received = match self.rx.get_mut() {
@@ -117,16 +109,31 @@ impl Read for ChunkSource {
                 // The producer is gone: end of stream, not an error.
                 Err(RecvTimeoutError::Disconnected) => {
                     self.finished = true;
-                    return Ok(0);
+                    return false;
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if self.token.is_cancelled() {
                         self.finished = true;
-                        return Ok(0);
+                        return false;
                     }
                 }
             }
         }
+    }
+}
+
+impl Read for ChunkSource {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() || !self.fill() {
+            return Ok(0);
+        }
+
+        // A caller asking for more than the chunk in hand holds gets a short
+        // read, which `Read` allows and symphonia's buffered reader handles.
+        let n = (self.current.len() - self.offset).min(buf.len());
+        buf[..n].copy_from_slice(&self.current[self.offset..self.offset + n]);
+        self.offset += n;
+        Ok(n)
     }
 }
 
@@ -158,10 +165,27 @@ impl MediaSource for ChunkSource {
 /// rather than played, because playing it would silently come out at the wrong
 /// pitch and speed — much harder to diagnose than an error code.
 pub fn decode_mp3_stream(
-    source: ChunkSource,
+    mut source: ChunkSource,
     requested_rate: u32,
     mut on_samples: impl FnMut(&[f32]) -> bool,
 ) -> Result<u64, DecodeError> {
+    // Wait for the first byte before probing. A stop that lands while the
+    // request is still in flight is the usual way a piece ends up empty, and
+    // probing it would have symphonia log an error and turn the user's own
+    // stop into a decode failure. It reads as a clean end instead, exactly
+    // like a stop that lands mid-stream. A producer that hangs up without
+    // sending anything is a real failure, named as such rather than as the
+    // decoder's confusion about it.
+    if !source.fill() {
+        return if source.token.is_cancelled() {
+            Ok(0)
+        } else {
+            Err(DecodeError::Decode(
+                "the stream ended before any audio arrived".to_string(),
+            ))
+        };
+    }
+
     let stream = MediaSourceStream::new(Box::new(source), Default::default());
 
     let mut hint = Hint::new();
@@ -327,6 +351,37 @@ mod tests {
         let mut buf = [0u8; 8];
         assert_eq!(source.read(&mut buf).unwrap(), 0);
         drop(tx);
+    }
+
+    #[test]
+    fn a_stop_before_the_first_byte_is_a_clean_end_not_a_decode_error() {
+        // The usual way a stop lands: the request is in flight, no audio yet.
+        // Probing that empty stream would have symphonia log an error and the
+        // player report a decode failure for what was the user's own stop.
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let source = ChunkSource::new(rx, token);
+
+        slot.release();
+
+        let mut batches = 0;
+        let decoded = decode_mp3_stream(source, 24_000, |_| {
+            batches += 1;
+            true
+        });
+        assert_eq!(decoded.unwrap(), 0);
+        assert_eq!(batches, 0);
+        drop(tx);
+    }
+
+    #[test]
+    fn a_producer_that_hangs_up_before_any_byte_is_a_decode_error() {
+        // Not a stop, so a clean end here would hide a backend that answered
+        // with an empty body.
+        let (source, _slot) = source_of(vec![]);
+        let err = decode_mp3_stream(source, 24_000, |_| true).unwrap_err();
+        assert_eq!(err.code(), "decode_failed");
     }
 
     #[test]

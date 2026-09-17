@@ -117,12 +117,16 @@ pub fn run_playback(
                                 ("detail", err.to_string()),
                             ],
                         );
+                    } else {
+                        log_event("speak_cancelled", &[]);
                     }
                 }
             }
         }
         // A network failure reads as a truncated stream, so report the real
-        // cause rather than the decoder's confusion about it.
+        // cause rather than the decoder's confusion about it. A stop is not a
+        // failure, whatever the stream looked like from here: the request it
+        // aborted may well have recorded one.
         _ => {
             let detail = failure.unwrap_or_else(|| match &decoded {
                 Err(err) => err.to_string(),
@@ -133,6 +137,8 @@ pub fn run_playback(
                     "speak_err",
                     &[("error", "backend".to_string()), ("detail", detail)],
                 );
+            } else {
+                log_event("speak_cancelled", &[]);
             }
         }
     }

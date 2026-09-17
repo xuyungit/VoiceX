@@ -46,7 +46,7 @@
 | M4 字幕打磨 | 大字体、无外框、位置与透明度 | 视觉迭代，可多轮 |
 | M5 流式 | 大模型流式输出 → 逐句 TTS → 字幕；取消字数上限；直接朗读也可显示字幕 | 高级功能 |
 
-每个里程碑单独成 PR。M1 与 M2 可以合并为一个 PR，如果改动量可控。M1、M2 的验证记录见附录 B，M3 的实现与验证见附录 B.3，M4 第一轮见附录 B.4。
+每个里程碑单独成 PR。M1 与 M2 可以合并为一个 PR，如果改动量可控。M1、M2 的验证记录见附录 B，M3 的实现与验证见附录 B.3，M4 第一轮见附录 B.4，字幕开放给直接朗读与停止日志的收尾见附录 B.5。
 
 ## 3. 功能需求
 
@@ -108,14 +108,14 @@
 
 ### 3.8 字幕
 
-适用范围：M3 起只在翻译朗读时显示；后续开放给直接朗读，开关不区分朗读种类。
+适用范围：M3 只在翻译朗读时显示；M4 收尾起直接朗读同样显示，一个开关不区分朗读种类（附录 B.5）。是否为直接朗读单设开关尚未定，顾虑是请求数增加，各后端的变化见下文"风险"。
 
 同步机制（M3 已实现）：
 
-- 待朗读文本按句切成小段：翻译朗读且字幕开启时 `TtsRequest.piece_limit` 为 120 字符，沿用 `split_for_backend` 的"先句末、后子句"规则；其他朗读保持各后端自己的分段上限。每段作为一个 TTS 请求或一个 AVSpeech utterance。
+- 待朗读文本按句切成小段：字幕开启时（M3 只限翻译朗读，M4 收尾起任一种朗读）`TtsRequest.piece_limit` 为 120 字符，沿用 `split_for_backend` 的"先句末、后子句"规则；字幕关闭时保持各后端自己的分段上限。每段作为一个 TTS 请求或一个 AVSpeech utterance。
 - 云端后端记录每段音频在播放流中的起始采样位置，播放器已知已消费采样数，两者比较得出当前段。四家云端后端同一套机制，不依赖厂商时间戳接口：阿里云、Azure、火山共用 `tts/cloud_playback.rs` 的逐段 MP3 解码播放端，小米走自己的 PCM 播放端但用同一个进度函数。当前段取"起点严格小于已播放采样数"的最后一段，刚登记、还没出声的段仍算上一段；`speaking` 置位前不回报，字幕不会比声音先跳。
 - AVSpeech 后端每段一个 utterance、一次全部入队，delegate 的 `didStart` 标记当前段；只有最后一个 utterance 的 `didFinish` 结束本次朗读，任一 utterance 的 `didCancel` 都按停止处理。
-- `say` 后端没有进度信号（`reports_progress` 为 false），不显示字幕，HUD 保持紧凑版。
+- `say` 后端没有进度信号（`reports_progress` 为 false），不显示字幕，HUD 保持紧凑版（附录 B.5 实测）。
 - HUD 驱动线程按现有 60 ms 轮询读取后端当前段，变化时发 `state:caption` 事件，载荷为当前句文本、下标、总数，结束时清空；日志 `event=caption index=… total=…`。
 
 版式：
@@ -125,6 +125,8 @@
 - M4 后续：位置与透明度可调，与现有 `hudTransparent` 设置协调。这一步以视觉效果为准，允许多轮迭代。
 
 风险：句级分块让云端请求数增加。CosyVoice 已经以 120 字分块运行，衔接没有问题；其他后端在实现时验证请求频率是否触发限流。M3 实测见附录 B.3：请求按段顺序发出，不受播放节奏约束，2870 字 35 段在阿里云上没有出现 `cloud_retry`。
+
+开放给直接朗读后，每次朗读的请求数按后端变化如下（字幕开启时）：CosyVoice（v1、v3.5）本来就 120 字一段，不变；阿里云 Qwen3 从 5000 字一段变为 120，阿里云其他模型从 9000 变为 120；Azure 从 2000 × 语速（0.5–1.0）变为 120；火山从 5000 变为 120；小米从 2000 变为 120；系统语音本地合成，不计请求。例：600 字的直接朗读，CosyVoice 仍是 5 个请求，其他云端后端从 1 个变成 5 个。要控制请求数，关掉"朗读字幕"即可恢复各后端自己的分段；是否再为直接朗读单设一个开关，待定。
 
 ### 3.9 译文留存
 
@@ -163,7 +165,7 @@
 | `ttsLlmProviderKey` | string | `follow` | `follow`、内置 provider 名，或 `custom:<id>` |
 | `ttsPreprocessEnabled` | boolean | false | 普通朗读前大模型整理 |
 | `ttsPreprocessPromptTemplate` | string | 默认提示词 | |
-| `ttsCaptionsEnabled` | boolean | true | 字幕开关，M3 起生效 |
+| `ttsCaptionsEnabled` | boolean | true | 字幕开关；M3 起翻译朗读生效，M4 收尾起直接朗读同样生效。开启即按句分段，云端每句一个请求 |
 
 大模型设置页同时新增推理控制（附录 B 的实测结论），不带 `ttsTranslate` 前缀，因为听写整理同样受益：
 
@@ -296,7 +298,7 @@
 - 请求频率：云端生产者按段顺序请求，一段音频流收完立刻发下一段，不等播放。按代码推断（没有逐段请求日志），阿里云每段约 1 秒返回，35 段大约在出声后 40 秒内全部请求完毕，其余六分多钟只是本地播放。没有触发限流；若某家后端限流，改成按播放进度节流（例如领先两段）即可，`cloud_playback` 的 channel 已经是逐段交接。
 - `scripts/tts/translate_read.sh --case all`：success 1 秒、long 2 秒（2871 字，第十二节在）、toolong、stop 通过；cancel 那一轮被判 INVALID，因为注入前微信恰好成了前台应用，脚本按设计拒绝向别的应用注入，单独重跑 cancel 通过。
 - 截图方法：开发版进程没有 bundle id，按应用截图的工具找不到它（`app_list_windows` 为空）；Bash 工具进程没有屏幕录制权限，`screencapture` 直接报 could not create image。可行的路径是从桌面应用的终端面板（有屏幕录制权限）跑探测脚本，用 System Events 取 "VoiceX HUD" 窗口的 position 与 size，再 `screencapture -R x,y,w,h`。另一个坑：后台运行的 Bash 作业没有按键注入权限，热键静默丢失、应用一条日志都没有，探测脚本要在前台 shell 里启动。
-- 未做：`say` 后端保持紧凑版只由单元测试覆盖（`reports_progress` 默认 false），没有切换 provider 实测；设置页的"朗读字幕"开关没有截图。
+- 未做：`say` 后端保持紧凑版只由单元测试覆盖（`reports_progress` 默认 false），没有切换 provider 实测（B.5 已实测）；设置页的"朗读字幕"开关没有截图。
 
 ### B.4 M4 第一轮：只显示文字、放大（2026-09-17）
 
@@ -304,4 +306,13 @@
 - `cargo test --lib` 358 通过、9 个 ignored；`pnpm build` 通过。
 - 开发版应用实测（阿里云，Cerebras 翻译 1.45 秒，2870 字 35 段）：HUD 窗口 rect 620,820,680,140，即 1920×1080 逻辑屏底部居中、下边距 120；`speak_started` 后 caption index 0→3 分别在 0、14、24、37 秒；45 秒时热键停止，`speak_stop` → `speak_stopped`，HUD 当秒隐藏。
 - 视觉核对：这次没截到实机 HUD。终端面板里由我打开的标签已到上限（6 个），Bash 进程和 Terminal.app 都没有屏幕录制权限（`screencapture` 报 could not create image），按应用截图的工具也认不出没有 bundle id 的开发版进程。改用内置浏览器打开开发服务器上的 `src/hud/index.html`，视口 680×140、加 `caption-mode` 类核对版式：119 字的中文段正好四行（scrollHeight 112 = 4 × 28）、居中、无状态行、无边框；"正在翻译..." 占位为 50% 白；错误态 141 字英文两行、粉红色。实机视觉效果由维护者自己测试判断，这一轮不再补截图。
-- 顺带记录：热键停止落在某段还在解码时，日志有一条 `symphonia_core::probe: probe reach EOF at 0 bytes`，之后没有 `speak_cancelled`（`cloud_playback.rs` 只在停止落在排空阶段时记这条）。M3 的运行里已经出现过，不是本轮引入；解码器被取消时的空流该按停止而不是错误来记，留待后续。
+- 顺带记录：热键停止落在某段还在解码时，日志有一条 `symphonia_core::probe: probe reach EOF at 0 bytes`，之后没有 `speak_cancelled`（`cloud_playback.rs` 只在停止落在排空阶段时记这条）。M3 的运行里已经出现过，不是本轮引入；解码器被取消时的空流该按停止而不是错误来记，留待后续（B.5 已处理）。
+
+### B.5 字幕开放给直接朗读、停止时的日志收尾（2026-09-17）
+
+- 改动：`caption_piece_limit` 不再看朗读种类，字幕开关开着的任何朗读都按 120 字分段，`say` 仍无字幕。设置页"朗读字幕"的说明改为两种朗读都适用，并注明文本按句合成、云端每句一个请求（zh-CN、en-US）。
+- 停止落在解码前：`decode.rs` 的 `ChunkSource` 抽出 `fill`，`decode_mp3_stream` 先等到第一个字节再交给 symphonia 探测。等到的是取消就按空流正常结束（`Ok(0)`），生产者一个字节都没发就挂断则报 `decode_failed`，不再让 symphonia 对着空流打 `probe reach EOF at 0 bytes`。`cloud_playback.rs` 与 `mimo.rs` 的错误分支在 `token.finish()` 失败（即已被取消）时记 `speak_cancelled`，停止无论落在哪一阶段都有这一条；真正的失败仍记 `speak_err`。新增两条单测：取消前无字节 → `Ok(0)` 且样本回调未被调用；无字节挂断 → `decode_failed`。
+- `cargo test --lib` 360 通过、9 个 ignored；`pnpm build` 通过；`scripts/tts/translate_read.sh --case all` 五个用例全部通过（success 1 秒、long 2 秒 2869 字第十二节在、toolong、cancel、stop）。
+- 直接朗读实测（阿里云 CosyVoice v3.5，字幕开，Control+Option+Command+R）：262 字 `speak_chunked pieces=4`，`speak_started` 后 caption index 0、1 分别在 0、13 秒；20 秒时热键停止，`speak_stop` → `speak_stopped` → `speak_cancelled`，HUD 当秒隐藏。热键后 2 秒（出声后 1 秒，下一段的请求必然在途）停止：同样三条日志，没有 `probe reach EOF` 那一行。
+- `say` 实测：把 provider 临时改为 `system`（系统音色为空即走 `say`），37 字直接朗读的日志为 `backend=mac_say`、`speak_started`，没有 `speak_chunked` 和 `caption` 事件，即不分段、无字幕；停止后 `speak_cancelled`。之后改回 `aliyun` 并核对过。
+- 未定：直接朗读是否单设字幕开关。维护者顾虑请求数增加，各后端的变化已写进 §3.8 的风险段；现状是一个开关管两种朗读，关掉即回到各后端自己的分段。

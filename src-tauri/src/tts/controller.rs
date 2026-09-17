@@ -51,15 +51,16 @@ const HUD_ERROR_LINGER_MS: u64 = 2_600;
 ///
 /// A caption is the piece being spoken, so the piece has to be about a
 /// sentence: long enough that a normal sentence is not cut, short enough
-/// that the HUD's three lines hold most of it. CosyVoice already ran at this
-/// size; for the other providers it means more, smaller requests per read.
+/// that the HUD's four lines hold it. CosyVoice already ran at this size;
+/// for the other providers it means more, smaller requests per read.
 const CAPTION_PIECE_LIMIT: usize = 120;
 
 /// Sentence-sized pieces cost extra requests, so a read is only split that
-/// way when captions will show them: a translate-and-read with the setting
-/// on. Every other read keeps its backend's own piece size.
-fn caption_piece_limit(kind: ReadKind, captions_enabled: bool) -> Option<usize> {
-    (kind == ReadKind::Translate && captions_enabled).then_some(CAPTION_PIECE_LIMIT)
+/// way when captions will show them: the setting is on, whichever hotkey
+/// started the read. With it off every read keeps its backend's own piece
+/// size.
+fn caption_piece_limit(captions_enabled: bool) -> Option<usize> {
+    captions_enabled.then_some(CAPTION_PIECE_LIMIT)
 }
 
 /// Settings values selecting a cloud backend.
@@ -715,10 +716,8 @@ impl TtsController {
         // pieces and a backend that can say which piece it is on; `say` has
         // no such signal and keeps the compact HUD. Decided here, before the
         // HUD is shown, because the layout is fixed for the session.
-        let piece_limit = caption_piece_limit(
-            kind,
-            settings.as_ref().is_some_and(|s| s.tts_captions_enabled),
-        );
+        let piece_limit =
+            caption_piece_limit(settings.as_ref().is_some_and(|s| s.tts_captions_enabled));
         let captions = piece_limit.is_some() && backend.reports_progress();
 
         let token = self.inner.session.claim();
@@ -1484,10 +1483,9 @@ mod tests {
     };
 
     #[test]
-    fn only_a_translate_read_with_captions_on_is_split_into_sentences() {
-        assert_eq!(caption_piece_limit(ReadKind::Translate, true), Some(120));
-        assert_eq!(caption_piece_limit(ReadKind::Translate, false), None);
-        assert_eq!(caption_piece_limit(ReadKind::Read, true), None);
+    fn only_a_read_with_captions_on_is_split_into_sentences() {
+        assert_eq!(caption_piece_limit(true), Some(120));
+        assert_eq!(caption_piece_limit(false), None);
     }
 
     #[test]
