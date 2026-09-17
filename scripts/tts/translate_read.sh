@@ -60,7 +60,12 @@ done
 
 [ -r "$DB" ] || { echo "history database not readable: $DB" >&2; exit 2; }
 
-max_rowid() { sqlite3 "$DB" "select coalesce(max(rowid),0) from history_record;"; }
+# The app holds write transactions on the same database while a case runs;
+# without a busy timeout sqlite3 gives up at once with "database is locked"
+# and the empty answer breaks the numeric comparisons below.
+sql() { sqlite3 -cmd ".timeout 3000" "$DB" "$1"; }
+
+max_rowid() { sql "select coalesce(max(rowid),0) from history_record;"; }
 
 screen_locked() {
   ioreg -n Root -d1 -a 2>/dev/null | grep -A1 IOConsoleLocked | grep -q '<true/>'
@@ -162,7 +167,7 @@ wait_for_row() {
   return 1
 }
 
-row_field() { sqlite3 "$DB" "select $2 from history_record where rowid=$1;"; }
+row_field() { sql "select $2 from history_record where rowid=$1;"; }
 
 run_case() {
   local name="$1" fixture before rowid front t0 t_row mode translated
