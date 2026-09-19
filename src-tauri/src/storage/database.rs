@@ -112,6 +112,16 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
         "INTEGER DEFAULT 0",
     )?;
 
+    // Reading (TTS) counters. Unlike the dictation counters below there is
+    // nothing to backfill them from: plain reads leave no history row at all,
+    // and translate-and-read rows are deliberately kept out of the counters.
+    // They start at zero and count only reads made from here on.
+    for table in ["usage_stats", "device_usage_stats"] {
+        for column in TTS_COUNTER_COLUMNS {
+            ensure_column(&conn, table, column, "INTEGER DEFAULT 0")?;
+        }
+    }
+
     // Backfill total_recording_count from actual history_record rows.
     // The cached counter may be too low if the column was added after
     // recordings already existed and a few increment calls have since
@@ -322,6 +332,54 @@ fn map_history_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRe
     })
 }
 
+/// Column names for the reading counters, in the order every query below
+/// reads and writes them.
+const TTS_COUNTER_COLUMNS: [&str; 5] = [
+    "tts_read_count",
+    "tts_translate_count",
+    "tts_characters",
+    "tts_duration_ms",
+    "tts_llm_count",
+];
+
+/// Reading (TTS) counters, held as running totals rather than per-read rows.
+///
+/// Field names match the sync server's `ttsUsage` payload, so this is also the
+/// wire type the sync service uploads and reads back.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TtsCounters {
+    pub read_count: i64,
+    pub translate_count: i64,
+    pub characters: i64,
+    pub duration_ms: i64,
+    pub llm_count: i64,
+}
+
+impl TtsCounters {
+    /// Read the five counters starting at `offset` in a row that selected
+    /// them in `TTS_COUNTER_COLUMNS` order.
+    fn from_row(row: &rusqlite::Row, offset: usize) -> rusqlite::Result<Self> {
+        Ok(Self {
+            read_count: row.get(offset)?,
+            translate_count: row.get(offset + 1)?,
+            characters: row.get(offset + 2)?,
+            duration_ms: row.get(offset + 3)?,
+            llm_count: row.get(offset + 4)?,
+        })
+    }
+
+    fn clamped(self) -> Self {
+        Self {
+            read_count: self.read_count.max(0),
+            translate_count: self.translate_count.max(0),
+            characters: self.characters.max(0),
+            duration_ms: self.duration_ms.max(0),
+            llm_count: self.llm_count.max(0),
+        }
+    }
+}
+
 /// Usage statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -331,6 +389,10 @@ pub struct UsageStats {
     pub llm_correction_count: i64,
     #[serde(default)]
     pub total_recording_count: i64,
+    /// Absent from the server's `usage` object, which only covers dictation;
+    /// the account's reading totals arrive separately as `ttsUsage`.
+    #[serde(default)]
+    pub tts: TtsCounters,
 }
 
 /// Get history records
@@ -570,7 +632,9 @@ fn remove_audio_file_if_needed(path: &str) -> Result<(), StorageError> {
 pub fn get_usage_stats() -> Result<UsageStats, StorageError> {
     with_db(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT total_duration_ms, total_characters, llm_correction_count, total_recording_count FROM usage_stats WHERE id = 1"
+            "SELECT total_duration_ms, total_characters, llm_correction_count, total_recording_count,
+                    tts_read_count, tts_translate_count, tts_characters, tts_duration_ms, tts_llm_count
+             FROM usage_stats WHERE id = 1"
         ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
         let stats = stmt
@@ -580,6 +644,7 @@ pub fn get_usage_stats() -> Result<UsageStats, StorageError> {
                     total_characters: row.get(1)?,
                     llm_correction_count: row.get(2)?,
                     total_recording_count: row.get(3)?,
+                    tts: TtsCounters::from_row(row, 4)?,
                 })
             })
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
@@ -597,13 +662,15 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
             total_characters: 0,
             llm_correction_count: 0,
             total_recording_count: 0,
+            tts: TtsCounters::default(),
         });
     }
 
     with_db(|conn| {
         let existing = conn
             .query_row(
-                "SELECT total_duration_ms, total_characters, llm_correction_count, total_recording_count
+                "SELECT total_duration_ms, total_characters, llm_correction_count, total_recording_count,
+                        tts_read_count, tts_translate_count, tts_characters, tts_duration_ms, tts_llm_count
                  FROM device_usage_stats WHERE device_id = ?1",
                 params![trimmed],
                 |row| {
@@ -612,6 +679,7 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
                         total_characters: row.get(1)?,
                         llm_correction_count: row.get(2)?,
                         total_recording_count: row.get(3)?,
+                        tts: TtsCounters::from_row(row, 4)?,
                     })
                 },
             )
@@ -638,6 +706,9 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
                         total_characters: row.get(1)?,
                         llm_correction_count: row.get(2)?,
                         total_recording_count: row.get(3)?,
+                        // No history rows describe reading, so a device row
+                        // built this way starts its reading counters at zero.
+                        tts: TtsCounters::default(),
                     })
                 },
             )
@@ -671,6 +742,10 @@ pub fn set_usage_stats(stats: &UsageStats) -> Result<(), StorageError> {
         //   1. one-time backfill from history_record at DB init,
         //   2. increment_usage_stats() on each new recording / sync event.
         // Once the server starts supplying a real count, add it back here.
+        //
+        // The reading counters are likewise absent from the server's `usage`
+        // object -- they arrive as `ttsUsage` and are written by
+        // set_account_tts_stats().
         conn.execute(
             "UPDATE usage_stats
              SET total_duration_ms = ?1,
@@ -847,6 +922,143 @@ pub fn increment_device_usage_stats(
         )
         .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         Ok(())
+    })
+}
+
+/// Overwrite the account-wide reading counters with the server's totals.
+///
+/// The server sums every device's last report, so this is an absolute value,
+/// not a delta. Only meaningful while sync is on; with sync off the same row
+/// is maintained by increment_account_tts_stats().
+pub fn set_account_tts_stats(counters: &TtsCounters) -> Result<(), StorageError> {
+    let c = counters.clamped();
+    with_db(|conn| {
+        conn.execute(
+            "UPDATE usage_stats
+             SET tts_read_count = ?1,
+                 tts_translate_count = ?2,
+                 tts_characters = ?3,
+                 tts_duration_ms = ?4,
+                 tts_llm_count = ?5,
+                 last_updated = ?6
+             WHERE id = 1",
+            params![
+                c.read_count,
+                c.translate_count,
+                c.characters,
+                c.duration_ms,
+                c.llm_count,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        Ok(())
+    })
+}
+
+/// Add one read to the account-wide counters.
+///
+/// Mirrors increment_usage_stats: call this only when sync is off, otherwise
+/// the server owns this row and a local bump would be overwritten anyway.
+pub fn increment_account_tts_stats(delta: &TtsCounters) -> Result<(), StorageError> {
+    let d = delta.clamped();
+    with_db(|conn| {
+        conn.execute(
+            "UPDATE usage_stats
+             SET tts_read_count = tts_read_count + ?1,
+                 tts_translate_count = tts_translate_count + ?2,
+                 tts_characters = tts_characters + ?3,
+                 tts_duration_ms = tts_duration_ms + ?4,
+                 tts_llm_count = tts_llm_count + ?5,
+                 last_updated = ?6
+             WHERE id = 1",
+            params![
+                d.read_count,
+                d.translate_count,
+                d.characters,
+                d.duration_ms,
+                d.llm_count,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        Ok(())
+    })
+}
+
+/// Add one read to this device's counters, and return the device's new totals.
+///
+/// The device row is created through get_local_usage_stats() rather than by
+/// this INSERT alone: that is the only path that backfills the dictation
+/// counters from history_record, and a row conjured here would make it skip
+/// the backfill and leave those counters stuck at zero.
+pub fn increment_device_tts_stats(
+    device_id: &str,
+    delta: &TtsCounters,
+) -> Result<TtsCounters, StorageError> {
+    let trimmed = device_id.trim();
+    if trimmed.is_empty() {
+        return Ok(TtsCounters::default());
+    }
+    get_local_usage_stats(trimmed)?;
+
+    let d = delta.clamped();
+    let now = Utc::now().to_rfc3339();
+
+    with_db(|conn| {
+        conn.execute(
+            "UPDATE device_usage_stats
+             SET tts_read_count = tts_read_count + ?1,
+                 tts_translate_count = tts_translate_count + ?2,
+                 tts_characters = tts_characters + ?3,
+                 tts_duration_ms = tts_duration_ms + ?4,
+                 tts_llm_count = tts_llm_count + ?5,
+                 last_updated = ?6
+             WHERE device_id = ?7",
+            params![
+                d.read_count,
+                d.translate_count,
+                d.characters,
+                d.duration_ms,
+                d.llm_count,
+                now,
+                trimmed,
+            ],
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+        let counters = conn
+            .query_row(
+                "SELECT tts_read_count, tts_translate_count, tts_characters,
+                        tts_duration_ms, tts_llm_count
+                 FROM device_usage_stats WHERE device_id = ?1",
+                params![trimmed],
+                |row| TtsCounters::from_row(row, 0),
+            )
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+        Ok(counters)
+    })
+}
+
+/// This device's reading totals, as the sync service uploads them.
+pub fn get_device_tts_stats(device_id: &str) -> Result<TtsCounters, StorageError> {
+    let trimmed = device_id.trim();
+    if trimmed.is_empty() {
+        return Ok(TtsCounters::default());
+    }
+    with_db(|conn| {
+        let counters = conn
+            .query_row(
+                "SELECT tts_read_count, tts_translate_count, tts_characters,
+                        tts_duration_ms, tts_llm_count
+                 FROM device_usage_stats WHERE device_id = ?1",
+                params![trimmed],
+                |row| TtsCounters::from_row(row, 0),
+            )
+            .optional()
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        Ok(counters.unwrap_or_default())
     })
 }
 

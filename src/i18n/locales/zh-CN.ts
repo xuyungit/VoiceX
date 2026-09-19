@@ -54,7 +54,14 @@ const zhCN = {
     on: '开',
     off: '关',
     recordingCount: '录音启动次数',
-    averageRecordingLength: '平均录音时长'
+    averageRecordingLength: '平均录音时长',
+    dictationSection: '听写',
+    readingSection: '朗读',
+    plainReadCount: '普通朗读次数',
+    translateReadCount: '翻译朗读次数',
+    readCharacters: '朗读字符数',
+    readDuration: '朗读时长',
+    readAiCalls: '朗读 AI 调用次数'
   },
   history: {
     title: '历史',

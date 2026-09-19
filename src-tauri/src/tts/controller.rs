@@ -11,22 +11,26 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::aliyun::{self, AliyunBackend, AliyunConfig};
 use super::azure::{self, AzureBackend, AzureConfig};
+use super::llm_stage::{self, LlmStageError, TRANSLATE_MAX_CHARS};
 use super::mimo::{MimoBackend, MimoConfig};
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
     log_event, SessionSlot, SpeechProgress, StopReason, TtsBackend, TtsError, TtsRequest,
     TtsStatus, TtsVoiceList,
 };
-use super::llm_stage::{self, LlmStageError, TRANSLATE_MAX_CHARS};
 use crate::commands::settings::AppSettings;
 use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest};
-use crate::services::history_service::{HistoryService, HISTORY_MODE_TRANSLATE_READ};
+use crate::services::history_service::{
+    sync_owns_counters, HistoryService, HISTORY_MODE_TRANSLATE_READ,
+};
 use crate::services::hud_service::{HudPresentation, HudService, ReadingKind, ReadingPhase};
 use crate::services::llm_service::{build_llm_config_for_key, settings_for_llm_key};
+use crate::services::sync_service::SyncService;
+use crate::storage::TtsCounters;
 
 /// Longest preview we will speak. The settings page sends a short fixed
 /// sentence; the cap only stops a malformed call from starting a long read.
@@ -481,11 +485,7 @@ impl TtsController {
         // `say`. The picker needs those ids; the empty entry is added in the
         // UI and is not a listed voice.
         let backend = if !is_cloud_provider(provider) {
-            self.inner
-                .system
-                .lock()
-                .ok()
-                .and_then(|slot| slot.clone())
+            self.inner.system.lock().ok().and_then(|slot| slot.clone())
         } else {
             self.backend_for(provider, settings.as_ref())
         }
@@ -703,6 +703,9 @@ impl TtsController {
             }
         }
         let settings = settings;
+        // Read before `settings` is moved into the worker: it decides whether
+        // the account-wide reading counters are ours to bump or the server's.
+        let sync_owns_totals = settings.as_ref().is_some_and(sync_owns_counters);
         let provider = settings
             .as_ref()
             .map(|s| s.tts_provider_type.clone())
@@ -721,6 +724,11 @@ impl TtsController {
         let captions = piece_limit.is_some() && backend.reports_progress();
 
         let token = self.inner.session.claim();
+        // The read outlives `backend.start()`, which returns as soon as the
+        // engine accepts the request. This clone is how the worker learns the
+        // read is over: the token stops owning the session when the backend
+        // hands it back, or when a stop or a newer read takes it away.
+        let stats_token = token.clone();
         self.set_active_backend(Some(backend.clone()));
         let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let llm_busy = Arc::new(AtomicBool::new(false));
@@ -732,6 +740,7 @@ impl TtsController {
             captions,
         );
         let app_for_history = app.clone();
+        let app_for_stats = app.clone();
 
         thread::Builder::new()
             .name("voicex-tts-read".to_string())
@@ -801,15 +810,21 @@ impl TtsController {
                         };
                         if kind == ReadKind::Translate {
                             if let Some(settings) = settings.as_ref() {
-                                retain_translation(settings, &source, &staged.text, &app_for_history);
+                                retain_translation(
+                                    settings,
+                                    &source,
+                                    &staged.text,
+                                    &app_for_history,
+                                );
                             }
                         }
+                        let chars = staged.text.chars().count() as i64;
                         log_event(
                             "speak_start",
                             &[
                                 ("kind", kind.action().to_string()),
                                 ("backend", backend.name().to_string()),
-                                ("chars", staged.text.chars().count().to_string()),
+                                ("chars", chars.to_string()),
                                 ("llm", staged.llm_invoked.to_string()),
                             ],
                         );
@@ -823,23 +838,35 @@ impl TtsController {
                             None => TtsRequest::plain(staged.text),
                         };
                         request.piece_limit = piece_limit;
-                        if let Err(err) = backend.start(request, token) {
-                            log_event(
-                                "speak_err",
-                                &[
-                                    ("error", err.code().to_string()),
-                                    ("detail", err.to_string()),
-                                ],
-                            );
-                            // The backend has already handed the session back
-                            // (its `start` contract), so this lands a hair
-                            // after the driver could see idle; the driver's
-                            // own emits on the way out cover that gap. Without
-                            // it a refused start — no API key, no voice id
-                            // for a designed-voice model — is a HUD that
-                            // flashes "preparing" and vanishes.
-                            if let Ok(mut slot) = failure.lock() {
-                                *slot = Some(err.code().to_string());
+                        match backend.start(request, token) {
+                            // Counted only once the engine has taken the
+                            // request: a start that was refused read nothing.
+                            Ok(()) => record_read(
+                                kind,
+                                chars,
+                                staged.llm_invoked,
+                                sync_owns_totals,
+                                &stats_token,
+                                &app_for_stats,
+                            ),
+                            Err(err) => {
+                                log_event(
+                                    "speak_err",
+                                    &[
+                                        ("error", err.code().to_string()),
+                                        ("detail", err.to_string()),
+                                    ],
+                                );
+                                // The backend has already handed the session
+                                // back (its `start` contract), so this lands a
+                                // hair after the driver could see idle; the
+                                // driver's own emits on the way out cover that
+                                // gap. Without it a refused start — no API key,
+                                // no voice id for a designed-voice model — is a
+                                // HUD that flashes "preparing" and vanishes.
+                                if let Ok(mut slot) = failure.lock() {
+                                    *slot = Some(err.code().to_string());
+                                }
                             }
                         }
                     }
@@ -1008,11 +1035,11 @@ fn apply_translate_voice_override(settings: &mut AppSettings) -> Option<String> 
 fn retain_translation(settings: &AppSettings, source: &str, translated: &str, app: &AppHandle) {
     if settings.tts_translate_copy_to_clipboard {
         match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(translated)) {
-            Ok(()) => log_event("translate_clipboard", &[("chars", translated.chars().count().to_string())]),
-            Err(err) => log_event(
-                "translate_clipboard_err",
-                &[("detail", err.to_string())],
+            Ok(()) => log_event(
+                "translate_clipboard",
+                &[("chars", translated.chars().count().to_string())],
             ),
+            Err(err) => log_event("translate_clipboard_err", &[("detail", err.to_string())]),
         }
     }
     if settings.tts_translate_save_history {
@@ -1034,6 +1061,75 @@ fn retain_translation(settings: &AppSettings, source: &str, translated: &str, ap
         );
         log_event("translate_history", &[]);
     }
+}
+
+/// Count one read, once it is over.
+///
+/// Parks the read worker for the length of the read. The thread has nothing
+/// else left to do, and the duration is only knowable at the end: `start`
+/// returns as soon as the engine accepts the request. The token stops owning
+/// the session when the backend finishes, when the user stops the read, and
+/// when a newer read takes over — all three end a read that really happened,
+/// so all three are counted, for as long as they lasted.
+fn record_read(
+    kind: ReadKind,
+    characters: i64,
+    llm_invoked: bool,
+    sync_owns_totals: bool,
+    token: &super::CancelToken,
+    app: &AppHandle,
+) {
+    let spoken_for = wait_for_read_to_end(token);
+
+    let translate = kind == ReadKind::Translate;
+    let delta = TtsCounters {
+        read_count: i64::from(!translate),
+        translate_count: i64::from(translate),
+        characters,
+        duration_ms: spoken_for.as_millis() as i64,
+        llm_count: i64::from(llm_invoked),
+    };
+    log_event(
+        "speak_end",
+        &[
+            ("kind", kind.action().to_string()),
+            ("chars", characters.to_string()),
+            ("ms", delta.duration_ms.to_string()),
+        ],
+    );
+
+    // With sync configured the server owns this row and pushes the account
+    // total back; bumping it here would only be overwritten on the next
+    // refresh. Same rule the dictation counters follow.
+    if !sync_owns_totals {
+        if let Err(err) = crate::storage::increment_account_tts_stats(&delta) {
+            log::warn!("Failed to update reading stats: {err}");
+        }
+    }
+
+    let device_id = match crate::storage::get_or_create_device_id() {
+        Ok(id) => id,
+        Err(err) => {
+            log::warn!("Failed to load device id for reading stats: {err}");
+            return;
+        }
+    };
+    match crate::storage::increment_device_tts_stats(&device_id, &delta) {
+        // The upload carries this device's absolute totals, so a send that
+        // fails costs nothing: the next read sends the same numbers again.
+        Ok(totals) => app.state::<SyncService>().upload_tts_usage(totals),
+        Err(err) => log::warn!("Failed to update device reading stats: {err}"),
+    }
+}
+
+/// Block until the session this token owns is handed back, and say how long
+/// that took.
+fn wait_for_read_to_end(token: &super::CancelToken) -> std::time::Duration {
+    let started = std::time::Instant::now();
+    while !token.is_cancelled() {
+        thread::sleep(HUD_POLL);
+    }
+    started.elapsed()
 }
 
 /// Persisted settings, or `None` when the store cannot be read.
@@ -1180,9 +1276,10 @@ fn log_selection_error(err: &SelectionError) {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::thread;
 
     use super::super::SessionSlot;
-    use super::{voice_request, StopReason, TtsController};
+    use super::{voice_request, wait_for_read_to_end, StopReason, TtsController, HUD_POLL};
     use crate::commands::settings::AppSettings;
 
     #[test]
@@ -1265,8 +1362,7 @@ mod tests {
         settings.aliyun_tts_voice_qwen3 = "Dylan".to_string();
         settings.aliyun_tts_voice_qwen_audio = "longanfengyue".to_string();
         settings.aliyun_tts_voice_cosy_voice = "longanyang".to_string();
-        settings.aliyun_tts_voice_cosy_voice_v35 =
-            "cosyvoice-v3.5-flash-vd-test".to_string();
+        settings.aliyun_tts_voice_cosy_voice_v35 = "cosyvoice-v3.5-flash-vd-test".to_string();
 
         settings.aliyun_tts_model = MODEL_QWEN3.to_string();
         assert_eq!(
@@ -1504,11 +1600,44 @@ mod tests {
     }
 
     #[test]
+    fn the_read_clock_stops_when_the_session_is_handed_back() {
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        let waiter = thread::spawn(move || wait_for_read_to_end(&token));
+        thread::sleep(HUD_POLL * 3);
+        slot.release();
+        let elapsed = waiter
+            .join()
+            .expect("the read clock must not outlive the session");
+        assert!(
+            elapsed >= HUD_POLL * 3,
+            "a read that lasted three polls cannot measure less"
+        );
+    }
+
+    #[test]
+    fn a_superseding_read_stops_the_previous_read_clock() {
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        let waiter = thread::spawn(move || wait_for_read_to_end(&token));
+        thread::sleep(HUD_POLL);
+        // The next read takes the session without releasing it first; the
+        // first read still ended, and still lasted as long as it lasted.
+        let _next = slot.claim();
+        waiter
+            .join()
+            .expect("being superseded must end the read, not hang it");
+    }
+
+    #[test]
     fn the_translate_hotkey_is_ignored_while_dictation_is_recording() {
         let controller = TtsController::default();
         controller.attach_recording_flag(Arc::new(AtomicBool::new(true)));
         controller.handle_translate_selection_hotkey();
-        assert!(!controller.is_active(), "no session may start into a live microphone");
+        assert!(
+            !controller.is_active(),
+            "no session may start into a live microphone"
+        );
     }
 
     #[test]
@@ -1602,9 +1731,18 @@ mod tests {
         let token = slot.claim();
         let busy = AtomicBool::new(false);
         let settings = AppSettings::default();
-        let result = stage_text(ReadKind::Translate, Some(&settings), "hi".to_string(), &token, &busy);
+        let result = stage_text(
+            ReadKind::Translate,
+            Some(&settings),
+            "hi".to_string(),
+            &token,
+            &busy,
+        );
         assert_eq!(result.err(), Some(LlmStageError::NotConfigured));
-        assert!(!busy.load(Ordering::SeqCst), "the busy flag never leaks past the stage");
+        assert!(
+            !busy.load(Ordering::SeqCst),
+            "the busy flag never leaks past the stage"
+        );
     }
 
     #[test]
@@ -1614,8 +1752,14 @@ mod tests {
         let busy = AtomicBool::new(false);
         let settings = AppSettings::default();
         assert!(!settings.tts_preprocess_enabled);
-        let staged = stage_text(ReadKind::Read, Some(&settings), "raw".to_string(), &token, &busy)
-            .expect("no LLM involved");
+        let staged = stage_text(
+            ReadKind::Read,
+            Some(&settings),
+            "raw".to_string(),
+            &token,
+            &busy,
+        )
+        .expect("no LLM involved");
         assert_eq!(staged.text, "raw");
         assert!(!staged.llm_invoked);
     }
@@ -1629,8 +1773,14 @@ mod tests {
         let busy = AtomicBool::new(false);
         let mut settings = AppSettings::default();
         settings.tts_preprocess_enabled = true;
-        let staged = stage_text(ReadKind::Read, Some(&settings), "raw".to_string(), &token, &busy)
-            .expect("falls back to the raw text");
+        let staged = stage_text(
+            ReadKind::Read,
+            Some(&settings),
+            "raw".to_string(),
+            &token,
+            &busy,
+        )
+        .expect("falls back to the raw text");
         assert_eq!(staged.text, "raw");
         assert!(!staged.llm_invoked);
     }
@@ -1645,7 +1795,13 @@ mod tests {
         settings.tts_preprocess_enabled = true;
         settings.llm_volcengine_api_key = "key".to_string();
         settings.llm_volcengine_base_url = "http://127.0.0.1:9".to_string();
-        let result = stage_text(ReadKind::Read, Some(&settings), "raw".to_string(), &token, &busy);
+        let result = stage_text(
+            ReadKind::Read,
+            Some(&settings),
+            "raw".to_string(),
+            &token,
+            &busy,
+        );
         assert_eq!(result.err(), Some(LlmStageError::Cancelled));
     }
 }

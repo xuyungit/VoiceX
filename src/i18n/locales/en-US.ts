@@ -54,7 +54,14 @@ const enUS = {
     on: 'On',
     off: 'Off',
     recordingCount: 'Recording count',
-    averageRecordingLength: 'Avg recording length'
+    averageRecordingLength: 'Avg recording length',
+    dictationSection: 'Dictation',
+    readingSection: 'Reading',
+    plainReadCount: 'Plain reads',
+    translateReadCount: 'Translated reads',
+    readCharacters: 'Characters read',
+    readDuration: 'Reading time',
+    readAiCalls: 'Reading AI calls'
   },
   history: {
     title: 'History',

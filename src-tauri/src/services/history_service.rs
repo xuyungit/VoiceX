@@ -18,6 +18,21 @@ pub const HISTORY_ERROR_ASR_FAILED: i32 = 1;
 /// mode never leave the machine, see [`HistoryService::translate_read_behavior`].
 pub const HISTORY_MODE_TRANSLATE_READ: &str = "translate_read";
 
+/// Whether the sync server owns the account-wide usage counters.
+///
+/// With a complete sync configuration the server derives those totals and
+/// pushes them back, so incrementing them locally would only be overwritten.
+/// Without one, nothing else maintains them and the local increment is the
+/// only writer. Reading stats follow the same rule as dictation, which is why
+/// this lives here rather than being spelled out at each call site.
+pub fn sync_owns_counters(settings: &AppSettings) -> bool {
+    settings.sync_enabled
+        && !settings.sync_server_url.trim().is_empty()
+        && !settings.sync_token.trim().is_empty()
+        && !settings.sync_shared_secret.trim().is_empty()
+        && !settings.sync_device_name.trim().is_empty()
+}
+
 #[derive(Clone, Default)]
 pub struct HistoryService;
 
@@ -242,11 +257,7 @@ impl HistoryService {
     }
 
     fn completed_behavior(settings: &AppSettings) -> PersistBehavior {
-        let sync_ready = settings.sync_enabled
-            && !settings.sync_server_url.trim().is_empty()
-            && !settings.sync_token.trim().is_empty()
-            && !settings.sync_shared_secret.trim().is_empty()
-            && !settings.sync_device_name.trim().is_empty();
+        let sync_ready = sync_owns_counters(settings);
 
         PersistBehavior {
             update_stats: !sync_ready,

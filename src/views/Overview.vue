@@ -101,6 +101,22 @@ const localAvgRecordingLength = computed(() => {
   return formatShortDuration(historyStore.localStats.totalDurationMs / count)
 })
 
+// Reads run from seconds to minutes, so the dictation formatter -- which
+// rounds down to whole minutes -- would report a 45-second read as "0 minutes".
+const formatReadingDuration = (durationMs: number) => {
+  if (durationMs >= 3600000) return formatDuration(durationMs)
+  return formatShortDuration(durationMs)
+}
+
+const tts = computed(() => historyStore.stats.tts)
+const localTts = computed(() => historyStore.localStats.tts)
+
+const readDuration = computed(() => formatReadingDuration(tts.value.durationMs || 0))
+const localReadDuration = computed(() => formatReadingDuration(localTts.value.durationMs || 0))
+
+const readCharacters = computed(() => formatCharacters(tts.value.characters || 0))
+const localReadCharacters = computed(() => formatCharacters(localTts.value.characters || 0))
+
 onMounted(async () => {
   await historyStore.loadStats()
 })
@@ -132,6 +148,8 @@ onMounted(async () => {
         <span class="pill-value" :class="{ 'pill-off': !settingsStore.settings.syncEnabled }">{{ syncDisplay }}</span>
       </div>
     </div>
+
+    <h2 class="section-title">{{ t('overview.dictationSection') }}</h2>
 
     <div class="stats-grid">
       <!-- Row 1: Total input characters | Total dictation time -->
@@ -213,6 +231,76 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+
+    <h2 class="section-title">{{ t('overview.readingSection') }}</h2>
+
+    <div class="stats-grid">
+      <!-- Row 1: Plain reads | Translated reads -->
+      <div class="surface-card stat-card">
+        <div class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.47 4.47 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06a9 9 0 0 0 0-17.54z" />
+          </svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value">{{ (tts.readCount || 0).toLocaleString() }}</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ (localTts.readCount || 0).toLocaleString() }}</div>
+          <div class="stat-label">{{ t('overview.plainReadCount') }}</div>
+        </div>
+      </div>
+
+      <div class="surface-card stat-card">
+        <div class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z" />
+          </svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value">{{ (tts.translateCount || 0).toLocaleString() }}</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ (localTts.translateCount || 0).toLocaleString() }}</div>
+          <div class="stat-label">{{ t('overview.translateReadCount') }}</div>
+        </div>
+      </div>
+
+      <!-- Row 2: Characters read | Reading time -->
+      <div class="surface-card stat-card">
+        <div class="stat-icon">
+          <span class="glyph">Aa</span>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value">{{ readCharacters }}</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localReadCharacters }}</div>
+          <div class="stat-label">{{ t('overview.readCharacters') }}</div>
+        </div>
+      </div>
+
+      <div class="surface-card stat-card">
+        <div class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13h-1v6l5 3 .5-.84-4.5-2.66Z" />
+          </svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value">{{ readDuration }}</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localReadDuration }}</div>
+          <div class="stat-label">{{ t('overview.readDuration') }}</div>
+        </div>
+      </div>
+
+      <!-- Row 3: AI calls made by reading -->
+      <div class="surface-card stat-card">
+        <div class="stat-icon">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 2a1 1 0 0 0-.92.6l-3 7a1 1 0 0 0 1.84.8L10.38 9h3.24l.46 1.4a1 1 0 0 0 1.92-.6l-3-7A1 1 0 0 0 12 2Zm7.66 11.11-2.78-.93a1 1 0 0 0-.64 1.9l1.38.46-1.88 2.64-1.37-.46a1 1 0 1 0-.64 1.9l2.78.92a1 1 0 0 0 1.1-.38l2.5-3.5a1 1 0 0 0-.45-1.55ZM8.1 14.2l-1.38.46-1.88-2.64 1.37-.46a1 1 0 1 0-.64-1.9l-2.78.92a1 1 0 0 0-.45 1.56l2.5 3.5a1 1 0 0 0 1.1.38l2.78-.93a1 1 0 0 0-.64-1.9Z" />
+          </svg>
+        </div>
+        <div class="stat-content">
+          <div class="stat-value">{{ (tts.llmCount || 0).toLocaleString() }}</div>
+          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ (localTts.llmCount || 0).toLocaleString() }}</div>
+          <div class="stat-label">{{ t('overview.readAiCalls') }}</div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -267,6 +355,15 @@ onMounted(async () => {
 
 .pill-off {
   color: var(--color-text-tertiary);
+}
+
+.section-title {
+  margin: 0;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .stats-grid {

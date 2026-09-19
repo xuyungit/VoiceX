@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::commands::settings::AppSettings;
 use crate::services::history_service::{HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ};
-use crate::storage::{self, HistoryRecord, UsageStats};
+use crate::storage::{self, HistoryRecord, TtsCounters, UsageStats};
 
 #[derive(Clone, Default)]
 pub struct SyncService {
@@ -168,6 +168,43 @@ impl SyncService {
         }
     }
 
+    /// Send this device's reading totals to the server, in the background.
+    ///
+    /// Deliberately not routed through the outbox. The outbox is an ordered
+    /// log that stops at its first rejected event, and reading stats have no
+    /// business being able to stall history sync. They also do not need the
+    /// ordering: what is sent is the device's absolute totals, so a lost,
+    /// retried or overtaken upload is corrected by the next one, and a
+    /// reconnect re-sends them anyway.
+    pub fn upload_tts_usage(&self, totals: TtsCounters) {
+        let (config, app) = {
+            let inner = self.inner.lock().expect("sync service lock");
+            if !inner.config.is_valid() {
+                return;
+            }
+            (inner.config.clone(), inner.app_handle.clone())
+        };
+
+        tauri::async_runtime::spawn(async move {
+            let device_id = match storage::get_or_create_device_id() {
+                Ok(id) if !id.is_empty() => id,
+                _ => return,
+            };
+            let client = reqwest::Client::new();
+            match put_tts_usage(&client, &config, &device_id, &totals).await {
+                Ok(Some(account_totals)) => {
+                    if let Err(err) = storage::set_account_tts_stats(&account_totals) {
+                        log::warn!("Failed to store account reading stats: {}", err);
+                    } else if let Some(app) = app {
+                        emit_history_updated(&app, "sync");
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => log::warn!("Reading stats upload failed: {}", err),
+            }
+        });
+    }
+
     pub fn request_sync_now(&self) {
         let inner = self.inner.lock().expect("sync service lock");
         if let Some(tx) = inner.flush_tx.as_ref() {
@@ -296,6 +333,21 @@ async fn run_sync_session(
     if let Err(err) = seed_outbox_from_history(device_id, &server_state) {
         log::warn!("Failed to seed outbox: {}", err);
     }
+    // Reads made while this device was offline live only in its own row until
+    // now. Sending the absolute totals here is also what repairs a server that
+    // was restored from a backup, or one this device has never reported to.
+    match storage::get_device_tts_stats(device_id) {
+        Ok(totals) => match put_tts_usage(client, config, device_id, &totals).await {
+            Ok(Some(account_totals)) => {
+                if let Err(err) = storage::set_account_tts_stats(&account_totals) {
+                    log::warn!("Failed to store account reading stats: {}", err);
+                }
+            }
+            Ok(None) => {}
+            Err(err) => log::warn!("Reading stats upload failed: {}", err),
+        },
+        Err(err) => log::warn!("Failed to read device reading stats: {}", err),
+    }
     let catch_up_since = server_state.last_seq.saturating_sub(1000);
     catch_up_events(
         client,
@@ -363,6 +415,49 @@ async fn register_device(
     }
 }
 
+/// Replace this device's reading totals on the server and take back the
+/// account total it answers with.
+///
+/// `Ok(None)` means the server predates the endpoint and answered 404. That
+/// is an expected answer, not a failure: the totals simply stay local until
+/// the server is upgraded, and saying so on every read would be noise.
+async fn put_tts_usage(
+    client: &reqwest::Client,
+    config: &SyncConfig,
+    device_id: &str,
+    totals: &TtsCounters,
+) -> Result<Option<TtsCounters>, String> {
+    let url = format!("{}/v1/usage/tts", config.server_url.trim_end_matches('/'));
+    let auth = config.bearer_token()?;
+    let payload = json!({
+        "deviceId": device_id,
+        "readCount": totals.read_count,
+        "translateCount": totals.translate_count,
+        "characters": totals.characters,
+        "durationMs": totals.duration_ms,
+        "llmCount": totals.llm_count,
+    });
+
+    let resp = client
+        .put(&url)
+        .bearer_auth(auth)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if resp.status() == StatusCode::NOT_FOUND {
+        log::debug!("Sync server has no reading-stats endpoint; keeping them local");
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        return Err(format!("reading stats upload failed ({})", resp.status()));
+    }
+
+    let body: TtsUsageResponse = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(Some(body.tts_usage))
+}
+
 async fn refresh_account(
     client: &reqwest::Client,
     config: &SyncConfig,
@@ -386,6 +481,14 @@ async fn refresh_account(
         log::warn!("Account response missing last_seq; skipping usage stats refresh");
         return Ok(payload);
     };
+
+    // Reading totals travel beside `usage`, not inside it: the server derives
+    // `usage` from uploaded history rows, while reading is reported directly
+    // by each device. An older server sends neither field and this stays zero,
+    // which is why it is not written through set_usage_stats().
+    if let Err(err) = storage::set_account_tts_stats(&payload.tts_usage) {
+        log::warn!("Failed to update reading stats: {}", err);
+    }
 
     if let Err(err) = storage::set_usage_stats(&payload.usage) {
         log::warn!("Failed to update usage stats: {}", err);
@@ -875,7 +978,17 @@ struct AccountResponse {
     server_id: String,
     account_id: String,
     usage: UsageStats,
+    /// Absent from servers older than the reading stats; defaults to zeros,
+    /// which is the truth as far as such a server is concerned.
+    #[serde(default)]
+    tts_usage: TtsCounters,
     last_seq: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TtsUsageResponse {
+    tts_usage: TtsCounters,
 }
 
 #[derive(Default)]

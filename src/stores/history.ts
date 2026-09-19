@@ -21,12 +21,29 @@ export interface HistoryRecord {
     llmModelName: string | null
 }
 
+export interface TtsCounters {
+    readCount: number
+    translateCount: number
+    characters: number
+    durationMs: number
+    llmCount: number
+}
+
 export interface UsageStats {
     totalDurationMs: number
     totalCharacters: number
     llmCorrectionCount: number
     totalRecordingCount: number
+    tts: TtsCounters
 }
+
+const emptyTtsCounters = (): TtsCounters => ({
+    readCount: 0,
+    translateCount: 0,
+    characters: 0,
+    durationMs: 0,
+    llmCount: 0
+})
 
 export const useHistoryStore = defineStore('history', () => {
     const records = ref<HistoryRecord[]>([])
@@ -34,13 +51,15 @@ export const useHistoryStore = defineStore('history', () => {
         totalDurationMs: 0,
         totalCharacters: 0,
         llmCorrectionCount: 0,
-        totalRecordingCount: 0
+        totalRecordingCount: 0,
+        tts: emptyTtsCounters()
     })
     const localStats = ref<UsageStats>({
         totalDurationMs: 0,
         totalCharacters: 0,
         llmCorrectionCount: 0,
-        totalRecordingCount: 0
+        totalRecordingCount: 0,
+        tts: emptyTtsCounters()
     })
     const isLoading = ref(false)
     const hasMore = ref(true)
