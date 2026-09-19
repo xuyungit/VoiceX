@@ -232,7 +232,8 @@ fn migrate_settings_blob(conn: &Connection) {
     let migrated_restore =
         crate::commands::settings::migrate_text_injection_override_restore_flag(&mut value);
     let migrated_asr = crate::commands::settings::migrate_openai_refine_model(&mut value);
-    if !migrated_endpoints && !migrated_restore && !migrated_asr {
+    let migrated_hotkeys = crate::commands::settings::migrate_hotkey_digit_key_codes(&mut value);
+    if !migrated_endpoints && !migrated_restore && !migrated_asr && !migrated_hotkeys {
         return;
     }
 
@@ -259,9 +260,11 @@ fn migrate_settings_blob(conn: &Connection) {
         params![payload],
     ) {
         Ok(_) => log::info!(
-            "Migrated persisted settings (custom LLM endpoints: {}, override restore flag: {})",
+            "Migrated persisted settings (custom LLM endpoints: {}, override restore flag: {}, \
+             hotkey digit key codes: {})",
             migrated_endpoints,
-            migrated_restore
+            migrated_restore,
+            migrated_hotkeys
         ),
         Err(e) => log::warn!("Settings migration write-back failed: {}", e),
     }
@@ -867,6 +870,7 @@ pub fn get_settings() -> Result<AppSettings, StorageError> {
                     crate::commands::settings::migrate_text_injection_override_restore_flag(
                         &mut raw,
                     );
+                    crate::commands::settings::migrate_hotkey_digit_key_codes(&mut raw);
                     match serde_json::from_value::<AppSettings>(raw) {
                         Ok(mut settings) => {
                             crate::commands::settings::normalize_text_injection_overrides(

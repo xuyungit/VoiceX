@@ -5,6 +5,8 @@ const ctrlDisplayName = isMacOS ? 'Control' : 'Ctrl';
 const altDisplayName = isMacOS ? 'Option' : 'Alt';
 const metaDisplayName = isMacOS ? 'Command' : 'Win';
 
+const DIGIT_KEY_CODE_TAG = 0x100;
+
 export function formatHotkey(config: string | null): string | null {
   if (!config) return null;
   const parts = config.split('|');
@@ -44,8 +46,11 @@ function keyName(code: number): string {
   if (code === 61) return `Right ${altDisplayName}`;
   if (code === 59) return ctrlDisplayName;
   if (code === 56) return 'Shift';
-  if (code >= 48 && code <= 57) return String.fromCharCode(code);
   if (code >= 65 && code <= 90) return String.fromCharCode(code);
+  // Digits are tagged ASCII: plain 48..57 belongs to the special keys above
+  // (the key code space is laid out in src-tauri/src/hotkey/config.rs).
+  const digit = code - DIGIT_KEY_CODE_TAG;
+  if (digit >= 48 && digit <= 57) return String.fromCharCode(digit);
   return `Key ${code}`;
 }
 

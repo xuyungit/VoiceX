@@ -1113,6 +1113,124 @@ mod tests {
         assert!(!manager.translate_selection_status().conflicts_with_reading);
     }
 
+    // --- the key code space: digits vs. special keys ---
+
+    const DIGIT_KEYS: [(Key, Key); 10] = [
+        (Key::Num0, Key::Kp0),
+        (Key::Num1, Key::Kp1),
+        (Key::Num2, Key::Kp2),
+        (Key::Num3, Key::Kp3),
+        (Key::Num4, Key::Kp4),
+        (Key::Num5, Key::Kp5),
+        (Key::Num6, Key::Kp6),
+        (Key::Num7, Key::Kp7),
+        (Key::Num8, Key::Kp8),
+        (Key::Num9, Key::Kp9),
+    ];
+
+    #[test]
+    fn no_digit_shares_a_key_code_with_another_key() {
+        // As plain ASCII, '0' was Tab, '1' Space, '3' Delete, '5' Escape and
+        // '6'/'7'/'8' the Right Command, Command and Shift keys.
+        let others = [
+            Key::Space,
+            Key::Return,
+            Key::Tab,
+            Key::Escape,
+            Key::Backspace,
+            Key::ShiftLeft,
+            Key::ShiftRight,
+            Key::MetaLeft,
+            Key::MetaRight,
+            Key::Alt,
+            Key::AltGr,
+            Key::ControlLeft,
+            Key::ControlRight,
+            Key::Function,
+            Key::KeyA,
+            Key::KeyR,
+            Key::KeyT,
+            Key::KeyZ,
+        ];
+        for (digit, (num, kp)) in DIGIT_KEYS.into_iter().enumerate() {
+            let code = key_code_from_key(num);
+            assert_eq!(
+                code,
+                key_code_from_key(kp),
+                "keypad {digit} is the same binding"
+            );
+            assert!(
+                !HotkeyConfiguration::is_modifier_only_key_code(code),
+                "digit {digit}"
+            );
+            for other in others {
+                assert_ne!(code, key_code_from_key(other), "digit {digit} vs {other:?}");
+            }
+            // Raw platform codes (macOS keycodes, Windows VKs) pass through
+            // for keys rdev cannot name; digits must sit above all of them.
+            assert!(code > 0xFF, "digit {digit}");
+        }
+    }
+
+    #[test]
+    fn a_digit_combo_is_not_the_default_dictation_hotkey() {
+        let mods = ModifierState {
+            ctrl: true,
+            alt: true,
+            meta: true,
+            ..Default::default()
+        };
+        let dictation = HotkeyConfiguration::default_primary();
+
+        let one = HotkeySnapshot::from_event(Key::Num1, &mods).unwrap();
+        assert_ne!(one.to_config(), dictation);
+        assert!(!one.matches_active(dictation.key_code, dictation.modifiers, dictation.uses_fn));
+        assert_eq!(
+            one.to_config().display_string(),
+            "Control + Option + Command + 1"
+        );
+
+        let space = HotkeySnapshot::from_event(Key::Space, &mods).unwrap();
+        assert_eq!(space.to_config(), dictation);
+    }
+
+    #[test]
+    fn a_bare_digit_is_not_a_modifier_only_binding() {
+        let seven = HotkeySnapshot::from_event(Key::Num7, &ModifierState::default())
+            .unwrap()
+            .to_config();
+        assert!(!seven.is_modifier_only());
+        assert_eq!(seven.display_string(), "7");
+    }
+
+    #[test]
+    fn letters_and_special_keys_keep_their_stored_codes() {
+        // Frozen by settings already on disk.
+        let frozen = [
+            (Key::Return, 36),
+            (Key::Tab, 48),
+            (Key::Space, 49),
+            (Key::Backspace, 51),
+            (Key::Escape, 53),
+            (Key::MetaRight, 54),
+            (Key::MetaLeft, 55),
+            (Key::ShiftLeft, 56),
+            (Key::Alt, 58),
+            (Key::ControlLeft, 59),
+            (Key::ShiftRight, 60),
+            (Key::AltGr, 61),
+            (Key::ControlRight, 62),
+            (Key::Function, 63),
+            (Key::KeyA, 65),
+            (Key::KeyR, 82),
+            (Key::KeyT, 84),
+            (Key::KeyZ, 90),
+        ];
+        for (key, code) in frozen {
+            assert_eq!(key_code_from_key(key), code, "{key:?}");
+        }
+    }
+
     #[test]
     fn clearing_the_translate_binding_disables_it_and_reports_unbound() {
         let manager = manager_with_all_three_defaults();
@@ -1166,16 +1284,16 @@ fn key_code_from_key(key: Key) -> u32 {
         Key::KeyX => 'X' as u32,
         Key::KeyY => 'Y' as u32,
         Key::KeyZ => 'Z' as u32,
-        Key::Num0 | Key::Kp0 => '0' as u32,
-        Key::Num1 | Key::Kp1 => '1' as u32,
-        Key::Num2 | Key::Kp2 => '2' as u32,
-        Key::Num3 | Key::Kp3 => '3' as u32,
-        Key::Num4 | Key::Kp4 => '4' as u32,
-        Key::Num5 | Key::Kp5 => '5' as u32,
-        Key::Num6 | Key::Kp6 => '6' as u32,
-        Key::Num7 | Key::Kp7 => '7' as u32,
-        Key::Num8 | Key::Kp8 => '8' as u32,
-        Key::Num9 | Key::Kp9 => '9' as u32,
+        Key::Num0 | Key::Kp0 => HotkeyConfiguration::digit_key_code(0),
+        Key::Num1 | Key::Kp1 => HotkeyConfiguration::digit_key_code(1),
+        Key::Num2 | Key::Kp2 => HotkeyConfiguration::digit_key_code(2),
+        Key::Num3 | Key::Kp3 => HotkeyConfiguration::digit_key_code(3),
+        Key::Num4 | Key::Kp4 => HotkeyConfiguration::digit_key_code(4),
+        Key::Num5 | Key::Kp5 => HotkeyConfiguration::digit_key_code(5),
+        Key::Num6 | Key::Kp6 => HotkeyConfiguration::digit_key_code(6),
+        Key::Num7 | Key::Kp7 => HotkeyConfiguration::digit_key_code(7),
+        Key::Num8 | Key::Kp8 => HotkeyConfiguration::digit_key_code(8),
+        Key::Num9 | Key::Kp9 => HotkeyConfiguration::digit_key_code(9),
         // Fallback to hash
         Key::Unknown(code) => code,
         _ => 0,

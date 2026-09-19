@@ -799,6 +799,38 @@ pub fn migrate_text_injection_override_restore_flag(value: &mut serde_json::Valu
     migrated
 }
 
+/// One-time migration of hotkey bindings stored while digit keys shared their
+/// key codes with the special keys. Which stored values can be rewritten, and
+/// why the rest keep their meaning, is
+/// [`HotkeyConfiguration::migrate_legacy_digit_storage`]'s to say.
+///
+/// Returns `true` when it actually migrated something, so callers can decide
+/// whether to persist the upgraded blob.
+pub fn migrate_hotkey_digit_key_codes(value: &mut serde_json::Value) -> bool {
+    const HOTKEY_FIELDS: [&str; 3] = [
+        "hotkeyConfig",
+        "ttsHotkeyConfig",
+        "ttsTranslateHotkeyConfig",
+    ];
+
+    let Some(obj) = value.as_object_mut() else {
+        return false;
+    };
+
+    let mut migrated = false;
+    for field in HOTKEY_FIELDS {
+        let rewritten = obj
+            .get(field)
+            .and_then(|v| v.as_str())
+            .and_then(crate::hotkey::HotkeyConfiguration::migrate_legacy_digit_storage);
+        if let Some(storage) = rewritten {
+            obj.insert(field.to_string(), serde_json::Value::String(storage));
+            migrated = true;
+        }
+    }
+    migrated
+}
+
 /// Derive a friendly default name from a base URL host, e.g.
 /// `https://api.deepseek.com/v1` -> `api.deepseek.com`.
 fn custom_endpoint_name_from_base_url(base_url: &str) -> String {
@@ -1244,9 +1276,9 @@ pub async fn clear_soniox_debug_overrides(
 #[cfg(test)]
 mod tests {
     use super::{
-        active_custom_endpoint, apply_llm_provider_selection, migrate_llm_custom_endpoints,
-        migrate_text_injection_override_restore_flag, normalize_qwen_settings,
-        normalize_text_injection_overrides, AppSettings,
+        active_custom_endpoint, apply_llm_provider_selection, migrate_hotkey_digit_key_codes,
+        migrate_llm_custom_endpoints, migrate_text_injection_override_restore_flag,
+        normalize_qwen_settings, normalize_text_injection_overrides, AppSettings,
     };
     use crate::foreground_app::TextInjectionAppOverride;
     use crate::services::llm_service::build_llm_config_from_settings;
@@ -1491,6 +1523,25 @@ mod tests {
 
         let mut other = serde_json::json!({ "textInjectionOverrides": "not-an-array" });
         assert!(!migrate_text_injection_override_restore_flag(&mut other));
+    }
+
+    #[test]
+    fn hotkey_digit_migration_rewrites_every_binding_field_once() {
+        let mut value = serde_json::json!({
+            "hotkeyConfig": "49|6400|0",
+            "ttsHotkeyConfig": "50|2304|0",
+            "ttsTranslateHotkeyConfig": "57|2304|0",
+        });
+        assert!(migrate_hotkey_digit_key_codes(&mut value));
+        assert_eq!(value["hotkeyConfig"], "49|6400|0", "Space stays Space");
+        assert_eq!(value["ttsHotkeyConfig"], "306|2304|0");
+        assert_eq!(value["ttsTranslateHotkeyConfig"], "313|2304|0");
+
+        assert!(!migrate_hotkey_digit_key_codes(&mut value), "idempotent");
+
+        // Unset bindings (null or absent) are the defaults, not something to migrate.
+        let mut unset = serde_json::json!({ "hotkeyConfig": null });
+        assert!(!migrate_hotkey_digit_key_codes(&mut unset));
     }
 
     #[test]
