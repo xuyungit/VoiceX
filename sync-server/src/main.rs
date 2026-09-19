@@ -145,6 +145,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let v1 = Router::new()
         .route("/account", get(get_account))
         .route("/device", put(put_device))
+        .route("/usage/tts", put(put_tts_usage))
         .route("/events", post(post_events).get(get_events))
         .route("/subscribe", get(subscribe))
         .layer(from_fn_with_state(state.clone(), auth_middleware));
@@ -363,6 +364,32 @@ async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // Reading (TTS) counters, reported per device as absolute lifetime totals
+    // rather than derived from events like `usage_stats` is.
+    //
+    // A device PUTs the values it currently holds and they replace its row, so
+    // a retried, duplicated or long-delayed report is harmless and the account
+    // total is always SUM() over the rows. Nothing here is derived from
+    // history rows: reading never uploads text, and translate-and-read rows
+    // stay on the machine that made them.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS device_tts_stats (
+            account_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            read_count INTEGER NOT NULL DEFAULT 0,
+            translate_count INTEGER NOT NULL DEFAULT 0,
+            characters INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            llm_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (account_id, device_id)
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS server_info (
@@ -562,6 +589,7 @@ struct AccountResponse {
     account_id: String,
     config: AccountConfig,
     usage: UsageStats,
+    tts_usage: TtsUsageStats,
     last_seq: Option<i64>,
     server_now: String,
 }
@@ -578,6 +606,40 @@ struct UsageStats {
     total_duration_ms: i64,
     total_characters: i64,
     llm_correction_count: i64,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TtsUsageStats {
+    read_count: i64,
+    translate_count: i64,
+    characters: i64,
+    duration_ms: i64,
+    llm_count: i64,
+}
+
+/// The account's reading totals: every device's last report, summed.
+///
+/// `SUM` over no rows is NULL, which is the normal state for an account that
+/// has never reported a read, so each column is coalesced to 0.
+async fn fetch_tts_totals(db: &SqlitePool, account_id: &str) -> Result<TtsUsageStats, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT COALESCE(SUM(read_count), 0), COALESCE(SUM(translate_count), 0),
+                COALESCE(SUM(characters), 0), COALESCE(SUM(duration_ms), 0),
+                COALESCE(SUM(llm_count), 0)
+         FROM device_tts_stats WHERE account_id = ?1",
+    )
+    .bind(account_id)
+    .fetch_one(db)
+    .await?;
+
+    Ok(TtsUsageStats {
+        read_count: row.get::<i64, _>(0),
+        translate_count: row.get::<i64, _>(1),
+        characters: row.get::<i64, _>(2),
+        duration_ms: row.get::<i64, _>(3),
+        llm_count: row.get::<i64, _>(4),
+    })
 }
 
 async fn get_account(
@@ -617,6 +679,7 @@ async fn get_account(
             total_characters: usage_row.get::<i64, _>(1),
             llm_correction_count: usage_row.get::<i64, _>(2),
         },
+        tts_usage: fetch_tts_totals(&state.db, &auth.account_id).await?,
         last_seq,
         server_now: Utc::now().to_rfc3339(),
     }))
@@ -732,6 +795,96 @@ async fn put_device(
         auth.account_id, req.device_id, name, seq
     );
     Ok(Json(json!({ "ok": true, "seq": seq, "changed": true })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PutTtsUsageRequest {
+    device_id: String,
+    #[serde(default)]
+    read_count: i64,
+    #[serde(default)]
+    translate_count: i64,
+    #[serde(default)]
+    characters: i64,
+    #[serde(default)]
+    duration_ms: i64,
+    #[serde(default)]
+    llm_count: i64,
+}
+
+/// Replace a device's reading counters with the absolute totals it now holds,
+/// and answer with the account total.
+///
+/// Deliberately outside the event log: reading stats are a small fixed set of
+/// numbers, not a history that other devices replay, and keeping them off
+/// `/v1/events` means a client that reports them can never block history sync.
+async fn put_tts_usage(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthedAccount>,
+    Json(req): Json<PutTtsUsageRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if req.device_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("deviceId is required".to_string()));
+    }
+    // Counters only ever grow on the client. A negative one means the client
+    // is broken, and silently clamping it would hide that while quietly
+    // skewing the account total, so say so instead.
+    for (field, value) in [
+        ("readCount", req.read_count),
+        ("translateCount", req.translate_count),
+        ("characters", req.characters),
+        ("durationMs", req.duration_ms),
+        ("llmCount", req.llm_count),
+    ] {
+        if value < 0 {
+            return Err(ApiError::BadRequest(format!(
+                "{} must not be negative (got {})",
+                field, value
+            )));
+        }
+    }
+
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO device_tts_stats (
+            account_id, device_id, read_count, translate_count,
+            characters, duration_ms, llm_count, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ON CONFLICT(account_id, device_id) DO UPDATE SET
+            read_count = excluded.read_count,
+            translate_count = excluded.translate_count,
+            characters = excluded.characters,
+            duration_ms = excluded.duration_ms,
+            llm_count = excluded.llm_count,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(&auth.account_id)
+    .bind(req.device_id.trim())
+    .bind(req.read_count)
+    .bind(req.translate_count)
+    .bind(req.characters)
+    .bind(req.duration_ms)
+    .bind(req.llm_count)
+    .bind(&now)
+    .execute(&state.db)
+    .await?;
+
+    let totals = fetch_tts_totals(&state.db, &auth.account_id).await?;
+
+    debug!(
+        "tts usage account={} device_id={} reads={} translates={} total_reads={}",
+        auth.account_id,
+        req.device_id,
+        req.read_count,
+        req.translate_count,
+        totals.read_count + totals.translate_count
+    );
+
+    Ok(Json(json!({ "ok": true, "ttsUsage": totals })))
 }
 
 #[derive(Debug, Deserialize)]
