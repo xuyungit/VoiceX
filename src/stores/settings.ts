@@ -13,8 +13,9 @@ export interface CustomLlmEndpoint {
     apiKey: string
     model: string
     apiMode: LlmApiModeValue
-    // `reasoning_effort` to send; '' sends nothing. Endpoints differ in what
-    // they accept (`none` on Cerebras, `minimal` on OpenAI, ...).
+    // '' asks for the lowest reasoning the endpoint has, spelled per vendor by
+    // the backend; 'server_default' sends nothing; anything else is sent as
+    // `reasoning_effort`.
     reasoningEffort: string
     // JSON object merged into every request body, for knobs with no standard
     // spelling: `{"enable_thinking": false}`, `{"thinking": {"type": "disabled"}}`.
@@ -402,7 +403,7 @@ const defaultSettings: AppSettings = {
     llmVolcengineBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
     llmVolcengineApiKey: '',
     llmVolcengineModel: 'doubao-seed-2-0-mini-260215',
-    llmVolcengineReasoningEffort: 'minimal',
+    llmVolcengineReasoningEffort: null,
 
     llmOpenaiBaseUrl: 'https://api.openai.com/v1',
     llmOpenaiApiKey: '',

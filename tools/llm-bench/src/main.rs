@@ -1397,8 +1397,9 @@ fn responses_reasoning(provider: &Provider) -> Option<ResponseApiReasoning> {
     configured_reasoning_effort(provider).map(|effort| ResponseApiReasoning { effort })
 }
 
-/// Chat-completions body, including vendor extras. Volcengine defaults to
-/// `reasoning_effort=minimal`; Qwen defaults to `enable_thinking=false`.
+/// Chat-completions body, including vendor extras. An entry that names no
+/// knob gets the main app's default: Volcengine `thinking: disabled`, Qwen
+/// `enable_thinking=false` (see `merge_provider_extra`).
 fn build_chat_request_body(
     provider: &Provider,
     system_prompt: String,
@@ -1425,8 +1426,7 @@ fn build_chat_request_body(
     match provider.provider_type.as_str() {
         "volcengine" => {
             request.temperature = Some(0.2);
-            request.reasoning_effort =
-                configured_reasoning_effort(provider).or_else(|| Some("minimal".into()));
+            request.reasoning_effort = configured_reasoning_effort(provider);
         }
         "openai" => {
             request.max_completion_tokens = Some(4096);
@@ -1463,11 +1463,7 @@ fn build_responses_request_body(
     match provider.provider_type.as_str() {
         "volcengine" => {
             request.temperature = Some(0.2);
-            request.reasoning = responses_reasoning(provider).or_else(|| {
-                Some(ResponseApiReasoning {
-                    effort: "minimal".into(),
-                })
-            });
+            request.reasoning = responses_reasoning(provider);
         }
         "openai" => {
             request.reasoning = responses_reasoning(provider);
@@ -1484,8 +1480,11 @@ fn build_responses_request_body(
     body
 }
 
-/// Merge `[provider.extra]` into the request. `type = "qwen"` also turns
-/// thinking off unless extra already set `enable_thinking`.
+/// Merge `[provider.extra]` into the request, then fill in the main app's
+/// lowest-reasoning default where the entry names no knob: `type = "qwen"`
+/// turns `enable_thinking` off, and `type = "volcengine"` without a
+/// `reasoning_effort` sends `thinking: disabled`, the one spelling every Ark
+/// model honors (`minimal` and `none` are ignored by some).
 fn merge_provider_extra(body: &mut serde_json::Value, provider: &Provider) {
     let serde_json::Value::Object(map) = body else {
         return;
@@ -1493,9 +1492,16 @@ fn merge_provider_extra(body: &mut serde_json::Value, provider: &Provider) {
     for (k, v) in &provider.extra {
         map.insert(k.clone(), toml_to_json(v));
     }
-    if provider.provider_type == "qwen" {
-        map.entry("enable_thinking".to_string())
-            .or_insert(serde_json::Value::Bool(false));
+    match provider.provider_type.as_str() {
+        "qwen" => {
+            map.entry("enable_thinking".to_string())
+                .or_insert(serde_json::Value::Bool(false));
+        }
+        "volcengine" if configured_reasoning_effort(provider).is_none() => {
+            map.entry("thinking".to_string())
+                .or_insert(serde_json::json!({ "type": "disabled" }));
+        }
+        _ => {}
     }
 }
 
@@ -2329,8 +2335,17 @@ mod tests {
     #[test]
     fn chat_body_uses_lowest_thinking_per_provider() {
         let volc = build_chat_request_body(&bench_provider("volcengine", None, &[]), "s".into(), "u".into());
-        assert_eq!(volc["reasoning_effort"], "minimal");
+        assert_eq!(volc["thinking"]["type"], "disabled");
+        assert!(volc.get("reasoning_effort").is_none());
         assert!(volc.get("enable_thinking").is_none());
+
+        let volc_low = build_chat_request_body(
+            &bench_provider("volcengine", Some("low"), &[]),
+            "s".into(),
+            "u".into(),
+        );
+        assert_eq!(volc_low["reasoning_effort"], "low");
+        assert!(volc_low.get("thinking").is_none());
 
         let openai_quiet =
             build_chat_request_body(&bench_provider("openai", None, &[]), "s".into(), "u".into());
@@ -2375,7 +2390,8 @@ mod tests {
         assert_eq!(min["reasoning"]["effort"], "minimal");
 
         let volc = build_responses_request_body(&bench_provider("volcengine", None, &[]), "s", "u");
-        assert_eq!(volc["reasoning"]["effort"], "minimal");
+        assert_eq!(volc["thinking"]["type"], "disabled");
+        assert!(volc.get("reasoning").is_none());
 
         let qwen = build_responses_request_body(&bench_provider("qwen", None, &[]), "s", "u");
         assert_eq!(qwen["enable_thinking"], false);

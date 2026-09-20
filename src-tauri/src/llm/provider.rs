@@ -1,6 +1,7 @@
 //! LLM Provider trait and implementations
 
 use super::config::{LLMConfig, LLMProviderType};
+use super::reasoning;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -52,19 +53,11 @@ pub fn create_provider(provider_type: &LLMProviderType) -> Box<dyn LLMProvider> 
     }
 }
 
-/// The reasoning effort to put on the wire, if the user chose one.
-fn configured_reasoning_effort(config: &LLMConfig) -> Option<&str> {
-    config
-        .reasoning_effort
-        .as_deref()
-        .map(str::trim)
-        .filter(|effort| !effort.is_empty())
-}
-
-/// Chat-completions shape: a top-level `reasoning_effort` field.
-fn insert_reasoning_effort(req: &mut Value, config: &LLMConfig) {
-    if let Some(effort) = configured_reasoning_effort(config) {
-        req["reasoning_effort"] = Value::String(effort.to_string());
+/// Put the reasoning fields `config` resolves to into `target`: the request
+/// body, or Gemini's `generation_config`.
+fn insert_reasoning_fields(target: &mut Value, config: &LLMConfig) {
+    if let Some(object) = target.as_object_mut() {
+        object.extend(reasoning::plan(config).fields);
     }
 }
 
@@ -76,17 +69,13 @@ pub struct VolcengineProvider;
 
 impl LLMProvider for VolcengineProvider {
     fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
-        let reasoning_effort = config
-            .reasoning_effort
-            .clone()
-            .unwrap_or_else(|| "minimal".to_string());
-
-        serde_json::json!({
+        let mut req = serde_json::json!({
             "model": config.model_name,
             "messages": messages,
-            "temperature": 0.2,
-            "reasoning_effort": reasoning_effort
-        })
+            "temperature": 0.2
+        });
+        insert_reasoning_fields(&mut req, config);
+        req
     }
 
     fn name(&self) -> &'static str {
@@ -106,7 +95,7 @@ impl LLMProvider for OpenAIProvider {
             "model": config.model_name,
             "messages": messages
         });
-        insert_reasoning_effort(&mut req, config);
+        insert_reasoning_fields(&mut req, config);
         req
     }
 
@@ -123,12 +112,13 @@ pub struct QwenProvider;
 
 impl LLMProvider for QwenProvider {
     fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
-        serde_json::json!({
+        let mut req = serde_json::json!({
             "model": config.model_name,
             "messages": messages,
-            "temperature": 0.2,
-            "enable_thinking": false
-        })
+            "temperature": 0.2
+        });
+        insert_reasoning_fields(&mut req, config);
+        req
     }
 
     fn name(&self) -> &'static str {
@@ -152,7 +142,7 @@ impl LLMProvider for CustomProvider {
             "messages": messages,
             "temperature": 0.2
         });
-        insert_reasoning_effort(&mut req, config);
+        insert_reasoning_fields(&mut req, config);
         req
     }
 
@@ -175,9 +165,7 @@ impl LLMProvider for CustomProvider {
             "temperature": 0.2,
             "stream": true
         });
-        if let Some(effort) = configured_reasoning_effort(config) {
-            req["reasoning"] = serde_json::json!({ "effort": effort });
-        }
+        insert_reasoning_fields(&mut req, config);
         req
     }
 
@@ -191,22 +179,6 @@ impl LLMProvider for CustomProvider {
 // =============================================================================
 
 pub struct GeminiProvider;
-
-/// Lowest thinking Gemini accepts for this model. 3.7/3.8 Flash reject MINIMAL;
-/// 2.5 Flash can set thinkingBudget=0; Flash-Lite already thinks off by default.
-fn gemini_thinking_config(model: &str) -> Option<Value> {
-    let model = model.to_ascii_lowercase();
-    if model.contains("2.5") {
-        if model.contains("pro") {
-            return Some(serde_json::json!({ "thinkingLevel": "LOW" }));
-        }
-        return Some(serde_json::json!({ "thinkingBudget": 0 }));
-    }
-    if model.contains("lite") {
-        return None;
-    }
-    Some(serde_json::json!({ "thinkingLevel": "LOW" }))
-}
 
 impl LLMProvider for GeminiProvider {
     fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
@@ -234,9 +206,7 @@ impl LLMProvider for GeminiProvider {
         let mut generation_config = serde_json::json!({
             "temperature": 0.2
         });
-        if let Some(thinking) = gemini_thinking_config(&config.model_name) {
-            generation_config["thinkingConfig"] = thinking;
-        }
+        insert_reasoning_fields(&mut generation_config, config);
 
         let mut req = serde_json::json!({
             "contents": contents,
@@ -259,20 +229,38 @@ impl LLMProvider for GeminiProvider {
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::LLMApiMode;
+    use super::super::reasoning::ReasoningChoice;
     use super::*;
+
+    fn config_for(provider_type: LLMProviderType, reasoning: ReasoningChoice) -> LLMConfig {
+        LLMConfig {
+            provider_type,
+            base_url: "https://example.test/v1".to_string(),
+            api_key: "k".to_string(),
+            model_name: "m".to_string(),
+            api_mode: LLMApiMode::ChatCompletions,
+            reasoning,
+            extra_body: None,
+        }
+    }
+
+    fn effort(value: &str) -> ReasoningChoice {
+        ReasoningChoice::Effort(value.to_string())
+    }
+
+    fn user_message() -> Vec<Message> {
+        vec![Message {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }]
+    }
 
     #[test]
     fn test_gemini_provider_build_chat_request() {
         let provider = GeminiProvider;
-        let config = LLMConfig {
-            provider_type: LLMProviderType::Gemini,
-            base_url: "https://generativelanguage.googleapis.com".to_string(),
-            api_key: "test_key".to_string(),
-            model_name: "gemini-3.5-flash-lite".to_string(),
-            api_mode: super::super::config::LLMApiMode::ChatCompletions,
-            reasoning_effort: None,
-            extra_body: None,
-        };
+        let mut config = config_for(LLMProviderType::Gemini, ReasoningChoice::Lowest);
+        config.model_name = "gemini-3.5-flash-lite".to_string();
 
         let messages = vec![
             Message {
@@ -297,20 +285,13 @@ mod tests {
     }
 
     #[test]
-    fn gemini_flash_uses_low_thinking() {
-        assert_eq!(
-            gemini_thinking_config("gemini-3.7-flash"),
-            Some(serde_json::json!({ "thinkingLevel": "LOW" }))
-        );
-        assert_eq!(
-            gemini_thinking_config("gemini-3.8-flash"),
-            Some(serde_json::json!({ "thinkingLevel": "LOW" }))
-        );
-        assert_eq!(gemini_thinking_config("gemini-3.5-flash-lite"), None);
-        assert_eq!(
-            gemini_thinking_config("gemini-2.5-flash"),
-            Some(serde_json::json!({ "thinkingBudget": 0 }))
-        );
+    fn gemini_thinking_goes_into_the_generation_config() {
+        let mut config = config_for(LLMProviderType::Gemini, ReasoningChoice::Lowest);
+        config.model_name = "gemini-3.8-flash".to_string();
+        let req = GeminiProvider.build_chat_request(user_message(), &config);
+        assert_eq!(req["generation_config"]["thinkingConfig"]["thinkingLevel"], "LOW");
+        assert!(req.get("thinkingConfig").is_none());
+        assert!(req["generation_config"].get("maxOutputTokens").is_none());
     }
 
     #[test]
@@ -319,30 +300,41 @@ mod tests {
         assert_eq!(provider.name(), "Gemini");
     }
 
-    fn config_for(provider_type: LLMProviderType, reasoning_effort: Option<&str>) -> LLMConfig {
-        LLMConfig {
-            provider_type,
-            base_url: "https://example.test/v1".to_string(),
-            api_key: "k".to_string(),
-            model_name: "m".to_string(),
-            api_mode: super::super::config::LLMApiMode::ChatCompletions,
-            reasoning_effort: reasoning_effort.map(str::to_string),
-            extra_body: None,
-        }
-    }
+    #[test]
+    fn volcengine_turns_thinking_off_unless_an_effort_is_chosen() {
+        let lowest = VolcengineProvider.build_chat_request(
+            user_message(),
+            &config_for(LLMProviderType::Volcengine, ReasoningChoice::Lowest),
+        );
+        assert_eq!(lowest["thinking"]["type"], "disabled");
+        assert!(lowest.get("reasoning_effort").is_none());
 
-    fn user_message() -> Vec<Message> {
-        vec![Message {
-            role: "user".to_string(),
-            content: "hi".to_string(),
-        }]
+        let chosen = VolcengineProvider.build_chat_request(
+            user_message(),
+            &config_for(LLMProviderType::Volcengine, effort("medium")),
+        );
+        assert_eq!(chosen["reasoning_effort"], "medium");
+        assert!(chosen.get("thinking").is_none());
     }
 
     #[test]
-    fn custom_chat_request_sends_no_output_cap_and_only_a_chosen_effort() {
+    fn openai_chat_request_sends_no_output_cap_and_the_models_own_floor() {
+        let mut config = config_for(LLMProviderType::Openai, ReasoningChoice::Lowest);
+        config.model_name = "gpt-5.6-luna".to_string();
+        let lowest = OpenAIProvider.build_chat_request(user_message(), &config);
+        assert!(lowest.get("max_completion_tokens").is_none());
+        assert_eq!(lowest["reasoning_effort"], "none");
+
+        config.model_name = "gpt-4.1-mini".to_string();
+        let plain = OpenAIProvider.build_chat_request(user_message(), &config);
+        assert!(plain.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn custom_chat_request_sends_no_output_cap_and_nothing_to_an_unknown_host() {
         let quiet = CustomProvider.build_chat_request(
             user_message(),
-            &config_for(LLMProviderType::Custom, None),
+            &config_for(LLMProviderType::Custom, ReasoningChoice::Lowest),
         );
         assert!(quiet.get("max_tokens").is_none());
         assert!(quiet.get("max_completion_tokens").is_none());
@@ -350,64 +342,45 @@ mod tests {
 
         let none = CustomProvider.build_chat_request(
             user_message(),
-            &config_for(LLMProviderType::Custom, Some("none")),
+            &config_for(LLMProviderType::Custom, effort("none")),
         );
         assert_eq!(none["reasoning_effort"], "none");
+    }
 
-        let blank = CustomProvider.build_chat_request(
-            user_message(),
-            &config_for(LLMProviderType::Custom, Some("  ")),
-        );
-        assert!(blank.get("reasoning_effort").is_none());
+    #[test]
+    fn custom_chat_request_uses_the_hosts_own_spelling() {
+        let mut config = config_for(LLMProviderType::Custom, ReasoningChoice::Lowest);
+        config.base_url = "https://api.deepseek.com".to_string();
+        let req = CustomProvider.build_chat_request(user_message(), &config);
+        assert_eq!(req["thinking"]["type"], "disabled");
+
+        config.reasoning = ReasoningChoice::ServerDefault;
+        let silent = CustomProvider.build_chat_request(user_message(), &config);
+        assert!(silent.get("thinking").is_none());
+        assert!(silent.get("reasoning_effort").is_none());
     }
 
     #[test]
     fn custom_responses_request_nests_the_effort_and_sends_no_output_cap() {
-        let req = CustomProvider.build_responses_request(
-            "sys",
-            "hi",
-            &config_for(LLMProviderType::Custom, Some("low")),
-        );
+        let mut config = config_for(LLMProviderType::Custom, effort("low"));
+        config.api_mode = LLMApiMode::Responses;
+        let req = CustomProvider.build_responses_request("sys", "hi", &config);
         assert_eq!(req["reasoning"]["effort"], "low");
+        assert!(req.get("reasoning_effort").is_none());
         assert!(req.get("max_output_tokens").is_none());
 
-        let quiet =
-            CustomProvider.build_responses_request("sys", "hi", &config_for(LLMProviderType::Custom, None));
+        config.reasoning = ReasoningChoice::ServerDefault;
+        let quiet = CustomProvider.build_responses_request("sys", "hi", &config);
         assert!(quiet.get("reasoning").is_none());
     }
 
     #[test]
-    fn openai_chat_request_sends_no_output_cap_and_an_optional_effort() {
-        let quiet = OpenAIProvider.build_chat_request(
+    fn qwen_turns_thinking_off_and_sends_no_cap() {
+        let qwen = QwenProvider.build_chat_request(
             user_message(),
-            &config_for(LLMProviderType::Openai, None),
+            &config_for(LLMProviderType::Qwen, ReasoningChoice::Lowest),
         );
-        assert!(quiet.get("max_completion_tokens").is_none());
-        assert!(quiet.get("reasoning_effort").is_none());
-
-        let minimal = OpenAIProvider.build_chat_request(
-            user_message(),
-            &config_for(LLMProviderType::Openai, Some("minimal")),
-        );
-        assert_eq!(minimal["reasoning_effort"], "minimal");
-    }
-
-    #[test]
-    fn volcengine_defaults_to_minimal_effort_and_qwen_gemini_send_no_cap() {
-        let volc = VolcengineProvider.build_chat_request(
-            user_message(),
-            &config_for(LLMProviderType::Volcengine, None),
-        );
-        assert_eq!(volc["reasoning_effort"], "minimal");
-
-        let qwen = QwenProvider.build_chat_request(user_message(), &config_for(LLMProviderType::Qwen, None));
         assert!(qwen.get("max_tokens").is_none());
         assert_eq!(qwen["enable_thinking"], false);
-
-        let gemini = GeminiProvider.build_chat_request(
-            user_message(),
-            &config_for(LLMProviderType::Gemini, None),
-        );
-        assert!(gemini["generation_config"].get("maxOutputTokens").is_none());
     }
 }

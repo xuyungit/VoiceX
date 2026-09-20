@@ -240,7 +240,7 @@ pub fn log_stage_result(stage: &str, input_chars: usize, elapsed_ms: u128, resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{LLMApiMode, LLMProviderType};
+    use crate::llm::{LLMApiMode, LLMProviderType, ReasoningChoice};
     use crate::tts::SessionSlot;
 
     #[test]
@@ -335,7 +335,7 @@ mod tests {
             api_key: api_key.to_string(),
             model_name: "test".to_string(),
             api_mode: LLMApiMode::ChatCompletions,
-            reasoning_effort: None,
+            reasoning: ReasoningChoice::default(),
             extra_body: None,
         }
     }

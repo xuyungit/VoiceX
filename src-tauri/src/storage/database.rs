@@ -243,7 +243,14 @@ fn migrate_settings_blob(conn: &Connection) {
         crate::commands::settings::migrate_text_injection_override_restore_flag(&mut value);
     let migrated_asr = crate::commands::settings::migrate_openai_refine_model(&mut value);
     let migrated_hotkeys = crate::commands::settings::migrate_hotkey_digit_key_codes(&mut value);
-    if !migrated_endpoints && !migrated_restore && !migrated_asr && !migrated_hotkeys {
+    let migrated_reasoning =
+        crate::commands::settings::migrate_volcengine_minimal_effort(&mut value);
+    if !migrated_endpoints
+        && !migrated_restore
+        && !migrated_asr
+        && !migrated_hotkeys
+        && !migrated_reasoning
+    {
         return;
     }
 
@@ -271,10 +278,11 @@ fn migrate_settings_blob(conn: &Connection) {
     ) {
         Ok(_) => log::info!(
             "Migrated persisted settings (custom LLM endpoints: {}, override restore flag: {}, \
-             hotkey digit key codes: {})",
+             hotkey digit key codes: {}, Volcengine reasoning: {})",
             migrated_endpoints,
             migrated_restore,
-            migrated_hotkeys
+            migrated_hotkeys,
+            migrated_reasoning
         ),
         Err(e) => log::warn!("Settings migration write-back failed: {}", e),
     }
@@ -1083,6 +1091,7 @@ pub fn get_settings() -> Result<AppSettings, StorageError> {
                         &mut raw,
                     );
                     crate::commands::settings::migrate_hotkey_digit_key_codes(&mut raw);
+                    crate::commands::settings::migrate_volcengine_minimal_effort(&mut raw);
                     match serde_json::from_value::<AppSettings>(raw) {
                         Ok(mut settings) => {
                             crate::commands::settings::normalize_text_injection_overrides(

@@ -142,14 +142,16 @@ pub struct AppSettings {
     pub llm_volcengine_base_url: String,
     pub llm_volcengine_api_key: String,
     pub llm_volcengine_model: String,
+    /// Reasoning for the Volcengine provider, in `ReasoningChoice::from_setting`'s
+    /// spelling: `None`/blank asks for the lowest the endpoint accepts.
     pub llm_volcengine_reasoning_effort: Option<String>,
 
     // LLM Provider: OpenAI
     pub llm_openai_base_url: String,
     pub llm_openai_api_key: String,
     pub llm_openai_model: String,
-    /// `reasoning_effort` for the OpenAI provider; `None`/blank sends nothing,
-    /// since models that do not reason (gpt-4o) reject the field.
+    /// Reasoning for the OpenAI provider; `None`/blank asks for the lowest the
+    /// model accepts, which is no field at all for one that does not reason.
     #[serde(default)]
     pub llm_openai_reasoning_effort: Option<String>,
 
@@ -338,8 +340,9 @@ pub struct CustomLlmEndpoint {
     pub api_key: String,
     pub model: String,
     pub api_mode: String, // "chat_completions" | "responses"
-    /// `reasoning_effort` to send; blank sends nothing. Endpoints differ in
-    /// what they accept (`none` on Cerebras, `minimal` on OpenAI, ...).
+    /// Blank asks for the lowest reasoning known for this host and model,
+    /// `server_default` sends nothing, anything else goes out as
+    /// `reasoning_effort`. Endpoints differ in what they accept.
     #[serde(default)]
     pub reasoning_effort: String,
     /// JSON object merged into every request body, for knobs that have no
@@ -378,6 +381,15 @@ pub struct LlmProviderProbeResult {
     pub response_text: String,
     pub expected_match: bool,
     pub error_message: Option<String>,
+}
+
+/// The reasoning fields the LLM page's current selection puts on the wire.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmReasoningPreview {
+    /// Compact JSON of the fields; empty when nothing is sent.
+    pub fields: String,
+    pub source: crate::llm::reasoning::ReasoningSource,
 }
 
 impl Default for AppSettings {
@@ -477,7 +489,7 @@ impl Default for AppSettings {
             llm_volcengine_base_url: "https://ark.cn-beijing.volces.com/api/v3".to_string(),
             llm_volcengine_api_key: String::new(),
             llm_volcengine_model: "doubao-seed-2-0-mini-260215".to_string(),
-            llm_volcengine_reasoning_effort: Some("minimal".to_string()),
+            llm_volcengine_reasoning_effort: None,
 
             llm_openai_base_url: "https://api.openai.com/v1".to_string(),
             llm_openai_api_key: String::new(),
@@ -676,6 +688,21 @@ pub fn apply_llm_provider_selection(settings: &mut AppSettings, key: &str) {
     } else {
         settings.llm_provider_type = key.to_string();
     }
+}
+
+/// `minimal` was the Volcengine page's default and its way of saying "lowest".
+/// It quiets Doubao Seed 2.x, but deepseek-v4-1-flash and doubao-seed-1-6-flash
+/// think straight through it. The page no longer offers the value: blank asks
+/// for the lowest reasoning, which on Ark is `thinking: disabled` and holds for
+/// every model.
+pub fn migrate_volcengine_minimal_effort(value: &mut serde_json::Value) -> bool {
+    let Some(object) = value.as_object_mut() else { return false; };
+    let key = "llmVolcengineReasoningEffort";
+    if object.get(key).and_then(serde_json::Value::as_str).map(str::trim) != Some("minimal") {
+        return false;
+    }
+    object.insert(key.into(), serde_json::Value::Null);
+    true
 }
 
 /// Preserve the previous final-pass model when introducing its independent setting.
@@ -1228,6 +1255,21 @@ pub async fn probe_current_llm_provider() -> Result<LlmProviderProbeResult, Stri
     probe_current_llm_provider_impl(config).await
 }
 
+/// Takes the page's settings rather than the saved ones, so the preview follows
+/// the fields as they are edited.
+#[tauri::command]
+pub fn preview_llm_reasoning(settings: AppSettings) -> LlmReasoningPreview {
+    let plan = crate::llm::reasoning::plan(&build_llm_config_from_settings(&settings));
+    LlmReasoningPreview {
+        fields: if plan.fields.is_empty() {
+            String::new()
+        } else {
+            serde_json::Value::Object(plan.fields).to_string()
+        },
+        source: plan.source,
+    }
+}
+
 #[tauri::command]
 pub fn load_provider_probe_audio() -> Result<Vec<u8>, String> {
     Ok(PROVIDER_PROBE_AUDIO_BYTES.to_vec())
@@ -1278,7 +1320,8 @@ mod tests {
     use super::{
         active_custom_endpoint, apply_llm_provider_selection, migrate_hotkey_digit_key_codes,
         migrate_llm_custom_endpoints, migrate_text_injection_override_restore_flag,
-        normalize_qwen_settings, normalize_text_injection_overrides, AppSettings,
+        migrate_volcengine_minimal_effort, normalize_qwen_settings,
+        normalize_text_injection_overrides, preview_llm_reasoning, AppSettings,
     };
     use crate::foreground_app::TextInjectionAppOverride;
     use crate::services::llm_service::build_llm_config_from_settings;
@@ -1627,6 +1670,31 @@ mod tests {
     }
 
     #[test]
+    fn the_retired_volcengine_minimal_becomes_lowest_and_chosen_efforts_stay() {
+        let mut stored = serde_json::json!({ "llmVolcengineReasoningEffort": "minimal" });
+        assert!(migrate_volcengine_minimal_effort(&mut stored));
+        assert!(stored["llmVolcengineReasoningEffort"].is_null());
+        assert!(!migrate_volcengine_minimal_effort(&mut stored));
+
+        let mut chosen = serde_json::json!({ "llmVolcengineReasoningEffort": "high" });
+        assert!(!migrate_volcengine_minimal_effort(&mut chosen));
+        assert_eq!(chosen["llmVolcengineReasoningEffort"], "high");
+    }
+
+    #[test]
+    fn the_reasoning_preview_follows_the_selected_provider() {
+        let mut settings = AppSettings::default();
+        let volc = preview_llm_reasoning(settings.clone());
+        assert_eq!(volc.fields, r#"{"thinking":{"type":"disabled"}}"#);
+        assert_eq!(volc.source, crate::llm::reasoning::ReasoningSource::Lowest);
+
+        settings.llm_provider_type = "openai".to_string();
+        let plain = preview_llm_reasoning(settings);
+        assert_eq!(plain.fields, "");
+        assert_eq!(plain.source, crate::llm::reasoning::ReasoningSource::NotNeeded);
+    }
+
+    #[test]
     fn build_config_picks_the_active_endpoint_among_many() {
         let mut settings = AppSettings::default();
         settings.llm_provider_type = "custom".to_string();
@@ -1658,7 +1726,10 @@ mod tests {
         assert_eq!(config.base_url, "https://api.groq.com/openai/v1");
         assert_eq!(config.model_name, "llama-3.3-70b");
         assert_eq!(config.api_key, "kb");
-        assert_eq!(config.reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(
+            config.reasoning,
+            crate::llm::ReasoningChoice::Effort("none".to_string())
+        );
         assert_eq!(config.extra_body.as_deref(), Some("{\"max_tokens\": 8192}"));
     }
 

@@ -2,7 +2,7 @@ use crate::{
     commands::settings::AppSettings,
     llm::{
         correction_timeout_for_text, LLMApiMode, LLMClient, LLMConfig, LLMProviderType,
-        PromptBuildOptions,
+        PromptBuildOptions, ReasoningChoice,
     },
     services::history_service::HistoryService,
     state::ProcessingIntent,
@@ -52,7 +52,9 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             api_key: settings.llm_volcengine_api_key.clone(),
             model_name: settings.llm_volcengine_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
-            reasoning_effort: settings.llm_volcengine_reasoning_effort.clone(),
+            reasoning: ReasoningChoice::from_setting(
+                settings.llm_volcengine_reasoning_effort.as_deref(),
+            ),
             extra_body: None,
         },
         LLMProviderType::Openai => LLMConfig {
@@ -61,7 +63,9 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             api_key: settings.llm_openai_api_key.clone(),
             model_name: settings.llm_openai_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
-            reasoning_effort: non_empty(settings.llm_openai_reasoning_effort.as_deref()),
+            reasoning: ReasoningChoice::from_setting(
+                settings.llm_openai_reasoning_effort.as_deref(),
+            ),
             extra_body: None,
         },
         LLMProviderType::Qwen => LLMConfig {
@@ -70,7 +74,7 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             api_key: settings.llm_qwen_api_key.clone(),
             model_name: settings.llm_qwen_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
-            reasoning_effort: None,
+            reasoning: ReasoningChoice::Lowest,
             extra_body: None,
         },
         LLMProviderType::Gemini => LLMConfig {
@@ -79,7 +83,7 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             api_key: settings.llm_gemini_api_key.clone(),
             model_name: settings.llm_gemini_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
-            reasoning_effort: None,
+            reasoning: ReasoningChoice::Lowest,
             extra_body: None,
         },
         LLMProviderType::Custom => {
@@ -92,7 +96,9 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
                 api_mode: endpoint
                     .map(|e| LLMApiMode::from_str(&e.api_mode))
                     .unwrap_or_default(),
-                reasoning_effort: endpoint.and_then(|e| non_empty(Some(&e.reasoning_effort))),
+                reasoning: ReasoningChoice::from_setting(
+                    endpoint.map(|e| e.reasoning_effort.as_str()),
+                ),
                 extra_body: endpoint.and_then(|e| non_empty(Some(&e.extra_body))),
             }
         }
@@ -280,21 +286,37 @@ mod llm_key_tests {
     }
 
     #[test]
-    fn blank_endpoint_knobs_send_nothing() {
+    fn a_blank_endpoint_asks_for_the_lowest_reasoning_and_no_extra_fields() {
         let config = build_llm_config_for_key(&settings_with_two_providers(), "custom:ep1");
-        assert_eq!(config.reasoning_effort, None);
+        assert_eq!(config.reasoning, ReasoningChoice::Lowest);
         assert_eq!(config.extra_body, None);
     }
 
     #[test]
-    fn openai_reasoning_effort_is_optional() {
+    fn every_provider_defaults_to_the_lowest_reasoning() {
+        let settings = settings_with_two_providers();
+        for key in ["volcengine", "openai", "qwen", "gemini", "custom:ep1"] {
+            assert_eq!(
+                build_llm_config_for_key(&settings, key).reasoning,
+                ReasoningChoice::Lowest,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chosen_effort_and_the_server_default_survive_into_the_config() {
         let mut settings = settings_with_two_providers();
         settings.llm_provider_type = "openai".to_string();
-        assert_eq!(build_llm_config_from_settings(&settings).reasoning_effort, None);
         settings.llm_openai_reasoning_effort = Some("minimal".to_string());
         assert_eq!(
-            build_llm_config_from_settings(&settings).reasoning_effort.as_deref(),
-            Some("minimal")
+            build_llm_config_from_settings(&settings).reasoning,
+            ReasoningChoice::Effort("minimal".to_string())
+        );
+        settings.llm_openai_reasoning_effort = Some("server_default".to_string());
+        assert_eq!(
+            build_llm_config_from_settings(&settings).reasoning,
+            ReasoningChoice::ServerDefault
         );
     }
 

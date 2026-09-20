@@ -80,10 +80,18 @@ Claude
 # type: "volcengine" | "openai" | "qwen" | "gemini" | "custom"
 # [provider.extra] can inject arbitrary fields into the request body.
 #
-# Correction / translation should use the lowest thinking the model accepts.
-#   volcengine: reasoning_effort defaults to "minimal" if omitted
-#   openai / custom: set reasoning_effort when the model reasons
-#     (Cerebras: "none", OpenAI GPT-5: "minimal", DeepSeek: "none")
+# Correction / translation should use the lowest thinking the model accepts,
+# and the same knob the main app sends (src-tauri/src/llm/reasoning.rs; probe
+# results in docs/llm-reasoning-knobs-2026-09-20.md).
+#   volcengine: omit reasoning_effort and the code sends thinking = disabled,
+#     the one spelling every Ark model honors ("minimal" is ignored by
+#     deepseek-v4-1-flash and doubao-seed-1-6-flash, "none" by the latter)
+#   openai / custom: set the model's own floor
+#     OpenAI: gpt-5.1 and later "none" (they reject "minimal"), gpt-5 "minimal"
+#       (rejects "none"), o-series "low", gpt-4.x nothing (any value is a 400)
+#     Cerebras: "none", except gpt-oss which stops at "low"
+#     DeepSeek, MiMo: extra thinking = { type = "disabled" }
+#     GLM (bigmodel.cn): "low"; it rejects thinking = disabled
 #   qwen: enable_thinking is forced off unless extra overrides it
 #   gemini: code sends the lowest thinkingLevel / thinkingBudget the model accepts
 #   extra: vendor knobs, e.g. enable_thinking = false, thinking = { type = "disabled" }
@@ -94,7 +102,6 @@ base_url = "https://ark.cn-beijing.volces.com/api/v3"
 api_key = "${VOLCENGINE_API_KEY}"
 model = "doubao-seed-1-6-lite-251015"
 type = "volcengine"
-reasoning_effort = "minimal"
 
 [[provider]]
 name = "Doubao-Seed-Pro"
@@ -102,7 +109,6 @@ base_url = "https://ark.cn-beijing.volces.com/api/v3"
 api_key = "${VOLCENGINE_API_KEY}"
 model = "doubao-seed-1-6-pro-251015"
 type = "volcengine"
-reasoning_effort = "minimal"
 
 # gpt-4o-mini is not a reasoning model; do not send reasoning_effort.
 [[provider]]
@@ -118,7 +124,7 @@ type = "openai"
 # api_key = "${OPENAI_API_KEY}"
 # model = "gpt-5.6-luna"
 # type = "openai"
-# reasoning_effort = "minimal"
+# reasoning_effort = "none"
 
 # type = "qwen" turns thinking off automatically; type = "custom" needs extra.
 [[provider]]

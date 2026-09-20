@@ -1,5 +1,6 @@
 //! LLM configuration
 
+use super::reasoning::ReasoningChoice;
 use serde::{Deserialize, Serialize};
 
 /// LLM provider type
@@ -62,11 +63,9 @@ pub struct LLMConfig {
     pub api_key: String,
     pub model_name: String,
     pub api_mode: LLMApiMode,
-    /// Reasoning effort, sent as the provider's own knob (`reasoning_effort`
-    /// on chat completions, `reasoning.effort` on the Responses API).
-    /// `None` sends nothing and leaves the server default in place; which
-    /// values a model accepts (`none`, `minimal`, `low`, ...) is up to it.
-    pub reasoning_effort: Option<String>,
+    /// How much the model may think. The default asks for the lowest this
+    /// endpoint accepts, which `reasoning::plan` spells per vendor.
+    pub reasoning: ReasoningChoice,
     /// Extra JSON object merged into every request body, the way llm-bench's
     /// `[provider.extra]` works. This is how endpoint-specific thinking knobs
     /// reach the wire (`enable_thinking: false` on DashScope,
@@ -83,7 +82,7 @@ impl Default for LLMConfig {
             api_key: String::new(),
             model_name: "doubao-seed-2-0-mini-260215".to_string(),
             api_mode: LLMApiMode::default(),
-            reasoning_effort: Some("minimal".to_string()),
+            reasoning: ReasoningChoice::default(),
             extra_body: None,
         }
     }

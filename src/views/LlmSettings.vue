@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { NInput, NSwitch, NButton, NSelect, NTabs, NTabPane } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
@@ -28,23 +28,32 @@ interface LlmProviderProbeResult {
   errorMessage: string | null
 }
 
+interface LlmReasoningPreview {
+  // Compact JSON of the fields, '' when nothing is sent.
+  fields: string
+  source: 'lowest' | 'not_needed' | 'unknown' | 'chosen'
+}
+
 const providerOptions = computed(() =>
   buildLlmProviderOptions(t, settingsStore.settings.llmCustomEndpoints, { includeAddAction: true })
 )
 const apiModeOptions = computed(() => buildLlmApiModeOptions(t))
 
+// '' is the default everywhere: the backend spells "lowest" per vendor and
+// model (`llm/reasoning.rs`). Ark has no level below `low` that every model
+// honors, so its list starts there.
 const reasoningEffortOptions = computed(() => [
+  { label: t('llm.reasoningLowest'), value: '' },
   { label: t('llm.low'), value: 'low' },
-  { label: t('llm.minimalDefault'), value: 'minimal' },
   { label: t('llm.medium'), value: 'medium' },
   { label: t('llm.high'), value: 'high' }
 ])
 
-// OpenAI-style endpoints: '' sends no `reasoning_effort` at all, because a
-// model that does not reason rejects the field, and each vendor accepts its
-// own subset of the rest.
+// OpenAI-style endpoints: each vendor accepts its own subset of the levels,
+// and `server_default` sends no reasoning field at all.
 const optionalReasoningEffortOptions = computed(() => [
-  { label: t('llm.reasoningNotSent'), value: '' },
+  { label: t('llm.reasoningLowest'), value: '' },
+  { label: t('llm.reasoningServerDefault'), value: 'server_default' },
   { label: t('llm.reasoningNone'), value: 'none' },
   { label: t('llm.reasoningMinimal'), value: 'minimal' },
   { label: t('llm.low'), value: 'low' },
@@ -97,8 +106,8 @@ const llmVolcengineModel = computed({
   set: (v: string) => settingsStore.updateSetting('llmVolcengineModel', v)
 })
 const llmVolcengineReasoningEffort = computed({
-  get: () => settingsStore.settings.llmVolcengineReasoningEffort ?? 'minimal',
-  set: (v: string) => settingsStore.updateSetting('llmVolcengineReasoningEffort', v)
+  get: () => settingsStore.settings.llmVolcengineReasoningEffort ?? '',
+  set: (v: string) => settingsStore.updateSetting('llmVolcengineReasoningEffort', v || null)
 })
 
 // OpenAI-specific
@@ -279,6 +288,59 @@ const llmProbeLoading = ref(false)
 const llmProbeResult = ref<LlmProviderProbeResult | null>(null)
 const llmProbeError = ref('')
 
+// The reasoning fields the selected provider will be sent, resolved by the
+// backend from the page's current values, saved or not.
+const reasoningPreview = ref<LlmReasoningPreview | null>(null)
+const reasoningPreviewError = ref('')
+let reasoningPreviewRequest = 0
+
+watch(
+  () => {
+    const s = settingsStore.settings
+    const endpoint = activeCustomEndpoint.value
+    return [
+      s.llmProviderType,
+      s.llmVolcengineBaseUrl, s.llmVolcengineModel, s.llmVolcengineReasoningEffort,
+      s.llmOpenaiBaseUrl, s.llmOpenaiModel, s.llmOpenaiReasoningEffort,
+      s.llmQwenBaseUrl, s.llmQwenModel,
+      s.llmGeminiBaseUrl, s.llmGeminiModel,
+      endpoint?.id, endpoint?.baseUrl, endpoint?.model, endpoint?.apiMode, endpoint?.reasoningEffort
+    ]
+  },
+  async () => {
+    const request = ++reasoningPreviewRequest
+    try {
+      const preview = await invoke<LlmReasoningPreview>('preview_llm_reasoning', {
+        settings: settingsStore.settings
+      })
+      if (request !== reasoningPreviewRequest) return
+      reasoningPreview.value = preview
+      reasoningPreviewError.value = ''
+    } catch (error) {
+      if (request !== reasoningPreviewRequest) return
+      reasoningPreview.value = null
+      reasoningPreviewError.value = error instanceof Error ? error.message : String(error)
+    }
+  },
+  { immediate: true }
+)
+
+const reasoningPreviewText = computed(() => {
+  const preview = reasoningPreview.value
+  if (!preview) return reasoningPreviewError.value
+  if (preview.source === 'unknown') {
+    return t(llmCustomExtraBody.value.trim() ? 'llm.reasoningPreviewUnknownExtra' : 'llm.reasoningPreviewUnknown')
+  }
+  if (preview.fields) return t('llm.reasoningPreviewSends')
+  return t(preview.source === 'not_needed' ? 'llm.reasoningPreviewNotNeeded' : 'llm.reasoningPreviewNothing')
+})
+
+// Worth a warning color: the lowest setting is not guaranteed.
+const reasoningPreviewWarns = computed(() => {
+  if (!reasoningPreview.value) return reasoningPreviewError.value !== ''
+  return reasoningPreview.value.source === 'unknown' && !llmCustomExtraBody.value.trim()
+})
+
 const resolvedLocale = computed<ResolvedLocale>(() => {
   return locale.value === 'zh-CN' ? 'zh-CN' : 'en-US'
 })
@@ -381,6 +443,10 @@ async function runLlmProviderProbe() {
             <div class="field-text">
               <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
               <div class="field-sub">{{ t('llm.reasoningEffortSub') }}</div>
+              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+                {{ reasoningPreviewText }}
+                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+              </div>
             </div>
             <NSelect
               v-model:value="llmVolcengineReasoningEffort"
@@ -420,6 +486,10 @@ async function runLlmProviderProbe() {
             <div class="field-text">
               <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
               <div class="field-sub">{{ t('llm.reasoningEffortOptionalSub') }}</div>
+              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+                {{ reasoningPreviewText }}
+                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+              </div>
             </div>
             <NSelect
               v-model:value="llmOpenaiReasoningEffort"
@@ -455,6 +525,17 @@ async function runLlmProviderProbe() {
             </div>
             <NInput v-model:value="llmQwenModel" class="field-control short" />
           </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
+              <div class="field-sub">{{ t('llm.reasoningEffortFixedSub') }}</div>
+              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+                {{ reasoningPreviewText }}
+                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+              </div>
+            </div>
+            <div class="field-control short reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
+          </div>
         </template>
 
         <!-- Gemini Settings -->
@@ -482,6 +563,17 @@ async function runLlmProviderProbe() {
               <div class="field-label">{{ t('llm.modelName') }}</div>
             </div>
             <NInput v-model:value="llmGeminiModel" class="field-control short" />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
+              <div class="field-sub">{{ t('llm.reasoningEffortFixedSub') }}</div>
+              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+                {{ reasoningPreviewText }}
+                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+              </div>
+            </div>
+            <div class="field-control short reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
           </div>
         </template>
 
@@ -543,6 +635,10 @@ async function runLlmProviderProbe() {
             <div class="field-text">
               <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
               <div class="field-sub">{{ t('llm.reasoningEffortOptionalSub') }}</div>
+              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+                {{ reasoningPreviewText }}
+                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+              </div>
             </div>
             <NSelect
               v-model:value="llmCustomReasoningEffort"
@@ -728,6 +824,25 @@ async function runLlmProviderProbe() {
 .field-sub {
   font-size: var(--font-xs);
   color: var(--color-text-tertiary);
+}
+
+.reasoning-preview {
+  user-select: text;
+}
+
+.reasoning-preview code {
+  font-family: ui-monospace, monospace;
+  word-break: break-all;
+}
+
+.reasoning-preview.warns {
+  color: #9a3412;
+}
+
+.reasoning-fixed {
+  font-size: var(--font-sm);
+  color: var(--color-text-secondary);
+  text-align: right;
 }
 
 .field-control {

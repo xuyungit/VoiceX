@@ -371,6 +371,7 @@ pub fn run() {
             commands::settings::choose_local_model_directory,
             commands::settings::probe_current_asr_provider,
             commands::settings::probe_current_llm_provider,
+            commands::settings::preview_llm_reasoning,
             commands::settings::load_provider_probe_audio,
             commands::settings::get_soniox_debug_harness_status,
             commands::settings::start_soniox_debug_mock_server,
