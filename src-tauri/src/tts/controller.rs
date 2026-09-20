@@ -67,6 +67,30 @@ fn caption_piece_limit(captions_enabled: bool) -> Option<usize> {
     captions_enabled.then_some(CAPTION_PIECE_LIMIT)
 }
 
+/// The caption to put on the HUD, or `None` while the one it shows stays.
+///
+/// Only a new sentence replaces a caption. A backend stops reporting progress
+/// the moment its audio ends, a beat before the session does, and in the
+/// text-only caption layout a cleared caption is an empty frame: the last
+/// sentence stays up through the linger instead, and goes with the window.
+fn next_caption(
+    shown: Option<&SpeechProgress>,
+    now: Option<SpeechProgress>,
+) -> Option<SpeechProgress> {
+    now.filter(|now| shown != Some(now))
+}
+
+/// Whether the HUD stays up for [`HUD_LINGER_MS`] after a read that ended
+/// without an error.
+///
+/// The linger keeps a short read from blinking, and takes something on screen
+/// to keep: the compact card always has it, the caption layout only once a
+/// sentence has been shown. A read stopped before its first sentence would
+/// linger as an empty frame, so its window goes at once.
+fn lingers_after_read(captions: bool, shown: Option<&SpeechProgress>) -> bool {
+    !captions || shown.is_some()
+}
+
 /// Settings values selecting a cloud backend.
 const PROVIDER_VOLCENGINE: &str = "volcengine";
 const PROVIDER_ALIYUN: &str = "aliyun";
@@ -290,33 +314,28 @@ impl TtsController {
                     // which piece is being heard, and only a change is worth
                     // an event.
                     if captions {
-                        let now = backend.progress();
-                        if now != caption {
-                            if let Some(progress) = &now {
-                                log_event(
-                                    "caption",
-                                    &[
-                                        ("index", progress.index.to_string()),
-                                        ("total", progress.total.to_string()),
-                                    ],
-                                );
-                            }
-                            hud.emit_caption(now.as_ref());
-                            caption = now;
+                        if let Some(next) = next_caption(caption.as_ref(), backend.progress()) {
+                            log_event(
+                                "caption",
+                                &[
+                                    ("index", next.index.to_string()),
+                                    ("total", next.total.to_string()),
+                                ],
+                            );
+                            hud.emit_caption(Some(&next));
+                            caption = Some(next);
                         }
                     }
                     thread::sleep(HUD_POLL);
                 }
 
-                if captions {
-                    hud.emit_caption(None);
-                }
                 hud.emit_reading(hud_kind, None);
                 // Dictation already owns the window. Hiding here would take the
                 // recording HUD down a moment after it appeared, and the next
                 // dictation tap would stop a session the user thought never
                 // started.
                 if yielded.swap(false, Ordering::SeqCst) {
+                    hud.emit_caption(None);
                     return;
                 }
                 let reported = failure.lock().ok().and_then(|slot| slot.clone());
@@ -325,13 +344,24 @@ impl TtsController {
                     // Without this a failed read is completely silent: the user
                     // pressed the hotkey and nothing whatsoever happened.
                     Some(code) => {
+                        // The error takes the caption's place for its linger.
+                        hud.emit_caption(None);
                         hud.emit_error(Some(&code));
                         hud.schedule_hide(HUD_ERROR_LINGER_MS, move || {
                             hud_for_hide.emit_error(None);
                             hud_for_hide.hide();
                         });
                     }
-                    None => hud.schedule_hide(HUD_LINGER_MS, move || hud_for_hide.hide()),
+                    // The last sentence stays up for the linger: the caption
+                    // layout draws nothing but its text, so clearing it first
+                    // left an empty frame on screen until the hide.
+                    None if lingers_after_read(captions, caption.as_ref()) => {
+                        hud.schedule_hide(HUD_LINGER_MS, move || {
+                            hud_for_hide.hide();
+                            hud_for_hide.emit_caption(None);
+                        })
+                    }
+                    None => hud.hide(),
                 }
             })
             .expect("failed to spawn the TTS HUD driver");
@@ -1573,10 +1603,34 @@ mod tests {
     // --- translate-and-read ---
 
     use super::super::llm_stage::{LlmStageError, TRANSLATE_MAX_CHARS};
+    use super::super::SpeechProgress;
     use super::{
-        apply_translate_voice_override, caption_piece_limit, stage_text, translate_voice_key,
-        ReadKind,
+        apply_translate_voice_override, caption_piece_limit, lingers_after_read, next_caption,
+        stage_text, translate_voice_key, ReadKind,
     };
+
+    #[test]
+    fn a_caption_is_replaced_by_the_next_sentence_and_by_nothing_else() {
+        let pieces = vec!["One.".to_string(), "Two.".to_string()];
+        let first = SpeechProgress::at(0, &pieces);
+        let second = SpeechProgress::at(1, &pieces);
+
+        assert_eq!(next_caption(None, None), None);
+        assert_eq!(next_caption(None, first.clone()), first);
+        assert_eq!(next_caption(first.as_ref(), first.clone()), None);
+        assert_eq!(next_caption(first.as_ref(), second.clone()), second);
+        // The backend going quiet ends the read; it does not blank the HUD.
+        assert_eq!(next_caption(second.as_ref(), None), None);
+    }
+
+    #[test]
+    fn a_caption_read_lingers_only_with_a_sentence_on_screen() {
+        let shown = SpeechProgress::at(0, &["One.".to_string()]);
+
+        assert!(lingers_after_read(false, None));
+        assert!(lingers_after_read(true, shown.as_ref()));
+        assert!(!lingers_after_read(true, None));
+    }
 
     #[test]
     fn only_a_read_with_captions_on_is_split_into_sentences() {

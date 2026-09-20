@@ -84,7 +84,8 @@ let currentIntent: "assistant" | "translate_en" = "assistant";
 /// Fixed for a session by the backend: the window is sized to match.
 let hudPresentation: "stream" | "batch" | "caption" = "stream";
 /// The sentence being spoken, shown in place of the transcript while a read
-/// runs with captions. Empty between sentences' arrival and after the read.
+/// runs with captions. Empty until the first sentence is heard; the last one
+/// stays through the linger and is cleared once the window has hidden.
 let captionText = "";
 let lastActiveIcon: keyof typeof icons = "mic";
 let partialText = "";
@@ -773,8 +774,9 @@ function renderTranscript() {
   let display = fitText(rawText);
 
   if (!display && isCaptionMode() && !isReadingMode() && !showError) {
-    // The read is over and its last caption cleared; while the HUD lingers
-    // there is nothing to announce, least of all the dictation prompt.
+    // The read is over with no caption to keep: it was stopped before its
+    // first sentence, or its error just cleared. The window is on its way
+    // out and there is nothing to announce, least of all the dictation prompt.
     textArea?.classList.remove("is-placeholder");
     if (textArea) {
       textArea.textContent = "";
