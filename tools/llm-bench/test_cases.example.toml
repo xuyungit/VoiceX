@@ -1,72 +1,41 @@
 # LLM Benchmark Test Cases
 # Copy to test_cases.toml and customize
 #
-# Optional [[case.checkpoint]] entries are scored deterministically after each
-# successful round. `tier` selects the ranking bucket:
-#   basic  — dictionary / simple ASR fixes (default)
-#   cloud  — cloud → Claude style corrections
-#   bonus  — icing (README, 下一集→下一级, ...)
+# A case is what the recognizer heard (`input`) and what was said (`expected`).
+# The places to correct are derived from the difference between the two; a fix
+# whose intended word is in the config dictionary counts as `dictionary`, any
+# other as `semantic`. There is nothing else to write per case.
+#
+# Optional [[case.pin]]: your own verdict on an answer that is neither the
+# expected one nor the uncorrected error. Whoever wrote `written` where `heard`
+# stood gets `credit` (0..1); the judge is not asked about it again.
 
 [[case]]
 name = "Simple typo"
 input = "今天天汽很好，我们去公园万吧"
 expected = "今天天气很好，我们去公园玩吧"
 
-[[case.checkpoint]]
-description = "「天汽」应纠正为「天气」"
-tier = "basic"
-must_contain = "天气"
-must_not_contain = "天汽"
-
 [[case]]
 name = "Technical terms"
 input = "我们用的是库伯内提斯来部署容器"
 expected = "我们用的是 Kubernetes 来部署容器"
-
-[[case.checkpoint]]
-description = "应使用词典中的 Kubernetes"
-tier = "basic"
-must_contain = "Kubernetes"
 
 [[case]]
 name = "Homophone errors"
 input = "这个项目的进度已经严重之后了，我们需要加快速度"
 expected = "这个项目的进度已经严重滞后了，我们需要加快速度"
 
-[[case.checkpoint]]
-description = "「之后」应纠正为「滞后」"
-tier = "basic"
-must_contain = "滞后"
-must_not_contain = "之后了"
-
 [[case]]
 name = "Mixed Chinese-English"
 input = "请把这个docker镜像推送到仓库里面"
 expected = "请把这个 Docker 镜像推送到仓库里面"
-
-[[case.checkpoint]]
-description = "docker 应规范为 Docker"
-tier = "basic"
-must_contain = "Docker"
 
 [[case]]
 name = "Context-sensitive terms"
 input = "应该会记录一些我们正在进行的事情，但是不要记录细节，而是指向下一集的导航，比如说我们这次发现了哪些信息、哪些报告、哪些结论，在查看哪个目录。这是一个 high level 的项目介绍，以及一些关键的功能以及关键的导航。然后我们的 cloud md 里边就去指向 read me。然后把一些过时的文档做一下清理。"
 expected = "应该会记录一些我们正在进行的事情，但是不要记录细节，而是指向下一级的导航，比如说我们这次发现了哪些信息、哪些报告、哪些结论，在查看哪个目录。这是一个 high level 的项目介绍，以及一些关键的功能以及关键的导航。然后我们的 CLAUDE.md 里边就去指向 README。然后把一些过时的文档做一下清理。"
 
-[[case.checkpoint]]
-description = "结合「导航」上下文，「下一集」应纠正为「下一级」"
-tier = "bonus"
-must_contain = "下一级"
-must_not_contain = "下一集"
-
-[[case.checkpoint]]
-description = "「cloud md」应把 cloud 纠正为 Claude（Claude / Claude.md / CLAUDE.md 均可）"
-tier = "cloud"
-must_contain = "Claude"
-must_not_contain = "cloud md"
-
-[[case.checkpoint]]
-description = "「read me」应纠正为 README"
-tier = "bonus"
-must_contain = "README"
+# [[case.pin]]
+# heard = "下一集"
+# written = "下一层"
+# credit = 1.0

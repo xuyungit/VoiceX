@@ -1,0 +1,70 @@
+{
+  "site": {
+    "type": "score",
+    "instructions": {
+      "task": "A speech recognizer misheard a phrase. `heard` is what it produced, `intended` is what the speaker actually said, `written` is what a correction system wrote in that place.",
+      "question": "Did the correction system recover the speaker's phrase?"
+    },
+    "criteria": [
+      {
+        "what": "Not recovered. `written` still says the misheard phrase, or another wrong word, or a different name than `intended`.",
+        "examples": [
+          "written keeps the misheard word and only changes its capitalization or punctuation",
+          "a person's name spelled with a different character than intended"
+        ]
+      },
+      {
+        "what": "Right word, imperfect form. A reader recognizes `written` as the `intended` term, but part of it is missing or it is not written the conventional way.",
+        "examples": [
+          "a file name with its extension dropped",
+          "a product name split into separate lowercase words"
+        ]
+      },
+      {
+        "what": "Recovered. `written` is the `intended` term or an equally correct way to write it, and the sentence means what the speaker meant.",
+        "examples": [
+          "same term with a different but accepted capitalization",
+          "a synonym that gives the sentence the same meaning"
+        ]
+      }
+    ]
+  },
+  "edit": {
+    "type": "choice",
+    "instructions": {
+      "task": "`before` is dictated speech as accepted by a human reviewer. A correction system changed it into `after`. The system is supposed to fix speech-recognition errors and otherwise keep the speaker's words.",
+      "question": "What did the change from `before` to `after` do?"
+    },
+    "criteria": {
+      "fixes_error": {
+        "what": "`before` contained a misrecognized or mistyped word, and `after` replaces it with what the speaker evidently said.",
+        "not_for": "A word in `before` that already made sense in its sentence."
+      },
+      "neutral": {
+        "what": "Only punctuation, spacing, hyphenation or capitalization changed. Every word and the meaning are the same."
+      },
+      "rephrases": {
+        "what": "`after` says the same thing in different words. The speaker's own wording was replaced, translated or trimmed although it was not an error."
+      },
+      "damages": {
+        "what": "`after` means something different: information was changed, added or removed, or a correct word was replaced by a wrong one."
+      },
+      "commentary": {
+        "what": "`after` contains text that is not part of the speech: a greeting, an explanation, a label, quotation marks or a code fence around it."
+      }
+    }
+  },
+  "gate": {
+    "type": "choice",
+    "instructions": {
+      "task": "`reference` is the correct transcript of a dictated speech. `output` was produced by a transcript-correction system.",
+      "question": "What kind of text is `output`?"
+    },
+    "criteria": {
+      "transcript": "Every sentence of the speech, in order, in the speaker's own words. Some words may be wrong, misspelled or punctuated differently.",
+      "incomplete": "A transcript that stops early or leaves out whole sentences of the speech.",
+      "extended": "A transcript that also contains sentences the speaker never said, before, inside or after the speech.",
+      "not_transcript": "A reply to the speaker, a summary, a rewrite in different words, or a translation."
+    }
+  }
+}

@@ -1,8 +1,13 @@
+mod adjudicate;
+mod typesafe;
+
+use adjudicate::{Analysis, Answers, Ask, Pin, Reference, Scored, Tier};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
+use typesafe::{Judge, JudgeRun, Questions};
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -12,29 +17,32 @@ struct Config {
     prompt: Option<String>,
     dictionary: Option<String>,
     provider: Vec<Provider>,
-    /// Optional second-pass evaluator. Runs after all provider tests finish.
+    /// Optional: settles the verdicts code cannot (is this other word the speaker's word, did this unrequested
+    /// change do harm). Must be `type = "typesafe"`. Runs after all provider tests finish, outside their timing.
     judge: Option<Provider>,
     #[serde(default)]
     eval: EvalConfig,
 }
 
 #[derive(Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
 struct EvalConfig {
-    /// Judge free-form rewrite quality. Default 0.20.
-    weight_quality: Option<f64>,
-    /// Dictionary / basic ASR fixes (names, simple typos). Default 0.20.
-    weight_basic: Option<f64>,
-    /// Distinctive "cloud → Claude" style corrections. Default 0.20.
-    weight_cloud: Option<f64>,
-    /// Icing: README, 下一集→下一级, etc. Default 0.10.
-    weight_bonus: Option<f64>,
-    /// Voice-correction latency. Default 0.30.
+    /// Dictionary sites: the dictionary term stands where the speaker said it. Default 0.40.
+    /// Unset, the legacy `weight_basic` + `weight_cloud` are summed instead.
+    weight_dictionary: Option<f64>,
+    /// Semantic sites: a wrong word outside the dictionary, fixed from context. Default 0.15.
+    #[serde(alias = "weight_bonus")]
+    weight_semantic: Option<f64>,
+    /// Clean transcript: nothing damaged, rephrased or added outside the sites. Default 0.10.
+    #[serde(alias = "weight_quality")]
+    weight_clean: Option<f64>,
+    /// Voice-correction latency. Default 0.35.
     weight_latency: Option<f64>,
-    /// Optional; default 0 (API failures already zero latency + checkpoints).
+    /// Optional; default 0 (a failed call already scores zero on latency, every site and the transcript).
     weight_success: Option<f64>,
-    /// Legacy: if set and the split checkpoint weights are unset, split 40/40/20
-    /// across basic / cloud / bonus.
-    weight_checkpoints: Option<f64>,
+    /// Legacy names of the two dictionary tiers; see `weight_dictionary`.
+    weight_basic: Option<f64>,
+    weight_cloud: Option<f64>,
     /// Avg latency at or below this (ms) scores 1.0. Default 1000.
     latency_full_ms: Option<f64>,
     /// Avg latency at or above this (ms) scores 0.0. Default 5000.
@@ -47,6 +55,19 @@ struct EvalConfig {
     standing_window: Option<usize>,
     /// Consecutive absences before a model is retired from the active table. 0 = never. Default 3.
     standing_retire_after: Option<usize>,
+    /// Override the judge's questions; defaults to the embedded typesafe_questions.json.
+    typesafe_questions: Option<String>,
+    /// Max concurrent judge calls. Default 8.
+    typesafe_concurrency: Option<usize>,
+}
+
+impl EvalConfig {
+    fn validate(&self) -> Result<(), String> {
+        if self.weight_dictionary.is_some() && (self.weight_basic.is_some() || self.weight_cloud.is_some()) {
+            return Err("[eval] set `weight_dictionary`, or the legacy `weight_basic` / `weight_cloud`, not both".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize, Clone)]
@@ -75,32 +96,22 @@ fn default_api_mode() -> String {
     "completion".into()
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct Cases {
     case: Vec<TestCase>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 struct TestCase {
     name: String,
+    /// What the recognizer produced.
     input: String,
-    expected: Option<String>,
+    /// What the speaker said. The sites to correct are the differences between the two.
+    expected: String,
+    /// Human verdicts: whoever wrote `written` where `heard` stood gets `credit`. Final, the judge is not asked.
     #[serde(default)]
-    checkpoint: Vec<Checkpoint>,
-}
-
-#[derive(Deserialize, Clone)]
-struct Checkpoint {
-    description: String,
-    must_contain: Option<String>,
-    must_not_contain: Option<String>,
-    /// Optional regular expression; must match for the checkpoint to pass.
-    pattern: Option<String>,
-    #[serde(default)]
-    case_sensitive: bool,
-    /// Scoring bucket: "basic" (default), "cloud", or "bonus" / "icing".
-    #[serde(default)]
-    tier: String,
+    pin: Vec<Pin>,
 }
 
 // ── OpenAI-compatible API types ─────────────────────────────────────────────
@@ -158,6 +169,14 @@ struct ResponseApiRequest {
     temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    /// Nested the way the Responses API and the main app send it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ResponseApiReasoning>,
+}
+
+#[derive(Serialize)]
+struct ResponseApiReasoning {
+    effort: String,
 }
 
 #[derive(Deserialize)]
@@ -266,85 +285,87 @@ struct ProviderStats {
     min_ms: u128,
     max_ms: u128,
     avg_tokens: Option<u32>,
-    checkpoints: CheckpointTally,
+    tallies: Tallies,
 }
 
-#[derive(Clone, Copy, Default)]
-struct CheckpointTally {
-    basic_hits: usize,
-    basic_total: usize,
-    cloud_hits: usize,
-    cloud_total: usize,
-    bonus_hits: usize,
-    bonus_total: usize,
+/// Credit earned over the items of one tier. An item that needed the judge and got no answer is `unjudged`:
+/// it is reported, and left out of the rate rather than counted as a miss.
+#[derive(Clone, Copy, Default, Serialize)]
+struct Tally {
+    credit: f64,
+    total: usize,
+    unjudged: usize,
 }
 
-impl CheckpointTally {
-    fn hits(self) -> usize {
-        self.basic_hits + self.cloud_hits + self.bonus_hits
-    }
-
-    fn total(self) -> usize {
-        self.basic_total + self.cloud_total + self.bonus_total
+impl Tally {
+    fn add(&mut self, credit: Option<f64>) {
+        self.total += 1;
+        match credit {
+            Some(c) => self.credit += c,
+            None => self.unjudged += 1,
+        }
     }
 
     fn merge(&mut self, other: Self) {
-        self.basic_hits += other.basic_hits;
-        self.basic_total += other.basic_total;
-        self.cloud_hits += other.cloud_hits;
-        self.cloud_total += other.cloud_total;
-        self.bonus_hits += other.bonus_hits;
-        self.bonus_total += other.bonus_total;
+        self.credit += other.credit;
+        self.total += other.total;
+        self.unjudged += other.unjudged;
     }
 
-    fn record(&mut self, tier: CheckpointTier, passed: bool) {
-        let (hits, total) = match tier {
-            CheckpointTier::Basic => (&mut self.basic_hits, &mut self.basic_total),
-            CheckpointTier::Cloud => (&mut self.cloud_hits, &mut self.cloud_total),
-            CheckpointTier::Bonus => (&mut self.bonus_hits, &mut self.bonus_total),
-        };
-        *total += 1;
-        if passed {
-            *hits += 1;
-        }
+    fn judged(self) -> usize {
+        self.total - self.unjudged
+    }
+
+    fn rate(self) -> Option<f64> {
+        (self.judged() > 0).then(|| self.credit / self.judged() as f64)
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CheckpointTier {
-    Basic,
-    Cloud,
-    Bonus,
+#[derive(Clone, Copy, Default)]
+struct Tallies {
+    dictionary: Tally,
+    semantic: Tally,
+    /// One item per output: what its changes outside the sites left of a clean transcript.
+    clean: Tally,
 }
 
-impl CheckpointTier {
-    fn parse(raw: &str) -> Self {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "cloud" => Self::Cloud,
-            "bonus" | "icing" => Self::Bonus,
-            _ => Self::Basic,
+impl Tallies {
+    fn add(&mut self, scored: &Scored) {
+        for site in &scored.sites {
+            self.tier(site.tier).add(site.credit);
+        }
+        self.clean.add(scored.clean);
+    }
+
+    /// A failed call corrected nothing: every site of the case scores zero, and so does the transcript.
+    fn add_failed(&mut self, reference: &Reference) {
+        for (tier, _, _) in reference.sites() {
+            self.tier(tier).add(Some(0.0));
+        }
+        self.clean.add(Some(0.0));
+    }
+
+    fn tier(&mut self, tier: Tier) -> &mut Tally {
+        match tier {
+            Tier::Dictionary => &mut self.dictionary,
+            Tier::Semantic => &mut self.semantic,
         }
     }
 
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Basic => "basic",
-            Self::Cloud => "cloud",
-            Self::Bonus => "bonus",
-        }
+    fn merge(&mut self, other: Self) {
+        self.dictionary.merge(other.dictionary);
+        self.semantic.merge(other.semantic);
+        self.clean.merge(other.clean);
     }
-}
 
-fn hit_rate(hits: usize, total: usize) -> Option<f64> {
-    if total == 0 {
-        None
-    } else {
-        Some(hits as f64 / total as f64)
+    fn unjudged(self) -> usize {
+        self.dictionary.unjudged + self.semantic.unjudged + self.clean.unjudged
     }
 }
 
 struct CaseRecord {
     case: TestCase,
+    reference: Reference,
     providers: Vec<ProviderRecord>,
 }
 
@@ -352,17 +373,25 @@ struct ProviderRecord {
     name: String,
     model: String,
     stats: ProviderStats,
-    rounds: Vec<RoundResult>,
+    rounds: Vec<RoundRecord>,
+}
+
+struct RoundRecord {
+    result: RoundResult,
+    /// What code found in the output; `None` when the call failed.
+    analysis: Option<Analysis>,
+    /// The analysis with the judge's answers applied.
+    scored: Option<Scored>,
 }
 
 struct RankedProvider {
     name: String,
     composite: f64,
-    quality: Option<f64>,
-    checkpoint_rate: Option<f64>,
-    basic_rate: Option<f64>,
-    cloud_rate: Option<f64>,
-    bonus_rate: Option<f64>,
+    dictionary_rate: Option<f64>,
+    semantic_rate: Option<f64>,
+    clean_rate: Option<f64>,
+    /// Items without a verdict: the rates cover the judged items only.
+    unjudged: usize,
     latency_score: f64,
     avg_ms: u128,
     success_rate: f64,
@@ -405,13 +434,22 @@ struct RunPlace {
     provider: String,
     points: f64,
     composite: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dictionary_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    semantic_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clean_rate: Option<f64>,
+    /// Races scored with checkpoints and a free-form judge carry these instead; kept so their history survives a save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     quality: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     checkpoint_rate: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     basic_rate: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     cloud_rate: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     bonus_rate: Option<f64>,
     #[serde(default)]
     latency_score: Option<f64>,
@@ -439,21 +477,6 @@ struct StandingEntry {
     best_place: usize,
     last_place: usize,
     last_points: f64,
-}
-
-#[derive(Deserialize)]
-struct JudgeReport {
-    providers: Vec<JudgeProviderScore>,
-    ranking: Option<Vec<String>>,
-    summary: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct JudgeProviderScore {
-    name: String,
-    quality_score: f64,
-    strengths: Option<String>,
-    weaknesses: Option<String>,
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -501,7 +524,19 @@ async fn main() {
         .map(resolve_provider)
         .collect();
 
-    let judge = config.judge.map(resolve_provider);
+    let http = Client::new();
+    let judge = config
+        .judge
+        .map(resolve_provider)
+        .map(|j| build_judge(&http, j, &eval_cfg));
+
+    // What every case requires, before the first provider call: a case that cannot be read costs nothing yet.
+    let terms = adjudicate::dictionary_terms(&dictionary);
+    let references: Vec<Reference> = cases
+        .case
+        .iter()
+        .map(|c| Reference::new(&c.input, &c.expected, &terms))
+        .collect();
 
     println!(
         "\n\x1b[1m══════════════════════════════════════════════════════════\x1b[0m"
@@ -522,29 +557,26 @@ async fn main() {
             p.name, p.model, p.api_mode
         );
     }
-    if let Some(ref j) = judge {
-        if skip_judge {
-            println!("  \x1b[2mJudge: {} (skipped)\x1b[0m", j.name);
-        } else {
-            println!("  \x1b[2mJudge: {} ({})\x1b[0m", j.name, j.model);
-        }
+    match &judge {
+        Some(j) if skip_judge => println!("  \x1b[2mJudge: {} (skipped)\x1b[0m", j.name),
+        Some(j) => println!("  \x1b[2mJudge: {} ({})\x1b[0m", j.name, j.model),
+        None => println!("  \x1b[2mJudge: none\x1b[0m"),
     }
     println!();
 
-    let http = Client::new();
     let mut bench_cases: Vec<CaseRecord> = Vec::new();
-    let mut json_results: Vec<serde_json::Value> = Vec::new();
 
-    for case in &cases.case {
+    for (case, reference) in cases.case.iter().zip(references) {
         println!("\x1b[1;36m━━━ {} ━━━\x1b[0m", case.name);
         println!("\x1b[2mInput:\x1b[0m    {}", case.input);
-        if let Some(ref exp) = case.expected {
-            println!("\x1b[2mExpected:\x1b[0m {}", exp);
-        }
-        if !case.checkpoint.is_empty() {
-            println!("\x1b[2mCheckpoints:\x1b[0m");
-            for cp in &case.checkpoint {
-                println!("  \x1b[2m• {}\x1b[0m", cp.description);
+        println!("\x1b[2mExpected:\x1b[0m {}", case.expected);
+        let sites = reference.sites();
+        if sites.is_empty() {
+            println!("\x1b[2mSites:\x1b[0m    none (input already reads as expected)");
+        } else {
+            println!("\x1b[2mSites:\x1b[0m");
+            for (tier, heard, intended) in &sites {
+                println!("  \x1b[2m• {:<10}  {} → {}\x1b[0m", tier.name(), heard, intended);
             }
         }
         println!();
@@ -552,16 +584,20 @@ async fn main() {
         let mut case_providers: Vec<ProviderRecord> = Vec::new();
 
         for provider in &providers {
-            let mut results: Vec<RoundResult> = Vec::new();
+            let mut records: Vec<RoundRecord> = Vec::new();
 
             for _ in 0..rounds {
                 let result =
                     run_once(&http, provider, &prompt, &dictionary, &case.input).await;
-                results.push(result);
+                let analysis = result
+                    .error
+                    .is_none()
+                    .then(|| reference.analyze(&result.output, &case.pin));
+                records.push(RoundRecord { result, analysis, scored: None });
             }
 
             // Display
-            let first = &results[0];
+            let first = &records[0].result;
             if let Some(ref err) = first.error {
                 println!(
                     "  \x1b[1m{}\x1b[0m \x1b[31m✗ ERROR:\x1b[0m {}",
@@ -575,8 +611,16 @@ async fn main() {
                 );
             }
 
-            let ok: Vec<&RoundResult> = results.iter().filter(|r| r.error.is_none()).collect();
-            let checkpoints = score_checkpoints(&ok, &case.checkpoint);
+            let ok: Vec<&RoundResult> = records
+                .iter()
+                .map(|r| &r.result)
+                .filter(|r| r.error.is_none())
+                .collect();
+            // The final tallies wait for the judge; this is what code alone already settles.
+            let mut by_code = Tallies::default();
+            for analysis in records.iter().filter_map(|r| r.analysis.as_ref()) {
+                by_code.add(&adjudicate::score(analysis, &Answers::new()));
+            }
             let stats = if ok.is_empty() {
                 println!("  \x1b[2m{} rounds: all failed\x1b[0m\n", rounds);
                 ProviderStats {
@@ -587,7 +631,7 @@ async fn main() {
                     min_ms: 0,
                     max_ms: 0,
                     avg_tokens: None,
-                    checkpoints,
+                    tallies: Tallies::default(),
                 }
             } else {
                 let times: Vec<u128> = ok.iter().map(|r| r.duration_ms).collect();
@@ -608,17 +652,12 @@ async fn main() {
                 if let Some(t) = avg_tokens {
                     print!("  \x1b[2mTokens: {}\x1b[0m", t);
                 }
-                if checkpoints.total() > 0 {
-                    print!(
-                        "  \x1b[2mCheckpoints: {}\x1b[0m",
-                        format_tally(checkpoints)
-                    );
-                }
-                if ok.len() < results.len() {
+                print!("  \x1b[2mBy code: {}\x1b[0m", format_by_code(by_code));
+                if ok.len() < records.len() {
                     print!(
                         "  \x1b[33m({}/{} succeeded)\x1b[0m",
                         ok.len(),
-                        results.len()
+                        records.len()
                     );
                 }
                 println!("\n");
@@ -631,56 +670,94 @@ async fn main() {
                     min_ms,
                     max_ms,
                     avg_tokens,
-                    checkpoints,
+                    tallies: Tallies::default(),
                 }
             };
-
-            // JSON output
-            let round_details: Vec<serde_json::Value> = results
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "duration_ms": r.duration_ms,
-                        "output": r.output,
-                        "tokens": r.tokens,
-                        "error": r.error,
-                    })
-                })
-                .collect();
-
-            json_results.push(serde_json::json!({
-                "case": case.name,
-                "provider": provider.name,
-                "model": provider.model,
-                "avg_ms": stats.avg_ms,
-                "min_ms": stats.min_ms,
-                "max_ms": stats.max_ms,
-                "successes": stats.successes,
-                "total_rounds": stats.total_rounds,
-                "avg_tokens": stats.avg_tokens,
-                "checkpoint_hits": stats.checkpoints.hits(),
-                "checkpoint_total": stats.checkpoints.total(),
-                "basic_hits": stats.checkpoints.basic_hits,
-                "basic_total": stats.checkpoints.basic_total,
-                "cloud_hits": stats.checkpoints.cloud_hits,
-                "cloud_total": stats.checkpoints.cloud_total,
-                "bonus_hits": stats.checkpoints.bonus_hits,
-                "bonus_total": stats.checkpoints.bonus_total,
-                "rounds": round_details,
-            }));
 
             case_providers.push(ProviderRecord {
                 name: provider.name.clone(),
                 model: provider.model.clone(),
                 stats,
-                rounds: results,
+                rounds: records,
             });
         }
 
         bench_cases.push(CaseRecord {
             case: case.clone(),
+            reference,
             providers: case_providers,
         });
+    }
+
+    // ── Judge ───────────────────────────────────────────────────────────────
+    // Outside every provider's timing. Each distinct question is asked once, whoever needs the answer.
+    let asks: Vec<Ask> = bench_cases
+        .iter()
+        .flat_map(|c| &c.providers)
+        .flat_map(|p| &p.rounds)
+        .filter_map(|r| r.analysis.as_ref())
+        .flat_map(|a| a.asks().into_iter().cloned())
+        .collect();
+    let needed = asks.len();
+    let judge_run: Option<JudgeRun> = match &judge {
+        _ if needed == 0 => {
+            println!("Code settled every verdict; the judge was not needed.\n");
+            None
+        }
+        None => {
+            println!("No [judge] configured: {} verdicts stay unjudged.\n", needed);
+            None
+        }
+        Some(_) if skip_judge => {
+            println!("Judge skipped (--skip-judge): {} verdicts stay unjudged.\n", needed);
+            None
+        }
+        Some(j) => {
+            println!(
+                "\x1b[1m══════════════════════════════════════════════════════════\x1b[0m"
+            );
+            println!("\x1b[1m  Judge\x1b[0m  ({})", j.model);
+            println!(
+                "\x1b[1m══════════════════════════════════════════════════════════\x1b[0m\n"
+            );
+            let run = j.ask_all(asks).await;
+            println!(
+                "  {} verdicts needed the judge · {} distinct questions · {} failed · tokens: {} in / {} out",
+                needed,
+                run.distinct,
+                run.failures.len(),
+                run.input_tokens,
+                run.output_tokens
+            );
+            for (question, error) in &run.failures {
+                println!("  \x1b[31m✗\x1b[0m {} — {}", question, error);
+            }
+            println!();
+            Some(run)
+        }
+    };
+
+    // ── Score ───────────────────────────────────────────────────────────────
+    let no_answers = Answers::new();
+    let answers = judge_run.as_ref().map_or(&no_answers, |run| &run.answers);
+    let mut review: Vec<String> = Vec::new();
+    let mut unjudged: Vec<String> = Vec::new();
+    for record in &mut bench_cases {
+        for p in &mut record.providers {
+            let mut tallies = Tallies::default();
+            for r in &mut p.rounds {
+                let Some(analysis) = &r.analysis else {
+                    tallies.add_failed(&record.reference);
+                    continue;
+                };
+                let scored = adjudicate::score(analysis, answers);
+                tallies.add(&scored);
+                review.extend(scored.review.iter().map(|v| format!("[{}] {}", record.case.name, v)));
+                unjudged.extend(scored.unjudged.iter().map(|v| format!("[{}] {}", record.case.name, v)));
+                r.scored = Some(scored);
+            }
+            p.stats.tallies = tallies;
+        }
     }
 
     // ── Summary table ───────────────────────────────────────────────────────
@@ -704,9 +781,9 @@ async fn main() {
         "Max ms",
         "Tokens",
         "Success",
-        "Basic",
-        "Cloud",
-        "Bonus",
+        "Dictionary",
+        "Semantic",
+        "Clean",
         width = name_width
     );
     println!(
@@ -734,7 +811,7 @@ async fn main() {
         let mut total_success = 0usize;
         let mut total_rounds = 0usize;
         let mut case_count = 0u128;
-        let mut checkpoints = CheckpointTally::default();
+        let mut tallies = Tallies::default();
 
         for record in &bench_cases {
             if let Some(p) = record.providers.iter().find(|s| &s.name == pname) {
@@ -755,7 +832,7 @@ async fn main() {
                 }
                 total_success += s.successes;
                 total_rounds += s.total_rounds;
-                checkpoints.merge(s.checkpoints);
+                tallies.merge(s.tallies);
             }
         }
 
@@ -784,9 +861,9 @@ async fn main() {
             tokens_str,
             total_success,
             total_rounds,
-            format_ratio(checkpoints.basic_hits, checkpoints.basic_total),
-            format_ratio(checkpoints.cloud_hits, checkpoints.cloud_total),
-            format_ratio(checkpoints.bonus_hits, checkpoints.bonus_total),
+            format_tally(tallies.dictionary),
+            format_tally(tallies.semantic),
+            format_tally(tallies.clean),
             width = name_width
         );
 
@@ -802,112 +879,13 @@ async fn main() {
             } else {
                 None
             },
-            checkpoints,
+            tallies,
         });
     }
     println!();
 
-    // ── Judge + ranking ─────────────────────────────────────────────────────
-    let mut judge_report: Option<JudgeReport> = None;
-    let mut judge_raw: Option<String> = None;
-
-    if let Some(ref judge_provider) = judge {
-        if skip_judge {
-            println!("Judge skipped (--skip-judge).\n");
-        } else {
-            println!(
-                "\x1b[1m══════════════════════════════════════════════════════════\x1b[0m"
-            );
-            println!(
-                "\x1b[1m  Judge evaluation\x1b[0m  ({})",
-                judge_provider.model
-            );
-            println!(
-                "\x1b[1m══════════════════════════════════════════════════════════\x1b[0m\n"
-            );
-
-            let payload = build_judge_payload(&bench_cases, &aggregated);
-            let result = run_prompt(
-                &http,
-                judge_provider,
-                default_judge_prompt(),
-                payload,
-            )
-            .await;
-
-            if let Some(ref err) = result.error {
-                println!("  \x1b[31mJudge failed:\x1b[0m {}\n", err);
-            } else {
-                judge_raw = Some(result.output.clone());
-                match parse_judge_report(&result.output) {
-                    Ok(report) => {
-                        let q_width = name_width;
-                        println!(
-                            "  {:<width$}  {:>7}  {}",
-                            "Provider",
-                            "Quality",
-                            "Notes",
-                            width = q_width
-                        );
-                        println!(
-                            "  {:<width$}  {:>7}  {}",
-                            "─".repeat(q_width),
-                            "───────",
-                            "─────",
-                            width = q_width
-                        );
-                        for score in &report.providers {
-                            let note = score
-                                .weaknesses
-                                .as_ref()
-                                .or(score.strengths.as_ref())
-                                .map(|s| truncate(s, 60))
-                                .unwrap_or_default();
-                            println!(
-                                "  {:<width$}  {:>7.1}  {}",
-                                score.name,
-                                score.quality_score,
-                                note,
-                                width = q_width
-                            );
-                        }
-                        println!();
-                        if let Some(ref ranking) = report.ranking {
-                            println!(
-                                "  \x1b[2mJudge ranking:\x1b[0m {}",
-                                ranking.join(" > ")
-                            );
-                        }
-                        if let Some(ref summary) = report.summary {
-                            println!("  {}\n", summary);
-                        } else {
-                            println!();
-                        }
-                        judge_report = Some(report);
-                    }
-                    Err(e) => {
-                        println!(
-                            "  \x1b[33mCould not parse judge JSON ({}):\x1b[0m\n{}\n",
-                            e,
-                            truncate(&result.output, 800)
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    let quality_map: HashMap<String, f64> = judge_report
-        .as_ref()
-        .map(|r| {
-            r.providers
-                .iter()
-                .map(|p| (p.name.clone(), p.quality_score))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let ranked = rank_providers(&aggregated, &quality_map, &eval_cfg);
+    // ── Ranking ─────────────────────────────────────────────────────────────
+    let ranked = rank_providers(&aggregated, &eval_cfg);
 
     println!(
         "\x1b[1m══════════════════════════════════════════════════════════\x1b[0m"
@@ -916,55 +894,71 @@ async fn main() {
     println!(
         "\x1b[1m══════════════════════════════════════════════════════════\x1b[0m\n"
     );
-    print_ranking_legend(&eval_cfg, &aggregated, !quality_map.is_empty());
+    print_ranking_legend(&eval_cfg, &aggregated);
 
     println!(
-        "  {:>3}  {:<width$}  {:>9}  {:>6}  {:>6}  {:>6}  {:>6}  {:>7}  {:>8}",
+        "  {:>3}  {:<width$}  {:>10}  {:>10}  {:>8}  {:>6}  {:>6}  {:>8}",
         "#",
         "Provider",
         "Composite",
-        "Basic",
-        "Cloud",
-        "Bonus",
+        "Dictionary",
+        "Semantic",
+        "Clean",
         "Speed",
-        "Quality",
         "Avg ms",
         width = name_width
     );
     println!(
-        "  {:>3}  {:<width$}  {:>9}  {:>6}  {:>6}  {:>6}  {:>6}  {:>7}  {:>8}",
+        "  {:>3}  {:<width$}  {:>10}  {:>10}  {:>8}  {:>6}  {:>6}  {:>8}",
         "─".repeat(3),
         "─".repeat(name_width),
-        "─────────",
+        "──────────",
+        "──────────",
+        "────────",
         "──────",
         "──────",
-        "──────",
-        "──────",
-        "───────",
         "────────",
         width = name_width
     );
 
     for (i, r) in ranked.iter().enumerate() {
-        let quality = r
-            .quality
-            .map(|q| format!("{:.1}", q))
-            .unwrap_or_else(|| "-".into());
         println!(
-            "  {:>3}  {:<width$}  {:>9.1}  {:>6}  {:>6}  {:>6}  {:>5.0}%  {:>7}  {:>8}",
+            "  {:>3}  {:<width$}  {:>10}  {:>10}  {:>8}  {:>6}  {:>5.0}%  {:>8}",
             i + 1,
             r.name,
-            r.composite,
-            format_pct(r.basic_rate),
-            format_pct(r.cloud_rate),
-            format_pct(r.bonus_rate),
+            format!("{:.1}{}", r.composite, if r.unjudged > 0 { "*" } else { " " }),
+            format_pct(r.dictionary_rate),
+            format_pct(r.semantic_rate),
+            format_pct(r.clean_rate),
             r.latency_score * 100.0,
-            quality,
             r.avg_ms,
             width = name_width
         );
     }
     println!();
+
+    let review = counted(&review);
+    let unjudged = counted(&unjudged);
+    if !unjudged.is_empty() {
+        println!(
+            "  \x1b[33m* Verdicts without an answer are left out of the rates, never counted as misses; a tier with nothing judged is left out of that model's composite.\x1b[0m"
+        );
+        println!("  \x1b[33mUnjudged ({}):\x1b[0m", unjudged.len());
+        for (item, outputs) in &unjudged {
+            println!("    {}  \x1b[2m×{}\x1b[0m", item, outputs);
+        }
+        println!();
+    }
+    if !review.is_empty() {
+        println!(
+            "  \x1b[33mReview ({}):\x1b[0m the judge was unsure here. A [[case.pin]] with heard / written / credit settles one for good.",
+            review.len()
+        );
+        for (verdict, outputs) in &review {
+            println!("    {}  \x1b[2m×{}\x1b[0m", verdict, outputs);
+        }
+        println!();
+    }
 
     if !skip_standings && !ranked.is_empty() {
         let lens = StandingLens::from_eval(&eval_cfg);
@@ -976,6 +970,40 @@ async fn main() {
 
     // Write JSON output if requested
     if let Some(path) = output_path {
+        let cases_json: Vec<serde_json::Value> = bench_cases
+            .iter()
+            .flat_map(|record| record.providers.iter().map(move |p| (record, p)))
+            .map(|(record, p)| {
+                let rounds: Vec<serde_json::Value> = p
+                    .rounds
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "duration_ms": r.result.duration_ms,
+                            "output": r.result.output,
+                            "tokens": r.result.tokens,
+                            "error": r.result.error,
+                            "score": &r.scored,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "case": record.case.name,
+                    "provider": p.name,
+                    "model": p.model,
+                    "avg_ms": p.stats.avg_ms,
+                    "min_ms": p.stats.min_ms,
+                    "max_ms": p.stats.max_ms,
+                    "successes": p.stats.successes,
+                    "total_rounds": p.stats.total_rounds,
+                    "avg_tokens": p.stats.avg_tokens,
+                    "dictionary": p.stats.tallies.dictionary,
+                    "semantic": p.stats.tallies.semantic,
+                    "clean": p.stats.tallies.clean,
+                    "rounds": rounds,
+                })
+            })
+            .collect();
         let ranking_json: Vec<serde_json::Value> = ranked
             .iter()
             .enumerate()
@@ -984,19 +1012,24 @@ async fn main() {
                     "rank": i + 1,
                     "provider": r.name,
                     "composite": r.composite,
-                    "quality": r.quality,
-                    "checkpoint_rate": r.checkpoint_rate,
-                    "basic_rate": r.basic_rate,
-                    "cloud_rate": r.cloud_rate,
-                    "bonus_rate": r.bonus_rate,
+                    "dictionary_rate": r.dictionary_rate,
+                    "semantic_rate": r.semantic_rate,
+                    "clean_rate": r.clean_rate,
+                    "unjudged": r.unjudged,
                     "latency_score": r.latency_score,
                     "avg_ms": r.avg_ms,
                     "success_rate": r.success_rate,
                 })
             })
             .collect();
+        let listed = |lines: &[(&str, usize)]| -> Vec<serde_json::Value> {
+            lines
+                .iter()
+                .map(|(what, outputs)| serde_json::json!({ "what": what, "outputs": outputs }))
+                .collect()
+        };
         let payload = serde_json::json!({
-            "cases": json_results,
+            "cases": cases_json,
             "summary": aggregated.iter().map(|s| serde_json::json!({
                 "provider": s.name,
                 "avg_ms": s.avg_ms,
@@ -1005,28 +1038,24 @@ async fn main() {
                 "avg_tokens": s.avg_tokens,
                 "successes": s.successes,
                 "total_rounds": s.total_rounds,
-                "checkpoint_hits": s.checkpoints.hits(),
-                "checkpoint_total": s.checkpoints.total(),
-                "basic_hits": s.checkpoints.basic_hits,
-                "basic_total": s.checkpoints.basic_total,
-                "cloud_hits": s.checkpoints.cloud_hits,
-                "cloud_total": s.checkpoints.cloud_total,
-                "bonus_hits": s.checkpoints.bonus_hits,
-                "bonus_total": s.checkpoints.bonus_total,
+                "dictionary": s.tallies.dictionary,
+                "semantic": s.tallies.semantic,
+                "clean": s.tallies.clean,
             })).collect::<Vec<_>>(),
             "ranking": ranking_json,
             "judge": {
-                "raw": judge_raw,
-                "report": judge_report.as_ref().map(|r| serde_json::json!({
-                    "summary": r.summary,
-                    "ranking": r.ranking,
-                    "providers": r.providers.iter().map(|p| serde_json::json!({
-                        "name": p.name,
-                        "quality_score": p.quality_score,
-                        "strengths": p.strengths,
-                        "weaknesses": p.weaknesses,
-                    })).collect::<Vec<_>>(),
-                })),
+                "model": judge.as_ref().map(|j| j.model.as_str()),
+                "ran": judge_run.is_some(),
+                "verdicts_needed": needed,
+                "distinct_questions": judge_run.as_ref().map(|run| run.distinct),
+                "input_tokens": judge_run.as_ref().map(|run| run.input_tokens),
+                "output_tokens": judge_run.as_ref().map(|run| run.output_tokens),
+                "failures": judge_run.iter().flat_map(|run| &run.failures).map(|(question, error)| serde_json::json!({
+                    "question": question,
+                    "error": error,
+                })).collect::<Vec<_>>(),
+                "review": listed(&review),
+                "unjudged": listed(&unjudged),
             },
         });
         let json = serde_json::to_string_pretty(&payload).unwrap();
@@ -1034,6 +1063,31 @@ async fn main() {
             eprintln!("Failed to write {}: {}", path, e);
         });
         println!("Results written to {}", path);
+    }
+}
+
+/// The judge settles what code cannot: is this other word the speaker's word, did this unrequested change do harm.
+/// It answers fixed questions with a probability per answer, which a chat model does not give.
+fn build_judge(http: &Client, provider: Provider, eval: &EvalConfig) -> Judge {
+    if provider.provider_type != "typesafe" {
+        eprintln!(
+            "[judge] `{}` has type \"{}\"; the judge must be `type = \"typesafe\"` (see config.example.toml)",
+            provider.name, provider.provider_type
+        );
+        std::process::exit(1);
+    }
+    let questions = Questions::load(eval.typesafe_questions.as_deref()).unwrap_or_else(|e| {
+        eprintln!("Judge questions: {}", e);
+        std::process::exit(1);
+    });
+    Judge {
+        name: provider.name,
+        http: http.clone(),
+        url: typesafe::endpoint(&provider.base_url),
+        api_key: provider.api_key,
+        model: provider.model,
+        questions,
+        concurrency: eval.typesafe_concurrency.unwrap_or(8),
     }
 }
 
@@ -1069,53 +1123,7 @@ async fn run_prompt(
         return run_once_response(http, provider, &system_prompt, &user_content).await;
     }
 
-    let mut request = ChatRequest {
-        model: provider.model.clone(),
-        messages: vec![
-            Message {
-                role: "system".into(),
-                content: system_prompt,
-            },
-            Message {
-                role: "user".into(),
-                content: user_content,
-            },
-        ],
-        temperature: None,
-        max_tokens: None,
-        max_completion_tokens: None,
-        reasoning_effort: None,
-    };
-
-    match provider.provider_type.as_str() {
-        "volcengine" => {
-            request.temperature = Some(0.2);
-            request.reasoning_effort = provider
-                .reasoning_effort
-                .clone()
-                .or_else(|| Some("minimal".into()));
-        }
-        "openai" => {
-            request.max_completion_tokens = Some(4096);
-            request.reasoning_effort = provider.reasoning_effort.clone();
-        }
-        _ => {
-            request.temperature = Some(0.2);
-            request.max_tokens = Some(4096);
-            request.reasoning_effort = provider.reasoning_effort.clone();
-        }
-    }
-
-    // Serialize request then merge extra fields
-    let mut body = serde_json::to_value(&request).unwrap();
-    if !provider.extra.is_empty() {
-        if let serde_json::Value::Object(ref mut map) = body {
-            for (k, v) in &provider.extra {
-                let json_val = toml_to_json(v);
-                map.insert(k.clone(), json_val);
-            }
-        }
-    }
+    let body = build_chat_request_body(provider, system_prompt, user_content);
 
     let url = format!(
         "{}/chat/completions",
@@ -1190,34 +1198,7 @@ async fn run_once_response(
     system_prompt: &str,
     user_content: &str,
 ) -> RoundResult {
-    let mut request = ResponseApiRequest {
-        model: provider.model.clone(),
-        input: serde_json::json!(user_content),
-        instructions: Some(system_prompt.to_string()),
-        temperature: None,
-        max_output_tokens: None,
-    };
-
-    match provider.provider_type.as_str() {
-        "volcengine" => {
-            request.temperature = Some(0.2);
-        }
-        "openai" => {}
-        _ => {
-            request.temperature = Some(0.2);
-            request.max_output_tokens = Some(4096);
-        }
-    }
-
-    let mut body = serde_json::to_value(&request).unwrap();
-    if !provider.extra.is_empty() {
-        if let serde_json::Value::Object(ref mut map) = body {
-            for (k, v) in &provider.extra {
-                let json_val = toml_to_json(v);
-                map.insert(k.clone(), json_val);
-            }
-        }
-    }
+    let body = build_responses_request_body(provider, system_prompt, user_content);
 
     let url = format!(
         "{}/responses",
@@ -1400,6 +1381,121 @@ async fn run_once_gemini(
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+fn configured_reasoning_effort(provider: &Provider) -> Option<String> {
+    provider
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty())
+        .map(|effort| effort.to_string())
+}
+
+fn responses_reasoning(provider: &Provider) -> Option<ResponseApiReasoning> {
+    configured_reasoning_effort(provider).map(|effort| ResponseApiReasoning { effort })
+}
+
+/// Chat-completions body, including vendor extras. Volcengine defaults to
+/// `reasoning_effort=minimal`; Qwen defaults to `enable_thinking=false`.
+fn build_chat_request_body(
+    provider: &Provider,
+    system_prompt: String,
+    user_content: String,
+) -> serde_json::Value {
+    let mut request = ChatRequest {
+        model: provider.model.clone(),
+        messages: vec![
+            Message {
+                role: "system".into(),
+                content: system_prompt,
+            },
+            Message {
+                role: "user".into(),
+                content: user_content,
+            },
+        ],
+        temperature: None,
+        max_tokens: None,
+        max_completion_tokens: None,
+        reasoning_effort: None,
+    };
+
+    match provider.provider_type.as_str() {
+        "volcengine" => {
+            request.temperature = Some(0.2);
+            request.reasoning_effort =
+                configured_reasoning_effort(provider).or_else(|| Some("minimal".into()));
+        }
+        "openai" => {
+            request.max_completion_tokens = Some(4096);
+            request.reasoning_effort = configured_reasoning_effort(provider);
+        }
+        _ => {
+            request.temperature = Some(0.2);
+            request.max_tokens = Some(4096);
+            request.reasoning_effort = configured_reasoning_effort(provider);
+        }
+    }
+
+    let mut body = serde_json::to_value(&request).unwrap();
+    merge_provider_extra(&mut body, provider);
+    body
+}
+
+/// Responses API body. Effort is nested as `reasoning.effort`, matching the
+/// main app. The previous path dropped `reasoning_effort` entirely.
+fn build_responses_request_body(
+    provider: &Provider,
+    system_prompt: &str,
+    user_content: &str,
+) -> serde_json::Value {
+    let mut request = ResponseApiRequest {
+        model: provider.model.clone(),
+        input: serde_json::json!(user_content),
+        instructions: Some(system_prompt.to_string()),
+        temperature: None,
+        max_output_tokens: None,
+        reasoning: None,
+    };
+
+    match provider.provider_type.as_str() {
+        "volcengine" => {
+            request.temperature = Some(0.2);
+            request.reasoning = responses_reasoning(provider).or_else(|| {
+                Some(ResponseApiReasoning {
+                    effort: "minimal".into(),
+                })
+            });
+        }
+        "openai" => {
+            request.reasoning = responses_reasoning(provider);
+        }
+        _ => {
+            request.temperature = Some(0.2);
+            request.max_output_tokens = Some(4096);
+            request.reasoning = responses_reasoning(provider);
+        }
+    }
+
+    let mut body = serde_json::to_value(&request).unwrap();
+    merge_provider_extra(&mut body, provider);
+    body
+}
+
+/// Merge `[provider.extra]` into the request. `type = "qwen"` also turns
+/// thinking off unless extra already set `enable_thinking`.
+fn merge_provider_extra(body: &mut serde_json::Value, provider: &Provider) {
+    let serde_json::Value::Object(map) = body else {
+        return;
+    };
+    for (k, v) in &provider.extra {
+        map.insert(k.clone(), toml_to_json(v));
+    }
+    if provider.provider_type == "qwen" {
+        map.entry("enable_thinking".to_string())
+            .or_insert(serde_json::Value::Bool(false));
+    }
+}
+
 /// Lowest thinking Gemini accepts for this model. 3.7/3.8 Flash reject MINIMAL;
 /// 2.5 Flash can set thinkingBudget=0; Flash-Lite already thinks off by default.
 fn gemini_thinking_config(provider: &Provider) -> Option<GeminiThinkingConfig> {
@@ -1413,9 +1509,9 @@ fn gemini_thinking_config(provider: &Provider) -> Option<GeminiThinkingConfig> {
             thinking_budget: extra_budget,
         });
     }
-    if let Some(level) = provider.reasoning_effort.as_ref() {
+    if let Some(level) = configured_reasoning_effort(provider) {
         return Some(GeminiThinkingConfig {
-            thinking_level: Some(normalize_gemini_thinking_level(level)),
+            thinking_level: Some(normalize_gemini_thinking_level(&level)),
             thinking_budget: None,
         });
     }
@@ -1492,6 +1588,16 @@ fn resolve_provider(mut p: Provider) -> Provider {
 }
 
 fn resolve_env(s: &str) -> String {
+    // file:<path> keeps the secret out of the config file itself.
+    if let Some(path) = s.strip_prefix("file:") {
+        return match std::fs::read_to_string(path) {
+            Ok(v) => v.trim().to_string(),
+            Err(e) => {
+                eprintln!("Warning: could not read {}: {}", path, e);
+                String::new()
+            }
+        };
+    }
     if let Some(var) = s.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
         match std::env::var(var) {
             Ok(val) => val,
@@ -1528,10 +1634,15 @@ fn load_config(path: &str) -> Config {
         eprintln!("Hint: copy config.example.toml to config.toml and fill in your API keys");
         std::process::exit(1);
     });
-    toml::from_str(&text).unwrap_or_else(|e| {
+    let config: Config = toml::from_str(&text).unwrap_or_else(|e| {
         eprintln!("Failed to parse {}: {}", path, e);
         std::process::exit(1);
-    })
+    });
+    if let Err(e) = config.eval.validate() {
+        eprintln!("{}: {}", path, e);
+        std::process::exit(1);
+    }
+    config
 }
 
 fn load_cases(path: &str) -> Cases {
@@ -1540,10 +1651,26 @@ fn load_cases(path: &str) -> Cases {
         eprintln!("Hint: copy test_cases.example.toml to test_cases.toml");
         std::process::exit(1);
     });
-    toml::from_str(&text).unwrap_or_else(|e| {
+    parse_cases(&text).unwrap_or_else(|e| {
         eprintln!("Failed to parse {}: {}", path, e);
+        eprintln!(
+            "Hint: a case is `name`, `input` (what was heard) and `expected` (what was said); the sites to correct are derived from their difference. See test_cases.example.toml"
+        );
         std::process::exit(1);
     })
+}
+
+fn parse_cases(text: &str) -> Result<Cases, String> {
+    let cases: Cases = toml::from_str(text).map_err(|e| e.to_string())?;
+    for case in &cases.case {
+        if let Some(pin) = case.pin.iter().find(|p| !(0.0..=1.0).contains(&p.credit)) {
+            return Err(format!(
+                "case `{}`: pin {:?} → {:?} has credit {}, which must be between 0 and 1",
+                case.name, pin.heard, pin.written, pin.credit
+            ));
+        }
+    }
+    Ok(cases)
 }
 
 fn default_prompt() -> String {
@@ -1572,46 +1699,48 @@ fn print_usage() {
     eprintln!("  --output <path>    Write detailed results to JSON file");
     eprintln!("  --standings <path> Rolling championship file (default: standings.json)");
     eprintln!("  --no-standings     Do not update or print long-term standings");
-    eprintln!("  --skip-judge       Skip the optional judge LLM evaluation");
+    eprintln!("  --skip-judge       Do not call the judge; verdicts that need it are reported as unjudged");
     eprintln!("  -h, --help         Show this help");
 }
 
 // ── Evaluation ──────────────────────────────────────────────────────────────
 
-fn score_checkpoints(ok_rounds: &[&RoundResult], checkpoints: &[Checkpoint]) -> CheckpointTally {
-    let mut tally = CheckpointTally::default();
-    for r in ok_rounds {
-        for cp in checkpoints {
-            tally.record(CheckpointTier::parse(&cp.tier), checkpoint_passed(&r.output, cp));
-        }
-    }
-    tally
-}
-
-fn format_tally(t: CheckpointTally) -> String {
-    let mut parts = Vec::new();
-    if t.basic_total > 0 {
-        parts.push(format!("basic {}/{}", t.basic_hits, t.basic_total));
-    }
-    if t.cloud_total > 0 {
-        parts.push(format!("cloud {}/{}", t.cloud_hits, t.cloud_total));
-    }
-    if t.bonus_total > 0 {
-        parts.push(format!("bonus {}/{}", t.bonus_hits, t.bonus_total));
-    }
-    if parts.is_empty() {
-        "-".into()
+fn format_credit(credit: f64) -> String {
+    if (credit - credit.round()).abs() < 1e-9 {
+        format!("{:.0}", credit)
     } else {
-        parts.join("  ")
+        format!("{:.2}", credit)
     }
 }
 
-fn format_ratio(hits: usize, total: usize) -> String {
-    if total == 0 {
-        "-".into()
-    } else {
-        format!("{}/{}", hits, total)
+/// "5.50/6": credit over judged items; "4/4*" when further items are unjudged.
+fn format_tally(t: Tally) -> String {
+    if t.total == 0 {
+        return "-".into();
     }
+    format!(
+        "{}/{}{}",
+        format_credit(t.credit),
+        t.judged(),
+        if t.unjudged > 0 { "*" } else { "" }
+    )
+}
+
+/// What code alone settled for one model on one case, before the judge is asked.
+fn format_by_code(t: Tallies) -> String {
+    [("dictionary", t.dictionary), ("semantic", t.semantic), ("clean", t.clean)]
+        .iter()
+        .filter(|(_, tally)| tally.total > 0)
+        .map(|(name, tally)| {
+            let pending = if tally.unjudged > 0 {
+                format!(" (+{} to judge)", tally.unjudged)
+            } else {
+                String::new()
+            };
+            format!("{} {}/{}{}", name, format_credit(tally.credit), tally.judged(), pending)
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 fn format_pct(rate: Option<f64>) -> String {
@@ -1619,222 +1748,22 @@ fn format_pct(rate: Option<f64>) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-fn checkpoint_passed(output: &str, cp: &Checkpoint) -> bool {
-    let mut has_condition = false;
-    if let Some(ref needle) = cp.must_contain {
-        has_condition = true;
-        if !contains_with_case(output, needle, cp.case_sensitive) {
-            return false;
-        }
-    }
-    if let Some(ref needle) = cp.must_not_contain {
-        has_condition = true;
-        if contains_with_case(output, needle, cp.case_sensitive) {
-            return false;
-        }
-    }
-    if let Some(ref pattern) = cp.pattern {
-        has_condition = true;
-        match regex::Regex::new(pattern) {
-            Ok(re) => {
-                if !re.is_match(output) {
-                    return false;
-                }
-            }
-            Err(e) => {
-                eprintln!("Warning: invalid checkpoint regex '{}': {}", pattern, e);
-                return false;
-            }
-        }
-    }
-    has_condition
-}
-
-fn contains_with_case(haystack: &str, needle: &str, case_sensitive: bool) -> bool {
-    if case_sensitive {
-        haystack.contains(needle)
-    } else {
-        haystack.to_lowercase().contains(&needle.to_lowercase())
-    }
-}
-
-fn checkpoint_details(output: &str, checkpoints: &[Checkpoint]) -> String {
-    checkpoints
-        .iter()
-        .map(|cp| {
-            let mark = if checkpoint_passed(output, cp) {
-                "✓"
-            } else {
-                "✗"
-            };
-            format!(
-                "{} [{}] {}",
-                mark,
-                CheckpointTier::parse(&cp.tier).as_str(),
-                cp.description
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("；")
-}
-
-fn default_judge_prompt() -> String {
-    r#"你是语音转写纠正质量的评审员。各模型的任务是：把 ASR 转写文本纠正为正确、自然的中文，保留原意，不增删信息。
-
-硬性检查点（人名词典、cloud→Claude、README、下一集→下一级等）由程序按维度单独计分，不要因为某条检查点未命中就把总分打到很低。你的 quality_score 只评价「自由发挥」的整体纠正质量：
-
-1. 是否保持原意，有没有胡乱增删、解释或跑题。
-2. 通顺程度、标点、中英混排是否自然。
-3. 专有名词和文件名是否写得像样（即使程序会另计 cloud/README，你也可以点出好坏，但不要主导打分）。
-4. 同音/近音错误是否改对。
-
-不要把延迟或成功率写进 quality_score——那些由程序另计。quality_score 使用 0-10 分（可保留一位小数）。name 必须与输入中的模型显示名完全一致。
-
-只输出 JSON，不要 markdown 代码围栏，不要其它说明。格式：
-{
-  "providers": [
-    {
-      "name": "模型显示名",
-      "quality_score": 8.5,
-      "strengths": "一句话优点",
-      "weaknesses": "一句话缺点"
-    }
-  ],
-  "ranking": ["从优到劣的 name"],
-  "summary": "2-4 句总体结论，点出谁最适合作为纠正模型及原因"
-}"#
-        .into()
-}
-
-fn build_judge_payload(cases: &[CaseRecord], aggregated: &[ProviderStats]) -> String {
-    let mut out = String::new();
-    out.push_str("# 汇总指标\n\n");
-    for s in aggregated {
-        let suc = if s.total_rounds > 0 {
-            format!(
-                "{}/{} ({:.0}%)",
-                s.successes,
-                s.total_rounds,
-                100.0 * s.successes as f64 / s.total_rounds as f64
-            )
-        } else {
-            "0/0".into()
-        };
-        let cp = if s.checkpoints.total() > 0 {
-            format_tally(s.checkpoints)
-        } else {
-            "无".into()
-        };
-        out.push_str(&format!(
-            "- {}: 平均 {}ms, 最小 {}ms, 最大 {}ms, 成功 {}, 检查点 {}\n",
-            s.name, s.avg_ms, s.min_ms, s.max_ms, suc, cp
-        ));
-    }
-    out.push('\n');
-
-    for (i, c) in cases.iter().enumerate() {
-        out.push_str(&format!("# Case {}: {}\n\n", i + 1, c.case.name));
-        out.push_str(&format!("原文：{}\n", c.case.input));
-        if let Some(ref exp) = c.case.expected {
-            out.push_str(&format!("参考答案（不一定是唯一正确写法）：{}\n", exp));
-        }
-        if !c.case.checkpoint.is_empty() {
-            out.push_str("硬性检查点（程序按 basic / cloud / bonus 单独计分，请勿重复重罚）：\n");
-            for cp in &c.case.checkpoint {
-                out.push_str(&format!(
-                    "- [{}] {}\n",
-                    CheckpointTier::parse(&cp.tier).as_str(),
-                    cp.description
-                ));
-                if let Some(ref s) = cp.must_contain {
-                    out.push_str(&format!("  必须包含：{}\n", s));
-                }
-                if let Some(ref s) = cp.must_not_contain {
-                    out.push_str(&format!("  不得包含：{}\n", s));
-                }
-                if let Some(ref s) = cp.pattern {
-                    out.push_str(&format!("  正则：{}\n", s));
-                }
-            }
-        }
-        out.push('\n');
-        for p in &c.providers {
-            out.push_str(&format!("## {} ({})\n", p.name, p.model));
-            out.push_str(&format!(
-                "延迟 avg={}ms min={}ms max={}ms；成功 {}/{}\n",
-                p.stats.avg_ms,
-                p.stats.min_ms,
-                p.stats.max_ms,
-                p.stats.successes,
-                p.stats.total_rounds
-            ));
-            if p.stats.checkpoints.total() > 0 {
-                out.push_str(&format!(
-                    "检查点命中 {}\n",
-                    format_tally(p.stats.checkpoints)
-                ));
-            }
-            for (ri, r) in p.rounds.iter().enumerate() {
-                if let Some(ref err) = r.error {
-                    out.push_str(&format!(
-                        "- round {}: ERROR {}\n",
-                        ri + 1,
-                        truncate(err, 120)
-                    ));
-                } else {
-                    out.push_str(&format!("- round {}: {}\n", ri + 1, r.output));
-                    if !c.case.checkpoint.is_empty() {
-                        out.push_str(&format!(
-                            "  检查点：{}\n",
-                            checkpoint_details(&r.output, &c.case.checkpoint)
-                        ));
-                    }
-                }
-            }
-            out.push('\n');
+/// The same verdict usually serves many outputs: each distinct line once, with how many outputs it serves.
+fn counted(lines: &[String]) -> Vec<(&str, usize)> {
+    let mut out: Vec<(&str, usize)> = Vec::new();
+    for line in lines {
+        match out.iter_mut().find(|(seen, _)| *seen == line.as_str()) {
+            Some((_, n)) => *n += 1,
+            None => out.push((line, 1)),
         }
     }
     out
 }
 
-fn extract_json_object(s: &str) -> Option<String> {
-    let trimmed = s.trim();
-    let stripped = if let Some(rest) = trimmed.strip_prefix("```json") {
-        rest.trim().strip_suffix("```").unwrap_or(rest).trim()
-    } else if let Some(rest) = trimmed.strip_prefix("```") {
-        rest.trim().strip_suffix("```").unwrap_or(rest).trim()
-    } else {
-        trimmed
-    };
-    if let Some(start) = stripped.find('{') {
-        if let Some(end) = stripped.rfind('}') {
-            if end > start {
-                return Some(stripped[start..=end].to_string());
-            }
-        }
-    }
-    None
-}
-
-fn parse_judge_report(raw: &str) -> Result<JudgeReport, String> {
-    let json = extract_json_object(raw).ok_or_else(|| "no JSON object found".to_string())?;
-    serde_json::from_str(&json).map_err(|e| e.to_string())
-}
-
-fn lookup_quality(map: &HashMap<String, f64>, name: &str) -> Option<f64> {
-    if let Some(v) = map.get(name) {
-        return Some(*v);
-    }
-    map.iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(name))
-        .map(|(_, v)| *v)
-}
-
-const DEFAULT_W_BASIC: f64 = 0.20;
-const DEFAULT_W_CLOUD: f64 = 0.20;
-const DEFAULT_W_BONUS: f64 = 0.10;
-const DEFAULT_W_QUALITY: f64 = 0.20;
-const DEFAULT_W_LATENCY: f64 = 0.30;
+const DEFAULT_W_DICTIONARY: f64 = 0.40;
+const DEFAULT_W_SEMANTIC: f64 = 0.15;
+const DEFAULT_W_CLEAN: f64 = 0.10;
+const DEFAULT_W_LATENCY: f64 = 0.35;
 const DEFAULT_LATENCY_FULL_MS: f64 = 1000.0;
 const DEFAULT_LATENCY_ZERO_MS: f64 = 5000.0;
 
@@ -1854,82 +1783,77 @@ fn latency_score(avg_ms: u128, successes: usize, full_ms: f64, zero_ms: f64) -> 
     }
 }
 
+/// Weights as configured; they need not sum to 1.
+#[derive(Clone, Copy)]
 struct ScoreWeights {
-    basic: f64,
-    cloud: f64,
-    bonus: f64,
-    quality: f64,
+    dictionary: f64,
+    semantic: f64,
+    clean: f64,
     latency: f64,
     success: f64,
 }
 
-fn score_weights(
-    eval: &EvalConfig,
-    has_basic: bool,
-    has_cloud: bool,
-    has_bonus: bool,
-    use_quality: bool,
-) -> ScoreWeights {
-    let (wb0, wcloud0, wbonus0) = if eval.weight_basic.is_none()
-        && eval.weight_cloud.is_none()
-        && eval.weight_bonus.is_none()
-    {
-        if let Some(lump) = eval.weight_checkpoints {
-            (lump * 0.4, lump * 0.4, lump * 0.2)
-        } else {
-            (DEFAULT_W_BASIC, DEFAULT_W_CLOUD, DEFAULT_W_BONUS)
-        }
-    } else {
-        (
-            eval.weight_basic.unwrap_or(DEFAULT_W_BASIC),
-            eval.weight_cloud.unwrap_or(DEFAULT_W_CLOUD),
-            eval.weight_bonus.unwrap_or(DEFAULT_W_BONUS),
-        )
-    };
-
-    let mut w = ScoreWeights {
-        basic: if has_basic { wb0 } else { 0.0 },
-        cloud: if has_cloud { wcloud0 } else { 0.0 },
-        bonus: if has_bonus { wbonus0 } else { 0.0 },
-        quality: if use_quality {
-            eval.weight_quality.unwrap_or(DEFAULT_W_QUALITY)
-        } else {
-            0.0
-        },
+fn score_weights(eval: &EvalConfig) -> ScoreWeights {
+    let dictionary = eval.weight_dictionary.unwrap_or_else(|| match (eval.weight_basic, eval.weight_cloud) {
+        (None, None) => DEFAULT_W_DICTIONARY,
+        (basic, cloud) => basic.unwrap_or(0.0) + cloud.unwrap_or(0.0),
+    });
+    ScoreWeights {
+        dictionary,
+        semantic: eval.weight_semantic.unwrap_or(DEFAULT_W_SEMANTIC),
+        clean: eval.weight_clean.unwrap_or(DEFAULT_W_CLEAN),
         latency: eval.weight_latency.unwrap_or(DEFAULT_W_LATENCY),
         success: eval.weight_success.unwrap_or(0.0),
-    };
-    let sum = w.basic + w.cloud + w.bonus + w.quality + w.latency + w.success;
-    if sum > 0.0 {
-        w.basic /= sum;
-        w.cloud /= sum;
-        w.bonus /= sum;
-        w.quality /= sum;
-        w.latency /= sum;
-        w.success /= sum;
     }
-    w
 }
 
-fn print_ranking_legend(eval: &EvalConfig, stats: &[ProviderStats], use_quality: bool) {
-    let has_basic = stats.iter().any(|s| s.checkpoints.basic_total > 0);
-    let has_cloud = stats.iter().any(|s| s.checkpoints.cloud_total > 0);
-    let has_bonus = stats.iter().any(|s| s.checkpoints.bonus_total > 0);
-    let w = score_weights(eval, has_basic, has_cloud, has_bonus, use_quality);
+impl ScoreWeights {
+    /// Out of 100: the weighted mean of the dimensions that have a rate. A tier without one (the cases have no
+    /// such site, or none of this model's verdicts came back) is left out instead of scoring zero.
+    fn composite(self, tiers: [Option<f64>; 3], latency: f64, success: f64) -> f64 {
+        let parts = [
+            (self.dictionary, tiers[0]),
+            (self.semantic, tiers[1]),
+            (self.clean, tiers[2]),
+            (self.latency, Some(latency)),
+            (self.success, Some(success)),
+        ];
+        let (mut sum, mut weight) = (0.0, 0.0);
+        for (w, rate) in parts {
+            if let Some(rate) = rate {
+                sum += w * rate;
+                weight += w;
+            }
+        }
+        if weight > 0.0 {
+            100.0 * sum / weight
+        } else {
+            0.0
+        }
+    }
+}
+
+fn print_ranking_legend(eval: &EvalConfig, stats: &[ProviderStats]) {
+    let w = score_weights(eval);
+    let exists = |tier: fn(&Tallies) -> Tally| stats.iter().any(|s| tier(&s.tallies).total > 0);
+    let parts = [
+        ("dictionary", w.dictionary, exists(|t| t.dictionary)),
+        ("semantic", w.semantic, exists(|t| t.semantic)),
+        ("clean", w.clean, exists(|t| t.clean)),
+        ("speed", w.latency, true),
+        ("success", w.success, w.success > 0.0),
+    ];
+    let sum: f64 = parts.iter().filter(|p| p.2).map(|p| p.1).sum();
+    let shares: Vec<String> = parts
+        .iter()
+        .filter(|p| p.2 && sum > 0.0)
+        .map(|(name, weight, _)| format!("{} {:.0}%", name, 100.0 * weight / sum))
+        .collect();
     let full = eval.latency_full_ms.unwrap_or(DEFAULT_LATENCY_FULL_MS);
     let zero = eval.latency_zero_ms.unwrap_or(DEFAULT_LATENCY_ZERO_MS);
+    println!("  \x1b[2mWeights: {}\x1b[0m", shares.join(" · "));
     println!(
-        "  \x1b[2mWeights: basic {:.0}% · cloud {:.0}% · bonus {:.0}% · speed {:.0}% · quality {:.0}%{}\x1b[0m",
-        w.basic * 100.0,
-        w.cloud * 100.0,
-        w.bonus * 100.0,
-        w.latency * 100.0,
-        w.quality * 100.0,
-        if w.success > 0.0 {
-            format!(" · success {:.0}%", w.success * 100.0)
-        } else {
-            String::new()
-        }
+        "  \x1b[2mDictionary: the dictionary term stands where it was said · Semantic: other wrong words fixed from context · Clean: nothing else damaged, rephrased or added\x1b[0m"
     );
     println!(
         "  \x1b[2mSpeed: 1.0 at ≤{:.0}ms, 0 at ≥{:.0}ms (not min-max across the field)\x1b[0m\n",
@@ -1937,49 +1861,30 @@ fn print_ranking_legend(eval: &EvalConfig, stats: &[ProviderStats], use_quality:
     );
 }
 
-fn rank_providers(
-    stats: &[ProviderStats],
-    quality: &HashMap<String, f64>,
-    eval: &EvalConfig,
-) -> Vec<RankedProvider> {
-    let use_quality = !quality.is_empty();
-    let has_basic = stats.iter().any(|s| s.checkpoints.basic_total > 0);
-    let has_cloud = stats.iter().any(|s| s.checkpoints.cloud_total > 0);
-    let has_bonus = stats.iter().any(|s| s.checkpoints.bonus_total > 0);
-    let w = score_weights(eval, has_basic, has_cloud, has_bonus, use_quality);
+fn rank_providers(stats: &[ProviderStats], eval: &EvalConfig) -> Vec<RankedProvider> {
+    let w = score_weights(eval);
     let full_ms = eval.latency_full_ms.unwrap_or(DEFAULT_LATENCY_FULL_MS);
     let zero_ms = eval.latency_zero_ms.unwrap_or(DEFAULT_LATENCY_ZERO_MS);
 
     let mut ranked: Vec<RankedProvider> = stats
         .iter()
         .map(|s| {
-            let quality_score = lookup_quality(quality, &s.name);
-            let quality_norm = quality_score.unwrap_or(0.0) / 10.0;
-            let basic_rate = hit_rate(s.checkpoints.basic_hits, s.checkpoints.basic_total);
-            let cloud_rate = hit_rate(s.checkpoints.cloud_hits, s.checkpoints.cloud_total);
-            let bonus_rate = hit_rate(s.checkpoints.bonus_hits, s.checkpoints.bonus_total);
-            let checkpoint_rate = hit_rate(s.checkpoints.hits(), s.checkpoints.total());
+            let dictionary_rate = s.tallies.dictionary.rate();
+            let semantic_rate = s.tallies.semantic.rate();
+            let clean_rate = s.tallies.clean.rate();
             let success_rate = if s.total_rounds > 0 {
                 s.successes as f64 / s.total_rounds as f64
             } else {
                 0.0
             };
             let lat_score = latency_score(s.avg_ms, s.successes, full_ms, zero_ms);
-            let composite = 100.0
-                * (w.basic * basic_rate.unwrap_or(0.0)
-                    + w.cloud * cloud_rate.unwrap_or(0.0)
-                    + w.bonus * bonus_rate.unwrap_or(0.0)
-                    + w.quality * quality_norm
-                    + w.latency * lat_score
-                    + w.success * success_rate);
             RankedProvider {
                 name: s.name.clone(),
-                composite,
-                quality: quality_score,
-                checkpoint_rate,
-                basic_rate,
-                cloud_rate,
-                bonus_rate,
+                composite: w.composite([dictionary_rate, semantic_rate, clean_rate], lat_score, success_rate),
+                dictionary_rate,
+                semantic_rate,
+                clean_rate,
+                unjudged: s.tallies.unjudged(),
                 latency_score: lat_score,
                 avg_ms: s.avg_ms,
                 success_rate,
@@ -2070,11 +1975,14 @@ fn award_points(ranked: &[RankedProvider], scheme: StandingScheme) -> Vec<RunPla
                 provider: r.name.clone(),
                 points: pts,
                 composite: r.composite,
-                quality: r.quality,
-                checkpoint_rate: r.checkpoint_rate,
-                basic_rate: r.basic_rate,
-                cloud_rate: r.cloud_rate,
-                bonus_rate: r.bonus_rate,
+                dictionary_rate: r.dictionary_rate,
+                semantic_rate: r.semantic_rate,
+                clean_rate: r.clean_rate,
+                quality: None,
+                checkpoint_rate: None,
+                basic_rate: None,
+                cloud_rate: None,
+                bonus_rate: None,
                 latency_score: Some(r.latency_score),
                 avg_ms: r.avg_ms as u64,
                 success_rate: r.success_rate,
@@ -2346,85 +2254,26 @@ fn print_standings(file: &StandingsFile, name_width: usize) {
 mod tests {
     use super::*;
 
-    fn cp(desc: &str, contain: Option<&str>, not_contain: Option<&str>) -> Checkpoint {
-        cp_tier(desc, contain, not_contain, "")
+    fn tally(credit: f64, total: usize) -> Tally {
+        Tally { credit, total, unjudged: 0 }
     }
 
-    fn cp_tier(
-        desc: &str,
-        contain: Option<&str>,
-        not_contain: Option<&str>,
-        tier: &str,
-    ) -> Checkpoint {
-        Checkpoint {
-            description: desc.into(),
-            must_contain: contain.map(|s| s.into()),
-            must_not_contain: not_contain.map(|s| s.into()),
-            pattern: None,
-            case_sensitive: false,
-            tier: tier.into(),
-        }
-    }
-
-    fn stats(name: &str, avg_ms: u128, successes: usize, hits: usize, total: usize) -> ProviderStats {
-        stats_tiers(name, avg_ms, successes, (hits, total), (0, 0), (0, 0))
-    }
-
-    fn stats_tiers(
-        name: &str,
-        avg_ms: u128,
-        successes: usize,
-        basic: (usize, usize),
-        cloud: (usize, usize),
-        bonus: (usize, usize),
-    ) -> ProviderStats {
+    /// Three successful rounds out of three; each tier as (credit, items).
+    fn stats(name: &str, avg_ms: u128, dictionary: (f64, usize), semantic: (f64, usize)) -> ProviderStats {
         ProviderStats {
             name: name.into(),
             total_rounds: 3,
-            successes,
+            successes: 3,
             avg_ms,
             min_ms: avg_ms,
             max_ms: avg_ms,
             avg_tokens: None,
-            checkpoints: CheckpointTally {
-                basic_hits: basic.0,
-                basic_total: basic.1,
-                cloud_hits: cloud.0,
-                cloud_total: cloud.1,
-                bonus_hits: bonus.0,
-                bonus_total: bonus.1,
+            tallies: Tallies {
+                dictionary: tally(dictionary.0, dictionary.1),
+                semantic: tally(semantic.0, semantic.1),
+                clean: tally(3.0, 3),
             },
         }
-    }
-
-    #[test]
-    fn next_level_checkpoint() {
-        let c = cp("下一集→下一级", Some("下一级"), Some("下一集"));
-        assert!(checkpoint_passed("指向下一级的导航", &c));
-        assert!(!checkpoint_passed("指向下一集的导航", &c));
-        assert!(!checkpoint_passed("指向下一级，同时下一集还在", &c));
-    }
-
-    #[test]
-    fn claude_checkpoint_accepts_claude_not_filename() {
-        let c = cp(
-            "cloud→Claude",
-            Some("Claude"),
-            Some("cloud md"),
-        );
-        assert!(checkpoint_passed("然后我们的 CLAUDE.md 里边就去指向 README", &c));
-        assert!(checkpoint_passed("Claude.md 指向 README", &c));
-        assert!(checkpoint_passed("然后我们的 Claude md 里边就去指向 README", &c));
-        assert!(!checkpoint_passed("cloud md 里边就去指向 read me", &c));
-        assert!(!checkpoint_passed("Cloud md 里边就去指向 read me", &c));
-    }
-
-    #[test]
-    fn readme_checkpoint() {
-        let c = cp("README", Some("README"), None);
-        assert!(checkpoint_passed("指向 README", &c));
-        assert!(checkpoint_passed("指向 Readme", &c));
-        assert!(!checkpoint_passed("指向 read me", &c));
     }
 
     #[test]
@@ -2454,29 +2303,89 @@ mod tests {
         assert_eq!(normalize_gemini_thinking_level("minimal"), "MINIMAL");
     }
 
-    #[test]
-    fn parse_judge_json_from_fence() {
-        let raw = "```json\n{\"providers\":[{\"name\":\"A\",\"quality_score\":8}],\"ranking\":[\"A\"],\"summary\":\"ok\"}\n```";
-        let report = parse_judge_report(raw).unwrap();
-        assert_eq!(report.providers[0].name, "A");
-        assert_eq!(report.providers[0].quality_score, 8.0);
+    fn bench_provider(
+        provider_type: &str,
+        reasoning: Option<&str>,
+        extra: &[(&str, toml::Value)],
+    ) -> Provider {
+        Provider {
+            name: "t".into(),
+            base_url: "https://example.test/v1".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+            provider_type: provider_type.into(),
+            api_mode: "completion".into(),
+            reasoning_effort: reasoning.map(|s| s.into()),
+            extra: extra
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+        }
     }
 
     #[test]
-    fn rank_uses_checkpoints_and_latency() {
-        let eval = EvalConfig {
-            weight_quality: Some(0.0),
-            weight_checkpoints: Some(0.7),
-            weight_success: Some(0.0),
-            ..Default::default()
-        };
+    fn chat_body_uses_lowest_thinking_per_provider() {
+        let volc = build_chat_request_body(&bench_provider("volcengine", None, &[]), "s".into(), "u".into());
+        assert_eq!(volc["reasoning_effort"], "minimal");
+        assert!(volc.get("enable_thinking").is_none());
+
+        let openai_quiet =
+            build_chat_request_body(&bench_provider("openai", None, &[]), "s".into(), "u".into());
+        assert!(openai_quiet.get("reasoning_effort").is_none());
+
+        let openai_min = build_chat_request_body(
+            &bench_provider("openai", Some("minimal"), &[]),
+            "s".into(),
+            "u".into(),
+        );
+        assert_eq!(openai_min["reasoning_effort"], "minimal");
+
+        let qwen = build_chat_request_body(&bench_provider("qwen", None, &[]), "s".into(), "u".into());
+        assert_eq!(qwen["enable_thinking"], false);
+
+        let qwen_override = build_chat_request_body(
+            &bench_provider("qwen", None, &[("enable_thinking", toml::Value::Boolean(true))]),
+            "s".into(),
+            "u".into(),
+        );
+        assert_eq!(qwen_override["enable_thinking"], true);
+
+        let custom_none = build_chat_request_body(
+            &bench_provider("custom", Some("none"), &[]),
+            "s".into(),
+            "u".into(),
+        );
+        assert_eq!(custom_none["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn responses_body_nests_reasoning_effort() {
+        let quiet =
+            build_responses_request_body(&bench_provider("openai", None, &[]), "s", "u");
+        assert!(quiet.get("reasoning").is_none());
+
+        let min = build_responses_request_body(
+            &bench_provider("openai", Some("minimal"), &[]),
+            "s",
+            "u",
+        );
+        assert_eq!(min["reasoning"]["effort"], "minimal");
+
+        let volc = build_responses_request_body(&bench_provider("volcengine", None, &[]), "s", "u");
+        assert_eq!(volc["reasoning"]["effort"], "minimal");
+
+        let qwen = build_responses_request_body(&bench_provider("qwen", None, &[]), "s", "u");
+        assert_eq!(qwen["enable_thinking"], false);
+    }
+
+    #[test]
+    fn rank_uses_sites_and_latency() {
         let ranked = rank_providers(
             &[
-                stats("slow-correct", 2000, 3, 3, 3),
-                stats("fast-wrong", 200, 3, 0, 3),
+                stats("fast-wrong", 200, (0.0, 3), (0.0, 0)),
+                stats("slow-correct", 2000, (3.0, 3), (0.0, 0)),
             ],
-            &HashMap::new(),
-            &eval,
+            &EvalConfig::default(),
         );
         assert_eq!(ranked[0].name, "slow-correct");
     }
@@ -2489,87 +2398,94 @@ mod tests {
         assert_eq!(latency_score(19000, 3, 1000.0, 5000.0), 0.0);
         assert_eq!(latency_score(900, 0, 1000.0, 5000.0), 0.0);
 
-        let eval = EvalConfig {
-            weight_quality: Some(0.0),
-            weight_success: Some(0.0),
-            ..Default::default()
-        };
         let ranked = rank_providers(
             &[
-                stats_tiers("fast", 800, 3, (3, 3), (3, 3), (6, 6)),
-                stats_tiers("mid", 2000, 3, (3, 3), (3, 3), (6, 6)),
-                stats_tiers("stall", 19000, 3, (3, 3), (3, 3), (6, 6)),
+                stats("stall", 19000, (6.0, 6), (6.0, 6)),
+                stats("mid", 2000, (6.0, 6), (6.0, 6)),
+                stats("fast", 800, (6.0, 6), (6.0, 6)),
             ],
-            &HashMap::new(),
-            &eval,
+            &EvalConfig::default(),
         );
         assert_eq!(ranked[0].name, "fast");
         assert_eq!(ranked[1].name, "mid");
         assert_eq!(ranked[2].name, "stall");
         assert!((ranked[0].latency_score - 1.0).abs() < 1e-9);
+        // A 19s outlier must not stretch the mid model up toward 1.0 the way min-max did.
         assert!((ranked[1].latency_score - 0.75).abs() < 1e-9);
         assert!(ranked[2].latency_score.abs() < 1e-9);
-        // A 19s outlier must not stretch the mid model up toward 1.0 the way min-max did.
-        assert!(ranked[1].latency_score < 0.80);
     }
 
     #[test]
-    fn cloud_outweighs_bonus_icing() {
-        let eval = EvalConfig {
-            weight_quality: Some(0.0),
-            weight_success: Some(0.0),
-            ..Default::default()
-        };
+    fn a_missed_dictionary_term_costs_more_than_a_missed_semantic_fix_and_speed_more_than_the_latter() {
         let ranked = rank_providers(
             &[
-                stats_tiers("miss-cloud", 800, 3, (3, 3), (0, 3), (6, 6)),
-                stats_tiers("miss-bonus", 800, 3, (3, 3), (3, 3), (0, 6)),
+                stats("miss-dictionary", 800, (0.0, 6), (6.0, 6)),
+                stats("slow", 4000, (6.0, 6), (6.0, 6)),
+                stats("miss-semantic", 800, (6.0, 6), (0.0, 6)),
             ],
-            &HashMap::new(),
-            &eval,
+            &EvalConfig::default(),
         );
-        assert_eq!(ranked[0].name, "miss-bonus");
-        assert!(ranked[0].composite > ranked[1].composite);
+        let order: Vec<&str> = ranked.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(order, ["miss-semantic", "slow", "miss-dictionary"]);
     }
 
     #[test]
-    fn speed_beats_icing_when_basics_match() {
-        let eval = EvalConfig {
-            weight_quality: Some(0.0),
-            weight_success: Some(0.0),
-            ..Default::default()
-        };
-        let ranked = rank_providers(
-            &[
-                stats_tiers("fast-no-icing", 700, 3, (3, 3), (3, 3), (0, 6)),
-                stats_tiers("slow-icing", 4000, 3, (3, 3), (3, 3), (6, 6)),
-            ],
-            &HashMap::new(),
-            &eval,
-        );
-        assert_eq!(ranked[0].name, "fast-no-icing");
+    fn legacy_weight_names_still_configure_the_tiers() {
+        let legacy = "weight_basic = 0.25\nweight_cloud = 0.15\nweight_bonus = 0.15\nweight_quality = 0.1\nweight_latency = 0.35";
+        let eval: EvalConfig = toml::from_str(legacy).unwrap();
+        eval.validate().unwrap();
+        let w = score_weights(&eval);
+        let configured = [w.dictionary, w.semantic, w.clean, w.latency, w.success];
+        for (got, want) in configured.iter().zip([0.40, 0.15, 0.10, 0.35, 0.0]) {
+            assert!((got - want).abs() < 1e-9);
+        }
+        let d = score_weights(&EvalConfig::default());
+        assert_eq!([d.dictionary, d.semantic, d.clean, d.latency, d.success], [0.40, 0.15, 0.10, 0.35, 0.0]);
+
+        let both: EvalConfig = toml::from_str("weight_dictionary = 0.4\nweight_basic = 0.25").unwrap();
+        assert!(both.validate().is_err());
+        assert!(toml::from_str::<EvalConfig>("weight_checkpoints = 0.5").is_err(), "an unknown weight must not be dropped silently");
     }
 
     #[test]
-    fn checkpoints_score_by_tier() {
-        let round = RoundResult {
-            duration_ms: 10,
-            output: "徐隽博 用 Claude 写 README，指向下一级".into(),
-            tokens: None,
-            error: None,
-        };
-        let tally = score_checkpoints(
-            &[&round],
-            &[
-                cp_tier("name", Some("徐隽博"), Some("徐俊博"), "basic"),
-                cp_tier("cloud", Some("Claude"), Some("cloud md"), "cloud"),
-                cp_tier("readme", Some("README"), None, "bonus"),
-                cp_tier("next", Some("下一级"), Some("下一集"), "bonus"),
-            ],
-        );
-        assert_eq!((tally.basic_hits, tally.basic_total), (1, 1));
-        assert_eq!((tally.cloud_hits, tally.cloud_total), (1, 1));
-        assert_eq!((tally.bonus_hits, tally.bonus_total), (2, 2));
+    fn an_unjudged_item_is_left_out_not_counted_as_a_miss() {
+        let mut semantic = Tally::default();
+        semantic.add(Some(1.0));
+        semantic.add(Some(0.5));
+        semantic.add(None);
+        assert_eq!((semantic.rate(), semantic.unjudged), (Some(0.75), 1));
+        assert_eq!(format_tally(semantic), "1.50/2*");
+
+        // nothing judged in a tier: that model's composite is taken over its other dimensions
+        let mut open = stats("open", 800, (6.0, 6), (0.0, 0));
+        open.tallies.semantic = Tally { credit: 0.0, total: 6, unjudged: 6 };
+        let ranked = rank_providers(&[open, stats("no-semantic-sites", 800, (6.0, 6), (0.0, 0))], &EvalConfig::default());
+        assert_eq!(ranked[0].semantic_rate, None);
+        assert!((ranked[0].composite - ranked[1].composite).abs() < 1e-9);
+        let marked: Vec<usize> = ranked.iter().map(|r| r.unjudged).collect();
+        assert!(marked.contains(&6) && marked.contains(&0));
+    }
+
+    #[test]
+    fn a_failed_call_scores_zero_on_every_site_and_on_the_transcript() {
+        let reference = Reference::new("用 cloud 写下一集的导航", "用 Claude 写下一级的导航", &["Claude".to_string()]);
+        let mut tallies = Tallies::default();
+        tallies.add_failed(&reference);
+        tallies.add(&adjudicate::score(&reference.analyze("用 Claude 写下一级的导航", &[]), &Answers::new()));
+        for tier in [tallies.dictionary, tallies.semantic, tallies.clean] {
+            assert_eq!((tier.rate(), tier.total, tier.unjudged), (Some(0.5), 2, 0));
+        }
+    }
+
+    #[test]
+    fn a_case_is_input_and_expected_with_optional_pins() {
+        let case = "[[case]]\nname = \"n\"\ninput = \"下一集\"\nexpected = \"下一级\"\n";
+        assert!(parse_cases(case).unwrap().case[0].pin.is_empty());
+        let pinned = format!("{case}[[case.pin]]\nheard = \"下一集\"\nwritten = \"下一层\"\ncredit = 1.0\n");
+        assert_eq!(parse_cases(&pinned).unwrap().case[0].pin[0].written, "下一层");
+        assert!(parse_cases(&pinned.replace("1.0", "1.5")).unwrap_err().contains("between 0 and 1"));
+        let old = format!("{case}[[case.checkpoint]]\ndescription = \"d\"\nmust_contain = \"下一级\"\n");
+        assert!(parse_cases(&old).unwrap_err().contains("checkpoint"));
     }
 
     #[test]
@@ -2617,11 +2533,10 @@ model = "m"
         RankedProvider {
             name: name.into(),
             composite,
-            quality: None,
-            checkpoint_rate: None,
-            basic_rate: None,
-            cloud_rate: None,
-            bonus_rate: None,
+            dictionary_rate: Some(1.0),
+            semantic_rate: None,
+            clean_rate: Some(1.0),
+            unjudged: 0,
             latency_score: 1.0,
             avg_ms: 100,
             success_rate: 1.0,
@@ -2684,6 +2599,19 @@ model = "m"
         assert_eq!(table[0].runs, 2);
         assert_eq!(table[0].avg_points, 1.5);
         assert!(table.iter().all(|s| s.active));
+    }
+
+    #[test]
+    fn races_scored_before_the_tiers_still_load_and_keep_their_fields() {
+        let old = r#"{"place":1,"provider":"a","points":3.0,"composite":71.5,"quality":8.2,"checkpoint_rate":0.9,"basic_rate":1.0,"cloud_rate":0.5,"bonus_rate":null,"latency_score":0.8,"avg_ms":900,"success_rate":1.0}"#;
+        let place: RunPlace = serde_json::from_str(old).unwrap();
+        let saved = serde_json::to_value(&place).unwrap();
+        assert_eq!((saved["quality"].as_f64(), saved["cloud_rate"].as_f64()), (Some(8.2), Some(0.5)));
+        assert!(saved.get("dictionary_rate").is_none());
+
+        let new = serde_json::to_value(&award_points(&[rp("a", 90.0)], StandingScheme::Borda)[0]).unwrap();
+        assert_eq!(new["dictionary_rate"].as_f64(), Some(1.0));
+        assert!(new.get("quality").is_none() && new.get("semantic_rate").is_none());
     }
 
     fn all_history_lens() -> StandingLens {

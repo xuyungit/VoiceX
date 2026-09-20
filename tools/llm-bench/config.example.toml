@@ -27,38 +27,66 @@ VoiceX
 Claude
 """
 
-# Optional second-pass evaluator. After all providers finish, this model
-# scores free-form rewrite quality (one ranking dimension; not the whole score).
+# --- Scoring ---
+# A test case is `input` (what the recognizer heard) and `expected` (what was
+# said). The places to correct are the differences between the two, and each
+# one is scored where it stands in the model's output:
+#
+#   dictionary  the intended word is in the dictionary above. Passes when that
+#               term stands there, in any casing or with a suffix (Claude,
+#               CLAUDE.md, Claude md). Settled by code.
+#   semantic    any other fix (下一集 → 下一级). Code settles the exact answer
+#               and the untouched error; anything else goes to the judge.
+#   clean       the model changed nothing else. Spacing, sentence punctuation
+#               and casing cost nothing; other changes go to the judge.
+#
+# The judge is only asked what code cannot settle, each distinct question once,
+# after all timing is done. Without a [judge], or with --skip-judge, those
+# verdicts are listed as unjudged and left out of the rates — never counted as
+# misses. Low-confidence verdicts are listed for review; settle one for good
+# with a [[case.pin]] in test_cases.toml.
+#
 # Keep [judge] / [eval] below prompt and dictionary — a TOML table owns
 # every following key until the next table header.
+# api_key accepts a literal, ${ENV_VAR}, or file:<path>.
 # [judge]
-# name = "Quality-Judge"
-# base_url = "https://api.openai.com/v1"
-# api_key = "${OPENAI_API_KEY}"
-# model = "gpt-4o"
-# type = "openai"
+# name = "TypeSafe-Judge"
+# base_url = "https://api.typesafe.ai/v1/systemone"   # https://docs.typesafe.ai
+# api_key = "file:.jev_key"
+# model = "jev-1.13.0"     # pin a version: `jev-latest` changes verdicts between runs
+# type = "typesafe"
 
 # [eval]
-# Five dimensions, different priorities. Missing dimensions (no checkpoints of
-# that tier, or no judge) are dropped and the rest renormalized.
-# weight_basic = 0.20      # dictionary / simple name fixes
-# weight_latency = 0.30    # voice-correction SLA; not min-max across the field
-# weight_cloud = 0.20      # cloud → Claude
-# weight_bonus = 0.10      # icing: README, 下一集→下一级, ...
-# weight_quality = 0.20    # judge free-form rewrite quality
-# weight_success = 0.0     # API failures already zero latency + checkpoints
-# latency_full_ms = 1000   # avg ≤ this scores 1.0
-# latency_zero_ms = 5000   # avg ≥ this scores 0.0
+# Composite = weighted mean over the dimensions a model has a rate for.
+# weight_dictionary = 0.40  # homophones fixed from the dictionary
+# weight_latency = 0.35     # voice-correction SLA; absolute, not min-max across the field
+# weight_semantic = 0.15    # fixes that need the context
+# weight_clean = 0.10       # nothing changed beyond the fixes
+# weight_success = 0.0      # a failed call already scores zero everywhere
+# latency_full_ms = 1000    # avg ≤ this scores 1.0
+# latency_zero_ms = 5000    # avg ≥ this scores 0.0
+# typesafe_questions = "typesafe_questions.json"   # override the built-in judge questions
+# typesafe_concurrency = 8   # parallel judge calls
 # standing_scheme = "borda"  # or "f1" (25/18/15/... for top 10)
 # standing_decay = 0.9       # older races fade; 1.0 = no decay
 # standing_window = 10       # only last N races feed form; 0 = all history
 # standing_retire_after = 3  # hide models absent this many races in a row; 0 = never
+# Older names still work: weight_basic + weight_cloud (summed) = weight_dictionary,
+# weight_bonus = weight_semantic, weight_quality = weight_clean.
 
 # --- Providers ---
 # Each [[provider]] is one model to benchmark.
 # api_key supports ${ENV_VAR} syntax for environment variables.
-# type: "volcengine" | "openai" | "custom"
+# type: "volcengine" | "openai" | "qwen" | "gemini" | "custom"
 # [provider.extra] can inject arbitrary fields into the request body.
+#
+# Correction / translation should use the lowest thinking the model accepts.
+#   volcengine: reasoning_effort defaults to "minimal" if omitted
+#   openai / custom: set reasoning_effort when the model reasons
+#     (Cerebras: "none", OpenAI GPT-5: "minimal", DeepSeek: "none")
+#   qwen: enable_thinking is forced off unless extra overrides it
+#   gemini: code sends the lowest thinkingLevel / thinkingBudget the model accepts
+#   extra: vendor knobs, e.g. enable_thinking = false, thinking = { type = "disabled" }
 
 [[provider]]
 name = "Doubao-Seed-Lite"
@@ -76,6 +104,7 @@ model = "doubao-seed-1-6-pro-251015"
 type = "volcengine"
 reasoning_effort = "minimal"
 
+# gpt-4o-mini is not a reasoning model; do not send reasoning_effort.
 [[provider]]
 name = "GPT-4o-mini"
 base_url = "https://api.openai.com/v1"
@@ -83,21 +112,39 @@ api_key = "${OPENAI_API_KEY}"
 model = "gpt-4o-mini"
 type = "openai"
 
+# [[provider]]
+# name = "GPT-5.6-luna"
+# base_url = "https://api.openai.com/v1"
+# api_key = "${OPENAI_API_KEY}"
+# model = "gpt-5.6-luna"
+# type = "openai"
+# reasoning_effort = "minimal"
+
+# type = "qwen" turns thinking off automatically; type = "custom" needs extra.
 [[provider]]
 name = "Qwen3.5-Plus"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 api_key = "${DASHSCOPE_API_KEY}"
 model = "qwen3.5-plus"
-type = "custom"
-[provider.extra]
-enable_thinking = false
+type = "qwen"
 
 # [[provider]]
-# name = "DeepSeek-V3"
-# base_url = "https://api.deepseek.com/v1"
+# name = "Cerebras Qwen 3.8 27B"
+# base_url = "https://api.cerebras.ai/v1"
+# api_key = "${CEREBRAS_API_KEY}"
+# model = "qwen-3.8-27b"
+# type = "openai"
+# reasoning_effort = "none"
+
+# [[provider]]
+# name = "DeepSeek-V4-Flash"
+# base_url = "https://api.deepseek.com"
 # api_key = "${DEEPSEEK_API_KEY}"
-# model = "deepseek-chat"
-# type = "custom"
+# model = "deepseek-v4-flash"
+# type = "openai"
+# reasoning_effort = "none"
+# [provider.extra]
+# thinking = { type = "disabled" }
 
 # [[provider]]
 # name = "Gemini-2.0-Flash"
