@@ -782,7 +782,7 @@ const zhCN = {
     readingLlmNotConfigured: '翻译模型未配置，请检查大模型设置',
     readingLlmFailed: '翻译失败，未朗读',
     readingLlmTimeout: '翻译超时，未朗读',
-    readingTextTooLong: '选中文字过长，翻译朗读最多 3000 字'
+    readingTextTooLong: '选中文字过长，翻译朗读最多 5000 字'
   }
 }
 

@@ -311,7 +311,7 @@ const LANGUAGE_LABEL_KEYS: Record<TranslateLanguage, string> = {
   pt: 'reading.langPt'
 }
 // `TRANSLATE_MAX_CHARS` in llm_stage.rs; shown in the note, enforced there.
-const TRANSLATE_MAX_CHARS = 3000
+const TRANSLATE_MAX_CHARS = 5000
 
 type PromptLocale = Parameters<typeof getDefaultPrompt>[1]
 const resolvedLocale = computed<PromptLocale>(() => (locale.value === 'zh-CN' ? 'zh-CN' : 'en-US'))

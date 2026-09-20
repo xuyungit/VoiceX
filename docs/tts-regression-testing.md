@@ -111,7 +111,7 @@ scripts/tts/translate_read.sh --case all
 |---|---|
 | success | 出一行，无音频路径 |
 | long | 约 2850 字，出一行且译文尾部保留最后一节的编号（抓输出截断） |
-| toolong | 超过 3000 字，LLM 调用前拒绝，无行 |
+| toolong | 超过 5000 字，LLM 调用前拒绝，无行 |
 | cancel | 热键后 0.5 秒 Esc，无行 |
 | stop | 朗读中第二次热键，行存在，朗读中断 |
 

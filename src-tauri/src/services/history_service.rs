@@ -284,7 +284,7 @@ impl HistoryService {
     ///
     /// The usage counters (total input characters, AI corrections, and the
     /// characters-per-minute rate derived from them) describe dictation. A
-    /// 3000-character translation with zero duration would distort all three,
+    /// 5000-character translation with zero duration would distort all three,
     /// on this device and on the sync server, which adds every uploaded row to
     /// its account totals without looking at the mode and cannot be taught
     /// otherwise without a redeploy. So these rows are neither uploaded nor

@@ -21,7 +21,12 @@ use super::{log_event, CancelToken};
 /// wait is long enough to look broken, and streaming (M5) is the real answer.
 /// A constant rather than a setting: nobody tunes this, and a setting would
 /// only move the cliff around.
-pub const TRANSLATE_MAX_CHARS: usize = 3_000;
+///
+/// Was 3000 while reasoning models spent a fixed 4096-token output cap on
+/// thinking (2900 characters took 44 s or came back cut). With the caps gone
+/// and reasoning at each vendor's floor the same text takes 1.4–11 s, so 5000
+/// stays well inside the 60 s timeout ceiling.
+pub const TRANSLATE_MAX_CHARS: usize = 5_000;
 
 /// Source-language value meaning "let the model work it out".
 pub const SOURCE_LANGUAGE_AUTO: &str = "auto";

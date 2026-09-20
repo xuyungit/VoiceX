@@ -14,9 +14,9 @@
 #
 # Cases:
 #   success  short Chinese sentence → one translate_read row, no audio path
-#   long     ~2900 chars, just under the cap → one translate_read row whose
+#   long     ~2900 chars, a long selection → one translate_read row whose
 #            translation is not cut short (no fixed output-token cap upstream)
-#   toolong  > 3000 chars → refused before the LLM call, no row
+#   toolong  > 5000 chars → refused before the LLM call, no row
 #   cancel   Esc while the LLM request is in flight → no row (Esc goes out
 #            CANCEL_ESC_DELAY_S after the hotkey, see below)
 #   stop     second hotkey press during speech → row exists (the translation
@@ -105,7 +105,7 @@ fixture_for() {
   case "$1" in
     success) printf '翻译朗读测试 %s：今天天气很好，我们去公园散步吧。' "$RUN_ID" ;;
     long)    printf '翻译朗读测试 %s %s' "$RUN_ID" "$(long_fixture_body)" ;;
-    toolong) printf '翻译朗读测试 %s %s' "$RUN_ID" "$(python3 -c 'print("这是一段很长的文字。"*320)')" ;;
+    toolong) printf '翻译朗读测试 %s %s' "$RUN_ID" "$(python3 -c 'print("这是一段很长的文字。"*520)')" ;;
     cancel)  printf '翻译朗读测试 %s %s' "$RUN_ID" "$(python3 -c 'print("这是一段需要较长时间翻译的文字，用来测试取消。"*100)')" ;;
     stop)    printf '翻译朗读测试 %s：这是一段足够长的文字，用来验证第二次按下热键会停止朗读。我们会在朗读开始后再次触发同一个热键，然后确认朗读被打断。' "$RUN_ID" ;;
     *) return 1 ;;
@@ -156,7 +156,7 @@ run_case() {
   local name="$1" fixture before rowid front t0 t_row mode translated
   fixture="$(fixture_for "$name")" || { fail "$name: unknown case"; return; }
   # ${#fixture} counts bytes under the C locale a non-interactive shell may
-  # have, which would make the 3000-character cap look wrong in the output.
+  # have, which would make the 5000-character cap look wrong in the output.
   info "case $name (run $RUN_ID, $(python3 -c 'import sys; print(len(sys.argv[1]))' "$fixture") chars)"
 
   if screen_locked; then invalid "$name: the screen is locked"; return; fi

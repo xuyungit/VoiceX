@@ -782,7 +782,7 @@ const enUS = {
     readingLlmNotConfigured: 'No translation model configured; check the LLM settings',
     readingLlmFailed: 'Translation failed; nothing was read',
     readingLlmTimeout: 'Translation timed out; nothing was read',
-    readingTextTooLong: 'Selection too long; translate-and-read stops at 3000 characters'
+    readingTextTooLong: 'Selection too long; translate-and-read stops at 5000 characters'
   }
 }
 
