@@ -1130,6 +1130,9 @@ async fn run_prompt(
         provider.base_url.trim_end_matches('/')
     );
 
+    // The clock stops after the body is read, not after `send()`: that resolves
+    // on the response headers, which api.deepseek.com flushes ~100 ms in and
+    // then holds the connection open until the completion is ready.
     let start = Instant::now();
     let resp = http
         .post(&url)
@@ -1138,12 +1141,11 @@ async fn run_prompt(
         .json(&body)
         .send()
         .await;
-    let duration_ms = start.elapsed().as_millis();
 
     let response = match resp {
         Err(e) => {
             return RoundResult {
-                duration_ms,
+                duration_ms: start.elapsed().as_millis(),
                 output: String::new(),
                 tokens: None,
                 error: Some(format!("HTTP error: {}", e)),
@@ -1154,6 +1156,7 @@ async fn run_prompt(
 
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
+    let duration_ms = start.elapsed().as_millis();
 
     if !status.is_success() {
         return RoundResult {
@@ -1213,12 +1216,11 @@ async fn run_once_response(
         .json(&body)
         .send()
         .await;
-    let duration_ms = start.elapsed().as_millis();
 
     let response = match resp {
         Err(e) => {
             return RoundResult {
-                duration_ms,
+                duration_ms: start.elapsed().as_millis(),
                 output: String::new(),
                 tokens: None,
                 error: Some(format!("HTTP error: {}", e)),
@@ -1229,6 +1231,7 @@ async fn run_once_response(
 
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
+    let duration_ms = start.elapsed().as_millis();
 
     if !status.is_success() {
         return RoundResult {
@@ -1318,12 +1321,11 @@ async fn run_once_gemini(
         .json(&body)
         .send()
         .await;
-    let duration_ms = start.elapsed().as_millis();
 
     let response = match resp {
         Err(e) => {
             return RoundResult {
-                duration_ms,
+                duration_ms: start.elapsed().as_millis(),
                 output: String::new(),
                 tokens: None,
                 error: Some(format!("HTTP error: {}", e)),
@@ -1334,6 +1336,7 @@ async fn run_once_gemini(
 
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
+    let duration_ms = start.elapsed().as_millis();
 
     if !status.is_success() {
         return RoundResult {
