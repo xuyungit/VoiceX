@@ -87,9 +87,10 @@ wait_for_event() {
 # delivers, so AppleScript keystrokes are invisible to it.
 INJECT="$(dirname "$0")/cgevent_key.py"
 
-# Key code 15 is the physical R key.
+# Key code 15 is the physical R key. A rebound hotkey comes in through the same
+# variables lib.sh reads (`eval "$(scripts/tts/hotkey_env.py)"`).
 trigger_read_hotkey() {
-  python3 "$INJECT" --key 15 --mods option,command
+  python3 "$INJECT" --key "${VOICEX_READ_KEY:-15}" --mods "${VOICEX_READ_MODS:-option,command}"
 }
 
 # Key code 0 is the physical A key.

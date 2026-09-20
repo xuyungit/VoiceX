@@ -22,9 +22,10 @@
 #   stop     second hotkey press during speech → row exists (the translation
 #            finished), speech is cut short; judged by ear, the row is reported
 #
-# The translate hotkey must be at its default (Option+Command+T) and
-# "翻译并朗读" enabled in Reading settings. Injection needs Accessibility for
-# the calling terminal (see cgevent_key.py).
+# "翻译并朗读" must be enabled in Reading settings. The hotkey injected is the
+# default Option+Command+T; for another binding, first run
+# `eval "$(scripts/tts/hotkey_env.py)"` (see lib.sh). Injection needs
+# Accessibility for the calling terminal (see cgevent_key.py).
 #
 # A reading hotkey pressed while a session is active stops that session instead
 # of starting another (tts/controller.rs), so every case first makes sure no
@@ -39,7 +40,6 @@ source "$_DIR/lib.sh"
 
 DB="${VOICEX_DB:-$HOME/Library/Application Support/com.voicex.app/voicex.db}"
 CASES="success"
-KEYCODE_T=17
 KEYCODE_ESC=53
 ROW_TIMEOUT_S=40
 # The cancel case must land its Esc while the LLM reply is still pending:
@@ -71,29 +71,12 @@ screen_locked() {
   ioreg -n Root -d1 -a 2>/dev/null | grep -A1 IOConsoleLocked | grep -q '<true/>'
 }
 
-# The HUD window is on screen only while a session runs, so its presence in the
-# app's window list is the one idle signal readable from outside. Dev builds run
-# as "voicex", packaged ones as "VoiceX".
-hud_visible() {
-  osa1 5 'tell application "System Events" to return name of windows of (first application process whose name is "voicex" or name is "VoiceX")' \
-    | grep -q 'VoiceX HUD'
-}
-
-wait_hud_hidden() {
-  local deadline=$(( $(date +%s) + $1 ))
-  while [ "$(date +%s)" -le "$deadline" ]; do
-    hud_visible || return 0
-    sleep 0.5
-  done
-  return 1
-}
-
 # Stop a read that is still going. A HUD that only lingers after a session
 # ended hides by itself within a couple of seconds, so give it that long first:
 # the hotkey sent to an idle app would start a read of whatever is selected.
 stop_if_reading() {
   wait_hud_hidden 3 && return 0
-  inject_key "$KEYCODE_T" option,command
+  trigger_translate_hotkey
   if wait_hud_hidden 5; then
     note "stopped the read still in progress"
   else
@@ -188,12 +171,12 @@ run_case() {
   fi
 
   select_all; sleep 0.4
-  inject_key "$KEYCODE_T" option,command
+  trigger_translate_hotkey
   t0=$(date +%s)
 
   case "$name" in
     cancel) sleep "$CANCEL_ESC_DELAY_S"; inject_key "$KEYCODE_ESC"; note "Esc sent $CANCEL_ESC_DELAY_S s after the hotkey" ;;
-    stop)   sleep 9; inject_key "$KEYCODE_T" option,command; note "second hotkey sent 9 s after the first" ;;
+    stop)   sleep 9; trigger_translate_hotkey; note "second hotkey sent 9 s after the first" ;;
   esac
 
   rowid="$(wait_for_row "$before")" || rowid=""

@@ -66,12 +66,22 @@ INJECT_CLICK="$_SCRIPT_DIR/cgevent_click.py"
 
 KEYCODE_A=0
 KEYCODE_R=15
+KEYCODE_T=17
 KEYCODE_W=13
 
 inject_key() { python3 "$INJECT_KEY" --key "$1" --mods "${2:-}"; }
 
-trigger_read_hotkey() { inject_key "$KEYCODE_R" option,command; }
-select_all()          { inject_key "$KEYCODE_A" command; }
+# The reading hotkeys are rebindable, and a harness pressing the default at an
+# app bound to something else looks exactly like a broken product: no
+# `hotkey_action` line, no HUD. `eval "$(scripts/tts/hotkey_env.py)"` exports
+# the bindings the running app actually has; unset, these are the defaults.
+trigger_read_hotkey() {
+  inject_key "${VOICEX_READ_KEY:-$KEYCODE_R}" "${VOICEX_READ_MODS:-option,command}"
+}
+trigger_translate_hotkey() {
+  inject_key "${VOICEX_TRANSLATE_KEY:-$KEYCODE_T}" "${VOICEX_TRANSLATE_MODS:-option,command}"
+}
+select_all() { inject_key "$KEYCODE_A" command; }
 
 # --- AppleScript ---------------------------------------------------------------
 
@@ -110,6 +120,34 @@ app_ready() {
     sleep 1
   done
   note "$app never became scriptable"
+  return 1
+}
+
+# --- HUD ---------------------------------------------------------------------
+
+# The HUD window is on screen only while a session runs, so its presence in the
+# app's window list is the one idle signal readable from outside. Dev builds run
+# as "voicex", packaged ones as "VoiceX".
+hud_visible() {
+  osa1 5 'tell application "System Events" to return name of windows of (first application process whose name is "voicex" or name is "VoiceX")' \
+    | grep -q 'VoiceX HUD'
+}
+
+wait_hud_visible() {
+  local deadline=$(( $(date +%s) + $1 ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    hud_visible && return 0
+    sleep 0.3
+  done
+  return 1
+}
+
+wait_hud_hidden() {
+  local deadline=$(( $(date +%s) + $1 ))
+  while [ "$(date +%s)" -le "$deadline" ]; do
+    hud_visible || return 0
+    sleep 0.5
+  done
   return 1
 }
 
