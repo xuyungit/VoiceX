@@ -49,6 +49,18 @@ pub const MODEL_QWEN_AUDIO_31: &str = "qwen-audio-3.1-tts-flash";
 pub const MODEL_COSYVOICE: &str = "cosyvoice-v3-flash";
 pub const MODEL_COSYVOICE_V35: &str = "cosyvoice-v3.5-flash";
 
+/// The style instruction a fresh install reads with — and an upgraded one,
+/// since the setting is new and a missing key loads the default. Technical
+/// text is what the reader is for, and every voice's own delivery is livelier
+/// than that wants. The service also restarts its prosody every ~120 characters (it
+/// synthesizes a request in sentence-packed chunks with no context between
+/// them), and this wording made those seams the least audible of those tried:
+/// the timbre jump (MFCC distance) across a chunk cut fell from 29.1 to 24.8,
+/// against 21–22 between sentences inside a chunk (qwen-audio-3.1-tts-flash,
+/// 2026-09-24). "标准播音风格" was tried and does the opposite — broadcast
+/// delivery is itself expressive.
+pub const DEFAULT_INSTRUCTION: &str = "语调平和，语速均匀，音量稳定，客观陈述，不夸张不起伏";
+
 pub fn default_model() -> &'static str {
     // Qwen-Audio 3.1 over 3.0: same endpoint, same 9000-character piece size,
     // and about a sixth of the cost for the same text (billed on audio tokens,
@@ -86,6 +98,12 @@ struct ModelSpec {
     /// with full stops did not help because the server merges the sentences
     /// straight back into one batch.
     piece_chars: usize,
+    /// Whether `input.instruction` is sent. Qwen-Audio takes free text with
+    /// any voice; CosyVoice v3.5 takes it with the designed/cloned voices that
+    /// are its only kind. CosyVoice v3's system voices accept only the fixed
+    /// phrasings on the voice list and answer anything else with `Engine
+    /// return error code: 428`, and Qwen3-TTS has no such field on this model.
+    accepts_instruction: bool,
     voices: VoiceSource,
     /// Always called with this spec's own `id`, so the body cannot name a
     /// different model than the spec it belongs to — a copy-pasted entry that
@@ -130,6 +148,8 @@ struct Synthesis<'a> {
     sample_rate: u32,
     /// Speed multiplier, 1.0 neutral, as both families take it.
     rate: f32,
+    /// Already filtered by `accepts_instruction`; `None` sends no field.
+    instruction: Option<&'a str>,
 }
 
 /// Qwen3-TTS. Voices are English given names; the dialect voices are the
@@ -256,7 +276,7 @@ const COSYVOICE_VOICES: [(&str, &str, &str); 10] = [
 ];
 
 fn speech_synthesizer_body(model: &'static str, s: &Synthesis<'_>) -> Value {
-    json!({
+    let mut body = json!({
         "model": model,
         "input": {
             "text": s.text,
@@ -265,7 +285,11 @@ fn speech_synthesizer_body(model: &'static str, s: &Synthesis<'_>) -> Value {
             "sample_rate": s.sample_rate,
             "rate": s.rate,
         },
-    })
+    });
+    if let Some(instruction) = s.instruction {
+        body["input"]["instruction"] = json!(instruction);
+    }
+    body
 }
 
 const SPECS: [ModelSpec; 5] = [
@@ -279,6 +303,7 @@ const SPECS: [ModelSpec; 5] = [
         max_chars: 5_000,
         // Renders ~4x realtime and completed every long-text probe intact.
         piece_chars: 5_000,
+        accepts_instruction: false,
         voices: VoiceSource::Preset(&QWEN3_VOICES),
         build_body: |model, s| {
             json!({
@@ -310,6 +335,7 @@ const SPECS: [ModelSpec; 5] = [
         // Shares CosyVoice's engine but not its budget: the 163-character
         // single-sentence probe came back complete, ~10x realtime.
         piece_chars: 9_000,
+        accepts_instruction: true,
         voices: VoiceSource::Preset(&QWEN_AUDIO_VOICES),
         build_body: speech_synthesizer_body,
     },
@@ -327,6 +353,7 @@ const SPECS: [ModelSpec; 5] = [
         // came back as 590 s of audio at the same 5.1 characters/s as a
         // 163-character one, rendered at ~12x realtime.
         piece_chars: 9_000,
+        accepts_instruction: true,
         voices: VoiceSource::Preset(&QWEN_AUDIO_31_VOICES),
         build_body: speech_synthesizer_body,
     },
@@ -346,6 +373,7 @@ const SPECS: [ModelSpec; 5] = [
         // text a comfortable margin inside it while cutting only once per
         // ~half minute of speech.
         piece_chars: 120,
+        accepts_instruction: false,
         voices: VoiceSource::Preset(&COSYVOICE_VOICES),
         build_body: speech_synthesizer_body,
     },
@@ -362,6 +390,7 @@ const SPECS: [ModelSpec; 5] = [
         // slow-rate text, which expands on this engine exactly as on v3, so
         // v3's 120 applies unchanged until dense text is measured here too.
         piece_chars: 120,
+        accepts_instruction: true,
         voices: VoiceSource::Custom,
         build_body: speech_synthesizer_body,
     },
@@ -382,6 +411,9 @@ pub fn default_voice_for(model: &str) -> &'static str {
 pub struct AliyunConfig {
     pub api_key: String,
     pub model: String,
+    /// Natural-language style instruction; empty sends none. Dropped for
+    /// models that reject it rather than failing the read.
+    pub instruction: String,
 }
 
 /// Convert the stored 0.0..=1.0 rate into the provider's own multiplier.
@@ -551,6 +583,9 @@ impl AliyunBackend {
         // the request rejected outright; the `min` only guards a future spec
         // whose two limits drift past each other. Split before anything
         // starts, so `progress` can name the piece the sink is on.
+        let instruction = Some(config.instruction.trim().to_string())
+            .filter(|instruction| spec.accepts_instruction && !instruction.is_empty());
+
         let pieces = cloud_playback::split_pieces(
             &request.text,
             piece_limit_for(request.piece_limit, spec.piece_chars.min(spec.max_chars)),
@@ -613,6 +648,7 @@ impl AliyunBackend {
                         voice: &voice,
                         sample_rate,
                         rate: speed,
+                        instruction: instruction.as_deref(),
                     },
                     &piece_tx,
                     &http_token,
@@ -833,6 +869,7 @@ mod tests {
             voice: "Cherry",
             sample_rate: 24_000,
             rate: 1.5,
+            instruction: None,
         };
 
         let qwen3 = (spec_for(MODEL_QWEN3).build_body)(MODEL_QWEN3, &synthesis);
@@ -876,6 +913,36 @@ mod tests {
     }
 
     #[test]
+    fn the_instruction_reaches_only_the_models_that_accept_it() {
+        // CosyVoice v3's system voices answer free text with an engine error
+        // (428), which would fail every read for a setting the user may have
+        // typed for another model; the others take it in `input`.
+        for (model, accepts) in [
+            (MODEL_QWEN3, false),
+            (MODEL_QWEN_AUDIO, true),
+            (MODEL_QWEN_AUDIO_31, true),
+            (MODEL_COSYVOICE, false),
+            (MODEL_COSYVOICE_V35, true),
+        ] {
+            assert_eq!(spec_for(model).accepts_instruction, accepts, "{model}");
+        }
+
+        let with = Synthesis {
+            text: "hi",
+            voice: "anxiaolan_v3.1",
+            sample_rate: 24_000,
+            rate: 1.0,
+            instruction: Some(DEFAULT_INSTRUCTION),
+        };
+        let body = (spec_for(MODEL_QWEN_AUDIO_31).build_body)(MODEL_QWEN_AUDIO_31, &with);
+        assert_eq!(body["input"]["instruction"], DEFAULT_INSTRUCTION);
+
+        let without = Synthesis { instruction: None, ..with };
+        let body = (spec_for(MODEL_QWEN_AUDIO_31).build_body)(MODEL_QWEN_AUDIO_31, &without);
+        assert!(body["input"].get("instruction").is_none());
+    }
+
+    #[test]
     fn every_spec_names_its_own_model_in_the_body() {
         // The id decides which spec is looked up; the body decides which model
         // the service runs. `stream_audio` threads `spec.id` into `build_body`,
@@ -885,6 +952,7 @@ mod tests {
             voice: "Cherry",
             sample_rate: 24_000,
             rate: 1.0,
+            instruction: None,
         };
         for spec in &SPECS {
             assert_eq!((spec.build_body)(spec.id, &synthesis)["model"], spec.id);
@@ -985,6 +1053,7 @@ mod tests {
         let backend = AliyunBackend::new(AliyunConfig {
             api_key: "sk-test".to_string(),
             model: MODEL_QWEN3.to_string(),
+            instruction: String::new(),
         });
         let listed = backend.list_voices().unwrap();
         assert!(listed.iter().any(|voice| voice.id == "Cherry"));
@@ -993,6 +1062,7 @@ mod tests {
         backend.apply_config(AliyunConfig {
             api_key: "sk-test".to_string(),
             model: MODEL_QWEN_AUDIO.to_string(),
+            instruction: String::new(),
         });
         let listed = backend.list_voices().unwrap();
         assert!(listed.iter().any(|voice| voice.id == "longanfengyue"));
@@ -1004,6 +1074,7 @@ mod tests {
         backend.apply_config(AliyunConfig {
             api_key: "sk-test".to_string(),
             model: MODEL_QWEN_AUDIO_31.to_string(),
+            instruction: String::new(),
         });
         let listed = backend.list_voices().unwrap();
         assert!(listed.iter().any(|voice| voice.id == "anxiaolan_v3.1"));
@@ -1013,6 +1084,7 @@ mod tests {
         backend.apply_config(AliyunConfig {
             api_key: "sk-test".to_string(),
             model: MODEL_COSYVOICE.to_string(),
+            instruction: String::new(),
         });
         let listed = backend.list_voices().unwrap();
         assert!(listed.iter().any(|voice| voice.id == "longanyang"));
@@ -1022,6 +1094,7 @@ mod tests {
         backend.apply_config(AliyunConfig {
             api_key: "sk-test".to_string(),
             model: MODEL_COSYVOICE_V35.to_string(),
+            instruction: String::new(),
         });
         let listed = backend.list_voices().unwrap();
         assert!(
@@ -1075,6 +1148,7 @@ mod tests {
         let backend = AliyunBackend::new(AliyunConfig {
             api_key: String::new(),
             model: MODEL_QWEN3.to_string(),
+            instruction: String::new(),
         });
         let slot = crate::tts::SessionSlot::default();
         let token = slot.claim();
@@ -1095,6 +1169,7 @@ mod tests {
         let backend = AliyunBackend::new(AliyunConfig {
             api_key: "sk-test".to_string(),
             model: MODEL_COSYVOICE_V35.to_string(),
+            instruction: String::new(),
         });
         let slot = crate::tts::SessionSlot::default();
         let token = slot.claim();
@@ -1172,6 +1247,7 @@ mod tests {
                     voice,
                     sample_rate: rate,
                     rate: 1.0,
+                    instruction: None,
                 },
                 &tx,
                 &token,
@@ -1230,6 +1306,7 @@ mod tests {
                         voice: id,
                         sample_rate: spec.sample_rates[0],
                         rate: 1.0,
+                        instruction: None,
                     },
                     &tx,
                     &token,

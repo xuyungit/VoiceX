@@ -220,6 +220,10 @@ const zhCN = {
     aliyunModelQwenAudio: 'Qwen-Audio 3.0 TTS Flash（含 500 余个基础音色）',
     aliyunModelCosyVoice: 'CosyVoice v3 Flash（系统音色多，含方言/有声书）',
     aliyunModelCosyVoice35: 'CosyVoice v3.5 Flash（需声音设计/复刻音色）',
+    aliyunInstruction: '朗读风格（可选）',
+    aliyunInstructionNote:
+      '用自然语言描述想要的朗读方式，每次合成都会带上。默认的描述让语气更平稳，也能减弱服务端每约 120 字重新起调带来的前后差异。清空则使用音色本身的风格。',
+    aliyunInstructionPlaceholder: '例如：语调平和，语速均匀，客观陈述',
     aliyunCustomVoiceNote: '这个模型没有系统预置音色。把百炼「声音设计」或「声音复刻」返回的 voice_id 粘贴到这里，再用试听确认。音色绑定创建时选的模型，换模型会直接失败。',
     providerMimo: '小米 MiMo（限时免费）',
     mimoApiKey: 'API Key',

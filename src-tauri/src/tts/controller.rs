@@ -242,6 +242,7 @@ impl TtsController {
             *slot = Some(Arc::new(AliyunBackend::new(AliyunConfig {
                 api_key: String::new(),
                 model: aliyun::default_model().to_string(),
+                instruction: String::new(),
             })));
         }
         if let Ok(mut slot) = self.inner.mimo.lock() {
@@ -468,6 +469,7 @@ impl TtsController {
                     cloud.apply_config(AliyunConfig {
                         api_key: settings.aliyun_tts_api_key.clone(),
                         model: settings.aliyun_tts_model.clone(),
+                        instruction: settings.aliyun_tts_instruction.clone(),
                     });
                     return Some(cloud as Arc<dyn TtsBackend>);
                 }

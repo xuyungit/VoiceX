@@ -269,6 +269,9 @@ pub struct AppSettings {
     /// spelling trap as the v3 field: `cosy_voice_v35` keeps the `V` capital
     /// so the frontend key is `aliyunTtsVoiceCosyVoiceV35`.
     pub aliyun_tts_voice_cosy_voice_v35: String,
+    /// Natural-language style instruction, sent to the models that accept one
+    /// (Qwen-Audio 3.x, CosyVoice v3.5). Empty sends none.
+    pub aliyun_tts_instruction: String,
     /// Normalized like the system voice's. Every family takes the same
     /// 0.5..=2.0 multiplier, so one pair covers them.
     pub aliyun_tts_rate: f32,
@@ -569,6 +572,7 @@ impl Default for AppSettings {
             )
             .to_string(),
             aliyun_tts_voice_cosy_voice_v35: String::new(),
+            aliyun_tts_instruction: crate::tts::aliyun::DEFAULT_INSTRUCTION.to_string(),
             aliyun_tts_rate: 0.5,
             aliyun_tts_volume: 1.0,
             mimo_tts_api_key: String::new(),
@@ -1412,6 +1416,11 @@ mod tests {
         assert!(
             settings.aliyun_tts_voice_cosy_voice_v35.is_empty(),
             "designed-voice ids are per account; the shipped default must be empty"
+        );
+        assert_eq!(
+            settings.aliyun_tts_instruction,
+            crate::tts::aliyun::DEFAULT_INSTRUCTION,
+            "an upgraded install reads with the shipped style instruction"
         );
         assert_eq!(settings.system_tts_rate, 0.5, "0.5 is the engine's 1x mark");
         assert_eq!(settings.system_tts_pitch, 1.0);

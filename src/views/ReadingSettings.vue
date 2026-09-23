@@ -213,6 +213,18 @@ const mimoTtsApiKey = computed({
   set: (value: string) => settingsStore.updateSetting('mimoTtsApiKey', value)
 })
 
+const aliyunTtsInstruction = computed({
+  get: () => settingsStore.settings.aliyunTtsInstruction,
+  set: (value: string) => settingsStore.updateSetting('aliyunTtsInstruction', value)
+})
+
+// Mirrors `accepts_instruction` in src-tauri/src/tts/aliyun.rs. CosyVoice v3's
+// system voices reject free text outright, and Qwen3-TTS has no such field.
+const aliyunAcceptsInstruction = computed(() =>
+  ['qwen-audio-3.1-tts-flash', 'qwen-audio-3.0-tts-flash', 'cosyvoice-v3.5-flash']
+    .includes(settingsStore.settings.aliyunTtsModel)
+)
+
 const mimoTtsInstruction = computed({
   get: () => settingsStore.settings.mimoTtsInstruction,
   set: (value: string) => settingsStore.updateSetting('mimoTtsInstruction', value)
@@ -864,6 +876,18 @@ onBeforeUnmount(() => {
               :options="aliyunModelOptions"
               size="small"
               class="field-control"
+            />
+          </div>
+          <div v-if="aliyunAcceptsInstruction" class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.aliyunInstruction') }}</div>
+              <div class="field-note">{{ t('reading.aliyunInstructionNote') }}</div>
+            </div>
+            <NInput
+              v-model:value="aliyunTtsInstruction"
+              size="small"
+              class="field-control"
+              :placeholder="t('reading.aliyunInstructionPlaceholder')"
             />
           </div>
         </template>

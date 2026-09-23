@@ -220,6 +220,10 @@ const enUS = {
     aliyunModelQwenAudio: 'Qwen-Audio 3.0 TTS Flash (500+ extra basic voices)',
     aliyunModelCosyVoice: 'CosyVoice v3 Flash (more system voices, incl. dialects)',
     aliyunModelCosyVoice35: 'CosyVoice v3.5 Flash (designed or cloned voice required)',
+    aliyunInstruction: 'Reading style (optional)',
+    aliyunInstructionNote:
+      'A plain-language description of the delivery, sent with every request. The default keeps the tone level and softens the shift you can hear each time the service starts a new ~120-character chunk. Clear it to use the voice\'s own style.',
+    aliyunInstructionPlaceholder: 'e.g. even tone, steady pace, matter-of-fact',
     aliyunCustomVoiceNote: 'This model has no system voices. Paste the voice_id returned by Model Studio Voice Design or Voice Cloning, then check it with Preview. The id is bound to the model it was created for.',
     providerMimo: 'Xiaomi MiMo (free for a limited time)',
     mimoApiKey: 'API key',

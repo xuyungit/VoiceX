@@ -217,6 +217,7 @@ export interface AppSettings {
     aliyunTtsVoiceQwenAudio31: string
     aliyunTtsVoiceCosyVoice: string
     aliyunTtsVoiceCosyVoiceV35: string
+    aliyunTtsInstruction: string
     aliyunTtsRate: number
     aliyunTtsVolume: number
 
@@ -466,6 +467,8 @@ const defaultSettings: AppSettings = {
     aliyunTtsVoiceQwenAudio31: 'anxiaolan_v3.1',
     aliyunTtsVoiceCosyVoice: 'longanyang',
     aliyunTtsVoiceCosyVoiceV35: '',
+    // Keep in step with DEFAULT_INSTRUCTION in src-tauri/src/tts/aliyun.rs.
+    aliyunTtsInstruction: '语调平和，语速均匀，音量稳定，客观陈述，不夸张不起伏',
     aliyunTtsRate: 0.5,
     aliyunTtsVolume: 1,
 
