@@ -445,11 +445,28 @@ struct StandingsFile {
     standings: Vec<StandingEntry>,
 }
 
+/// The rules a run's places were decided by. The season standings count only runs on the current rules:
+/// a place won when speed weighed 0.35 and a place won when it weighs 0.15 rank different things, and
+/// averaging them says nothing about either. Bump it whenever a change moves places for the same outputs —
+/// a weight, how a dimension is scored, what counts into it. Runs on older rules stay in the file.
+///
+/// - 0: every run recorded before the rules were versioned (up to 2026-09-23).
+/// - 1: cleanup sites inside clean, per-call log-scale speed ending at the app's timeout, latency 0.15.
+const SCORING_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize, Clone)]
 struct StandingRun {
     at: String,
     scheme: String,
+    /// [`SCORING_VERSION`] the run was placed under; 0 for runs recorded before it existed.
+    #[serde(default)]
+    scoring: u32,
     ranking: Vec<RunPlace>,
+}
+
+/// The runs the season standings are computed from: those placed under the current rules.
+fn season_runs(runs: &[StandingRun]) -> Vec<StandingRun> {
+    runs.iter().filter(|run| run.scoring == SCORING_VERSION).cloned().collect()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1103,6 +1120,7 @@ async fn main() {
                 "config": config_path,
                 "cases": cases_path,
                 "rounds": rounds,
+                "scoring": SCORING_VERSION,
                 "git": runlog::git_state(),
                 "prompt": prompt,
                 "dictionary": dictionary,
@@ -2477,12 +2495,13 @@ fn update_standings(
     file.runs.push(StandingRun {
         at: chrono::Utc::now().to_rfc3339(),
         scheme: lens.scheme.clone(),
+        scoring: SCORING_VERSION,
         ranking: award_points(ranked, scheme),
     });
     file.version = 1;
     file.scheme = lens.scheme.clone();
     file.lens = lens;
-    file.standings = recompute_standings(&file.runs, &file.lens);
+    file.standings = recompute_standings(&season_runs(&file.runs), &file.lens);
     save_standings(path, &file)?;
     Ok(file)
 }
@@ -2508,17 +2527,27 @@ fn print_standings(file: &StandingsFile, name_width: usize) {
     } else {
         file.lens.retire_after.to_string()
     };
+    let season = season_runs(&file.runs).len();
+    let earlier = file.runs.len() - season;
     println!(
         "\x1b[1m══════════════════════════════════════════════════════════\x1b[0m"
     );
     println!(
-        "\x1b[1m  Season standings\x1b[0m  (composite places · form · decay={} · window={} · retire after {} · {} {})",
+        "\x1b[1m  Season standings\x1b[0m  (composite places · scoring v{} · form · decay={} · window={} · retire after {} · {} {})",
+        SCORING_VERSION,
         file.lens.decay,
         window_label,
         retire_label,
-        file.runs.len(),
-        if file.runs.len() == 1 { "race" } else { "races" }
+        season,
+        if season == 1 { "race" } else { "races" }
     );
+    if earlier > 0 {
+        println!(
+            "  \x1b[2m{} earlier {} placed under older scoring rules stay in the file and do not count.\x1b[0m",
+            earlier,
+            if earlier == 1 { "race" } else { "races" }
+        );
+    }
     println!(
         "\x1b[1m══════════════════════════════════════════════════════════\x1b[0m\n"
     );
@@ -3126,11 +3155,13 @@ model = "m"
         let run1 = StandingRun {
             at: "1".into(),
             scheme: "borda".into(),
+            scoring: SCORING_VERSION,
             ranking: award_points(&[rp("a", 90.0), rp("b", 10.0)], StandingScheme::Borda),
         };
         let run2 = StandingRun {
             at: "2".into(),
             scheme: "borda".into(),
+            scoring: SCORING_VERSION,
             ranking: award_points(&[rp("b", 90.0), rp("a", 10.0)], StandingScheme::Borda),
         };
         let table = recompute_standings(&[run1, run2], &all_history_lens());
@@ -3154,6 +3185,27 @@ model = "m"
         assert!(new.get("quality").is_none() && new.get("semantic_rate").is_none());
     }
 
+    #[test]
+    fn races_placed_under_older_scoring_stay_in_the_file_but_leave_the_season() {
+        let dir = std::env::temp_dir().join(format!("llm-bench-season-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("standings.json");
+        // a file written before runs carried their scoring rules: `a` won both of its races
+        let legacy = r#"{"version":1,"scheme":"borda","runs":[
+            {"at":"1","scheme":"borda","ranking":[{"place":1,"provider":"a","points":2.0,"composite":90.0,"avg_ms":900,"success_rate":1.0},{"place":2,"provider":"b","points":1.0,"composite":50.0,"avg_ms":900,"success_rate":1.0}]},
+            {"at":"2","scheme":"borda","ranking":[{"place":1,"provider":"a","points":2.0,"composite":90.0,"avg_ms":900,"success_rate":1.0},{"place":2,"provider":"b","points":1.0,"composite":50.0,"avg_ms":900,"success_rate":1.0}]}
+        ],"standings":[]}"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let file = update_standings(path.to_str().unwrap(), all_history_lens(), &[rp("b", 90.0), rp("a", 10.0)]).unwrap();
+        assert_eq!(file.runs.len(), 3, "the older races are kept");
+        assert_eq!(file.runs.iter().map(|r| r.scoring).collect::<Vec<_>>(), vec![0, 0, SCORING_VERSION]);
+        // only the race under the current rules counts, which `b` won
+        assert_eq!(file.standings[0].provider, "b");
+        assert!(file.standings.iter().all(|s| s.runs == 1));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn all_history_lens() -> StandingLens {
         StandingLens {
             scheme: "borda".into(),
@@ -3172,6 +3224,7 @@ model = "m"
         StandingRun {
             at: at.into(),
             scheme: "borda".into(),
+            scoring: SCORING_VERSION,
             ranking: award_points(&ranked, StandingScheme::Borda),
         }
     }

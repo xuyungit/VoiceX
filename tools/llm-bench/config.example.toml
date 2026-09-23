@@ -79,7 +79,8 @@ Claude
 # on dictionary/semantic/clean only. Fast# is average milliseconds of successful
 # calls. The header names the ability leader, and the fastest model at or under
 # latency_full_ms whose dictionary rate is at least 50%. Season standings follow
-# the composite places.
+# the composite places, and count only runs placed under the current scoring
+# rules (SCORING_VERSION in src/main.rs); earlier runs stay in standings.json.
 # weight_dictionary = 0.40  # homophones fixed from the dictionary
 # weight_latency = 0.15     # each doubling of latency costs about a quarter of this
 # weight_semantic = 0.15    # fixes that need the context
