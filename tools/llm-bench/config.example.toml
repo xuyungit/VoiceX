@@ -94,7 +94,8 @@ Claude
 # one that runs past it fails, as it does in the app (raw transcript pasted):
 # every site missed, transcript unclean, no speed. latency_zero_ms is not read.
 # Clean also carries the cleanup sites: the fillers, stutters and half-sentences
-# that `expected` leaves out. Code alone settles whether each is gone; an output
+# that `expected` leaves out (a removal that is neither a filler nor said again
+# nearby is a semantic site instead). Code alone settles whether each is gone; an output
 # that keeps every one of them keeps half of its clean credit, all gone costs
 # nothing, in between pro rata. Deleting them never reaches the judge.
 # typesafe_questions = "typesafe_questions.json"   # override the built-in judge questions

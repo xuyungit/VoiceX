@@ -80,6 +80,43 @@ fn subsequence(part: &str, whole: &str) -> bool {
     part.chars().all(|c| rest.by_ref().any(|w| w == c))
 }
 
+/// Hesitations that carry nothing wherever they stand: taking one out is cleanup, never a correction.
+const FILLERS: [&str; 15] = ["这个", "那个", "就是", "然后", "嗯", "呃", "额", "啊", "唔", "哦", "噢", "诶", "欸", "哎", "唉"];
+/// How far on either side of a removal a copy of a removed character makes it a repeat: the stutter in
+/// 去去去, the half word in 页HTML页面, the second 一个 in 一个可交互的一个呃数据.
+const REPEAT_REACH: usize = 8;
+
+/// Whether `expected` taking `inp[a0..a1]` (words `old`) down to `new` is cleanup rather than a correction:
+/// words only go away, and each one that goes is a filler or said again close by. A removal that is neither —
+/// 我不想去了 → 我想去了 — changes what was said, and is scored as a semantic site.
+fn is_cleanup(inp: &[char], a0: usize, a1: usize, old: &str, new: &str) -> bool {
+    if !subsequence(new, old) {
+        return false;
+    }
+    // what goes: the characters of `old` that `new` does not use, matched greedily
+    let mut kept = new.chars().peekable();
+    let mut removed: String = old
+        .chars()
+        .filter(|&c| {
+            if kept.peek() == Some(&c) {
+                kept.next();
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    for filler in FILLERS {
+        removed = removed.replace(filler, "");
+    }
+    let around: Vec<char> = inp[a0.saturating_sub(REPEAT_REACH)..a0]
+        .iter()
+        .chain(&inp[a1..(a1 + REPEAT_REACH).min(inp.len())])
+        .copied()
+        .collect();
+    removed.chars().all(|c| around.contains(&c))
+}
+
 /// Whether an edit belongs to the window `[l, r)`. Text inserted between two sentences continues the first one.
 fn within(x: &Edit, l: usize, r: usize) -> bool {
     if x.a0 < x.a1 {
@@ -432,8 +469,8 @@ pub enum Tier {
     Dictionary,
     Semantic,
     /// Words the speaker did not mean: a filler, a stutter, an abandoned half-sentence. `expected` has none of
-    /// them, so the diff only takes words out there. Code alone sees whether they are gone; the credit goes
-    /// into `clean`.
+    /// them, so the diff only takes words out there, and each is a filler or said again close by
+    /// ([`is_cleanup`]). Code alone sees whether they are gone; the credit goes into `clean`.
     Cleanup,
 }
 
@@ -560,7 +597,7 @@ impl Reference {
                 continue;
             }
             // words that only go away were never meant: a filler, a stutter, a half word before the whole one
-            let tier = if subsequence(&new, &old) { Tier::Cleanup } else { Tier::Semantic };
+            let tier = if is_cleanup(&inp, e.a0, e.a1, &old, &new) { Tier::Cleanup } else { Tier::Semantic };
             specs.push(Spec { tier, a0: e.a0, a1: e.a1, intended: e.new.clone(), own: vec![k], terms: Vec::new() });
         }
         specs.sort_by_key(|s| (s.a0, s.a1));
@@ -1275,6 +1312,9 @@ mod tests {
         let merged = reference("这个呃制作反力很大", "支座反力很大", &["支座"]);
         assert_eq!(merged.sites(), vec![site(Tier::Dictionary, "这个呃制作", "支座")]);
         assert_eq!(credits(&merged, "这个呃支座反力很大"), vec![Some(1.0)]);
+        // a removal that is neither a filler nor a repeat changes what was said: a semantic site
+        let negation = reference("我不想去了。", "我想去了。", &[]);
+        assert_eq!(negation.sites(), vec![site(Tier::Semantic, "不", "")]);
         // a filler left in `expected` is one the author keeps: taking it out is an ordinary edit
         let kept = reference("嗯，我们看下一集。", "嗯，我们看下一级。", &[]);
         let analysis = kept.analyze("我们看下一级。", &[]);

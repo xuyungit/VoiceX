@@ -6,8 +6,10 @@
 # stutters and abandoned half-sentences gone, as the prompt asks. The places to
 # correct are derived from the difference between the two; a fix whose intended
 # word is in the config dictionary counts as `dictionary`, any other changed
-# word as `semantic`, and words that only go away as `cleanup`. There is nothing
-# else to write per case.
+# word as `semantic`, and words that only go away as `cleanup` when each is a
+# filler (嗯, 呃, 这个, 就是, ...) or said again close by (a stutter, a half
+# word). A removal that is neither, like 我不想去了 → 我想去了, changes what
+# was said and is `semantic`. There is nothing else to write per case.
 #
 # Cleanup sites are settled by code alone (gone, kept, or partly gone) and go
 # into the clean dimension: an output that keeps every filler keeps half of its
