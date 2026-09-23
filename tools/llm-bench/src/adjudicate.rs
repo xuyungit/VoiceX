@@ -23,6 +23,9 @@ const SLACK: usize = 4;
 pub const REVIEW_BELOW: f64 = 0.4;
 /// Credit per judged level of a site: not recovered / right word, imperfect form / recovered.
 pub const SITE_CREDIT: [f64; 3] = [0.0, 0.5, 1.0];
+/// What an output keeps of its clean credit when every cleanup site is still in it: the app prompt asks for the
+/// fillers to go, so leaving them all in costs half of `clean`, taking them all out costs nothing.
+pub const FILLERS_KEPT_CREDIT: f64 = 0.5;
 /// Credit per judged kind of an unrequested change.
 pub const EDIT_CREDIT: [(&str, f64); 5] = [
     ("fixes_error", 1.0),
@@ -69,6 +72,12 @@ fn words_only(s: &str) -> String {
 /// `s` without spacing and sentence punctuation at its two ends.
 fn core(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_whitespace() || SENTENCE_PUNCT.contains(&c))
+}
+
+/// Whether every character of `part` occurs in `whole`, in order.
+fn subsequence(part: &str, whole: &str) -> bool {
+    let mut rest = whole.chars();
+    part.chars().all(|c| rest.by_ref().any(|w| w == c))
 }
 
 /// Whether an edit belongs to the window `[l, r)`. Text inserted between two sentences continues the first one.
@@ -422,6 +431,10 @@ fn pinned(pins: &[Pin], heard: &str, written: &str) -> Option<f64> {
 pub enum Tier {
     Dictionary,
     Semantic,
+    /// Words the speaker did not mean: a filler, a stutter, an abandoned half-sentence. `expected` has none of
+    /// them, so the diff only takes words out there. Code alone sees whether they are gone; the credit goes
+    /// into `clean`.
+    Cleanup,
 }
 
 impl Tier {
@@ -429,6 +442,7 @@ impl Tier {
         match self {
             Tier::Dictionary => "dictionary",
             Tier::Semantic => "semantic",
+            Tier::Cleanup => "cleanup",
         }
     }
 }
@@ -541,9 +555,13 @@ impl Reference {
         }
         for (k, e) in req.iter().enumerate() {
             // spacing and sentence punctuation are formatting: required, but not what a site is scored for
-            if !in_dictionary_site[k] && words_only(&string(&inp[e.a0..e.a1])) != words_only(&e.new) {
-                specs.push(Spec { tier: Tier::Semantic, a0: e.a0, a1: e.a1, intended: e.new.clone(), own: vec![k], terms: Vec::new() });
+            let (old, new) = (words_only(&string(&inp[e.a0..e.a1])), words_only(&e.new));
+            if in_dictionary_site[k] || old == new {
+                continue;
             }
+            // words that only go away were never meant: a filler, a stutter, a half word before the whole one
+            let tier = if subsequence(&new, &old) { Tier::Cleanup } else { Tier::Semantic };
+            specs.push(Spec { tier, a0: e.a0, a1: e.a1, intended: e.new.clone(), own: vec![k], terms: Vec::new() });
         }
         specs.sort_by_key(|s| (s.a0, s.a1));
         let sents = sentences(&inp);
@@ -656,6 +674,34 @@ impl Reference {
                     depends_on_gate = !local && credit > 0.0;
                     Outcome::settled(if credit > 0.0 { "code:term" } else { "code:term-missing" }, credit)
                 }
+            } else if spec.tier == Tier::Cleanup && local {
+                // the job is that the words are gone, and code can see that; what else changed here is an edit
+                let (hw, iw, ww) = (folded(&words_only(&h)), folded(&words_only(&i)), folded(&words_only(&w)));
+                let n = |x: &str| x.chars().count() as f64;
+                let (credit, claim) = if ww == iw {
+                    (1.0, true)
+                } else if ww == hw {
+                    (0.0, true)
+                } else if subsequence(&ww, &hw) && subsequence(&iw, &ww) {
+                    (1.0 - (n(&ww) - n(&iw)) / (n(&hw) - n(&iw)), true) // some of the words went, not all
+                } else {
+                    let filler = folded(&words_only(&string(&inp[s..e])));
+                    let gone = ww.matches(filler.as_str()).count() < hw.matches(filler.as_str()).count();
+                    (if gone { 1.0 } else { 0.0 }, false)
+                };
+                if !claim && !entangled {
+                    for &k in &over {
+                        claimed[k] = false;
+                    }
+                }
+                Outcome::settled(if credit >= 1.0 { "code:removed" } else if credit <= 0.0 { "code:kept" } else { "code:part" }, credit)
+            } else if spec.tier == Tier::Cleanup {
+                let [heard, intended, written] = self.rewritten((lo, hi), &act);
+                let (hw, iw, ww) = (folded(&words_only(&heard)), folded(&words_only(&intended)), folded(&words_only(&written)));
+                let filler = folded(&words_only(&string(&inp[s..e])));
+                let gone = ww == iw || ww.matches(filler.as_str()).count() < hw.matches(filler.as_str()).count();
+                depends_on_gate = gone;
+                Outcome::settled(if gone { "code:removed" } else { "code:kept" }, if gone { 1.0 } else { 0.0 })
             } else if local && !entangled {
                 let (ch, ci, cw) = (core(&h), core(&i), core(&w));
                 let casing_is_content = folded(ci) == folded(ch);
@@ -965,12 +1011,18 @@ pub fn score(analysis: &Analysis, answers: &Answers) -> Scored {
         edits.push(e);
     }
 
+    // the fillers: all gone leaves `clean` whole, all still there halves it, in between pro rata
+    let cleanup: Vec<Option<f64>> = sites.iter().filter(|s| s.tier == Tier::Cleanup).map(|s| s.credit).collect();
     let clean = if matches!(kind, Some(k) if k != "transcript") {
         Some(0.0)
-    } else if gate_open || edits.iter().any(|e| e.credit.is_none()) {
+    } else if gate_open || edits.iter().any(|e| e.credit.is_none()) || cleanup.contains(&None) {
         None
     } else {
-        Some(edits.iter().filter_map(|e| e.credit).product())
+        let tidy = match cleanup.len() {
+            0 => 1.0,
+            n => FILLERS_KEPT_CREDIT + (1.0 - FILLERS_KEPT_CREDIT) * cleanup.iter().flatten().sum::<f64>() / n as f64,
+        };
+        Some(edits.iter().filter_map(|e| e.credit).product::<f64>() * tidy)
     };
     Scored { sites, edits, gate, clean, neutral_edits: analysis.neutral, review, unjudged }
 }
@@ -1184,6 +1236,49 @@ mod tests {
             let unsure = ["synonym", "term only mentioned"].contains(name);
             assert_eq!(!scored.review.is_empty(), unsure, "{}: review {:?}", name, scored.review);
         }
+    }
+
+    #[test]
+    fn fillers_are_cleanup_sites_that_code_settles_into_clean() {
+        let site = |tier, heard: &str, intended: &str| (tier, heard.to_string(), intended.to_string());
+        let r = reference("嗯，把这这个数据处理一下，然后呃看看变化。", "把这个数据处理一下，然后看看变化。", &[]);
+        assert_eq!(r.sites(), vec![site(Tier::Cleanup, "嗯，", ""), site(Tier::Cleanup, "这", ""), site(Tier::Cleanup, "呃", "")]);
+        let clean = |output: &str| {
+            let analysis = r.analyze(output, &[]);
+            assert!(analysis.asks().is_empty(), "{:?}: {:?}", output, analysis.asks());
+            score(&analysis, &Answers::new()).clean
+        };
+        // all gone, none gone, some gone: the credit goes into clean, and no question is asked
+        assert_eq!(credits(&r, "把这个数据处理一下，然后看看变化。"), vec![Some(1.0); 3]);
+        assert_eq!(clean("把这个数据处理一下，然后看看变化。"), Some(1.0));
+        assert_eq!(credits(&r, "嗯，把这这个数据处理一下，然后呃看看变化。"), vec![Some(0.0); 3]);
+        assert_eq!(clean("嗯，把这这个数据处理一下，然后呃看看变化。"), Some(FILLERS_KEPT_CREDIT));
+        assert_eq!(credits(&r, "嗯，把这个数据处理一下，然后看看变化。"), vec![Some(0.0), Some(1.0), Some(1.0)]);
+        assert_eq!(clean("嗯，把这个数据处理一下，然后看看变化。"), Some(FILLERS_KEPT_CREDIT + (1.0 - FILLERS_KEPT_CREDIT) * 2.0 / 3.0));
+        // other words where the filler stood: it is gone, and what came instead is an edit for the judge
+        let reworded = reference("本本质上是这样。", "本质上是这样。", &[]);
+        let analysis = reworded.analyze("从本质上是这样。", &[]);
+        assert_eq!((credits(&reworded, "从本质上是这样。"), analysis.groups.len()), (vec![Some(1.0)], 1));
+        assert_eq!(analysis.groups[0].changes, vec![["本".to_string(), "从".to_string()]]);
+        // a stutter half taken out is half done
+        let stutter = reference("那就可以去呃去去去呃图放大。", "那就可以去图放大。", &[]);
+        assert_eq!(stutter.sites(), vec![site(Tier::Cleanup, "呃去去去呃", "")]);
+        let part = score(&stutter.analyze("那就可以去去图放大。", &[]), &Answers::new());
+        assert_eq!((part.sites[0].how.as_str(), part.sites[0].credit), ("code:part", Some(0.8)));
+        // more than the filler went: the site is done, the rest is an edit for the judge like any other
+        let collateral = reference("呃，然后我们看图。", "然后我们看图。", &[]);
+        let analysis = collateral.analyze("我们看图。", &[]);
+        assert_eq!(credits(&collateral, "我们看图。"), vec![Some(1.0)]);
+        assert_eq!(analysis.groups.len(), 1);
+        assert_eq!(analysis.groups[0].changes, vec![["呃，然后".to_string(), String::new()]]);
+        // a filler that merges into a dictionary site does not decide it: the term standing there does
+        let merged = reference("这个呃制作反力很大", "支座反力很大", &["支座"]);
+        assert_eq!(merged.sites(), vec![site(Tier::Dictionary, "这个呃制作", "支座")]);
+        assert_eq!(credits(&merged, "这个呃支座反力很大"), vec![Some(1.0)]);
+        // a filler left in `expected` is one the author keeps: taking it out is an ordinary edit
+        let kept = reference("嗯，我们看下一集。", "嗯，我们看下一级。", &[]);
+        let analysis = kept.analyze("我们看下一级。", &[]);
+        assert_eq!((analysis.sites.len(), analysis.groups.len()), (1, 1));
     }
 
     #[test]
