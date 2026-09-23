@@ -23,6 +23,7 @@ tools/llm-bench/config.toml
 tools/llm-bench/test_cases.toml
 tools/llm-bench/standings.json
 tools/llm-bench/.jev_key
+tools/llm-bench/runs
 
 # Sync server runtime data
 sync-server/*.db

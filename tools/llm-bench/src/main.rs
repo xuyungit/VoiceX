@@ -1,3 +1,7 @@
+// `println!`, `print!` and `eprintln!` in this crate are runlog's: they also write to the run log while one is open.
+#[macro_use]
+mod runlog;
+
 mod adjudicate;
 mod typesafe;
 
@@ -498,10 +502,26 @@ async fn main() {
     let skip_standings = args.iter().any(|a| a == "--no-standings");
     let standings_path =
         get_arg(&args, "--standings").unwrap_or("standings.json".into());
+    let log_dir = get_arg(&args, "--log-dir").unwrap_or("runs".into());
+    let skip_log = args.iter().any(|a| a == "--no-log");
 
     let config = load_config(&config_path);
     let cases = load_cases(&cases_path);
     let eval_cfg = config.eval.clone();
+
+    // Every run keeps its console output and its results on disk, so a score can be looked at again later
+    // without copying it out of the terminal.
+    let run_dir = if skip_log {
+        None
+    } else {
+        match runlog::open(Path::new(&log_dir), &runlog::header(&args, &config_path, &cases_path)) {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                eprintln!("Cannot create a run directory under {}: {} (pass --no-log to run without one)", log_dir, e);
+                std::process::exit(1);
+            }
+        }
+    };
 
     let rounds = rounds_override.or(config.rounds).unwrap_or(3);
     let prompt = config.prompt.unwrap_or_else(|| {
@@ -561,6 +581,9 @@ async fn main() {
         Some(j) if skip_judge => println!("  \x1b[2mJudge: {} (skipped)\x1b[0m", j.name),
         Some(j) => println!("  \x1b[2mJudge: {} ({})\x1b[0m", j.name, j.model),
         None => println!("  \x1b[2mJudge: none\x1b[0m"),
+    }
+    if let Some(dir) = &run_dir {
+        println!("  \x1b[2mRun log: {}/\x1b[0m", dir.display());
     }
     println!();
 
@@ -968,8 +991,8 @@ async fn main() {
         }
     }
 
-    // Write JSON output if requested
-    if let Some(path) = output_path {
+    // The detailed results: into the run directory, and wherever --output asks for a copy.
+    if run_dir.is_some() || output_path.is_some() {
         let cases_json: Vec<serde_json::Value> = bench_cases
             .iter()
             .flat_map(|record| record.providers.iter().map(move |p| (record, p)))
@@ -1028,7 +1051,25 @@ async fn main() {
                 .map(|(what, outputs)| serde_json::json!({ "what": what, "outputs": outputs }))
                 .collect()
         };
+        let weights = score_weights(&eval_cfg);
         let payload = serde_json::json!({
+            "run": {
+                "at": chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+                "command": args,
+                "config": config_path,
+                "cases": cases_path,
+                "rounds": rounds,
+                "git": runlog::git_state(),
+                "prompt": prompt,
+                "dictionary": dictionary,
+                "weights": {
+                    "dictionary": weights.dictionary,
+                    "semantic": weights.semantic,
+                    "clean": weights.clean,
+                    "latency": weights.latency,
+                    "success": weights.success,
+                },
+            },
             "cases": cases_json,
             "summary": aggregated.iter().map(|s| serde_json::json!({
                 "provider": s.name,
@@ -1059,10 +1100,16 @@ async fn main() {
             },
         });
         let json = serde_json::to_string_pretty(&payload).unwrap();
-        std::fs::write(&path, &json).unwrap_or_else(|e| {
-            eprintln!("Failed to write {}: {}", path, e);
-        });
-        println!("Results written to {}", path);
+        let results = run_dir.iter().map(|dir| dir.join(runlog::RESULTS_FILE)).chain(output_path.map(Into::into));
+        for path in results {
+            match std::fs::write(&path, &json) {
+                Ok(()) => println!("Results written to {}", path.display()),
+                Err(e) => eprintln!("Failed to write {}: {}", path.display(), e),
+            }
+        }
+    }
+    if let Some(dir) = &run_dir {
+        println!("Run log: {}", dir.join(runlog::REPORT_FILE).display());
     }
 }
 
@@ -1705,7 +1752,10 @@ fn print_usage() {
     eprintln!("  --config <path>    Provider config file (default: config.toml)");
     eprintln!("  --cases <path>     Test cases file (default: test_cases.toml)");
     eprintln!("  --rounds <n>       Override number of rounds per test");
-    eprintln!("  --output <path>    Write detailed results to JSON file");
+    eprintln!("  --output <path>    Write a copy of the detailed results JSON here as well");
+    eprintln!("  --log-dir <path>   Where each run keeps its report.log (the console output) and results.json,");
+    eprintln!("                     in a directory named after the start time (default: runs)");
+    eprintln!("  --no-log           Keep nothing on disk for this run");
     eprintln!("  --standings <path> Rolling championship file (default: standings.json)");
     eprintln!("  --no-standings     Do not update or print long-term standings");
     eprintln!("  --skip-judge       Do not call the judge; verdicts that need it are reported as unjudged");
