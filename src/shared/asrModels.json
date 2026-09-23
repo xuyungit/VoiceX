@@ -177,6 +177,13 @@
     },
     {
       "provider": "qwen",
+      "id": "qwen-audio-3.1-asr-flash-streaming",
+      "modes": [
+        "realtime"
+      ]
+    },
+    {
+      "provider": "qwen",
       "id": "qwen-audio-3.0-asr-flash-streaming",
       "modes": [
         "realtime"
@@ -201,6 +208,13 @@
       "id": "qwen3-asr-flash-realtime-2025-10-27",
       "modes": [
         "realtime"
+      ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen-audio-3.1-asr-flash",
+      "modes": [
+        "batch"
       ]
     },
     {
@@ -230,6 +244,12 @@
       "modes": [
         "batch"
       ]
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen-audio-3.1-asr-flash-filetrans",
+      "modes": [],
+      "status": "unavailable"
     },
     {
       "provider": "qwen",

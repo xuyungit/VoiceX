@@ -45,15 +45,18 @@ const HOST: &str = "https://dashscope.aliyuncs.com";
 
 pub const MODEL_QWEN3: &str = "qwen3-tts-flash";
 pub const MODEL_QWEN_AUDIO: &str = "qwen-audio-3.0-tts-flash";
+pub const MODEL_QWEN_AUDIO_31: &str = "qwen-audio-3.1-tts-flash";
 pub const MODEL_COSYVOICE: &str = "cosyvoice-v3-flash";
 pub const MODEL_COSYVOICE_V35: &str = "cosyvoice-v3.5-flash";
 
 pub fn default_model() -> &'static str {
-    // Qwen-Audio 3.0 over Qwen3: the same 中英混读 quality with the far larger
-    // voice roster (12 system + ~600 basic ids) and the 9000-character piece
-    // size. Qwen3 remains the pick for its dialect voices. Keep the frontend
-    // store default (settings.ts) in step with this.
-    MODEL_QWEN_AUDIO
+    // Qwen-Audio 3.1 over 3.0: same endpoint, same 9000-character piece size,
+    // and about a sixth of the cost for the same text (billed on audio tokens,
+    // 12.5 per second, instead of per input character — measured 2026-09-23,
+    // docs/qwen-audio-3.1-research-2026-09-23.md). 3.0 keeps the ~600 "basic"
+    // voices 3.1 does not have; Qwen3 remains the pick for its dialect voices.
+    // Keep the frontend store default (settings.ts) in step with this.
+    MODEL_QWEN_AUDIO_31
 }
 
 /// Everything that differs between the model families.
@@ -177,6 +180,59 @@ const QWEN_AUDIO_VOICES: [(&str, &str, &str); 19] = [
     ("qwen-audio-3.0-tts-flash-loongivyhu", "Ivy Hu（朗诵）", "en-US"),
 ];
 
+/// Qwen-Audio-3.1-TTS system voices: every non-character voice on the published
+/// list (the 15 role-play voices are reachable through the picker's typed-id
+/// path). All carry a `_v3.1` suffix, and 3.0's ids — basic voices included —
+/// come back as `Engine error [411]`, so 3.1 needs its own voice setting.
+/// There is no 3.1 equivalent of 3.0's ~600 basic voices.
+///
+/// The default leads: its listed uses are 有声书、旁白、新闻播报, i.e. reading.
+/// `longanfengyue_v3.1` is *not* 3.0's default voice with a suffix — on 3.1 it
+/// is a 东北话 voice. Every entry here returned audio on 2026-09-23.
+const QWEN_AUDIO_31_VOICES: [(&str, &str, &str); 41] = [
+    ("anxiaolan_v3.1", "安小岚", "zh-CN"),
+    ("xieshurou_v3.1", "谢舒柔", "zh-CN"),
+    ("wenhuaizhi_v3.1", "闻怀之", "zh-CN"),
+    ("xuyanchu_v3.1", "许言初", "zh-CN"),
+    ("xuyuyuan_v3.1", "许玉远", "zh-CN"),
+    ("xiaoxingzhi_v3.1", "萧行之", "zh-CN"),
+    ("guyunshu_v3.1", "顾云舒", "zh-CN"),
+    ("yeqinghe_v3.1", "叶清禾", "zh-CN"),
+    ("wenhuaiqing_v3.1", "温怀清", "zh-CN"),
+    ("yuxiaoyun_v3.1", "于小云", "zh-CN"),
+    ("qiaoxiaojiao_v3.1", "乔小娇", "zh-CN"),
+    ("xiaxiaochen_v3.1", "夏小晨", "zh-CN"),
+    ("baiqinglan_v3.1", "白清岚", "zh-CN"),
+    ("anruorou_v3.1", "安若柔", "zh-CN"),
+    ("yunhuanhuan_v3.1", "云欢欢", "zh-CN"),
+    ("xuxiaoqiao_v3.1", "徐小俏", "zh-CN"),
+    ("baianran_v3.1", "白安然", "zh-CN"),
+    ("yezhiqing_v3.1", "叶知晴", "zh-CN"),
+    ("anyuqing_v3.1", "安语晴", "zh-CN"),
+    ("anmingyuan_v3.1", "安明远", "zh-CN"),
+    ("huozhuoshi_v3.1", "霍拙石", "zh-CN"),
+    ("andi_v3.1", "安迪（ABC 口音）", "zh-CN"),
+    ("longanhuan_v3.1", "龙安欢（重庆话）", "zh-CN"),
+    ("longanlingxin_v3.1", "龙安灵心（云南话）", "zh-CN"),
+    ("longanfengyue_v3.1", "龙安风悦（东北话）", "zh-CN"),
+    ("xunanchuan_v3.1", "许南川（甘肃话）", "zh-CN"),
+    ("Emily_v3.1", "Emily", "en-GB"),
+    ("Luna_v3.1", "Luna", "en-GB"),
+    ("Eric_v3.1", "Eric", "en-GB"),
+    ("Luca_v3.1", "Luca", "en-GB"),
+    ("Abby_v3.1", "Abby", "en-US"),
+    ("Annie_v3.1", "Annie", "en-US"),
+    ("Ava_v3.1", "Ava", "en-US"),
+    ("Beth_v3.1", "Beth", "en-US"),
+    ("Betty_v3.1", "Betty", "en-US"),
+    ("Cally_v3.1", "Cally", "en-US"),
+    ("Cindy_v3.1", "Cindy", "en-US"),
+    ("Donna_v3.1", "Donna", "en-US"),
+    ("Andy_v3.1", "Andy", "en-US"),
+    ("Brian_v3.1", "Brian", "en-US"),
+    ("David_v3.1", "David", "en-US"),
+];
+
 /// CosyVoice-v3-flash system voices. The service has eighty-plus; this is the
 /// reading-shaped subset that the live account accepted. The picker still
 /// accepts a typed id, so the rest stay reachable.
@@ -212,7 +268,7 @@ fn speech_synthesizer_body(model: &'static str, s: &Synthesis<'_>) -> Value {
     })
 }
 
-const SPECS: [ModelSpec; 4] = [
+const SPECS: [ModelSpec; 5] = [
     ModelSpec {
         id: MODEL_QWEN3,
         path: "/api/v1/services/aigc/multimodal-generation/generation",
@@ -255,6 +311,23 @@ const SPECS: [ModelSpec; 4] = [
         // single-sentence probe came back complete, ~10x realtime.
         piece_chars: 9_000,
         voices: VoiceSource::Preset(&QWEN_AUDIO_VOICES),
+        build_body: speech_synthesizer_body,
+    },
+    ModelSpec {
+        id: MODEL_QWEN_AUDIO_31,
+        path: "/api/v1/services/audio/tts/SpeechSynthesizer",
+        // Measured 2026-09-23: every rate here comes back in the MP3 frame
+        // header as requested.
+        sample_rates: &[48_000, 44_100, 24_000, 22_050, 16_000],
+        // Same 20000-unit cap and CJK-counts-double rule as 3.0: 10000
+        // characters accepted, 15000 rejected as "limited: 20000, current:
+        // 27000".
+        max_chars: 9_000,
+        // No output budget either: a 3000-character mixed prose/digit piece
+        // came back as 590 s of audio at the same 5.1 characters/s as a
+        // 163-character one, rendered at ~12x realtime.
+        piece_chars: 9_000,
+        voices: VoiceSource::Preset(&QWEN_AUDIO_31_VOICES),
         build_body: speech_synthesizer_body,
     },
     ModelSpec {
@@ -774,6 +847,15 @@ mod tests {
         assert!(audio["input"].get("language_type").is_none());
         assert!(audio.get("parameters").is_none());
 
+        let audio31 = (spec_for(MODEL_QWEN_AUDIO_31).build_body)(MODEL_QWEN_AUDIO_31, &synthesis);
+        assert_eq!(audio31["model"], MODEL_QWEN_AUDIO_31);
+        assert_eq!(audio31["input"]["rate"], 1.5);
+        assert_eq!(audio31["input"]["format"], "mp3");
+        assert_eq!(
+            spec_for(MODEL_QWEN_AUDIO_31).path,
+            spec_for(MODEL_QWEN_AUDIO).path
+        );
+
         let cosy = (spec_for(MODEL_COSYVOICE).build_body)(MODEL_COSYVOICE, &synthesis);
         assert_eq!(cosy["model"], MODEL_COSYVOICE);
         assert_eq!(cosy["input"]["rate"], 1.5);
@@ -885,6 +967,7 @@ mod tests {
         assert_eq!(spec_for("qwen9-tts-imaginary").id, MODEL_QWEN3);
         assert_eq!(default_voice_for("qwen9-tts-imaginary"), "Cherry");
         assert_eq!(default_voice_for(MODEL_QWEN_AUDIO), "longanfengyue");
+        assert_eq!(default_voice_for(MODEL_QWEN_AUDIO_31), "anxiaolan_v3.1");
         assert_eq!(default_voice_for(MODEL_COSYVOICE), "longanyang");
         assert_eq!(
             default_voice_for(MODEL_COSYVOICE_V35),
@@ -915,6 +998,17 @@ mod tests {
         assert!(listed.iter().any(|voice| voice.id == "longanfengyue"));
         assert!(!listed.iter().any(|voice| voice.id == "Cherry"));
         assert!(!listed.iter().any(|voice| voice.id == "longanyang"));
+
+        // 3.1 rejects every 3.0 id (`Engine error [411]`), so the tables
+        // must not overlap at all.
+        backend.apply_config(AliyunConfig {
+            api_key: "sk-test".to_string(),
+            model: MODEL_QWEN_AUDIO_31.to_string(),
+        });
+        let listed = backend.list_voices().unwrap();
+        assert!(listed.iter().any(|voice| voice.id == "anxiaolan_v3.1"));
+        assert!(listed.iter().all(|voice| voice.id.ends_with("_v3.1")));
+        assert!(!listed.iter().any(|voice| voice.id == "longanfengyue"));
 
         backend.apply_config(AliyunConfig {
             api_key: "sk-test".to_string(),
@@ -947,7 +1041,8 @@ mod tests {
         // (2026-08) and again on v3.5-flash with a designed voice (2026-09:
         // 180 characters complete, 200 characters an empty ID3). The same
         // 163-character single-sentence text came back complete from
-        // qwen3-tts-flash and qwen-audio-3.0-tts-flash. Capping the others
+        // qwen3-tts-flash and qwen-audio-3.0-tts-flash, and a 3000-character
+        // one from qwen-audio-3.1-tts-flash. Capping the others
         // would only multiply requests and seams for nothing — and a
         // cosyvoice limit above the measured cliff would reintroduce
         // silently truncated tails.
@@ -962,6 +1057,7 @@ mod tests {
         );
         assert_eq!(spec_for(MODEL_QWEN3).piece_chars, 5_000);
         assert_eq!(spec_for(MODEL_QWEN_AUDIO).piece_chars, 9_000);
+        assert_eq!(spec_for(MODEL_QWEN_AUDIO_31).piece_chars, 9_000);
         for spec in &SPECS {
             assert!(
                 spec.piece_chars <= spec.max_chars,

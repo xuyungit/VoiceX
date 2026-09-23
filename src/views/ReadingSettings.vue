@@ -73,7 +73,7 @@ const ttsEnabled = computed({
 })
 
 type ProviderValue = 'system' | 'volcengine' | 'aliyun' | 'mimo' | 'azure'
-type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash' | 'cosyvoice-v3-flash' | 'cosyvoice-v3.5-flash'
+type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash' | 'qwen-audio-3.1-tts-flash' | 'cosyvoice-v3-flash' | 'cosyvoice-v3.5-flash'
 
 const providerOptions = computed(() => [
   { label: t('reading.providerSystem'), value: 'system' },
@@ -126,6 +126,7 @@ const engineControls = computed(() => {
 
 const aliyunModelOptions = computed(() => [
   { label: t('reading.aliyunModelQwen3'), value: 'qwen3-tts-flash' },
+  { label: t('reading.aliyunModelQwenAudio31'), value: 'qwen-audio-3.1-tts-flash' },
   { label: t('reading.aliyunModelQwenAudio'), value: 'qwen-audio-3.0-tts-flash' },
   { label: t('reading.aliyunModelCosyVoice'), value: 'cosyvoice-v3-flash' },
   { label: t('reading.aliyunModelCosyVoice35'), value: 'cosyvoice-v3.5-flash' }
@@ -147,6 +148,8 @@ const aliyunVoiceKey = computed(() => {
   switch (settingsStore.settings.aliyunTtsModel) {
     case 'qwen-audio-3.0-tts-flash':
       return 'aliyunTtsVoiceQwenAudio' as const
+    case 'qwen-audio-3.1-tts-flash':
+      return 'aliyunTtsVoiceQwenAudio31' as const
     case 'cosyvoice-v3-flash':
       return 'aliyunTtsVoiceCosyVoice' as const
     case 'cosyvoice-v3.5-flash':

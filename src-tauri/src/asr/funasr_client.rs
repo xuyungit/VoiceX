@@ -118,7 +118,7 @@ impl FunAsrRealtimeClient {
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
         // 上下文增强：把 VoiceX 用户词典与最近识别历史组装成 input.context。
-        // Qwen-Audio 3.0 Streaming 与两个 Fun-ASR 主版本支持该能力。
+        // Qwen-Audio 3.x Streaming 与两个 Fun-ASR 主版本支持该能力。
         // 不支持的模型若开了上下文，显式 warn 而非静默吞（遵守 AGENTS.md 防静默失败规则）。
         let context_payload = build_context_payload(
             &model,
@@ -207,10 +207,18 @@ impl FunAsrRealtimeClient {
     }
 }
 
+/// Qwen-Audio streaming models, which speak the `/api-ws/v1/inference`
+/// run-task protocol rather than the Qwen3-ASR `/realtime` one.
+const QWEN_AUDIO_STREAMING_MODELS: [&str; 2] = [
+    "qwen-audio-3.1-asr-flash-streaming",
+    "qwen-audio-3.0-asr-flash-streaming",
+];
+
 pub fn qwen_uses_inference_protocol(model: &str) -> bool {
-    model
-        .trim()
-        .starts_with("qwen-audio-3.0-asr-flash-streaming")
+    let model = model.trim();
+    QWEN_AUDIO_STREAMING_MODELS
+        .iter()
+        .any(|id| model.starts_with(id))
 }
 
 async fn wait_for_task_started(
@@ -544,7 +552,10 @@ fn model_supports_context(model: &str) -> bool {
     let trimmed = model.trim();
     matches!(
         trimmed,
-        "fun-asr-realtime" | "fun-asr-realtime-2025-11-07" | "qwen-audio-3.0-asr-flash-streaming"
+        "fun-asr-realtime"
+            | "fun-asr-realtime-2025-11-07"
+            | "qwen-audio-3.0-asr-flash-streaming"
+            | "qwen-audio-3.1-asr-flash-streaming"
     )
 }
 
@@ -731,7 +742,7 @@ pub(crate) fn qwen_workspace_host(raw_url: &str, workspace_id: &str) -> Result<S
     let workspace_id = workspace_id.trim();
     if workspace_id.is_empty() {
         return Err(AsrError::ConnectionFailed(
-            "Qwen-Audio 3.0 ASR requires an Alibaba Cloud Workspace ID or a full workspace-scoped endpoint".to_string(),
+            "Qwen-Audio ASR requires an Alibaba Cloud Workspace ID or a full workspace-scoped endpoint".to_string(),
         ));
     }
     if !workspace_id
@@ -895,6 +906,7 @@ mod tests {
         assert!(model_supports_context("fun-asr-realtime-2025-11-07"));
         assert!(model_supports_context("  fun-asr-realtime  ")); // 容忍空白
         assert!(model_supports_context("qwen-audio-3.0-asr-flash-streaming"));
+        assert!(model_supports_context("qwen-audio-3.1-asr-flash-streaming"));
 
         // 最新快照不支持——这是最容易踩的坑
         assert!(!model_supports_context("fun-asr-realtime-2026-02-28"));
@@ -946,6 +958,11 @@ mod tests {
         assert!(qwen_uses_inference_protocol(
             "qwen-audio-3.0-asr-flash-streaming"
         ));
+        assert!(qwen_uses_inference_protocol(
+            " qwen-audio-3.1-asr-flash-streaming "
+        ));
+        assert!(!qwen_uses_inference_protocol("qwen3-asr-flash-realtime"));
+        assert!(!qwen_uses_inference_protocol("qwen-audio-3.1-asr-flash"));
         assert_eq!(
             inference_ws_url("wss://dashscope.aliyuncs.com/api-ws/v1/realtime").unwrap(),
             "wss://dashscope.aliyuncs.com/api-ws/v1/inference"

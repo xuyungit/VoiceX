@@ -135,11 +135,17 @@ impl QwenTranscriptionClient {
     }
 }
 
+/// The short-audio Qwen-Audio models on the DashScope multimodal endpoint.
+/// Their streaming, file-transcription and message siblings share the prefix
+/// but not the endpoint.
 fn qwen_audio_flash_batch_model(model: &str) -> bool {
     let model = model.trim();
-    model.starts_with("qwen-audio-3.0-asr-flash")
+    ["qwen-audio-3.1-asr-flash", "qwen-audio-3.0-asr-flash"]
+        .iter()
+        .any(|id| model.starts_with(id))
         && !model.contains("streaming")
         && !model.contains("filetrans")
+        && !model.contains("message")
 }
 
 fn build_legacy_qwen_body(config: &AsrConfig, data_uri: String, bias_text: &str) -> Value {
@@ -382,5 +388,14 @@ mod tests {
             "input_audio"
         );
         assert!(qwen_audio_flash_batch_model(&config.qwen_batch_model));
+        assert!(qwen_audio_flash_batch_model("qwen-audio-3.1-asr-flash"));
+        for other in [
+            "qwen-audio-3.1-asr-flash-streaming",
+            "qwen-audio-3.1-asr-flash-filetrans",
+            "qwen-audio-3.1-asr-flash-message",
+            "qwen3-asr-flash",
+        ] {
+            assert!(!qwen_audio_flash_batch_model(other), "{other}");
+        }
     }
 }

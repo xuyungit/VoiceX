@@ -1115,6 +1115,8 @@ fn apply_translate_voice_override(settings: &mut AppSettings) -> Option<String> 
         PROVIDER_ALIYUN => {
             if settings.aliyun_tts_model == aliyun::MODEL_QWEN_AUDIO {
                 &mut settings.aliyun_tts_voice_qwen_audio
+            } else if settings.aliyun_tts_model == aliyun::MODEL_QWEN_AUDIO_31 {
+                &mut settings.aliyun_tts_voice_qwen_audio31
             } else if settings.aliyun_tts_model == aliyun::MODEL_COSYVOICE_V35 {
                 &mut settings.aliyun_tts_voice_cosy_voice_v35
             } else if settings.aliyun_tts_model == aliyun::MODEL_COSYVOICE {
@@ -1337,6 +1339,8 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
 fn aliyun_voice(settings: &AppSettings) -> String {
     if settings.aliyun_tts_model == aliyun::MODEL_QWEN_AUDIO {
         settings.aliyun_tts_voice_qwen_audio.clone()
+    } else if settings.aliyun_tts_model == aliyun::MODEL_QWEN_AUDIO_31 {
+        settings.aliyun_tts_voice_qwen_audio31.clone()
     } else if settings.aliyun_tts_model == aliyun::MODEL_COSYVOICE_V35 {
         settings.aliyun_tts_voice_cosy_voice_v35.clone()
     } else if settings.aliyun_tts_model == aliyun::MODEL_COSYVOICE {
@@ -1482,12 +1486,14 @@ mod tests {
         // voice, it is a guaranteed 400 on the next read.
         use crate::tts::aliyun::{
             MODEL_COSYVOICE, MODEL_COSYVOICE_V35, MODEL_QWEN3, MODEL_QWEN_AUDIO,
+            MODEL_QWEN_AUDIO_31,
         };
 
         let mut settings = AppSettings::default();
         settings.tts_provider_type = "aliyun".to_string();
         settings.aliyun_tts_voice_qwen3 = "Dylan".to_string();
         settings.aliyun_tts_voice_qwen_audio = "longanfengyue".to_string();
+        settings.aliyun_tts_voice_qwen_audio31 = "xieshurou_v3.1".to_string();
         settings.aliyun_tts_voice_cosy_voice = "longanyang".to_string();
         settings.aliyun_tts_voice_cosy_voice_v35 = "cosyvoice-v3.5-flash-vd-test".to_string();
 
@@ -1501,6 +1507,12 @@ mod tests {
         assert_eq!(
             voice_request(&settings, "hi".to_string()).voice.as_deref(),
             Some("longanfengyue")
+        );
+
+        settings.aliyun_tts_model = MODEL_QWEN_AUDIO_31.to_string();
+        assert_eq!(
+            voice_request(&settings, "hi".to_string()).voice.as_deref(),
+            Some("xieshurou_v3.1")
         );
 
         settings.aliyun_tts_model = MODEL_COSYVOICE.to_string();

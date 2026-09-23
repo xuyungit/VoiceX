@@ -257,6 +257,9 @@ pub struct AppSettings {
     /// model switch fail until the voice was reset by hand.
     pub aliyun_tts_voice_qwen3: String,
     pub aliyun_tts_voice_qwen_audio: String,
+    /// `qwen-audio-3.1-tts-flash` rejects every 3.0 id, so it gets its own.
+    /// Serializes as `aliyunTtsVoiceQwenAudio31`.
+    pub aliyun_tts_voice_qwen_audio31: String,
     /// Underscore before `voice` so serde camelCase matches the frontend key
     /// `aliyunTtsVoiceCosyVoice`. `cosyvoice` as one word serializes as
     /// `Cosyvoice` and the picker writes a field the backend never reads —
@@ -555,6 +558,10 @@ impl Default for AppSettings {
             .to_string(),
             aliyun_tts_voice_qwen_audio: crate::tts::aliyun::default_voice_for(
                 crate::tts::aliyun::MODEL_QWEN_AUDIO,
+            )
+            .to_string(),
+            aliyun_tts_voice_qwen_audio31: crate::tts::aliyun::default_voice_for(
+                crate::tts::aliyun::MODEL_QWEN_AUDIO_31,
             )
             .to_string(),
             aliyun_tts_voice_cosy_voice: crate::tts::aliyun::default_voice_for(
@@ -1349,6 +1356,7 @@ mod tests {
         settings.volc_tts_rate = 0.3;
         settings.aliyun_tts_model = crate::tts::aliyun::MODEL_COSYVOICE.to_string();
         settings.aliyun_tts_voice_cosy_voice = "longhuhu_v3".to_string();
+        settings.aliyun_tts_voice_qwen_audio31 = "xieshurou_v3.1".to_string();
         settings.aliyun_tts_voice_cosy_voice_v35 =
             "cosyvoice-v3.5-flash-vd-test".to_string();
 
@@ -1364,6 +1372,7 @@ mod tests {
         assert_eq!(blob["volcTtsSpeaker"], "zh_male_liufei_uranus_bigtts");
         assert_eq!(blob["aliyunTtsModel"], "cosyvoice-v3-flash");
         assert_eq!(blob["aliyunTtsVoiceCosyVoice"], "longhuhu_v3");
+        assert_eq!(blob["aliyunTtsVoiceQwenAudio31"], "xieshurou_v3.1");
         assert_eq!(blob["aliyunTtsVoiceCosyVoiceV35"], "cosyvoice-v3.5-flash-vd-test");
         assert!(
             blob.get("aliyunTtsVoiceCosyvoice").is_none(),

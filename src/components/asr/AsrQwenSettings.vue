@@ -17,8 +17,17 @@ import {
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
-const QWEN_AUDIO_STREAMING_MODEL = 'qwen-audio-3.0-asr-flash-streaming'
-const QWEN_AUDIO_BATCH_MODEL = 'qwen-audio-3.0-asr-flash'
+// Same predicates as `qwen_uses_inference_protocol` (funasr_client.rs) and
+// `qwen_audio_flash_batch_model` (qwen_transcription_client.rs).
+const QWEN_AUDIO_STREAMING_MODELS = ['qwen-audio-3.1-asr-flash-streaming', 'qwen-audio-3.0-asr-flash-streaming']
+const QWEN_AUDIO_BATCH_MODELS = ['qwen-audio-3.1-asr-flash', 'qwen-audio-3.0-asr-flash']
+const isQwenAudioStreamingModel = (model: string) =>
+  QWEN_AUDIO_STREAMING_MODELS.some(id => model.trim().startsWith(id))
+const isQwenAudioBatchModel = (model: string) => {
+  const id = model.trim()
+  return QWEN_AUDIO_BATCH_MODELS.some(prefix => id.startsWith(prefix))
+    && !/streaming|filetrans|message/.test(id)
+}
 
 const qwenAsrApiKey = computed({
   get: () => settingsStore.settings.qwenAsrApiKey,
@@ -45,7 +54,7 @@ const qwenAsrModel = computed({
   get: () => settingsStore.settings.qwenAsrModel,
   set: (v: string) => {
     settingsStore.updateSetting('qwenAsrModel', v)
-    const path = v === QWEN_AUDIO_STREAMING_MODEL ? 'inference' : 'realtime'
+    const path = isQwenAudioStreamingModel(v) ? 'inference' : 'realtime'
     const current = settingsStore.settings.qwenAsrWsUrl
     const next = current.replace(/\/api-ws\/v1\/(?:realtime|inference)(?:\?.*)?$/, `/api-ws/v1/${path}`)
     if (next !== current) settingsStore.updateSetting('qwenAsrWsUrl', next)
@@ -129,8 +138,8 @@ const hotwordWeightOptions = computed(() => [1, 2, 3, 4, 5, 50].map(value => ({
   value
 })))
 
-const usesQwenAudioStreaming = computed(() => qwenAsrModel.value === QWEN_AUDIO_STREAMING_MODEL)
-const usesQwenAudioBatch = computed(() => qwenAsrBatchModel.value === QWEN_AUDIO_BATCH_MODEL)
+const usesQwenAudioStreaming = computed(() => isQwenAudioStreamingModel(qwenAsrModel.value))
+const usesQwenAudioBatch = computed(() => isQwenAudioBatchModel(qwenAsrBatchModel.value))
 const usesActiveQwenAudioStreaming = computed(() =>
   qwenAsrRecognitionMode.value === 'realtime' && usesQwenAudioStreaming.value
 )

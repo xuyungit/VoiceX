@@ -45,7 +45,7 @@ VoiceX 通过一个可配置的全局热键映射三种不同意图：
 | | 说明 |
 |---|---|
 | **取词方式** | 优先走辅助功能接口直接取（8–15 ms）；取不到时降级为模拟 Command + C，并在读完后还原剪贴板。兼容模式可在设置里关闭，代价是失去 Safari 与 VS Code 支持 |
-| **朗读引擎** | 系统语音（离线、免配置，默认使用「系统设置 → 辅助功能 → 朗读内容」里的声音，在当前 macOS 上通常是 Siri 音色）；云端可选火山引擎豆包 Seed-TTS 2.0、阿里云百炼（默认 `qwen-audio-3.0-tts-flash`，单次可读更长文本；`qwen3-tts-flash` 含北京、上海、四川、粤语等方言；`cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`，后者用 Voice Design / 声音复刻的 `voice_id`）、小米 MiMo，或 Microsoft Azure Speech。云端引擎都是流式合成，按下热键后约 0.4–0.6 秒开始出声；超长文本按句切开连续合成，不再截断。每个引擎的音色、语速、音量独立设置 |
+| **朗读引擎** | 系统语音（离线、免配置，默认使用「系统设置 → 辅助功能 → 朗读内容」里的声音，在当前 macOS 上通常是 Siri 音色）；云端可选火山引擎豆包 Seed-TTS 2.0、阿里云百炼（默认 `qwen-audio-3.1-tts-flash`，单次可读更长文本、价格约为 3.0 的六分之一；`qwen-audio-3.0-tts-flash` 多 500 余个基础音色；`qwen3-tts-flash` 含北京、上海、四川、粤语等方言；`cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`，后者用 Voice Design / 声音复刻的 `voice_id`）、小米 MiMo，或 Microsoft Azure Speech。云端引擎都是流式合成，按下热键后约 0.4–0.6 秒开始出声；超长文本按句切开连续合成，不再截断。每个引擎的音色、语速、音量独立设置 |
 | **与听写互斥** | 听写开始时朗读自动停止——否则朗读的声音会被麦克风录进去再转写一遍 |
 
 ### 与系统自带「朗读所选内容」的差异
@@ -71,7 +71,7 @@ macOS 自带一个同类功能（系统设置 → 辅助功能 → 朗读内容�
 | 火山引擎（豆包语音） | 云端流式 (WebSocket) | 中文优化；支持热词增强、ITN、标点、DDC |
 | Google Cloud Speech-to-Text V2 | 云端流式 (gRPC) | 多语种，Phrase Boost，可配置端点检测 |
 | Fun-ASR Realtime | 云端流式 (WebSocket) | DashScope；`fun-asr-realtime` / `fun-asr-flash-8k-realtime`；适合低延迟实时出字；部分模型支持以词典作为上下文增强 |
-| 通义千问（DashScope ASR） | 云端流式 / 批量文件识别 | 阿里云；新一代 `qwen-audio-3.0-asr-flash(-streaming)` 与既有 Qwen3-ASR 两代模型；支持 `Realtime`、`Batch` 和 `Realtime + 录后 Batch 精修`；新一代模型支持实时热词与权重、预编译热词表、上下文、语义断句；batch 路径当前受 5 分钟短音频接口限制 |
+| 通义千问（DashScope ASR） | 云端流式 / 批量文件识别 | 阿里云；新一代 `qwen-audio-3.1/3.0-asr-flash(-streaming)` 与既有 Qwen3-ASR 两代模型（3.1 按 token 计费，比 3.0 便宜约六成到九成）；支持 `Realtime`、`Batch` 和 `Realtime + 录后 Batch 精修`；新一代模型支持实时热词与权重、预编译热词表、上下文、语义断句；batch 路径当前受 5 分钟短音频接口限制 |
 | Gemini Audio Transcription | 云端批量文件识别 | 默认 `gemini-3.5-flash-lite`；也可选 `gemini-3.5-transcribe` 与 preview `gemini-3.1-flash-lite-preview`；录音结束后上传整段音频；支持自动 / 中文 / English / 中英混合提示 |
 | Gemini Live Realtime | 云端流式 (WebSocket) | 默认 `gemini-3.1-flash-live-preview`，也可选 `gemini-3.5-transcribe-live`；基于输入音频转写的实时识别，可附带语言提示 |
 | Cohere Audio Transcription | 云端批量文件识别 | `cohere-transcribe-03-2026`；整段音频上传识别，需显式指定 ISO-639-1 语言码 |
