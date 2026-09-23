@@ -546,19 +546,9 @@ async fn main() {
     let cases = load_cases(&cases_path);
     let eval_cfg = config.eval.clone();
 
-    // Every run keeps its console output and its results on disk, so a score can be looked at again later
-    // without copying it out of the terminal.
-    let run_dir = if skip_log {
-        None
-    } else {
-        match runlog::open(Path::new(&log_dir), &runlog::header(&args, &config_path, &cases_path)) {
-            Ok(dir) => Some(dir),
-            Err(e) => {
-                eprintln!("Cannot create a run directory under {}: {} (pass --no-log to run without one)", log_dir, e);
-                std::process::exit(1);
-            }
-        }
-    };
+    if skip_log {
+        runlog::disable();
+    }
 
     let rounds = rounds_override.or(config.rounds).unwrap_or(3);
     let prompt = config.prompt.unwrap_or_else(|| {
@@ -594,6 +584,21 @@ async fn main() {
         .iter()
         .map(|c| Reference::new(&c.input, &c.expected, &terms))
         .collect();
+
+    // Every run keeps its console output and its results on disk, so a score can be looked at again later
+    // without copying it out of the terminal. Opened only now: a run that stops during setup leaves no
+    // directory, and what setup printed is carried into the report.
+    let run_dir = if skip_log {
+        None
+    } else {
+        match runlog::open(Path::new(&log_dir), &runlog::header(&args, &config_path, &cases_path)) {
+            Ok(dir) => Some(dir),
+            Err(e) => {
+                eprintln!("Cannot create a run directory under {}: {} (pass --no-log to run without one)", log_dir, e);
+                std::process::exit(1);
+            }
+        }
+    };
 
     println!(
         "\n\x1b[1m══════════════════════════════════════════════════════════\x1b[0m"

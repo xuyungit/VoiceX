@@ -2,14 +2,24 @@
 //! be looked at again later without copying it out of the terminal.
 //!
 //! The crate's `println!`, `print!` and `eprintln!` are the macros below, not std's: they write to the terminal
-//! as usual and, while a run log is open, the same text (without the colour escapes) to the file.
+//! as usual and the same text (without the colour escapes) to the run log. Until the log is opened that text is
+//! held in memory, so a run that stops during setup leaves no directory behind, yet the warnings setup prints
+//! still reach the report of a run that goes ahead.
 
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-static LOG: Mutex<Option<File>> = Mutex::new(None);
+enum Log {
+    /// Not opened yet: what is printed is kept for the report.
+    Pending(String),
+    Open(File),
+    /// `--no-log`, or a write failed.
+    Off,
+}
+
+static LOG: Mutex<Log> = Mutex::new(Log::Pending(String::new()));
 
 /// The console copy of the run: `report.log` inside the run directory.
 pub const REPORT_FILE: &str = "report.log";
@@ -51,25 +61,40 @@ macro_rules! eprintln {
 }
 
 /// Creates the run directory under `log_dir`, named after the local time, and opens its report with `header`
-/// (the lines about the run that the console does not print) on top. Returns the run directory.
+/// (the lines about the run that the console does not print) on top, followed by everything printed so far.
+/// Returns the run directory.
 pub fn open(log_dir: &Path, header: &str) -> std::io::Result<PathBuf> {
+    let mut log = LOG.lock().unwrap();
+    let Log::Pending(pending) = &*log else {
+        panic!("the run log is opened once, and not after --no-log");
+    };
     let dir = unique_dir(log_dir, &stamp(chrono::Local::now()))?;
     let mut file = File::create(dir.join(REPORT_FILE))?;
     file.write_all(header.as_bytes())?;
     file.write_all(b"\n")?;
-    *LOG.lock().unwrap() = Some(file);
+    file.write_all(pending.as_bytes())?;
+    *log = Log::Open(file);
     Ok(dir)
 }
 
-/// Appends `text` to the open report, colour escapes removed; nothing happens when no run log is open. The
-/// first write that fails closes the log and says so once, rather than failing every line after it.
+/// This run keeps nothing: what was held for the report is dropped, and nothing more is.
+pub fn disable() {
+    *LOG.lock().unwrap() = Log::Off;
+}
+
+/// Appends `text` to the report, colour escapes removed, or holds it until the report is opened. The first
+/// write that fails closes the log and says so once, rather than failing every line after it.
 pub fn record(text: &str) {
     let mut log = LOG.lock().unwrap();
-    if let Some(file) = log.as_mut() {
-        if let Err(e) = file.write_all(strip_ansi(text).as_bytes()) {
-            ::std::eprintln!("Run log stopped: {}", e);
-            *log = None;
+    match &mut *log {
+        Log::Pending(pending) => pending.push_str(&strip_ansi(text)),
+        Log::Open(file) => {
+            if let Err(e) = file.write_all(strip_ansi(text).as_bytes()) {
+                ::std::eprintln!("Run log stopped: {}", e);
+                *log = Log::Off;
+            }
         }
+        Log::Off => {}
     }
 }
 
