@@ -188,6 +188,11 @@ pub struct AppSettings {
     /// Accessibility path comes up empty. Turning it off loses Safari and
     /// VS Code (plan §5.1); every other P0 application reads via AX.
     pub tts_clipboard_fallback: bool,
+    /// When a reading key finds no selection it can read, read the clipboard
+    /// instead: copy first, then press the key. Applies to both reading keys.
+    /// Not to be confused with `tts_clipboard_fallback` above, which is a way
+    /// of reading the *selection* through a synthesized copy.
+    pub tts_clipboard_when_no_selection: bool,
 
     // Translate-and-read: one LLM call between the selection and the engine.
     // Prefixed `tts_translate_*` to stay apart from dictation's
@@ -515,6 +520,7 @@ impl Default for AppSettings {
             tts_provider_type: "system".to_string(),
             tts_hotkey_config: None,
             tts_clipboard_fallback: true,
+            tts_clipboard_when_no_selection: true,
 
             tts_translate_enabled: true,
             tts_translate_hotkey_config: None,
@@ -1481,6 +1487,18 @@ mod tests {
             crate::tts::llm_stage::DEFAULT_PREPROCESS_PROMPT_ZH
         );
         assert!(settings.tts_captions_enabled);
+    }
+
+    #[test]
+    fn reading_the_clipboard_without_a_selection_is_on_for_existing_settings() {
+        let legacy = r#"{"uiLanguage": "zh-CN", "ttsEnabled": true}"#;
+        let settings: AppSettings = serde_json::from_str(legacy).unwrap();
+        assert!(settings.tts_clipboard_when_no_selection);
+
+        let mut settings = AppSettings::default();
+        settings.tts_clipboard_when_no_selection = false;
+        let blob = serde_json::to_value(&settings).unwrap();
+        assert_eq!(blob["ttsClipboardWhenNoSelection"], false);
     }
 
     #[test]

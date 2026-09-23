@@ -94,6 +94,24 @@ impl ReadingKind {
     }
 }
 
+/// Where the text being read came from. The chip says "剪贴板" for the
+/// clipboard, because a read of the clipboard looks exactly like a read of
+/// the selection otherwise, and the two can hold different text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadingSource {
+    Selection,
+    Clipboard,
+}
+
+impl ReadingSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReadingSource::Selection => "selection",
+            ReadingSource::Clipboard => "clipboard",
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct HudSnapshot {
     events: std::collections::BTreeMap<&'static str, serde_json::Value>,
@@ -270,11 +288,17 @@ impl HudService {
         let _ = self.app_handle.emit_to("hud", event_name, payload);
     }
 
-    /// Report the state of a selected-text read. `None` means it ended.
-    pub fn emit_reading(&self, kind: ReadingKind, phase: Option<ReadingPhase>) {
+    /// Report the state of a read. `None` means it ended.
+    pub fn emit_reading(
+        &self,
+        kind: ReadingKind,
+        source: ReadingSource,
+        phase: Option<ReadingPhase>,
+    ) {
         let payload = json!({
             "phase": phase.map(ReadingPhase::as_str),
             "kind": kind.as_str(),
+            "source": source.as_str(),
         });
         self.cache_event("state:reading", &payload);
         let _ = self.app_handle.emit("state:reading", payload.clone());
@@ -317,7 +341,7 @@ impl HudService {
 
 #[cfg(test)]
 mod tests {
-    use super::{HudPresentation, ReadingKind, ReadingPhase};
+    use super::{HudPresentation, ReadingKind, ReadingPhase, ReadingSource};
 
     #[test]
     fn reading_phase_tokens_match_what_the_hud_switches_on() {
@@ -329,6 +353,8 @@ mod tests {
         assert_eq!(ReadingPhase::Speaking.as_str(), "speaking");
         assert_eq!(ReadingKind::Read.as_str(), "read");
         assert_eq!(ReadingKind::Translate.as_str(), "translate");
+        assert_eq!(ReadingSource::Selection.as_str(), "selection");
+        assert_eq!(ReadingSource::Clipboard.as_str(), "clipboard");
         assert_eq!(HudPresentation::Stream.as_str(), "stream");
         assert_eq!(HudPresentation::Batch.as_str(), "batch");
         assert_eq!(HudPresentation::Caption.as_str(), "caption");

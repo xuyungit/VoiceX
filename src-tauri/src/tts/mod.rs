@@ -11,6 +11,7 @@
 
 pub mod aliyun;
 pub mod azure;
+pub mod clipboard_text;
 pub mod cloud_playback;
 pub mod controller;
 pub mod decode;

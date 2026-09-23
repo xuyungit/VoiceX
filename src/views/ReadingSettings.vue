@@ -324,6 +324,11 @@ const sourceLanguageOptions = computed(() => [
   ...languageOptions.value
 ])
 
+const clipboardWhenNoSelection = computed({
+  get: () => settingsStore.settings.ttsClipboardWhenNoSelection,
+  set: (value: boolean) => settingsStore.updateSetting('ttsClipboardWhenNoSelection', value)
+})
+
 const translateEnabled = computed({
   get: () => settingsStore.settings.ttsTranslateEnabled,
   set: (value: boolean) => {
@@ -768,6 +773,18 @@ onBeforeUnmount(() => {
         </div>
         <div v-else-if="translateConflict === 'reading'" class="warning-box">
           {{ t('reading.translateHotkeyConflictReading') }}
+        </div>
+
+        <!-- Applies to both keys above, so it sits under them rather than in
+             either key's own card. -->
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.clipboardWhenNoSelection') }}</div>
+            <div class="field-note">{{ t('reading.clipboardWhenNoSelectionNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <NSwitch v-model:value="clipboardWhenNoSelection" :disabled="!isMacOS" size="small" />
+          </div>
         </div>
       </div>
     </div>

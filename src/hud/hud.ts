@@ -73,6 +73,11 @@ let currentMode:
 /// keeps its green "翻译朗读" label through every phase, a plain read (even
 /// one that is being preprocessed by the LLM) stays "朗读".
 let readingKind: "read" | "translate" = "read";
+/// Where the current read's text came from. A read that fell back to the
+/// clipboard says so on the chip: it looks exactly like a read of the
+/// selection otherwise, and the two can hold different text. Can change once
+/// mid-session, when the selection turns out to be unreadable.
+let readingSource: "selection" | "clipboard" = "selection";
 /// When a real output level last arrived. Reading only draws the waveform
 /// while one is flowing: the macOS voice never reports a level, and bars
 /// standing still read as a broken widget rather than as silence.
@@ -264,6 +269,11 @@ const readingErrorMessages: Record<string, keyof typeof zhCN.hud> = {
   llm_failed: "readingLlmFailed",
   llm_timeout: "readingLlmTimeout",
   text_too_long: "readingTextTooLong",
+  // No readable selection, and the clipboard read in its place failed too.
+  clipboard_empty: "readingClipboardEmpty",
+  clipboard_not_text: "readingClipboardNotText",
+  clipboard_concealed: "readingClipboardConcealed",
+  clipboard_unavailable: "readingClipboardUnavailable",
 };
 
 function readingErrorText() {
@@ -895,10 +905,14 @@ function renderIntentChip() {
 
   if (isReadingMode()) {
     if (readingKind === "translate") {
-      intentChip.textContent = t("translateReadChip");
+      intentChip.textContent = t(
+        readingSource === "clipboard" ? "translateClipboardChip" : "translateReadChip",
+      );
       intentChip.classList.add("translate");
     } else {
-      intentChip.textContent = t("readingChip");
+      intentChip.textContent = t(
+        readingSource === "clipboard" ? "readingClipboardChip" : "readingChip",
+      );
       intentChip.classList.remove("translate");
     }
     return;
@@ -988,11 +1002,12 @@ async function initListeners() {
 
   await add(
     "state:reading",
-    (event: { payload?: { phase?: string; kind?: string } }) => {
+    (event: { payload?: { phase?: string; kind?: string; source?: string } }) => {
     const phase = event.payload?.phase;
     // The kind arrives with every phase of a session; it is set before the
     // status so the chip drawn by updateStatus is already the right one.
     readingKind = event.payload?.kind === "translate" ? "translate" : "read";
+    readingSource = event.payload?.source === "clipboard" ? "clipboard" : "selection";
     if (phase === "preparing") {
       updateStatus("reading_prepare");
     } else if (phase === "translating") {

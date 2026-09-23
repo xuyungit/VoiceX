@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::aliyun::{self, AliyunBackend, AliyunConfig};
 use super::azure::{self, AzureBackend, AzureConfig};
+use super::clipboard_text;
 use super::llm_stage::{self, LlmStageError, TRANSLATE_MAX_CHARS};
 use super::mimo::{MimoBackend, MimoConfig};
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
@@ -27,7 +28,9 @@ use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest}
 use crate::services::history_service::{
     sync_owns_counters, HistoryService, HISTORY_MODE_TRANSLATE_READ,
 };
-use crate::services::hud_service::{HudPresentation, HudService, ReadingKind, ReadingPhase};
+use crate::services::hud_service::{
+    HudPresentation, HudService, ReadingKind, ReadingPhase, ReadingSource,
+};
 use crate::services::llm_service::{build_llm_config_for_key, settings_for_llm_key};
 use crate::services::sync_service::SyncService;
 use crate::storage::TtsCounters;
@@ -97,16 +100,44 @@ const PROVIDER_ALIYUN: &str = "aliyun";
 const PROVIDER_MIMO: &str = "mimo";
 const PROVIDER_AZURE: &str = "azure";
 
-/// What a reading session does with the selection before speaking it.
+/// What a reading session does with its text before speaking it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadKind {
-    /// Speak the selection (through the preprocessor when that is on).
+    /// Speak the text (through the preprocessor when that is on).
     Read,
-    /// Translate the selection with the LLM, then speak the translation.
+    /// Translate the text with the LLM, then speak the translation.
     Translate,
 }
 
+/// Where a read's text came from. Orthogonal to [`ReadKind`]: everything
+/// after the text is in hand — cleanup, translation, voice, captions,
+/// counting — is the same whichever source it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadSource {
+    /// The focused application's selection.
+    Selection,
+    /// The clipboard, read because no selection could be (see
+    /// [`falls_back_to_clipboard`]).
+    Clipboard,
+}
+
+impl ReadSource {
+    fn as_str(self) -> &'static str {
+        self.hud_source().as_str()
+    }
+
+    fn hud_source(self) -> ReadingSource {
+        match self {
+            ReadSource::Selection => ReadingSource::Selection,
+            ReadSource::Clipboard => ReadingSource::Clipboard,
+        }
+    }
+}
+
 impl ReadKind {
+    /// The key's name in the log (`hotkey_action`, `speak_start`, …). Named
+    /// after the selection because that is what the key reads first; where
+    /// the text actually came from is logged as `source`.
     fn action(self) -> &'static str {
         match self {
             ReadKind::Read => "read_selection",
@@ -254,10 +285,12 @@ impl TtsController {
     /// (plan §5.4), which is otherwise indistinguishable from a dead hotkey.
     /// `failure` is how the read reports a problem: the driver owns the HUD for
     /// the whole read, so letting anyone else write to it would race the hide it
-    /// schedules on the way out.
+    /// schedules on the way out. `from_clipboard` is how the worker says the
+    /// text came from the clipboard, for the same reason.
     fn spawn_hud_driver(
         &self,
         kind: ReadKind,
+        from_clipboard: Arc<AtomicBool>,
         backend: Arc<dyn TtsBackend>,
         failure: Arc<Mutex<Option<String>>>,
         llm_busy: Arc<AtomicBool>,
@@ -265,6 +298,14 @@ impl TtsController {
     ) {
         let Some(hud) = self.hud() else { return };
         let hud_kind = kind.hud_kind();
+        let source_of = |from_clipboard: &AtomicBool| {
+            if from_clipboard.load(Ordering::SeqCst) {
+                ReadSource::Clipboard
+            } else {
+                ReadSource::Selection
+            }
+            .hud_source()
+        };
         let session = self.inner.session.clone();
         let yielded = self.inner.hud_yielded.clone();
         // A leftover yield from a previous handoff must not suppress hide on
@@ -282,12 +323,17 @@ impl TtsController {
         });
         hud.emit_error(None);
         hud.emit_caption(None);
-        hud.emit_reading(hud_kind, Some(ReadingPhase::Preparing));
+        hud.emit_reading(
+            hud_kind,
+            ReadingSource::Selection,
+            Some(ReadingPhase::Preparing),
+        );
 
         thread::Builder::new()
             .name("voicex-tts-hud".to_string())
             .spawn(move || {
                 let mut shown = ReadingPhase::Preparing;
+                let mut shown_source = ReadingSource::Selection;
                 let mut caption: Option<SpeechProgress> = None;
                 while session.is_active() {
                     let phase = match backend.status() {
@@ -300,9 +346,13 @@ impl TtsController {
                         }
                         TtsStatus::Idle => ReadingPhase::Preparing,
                     };
-                    if phase != shown {
+                    // The source changes at most once, when the selection
+                    // turns out to be unreadable and the clipboard is read.
+                    let source = source_of(&from_clipboard);
+                    if phase != shown || source != shown_source {
                         shown = phase;
-                        hud.emit_reading(hud_kind, Some(phase));
+                        shown_source = source;
+                        hud.emit_reading(hud_kind, source, Some(phase));
                     }
                     // Only backends that render audio themselves have a level;
                     // the system voice reports none and the HUD then shows just
@@ -329,7 +379,7 @@ impl TtsController {
                     thread::sleep(HUD_POLL);
                 }
 
-                hud.emit_reading(hud_kind, None);
+                hud.emit_reading(hud_kind, source_of(&from_clipboard), None);
                 // Dictation already owns the window. Hiding here would take the
                 // recording HUD down a moment after it appeared, and the next
                 // dictation tap would stop a session the user thought never
@@ -762,8 +812,10 @@ impl TtsController {
         self.set_active_backend(Some(backend.clone()));
         let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let llm_busy = Arc::new(AtomicBool::new(false));
+        let from_clipboard = Arc::new(AtomicBool::new(false));
         self.spawn_hud_driver(
             kind,
+            from_clipboard.clone(),
             backend.clone(),
             failure.clone(),
             llm_busy.clone(),
@@ -776,6 +828,9 @@ impl TtsController {
             .name("voicex-tts-read".to_string())
             .spawn(move || {
                 log_event("selection_start", &[("kind", kind.action().to_string())]);
+                let clipboard_when_no_selection = settings
+                    .as_ref()
+                    .is_some_and(|s| s.tts_clipboard_when_no_selection);
                 let result = selection::read_selection(SelectionRequest {
                     app,
                     // Compatibility mode, off by choice in the reading settings.
@@ -804,14 +859,31 @@ impl TtsController {
                     return;
                 }
 
-                match result {
+                let acquired = match result {
                     Ok(outcome) => {
                         log_selection_ok(&outcome);
-                        let source = outcome.text;
+                        Ok((outcome.text, ReadSource::Selection))
+                    }
+                    Err(err) => {
+                        log_selection_error(&err);
+                        if clipboard_when_no_selection && falls_back_to_clipboard(&err) {
+                            read_clipboard_instead(&err)
+                                .map(|text| (text, ReadSource::Clipboard))
+                        } else {
+                            Err(err.code().to_string())
+                        }
+                    }
+                };
+
+                match acquired {
+                    Ok((original, source)) => {
+                        if source == ReadSource::Clipboard {
+                            from_clipboard.store(true, Ordering::SeqCst);
+                        }
                         let staged = match stage_text(
                             kind,
                             settings.as_ref(),
-                            source.clone(),
+                            original.clone(),
                             &token,
                             &llm_busy,
                         ) {
@@ -842,7 +914,7 @@ impl TtsController {
                             if let Some(settings) = settings.as_ref() {
                                 retain_translation(
                                     settings,
-                                    &source,
+                                    &original,
                                     &staged.text,
                                     &app_for_history,
                                 );
@@ -853,6 +925,7 @@ impl TtsController {
                             "speak_start",
                             &[
                                 ("kind", kind.action().to_string()),
+                                ("source", source.as_str().to_string()),
                                 ("backend", backend.name().to_string()),
                                 ("chars", chars.to_string()),
                                 ("llm", staged.llm_invoked.to_string()),
@@ -900,12 +973,11 @@ impl TtsController {
                             }
                         }
                     }
-                    Err(err) => {
-                        log_selection_error(&err);
+                    Err(code) => {
                         // Record before releasing the session: the HUD driver
                         // reads this the moment it sees the session go idle.
                         if let Ok(mut slot) = failure.lock() {
-                            *slot = Some(err.code().to_string());
+                            *slot = Some(code);
                         }
                         // Nothing will speak, so hand the session back — but
                         // only if a newer request has not already claimed it.
@@ -1274,6 +1346,31 @@ fn aliyun_voice(settings: &AppSettings) -> String {
     }
 }
 
+/// Selection failures after which the clipboard is read instead, when the
+/// setting allows it. Each is "there is no selection we can read here":
+/// nothing selected, a control that does not expose its selection, a copy
+/// that changed nothing. The rest are left alone on purpose — a secure input
+/// field is where a password is about to be pasted, a missing permission or
+/// VoiceX's own focus is something the user has to fix, and a refused
+/// clipboard snapshot or a changed foreground app may still have a selection
+/// the user meant.
+fn falls_back_to_clipboard(err: &SelectionError) -> bool {
+    matches!(
+        err,
+        SelectionError::NoSelection
+            | SelectionError::UnsupportedControl
+            | SelectionError::CopyTimeout
+    )
+}
+
+/// Read the clipboard in place of a selection that could not be read. The
+/// error codes are the clipboard's own; the HUD words them as "no readable
+/// selection, and the clipboard …", since this is the only way it is read.
+fn read_clipboard_instead(err: &SelectionError) -> Result<String, String> {
+    log_event("clipboard_fallback", &[("after", err.code().to_string())]);
+    clipboard_text::read().map_err(|err| err.code().to_string())
+}
+
 fn log_selection_ok(outcome: &SelectionOutcome) {
     let mut fields = vec![
         ("source", outcome.source.as_str().to_string()),
@@ -1606,8 +1703,9 @@ mod tests {
     use super::super::SpeechProgress;
     use super::{
         apply_translate_voice_override, caption_piece_limit, lingers_after_read, next_caption,
-        stage_text, translate_voice_key, ReadKind,
+        falls_back_to_clipboard, stage_text, translate_voice_key, ReadKind,
     };
+    use crate::selection::SelectionError;
 
     #[test]
     fn a_caption_is_replaced_by_the_next_sentence_and_by_nothing_else() {
@@ -1692,6 +1790,31 @@ mod tests {
             !controller.is_active(),
             "no session may start into a live microphone"
         );
+    }
+
+    // --- reading the clipboard when there is no selection ---
+
+    #[test]
+    fn only_an_unreadable_selection_falls_back_to_the_clipboard() {
+        for err in [
+            SelectionError::NoSelection,
+            SelectionError::UnsupportedControl,
+            SelectionError::CopyTimeout,
+        ] {
+            assert!(falls_back_to_clipboard(&err), "{}", err.code());
+        }
+        for err in [
+            // A password field: the clipboard likely holds what goes into it.
+            SelectionError::SecureInput,
+            SelectionError::PermissionDenied,
+            SelectionError::FocusIsSelf,
+            SelectionError::ClipboardSnapshotRefused("promised type".to_string()),
+            SelectionError::ForegroundChanged,
+            SelectionError::ModifiersHeld,
+            SelectionError::Cancelled,
+        ] {
+            assert!(!falls_back_to_clipboard(&err), "{}", err.code());
+        }
     }
 
     #[test]

@@ -168,6 +168,9 @@ export interface AppSettings {
     ttsProviderType: 'system' | 'volcengine' | 'aliyun' | 'mimo' | 'azure'
     ttsHotkeyConfig: string | null
     ttsClipboardFallback: boolean
+    // Both reading keys read the clipboard when no selection can be read.
+    // Not `ttsClipboardFallback`, which reads the *selection* via a copy.
+    ttsClipboardWhenNoSelection: boolean
 
     // Translate-and-read: one LLM call between the selection and the engine.
     // `ttsTranslate*` is deliberately not `translation*` — that prefix belongs
@@ -429,6 +432,7 @@ const defaultSettings: AppSettings = {
     ttsProviderType: 'system',
     ttsHotkeyConfig: null,
     ttsClipboardFallback: true,
+    ttsClipboardWhenNoSelection: true,
 
     ttsTranslateEnabled: true,
     ttsTranslateHotkeyConfig: null,

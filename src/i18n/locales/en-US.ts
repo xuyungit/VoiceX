@@ -175,7 +175,7 @@ const enUS = {
     ttsProvider: 'Engine',
     providerSystem: 'System voice',
     general: 'Read selection',
-    generalSub: 'Select text in any app and press a hotkey to hear it; a key that is switched off goes back to the front app',
+    generalSub: 'Select text in any app and press a hotkey to hear it, or read the clipboard when nothing is selected; a key that is switched off goes back to the front app',
     hotkey: 'Plain reading',
     hotkeyNote: 'Default Option + Command + R; independent of the macOS Speak Selection key (Option + Esc)',
     record: 'Record',
@@ -202,7 +202,7 @@ const enUS = {
     previewFailed: 'Preview failed',
     advanced: 'Advanced',
     advancedSub: 'You should rarely need these',
-    clipboardFallback: 'Compatibility mode',
+    clipboardFallback: 'Selection compatibility mode',
     clipboardFallbackNote: 'When Accessibility cannot read the selection, synthesize Command + C and restore the clipboard afterwards. Turning this off loses Safari and VS Code; every other app is unaffected.',
     providerVolcengine: 'Volcengine (Doubao Seed-TTS 2.0)',
     volcApiKey: 'API key',
@@ -247,6 +247,8 @@ const enUS = {
     translateHotkeyNote: 'Default Option + Command + T. Any reading key stops a read in progress; while waiting for the translation, the key or Esc cancels.',
     translateHotkeyConflictDictation: 'The translate hotkey is also the recording hotkey, so translate-and-read is off. Change one of them.',
     translateHotkeyConflictReading: 'The translate hotkey is also the plain reading hotkey, so translate-and-read is off. Change one of them.',
+    clipboardWhenNoSelection: 'Read the clipboard when nothing is selected',
+    clipboardWhenNoSelectionNote: 'For both reading keys: when no selection can be read, read the text on the clipboard instead; the HUD label says "Clipboard". Never in a password field, and passwords copied by a password manager are never read.',
     sourceLanguage: 'Source language',
     sourceLanguageNote: 'Leave on auto-detect; set it only where detection is ambiguous, such as Chinese vs. Japanese characters or Simplified vs. Traditional',
     targetLanguage: 'Target language',
@@ -782,7 +784,13 @@ const enUS = {
     readingLlmNotConfigured: 'No translation model configured; check the LLM settings',
     readingLlmFailed: 'Translation failed; nothing was read',
     readingLlmTimeout: 'Translation timed out; nothing was read',
-    readingTextTooLong: 'Selection too long; translate-and-read stops at 5000 characters'
+    readingTextTooLong: 'Text too long; translate-and-read stops at 5000 characters',
+    readingClipboardChip: 'Clipboard',
+    translateClipboardChip: 'Translate clipboard',
+    readingClipboardEmpty: 'No readable selection, and the clipboard is empty',
+    readingClipboardNotText: 'No readable selection, and the clipboard holds no text',
+    readingClipboardConcealed: 'No readable selection; the clipboard holds a password, not read',
+    readingClipboardUnavailable: 'No readable selection, and the clipboard could not be read'
   }
 }
 

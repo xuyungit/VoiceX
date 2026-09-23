@@ -175,7 +175,7 @@ const zhCN = {
     ttsProvider: '引擎',
     providerSystem: '系统语音',
     general: '选中朗读',
-    generalSub: '在任意应用里选中文字，按热键读出来；关掉的热键交还给前台应用',
+    generalSub: '在任意应用里选中文字，按热键读出来；没选中时也可以读剪贴板。关掉的热键交还给前台应用',
     hotkey: '普通朗读',
     hotkeyNote: '默认 Option + Command + R，与 macOS 自带的「朗读所选内容」（Option + Esc）互不影响',
     record: '录制',
@@ -202,7 +202,7 @@ const zhCN = {
     previewFailed: '试听失败',
     advanced: '高级',
     advancedSub: '一般不需要改',
-    clipboardFallback: '兼容模式',
+    clipboardFallback: '取词兼容模式',
     clipboardFallbackNote: '辅助功能取不到选中文字时，改用模拟 Command + C 复制并随后还原剪贴板。关闭后 Safari 与 VS Code 将无法朗读，其余应用不受影响。',
     providerVolcengine: '火山引擎（豆包 Seed-TTS 2.0）',
     volcApiKey: 'API Key',
@@ -247,6 +247,8 @@ const zhCN = {
     translateHotkeyNote: '默认 Option + Command + T。朗读中按任一朗读键停止；等待翻译时再按或 Esc 取消',
     translateHotkeyConflictDictation: '翻译朗读热键与录音热键相同，翻译朗读已停用，请换一个组合',
     translateHotkeyConflictReading: '翻译朗读热键与普通朗读热键相同，翻译朗读已停用，请换一个组合',
+    clipboardWhenNoSelection: '没选中文字时读剪贴板',
+    clipboardWhenNoSelectionNote: '两个朗读键都适用：读不到选中文字时，改读剪贴板里的文字，HUD 标签会注明「剪贴板」。在密码框里不会改读；密码管理器复制的密码不会朗读',
     sourceLanguage: '源语言',
     sourceLanguageNote: '一般保持自动检测；只在中日汉字、简繁体这类容易误判的情况下才指定',
     targetLanguage: '目标语言',
@@ -782,7 +784,13 @@ const zhCN = {
     readingLlmNotConfigured: '翻译模型未配置，请检查大模型设置',
     readingLlmFailed: '翻译失败，未朗读',
     readingLlmTimeout: '翻译超时，未朗读',
-    readingTextTooLong: '选中文字过长，翻译朗读最多 5000 字'
+    readingTextTooLong: '文字过长，翻译朗读最多 5000 字',
+    readingClipboardChip: '朗读剪贴板',
+    translateClipboardChip: '翻译剪贴板',
+    readingClipboardEmpty: '读不到选中文字，剪贴板也是空的',
+    readingClipboardNotText: '读不到选中文字，剪贴板里也不是文字',
+    readingClipboardConcealed: '读不到选中文字，剪贴板里是密码，未朗读',
+    readingClipboardUnavailable: '读不到选中文字，剪贴板也读取失败'
   }
 }
 
