@@ -29,11 +29,12 @@ use base64::Engine;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
+use super::caption_timeline::{self, CaptionTimeline};
 use super::cloud_playback::{self, PieceStream};
 use super::playback::{negotiate_sample_rate_among, prebuffer_samples, PlaybackHandle};
 use super::{
-    cloud_http_client, log_cloud_retry, piece_limit_for, CancelToken, CloudStreamError,
-    SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
+    cloud_http_client, log_cloud_retry, log_event, piece_limit_for, split_for_backend, CancelToken,
+    CloudStreamError, SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
 };
 
 /// Region host. The workspace-scoped `{id}.cn-beijing.maas.aliyuncs.com` form
@@ -104,6 +105,15 @@ struct ModelSpec {
     /// phrasings on the voice list and answer anything else with `Engine
     /// return error code: 428`, and Qwen3-TTS has no such field on this model.
     accepts_instruction: bool,
+    /// Whether the stream names each chunk it synthesizes and, asked with
+    /// `word_timestamp_enabled`, when every character of it is spoken. With
+    /// captions on, such a model keeps the read in one request and each
+    /// caption is placed by that timing (see [`caption_timeline`]); every
+    /// other model goes out in caption-sized requests, one caption each.
+    /// Verified on Qwen-Audio 3.1 (2026-09-24): chunk texts concatenate back
+    /// to the input exactly, chunk starts land within 0.2 s of the audio, and
+    /// the timestamps leave the audio byte-for-byte unchanged.
+    timed_chunks: bool,
     voices: VoiceSource,
     /// Always called with this spec's own `id`, so the body cannot name a
     /// different model than the spec it belongs to — a copy-pasted entry that
@@ -150,6 +160,8 @@ struct Synthesis<'a> {
     rate: f32,
     /// Already filtered by `accepts_instruction`; `None` sends no field.
     instruction: Option<&'a str>,
+    /// Ask for per-character timing; only a `timed_chunks` model is asked.
+    word_timestamps: bool,
 }
 
 /// Qwen3-TTS. Voices are English given names; the dialect voices are the
@@ -289,6 +301,9 @@ fn speech_synthesizer_body(model: &'static str, s: &Synthesis<'_>) -> Value {
     if let Some(instruction) = s.instruction {
         body["input"]["instruction"] = json!(instruction);
     }
+    if s.word_timestamps {
+        body["input"]["word_timestamp_enabled"] = json!(true);
+    }
     body
 }
 
@@ -304,6 +319,7 @@ const SPECS: [ModelSpec; 5] = [
         // Renders ~4x realtime and completed every long-text probe intact.
         piece_chars: 5_000,
         accepts_instruction: false,
+        timed_chunks: false,
         voices: VoiceSource::Preset(&QWEN3_VOICES),
         build_body: |model, s| {
             json!({
@@ -336,6 +352,7 @@ const SPECS: [ModelSpec; 5] = [
         // single-sentence probe came back complete, ~10x realtime.
         piece_chars: 9_000,
         accepts_instruction: true,
+        timed_chunks: false,
         voices: VoiceSource::Preset(&QWEN_AUDIO_VOICES),
         build_body: speech_synthesizer_body,
     },
@@ -354,6 +371,7 @@ const SPECS: [ModelSpec; 5] = [
         // 163-character one, rendered at ~12x realtime.
         piece_chars: 9_000,
         accepts_instruction: true,
+        timed_chunks: true,
         voices: VoiceSource::Preset(&QWEN_AUDIO_31_VOICES),
         build_body: speech_synthesizer_body,
     },
@@ -374,6 +392,7 @@ const SPECS: [ModelSpec; 5] = [
         // ~half minute of speech.
         piece_chars: 120,
         accepts_instruction: false,
+        timed_chunks: false,
         voices: VoiceSource::Preset(&COSYVOICE_VOICES),
         build_body: speech_synthesizer_body,
     },
@@ -391,6 +410,7 @@ const SPECS: [ModelSpec; 5] = [
         // v3's 120 applies unchanged until dense text is measured here too.
         piece_chars: 120,
         accepts_instruction: true,
+        timed_chunks: false,
         voices: VoiceSource::Custom,
         build_body: speech_synthesizer_body,
     },
@@ -439,7 +459,9 @@ fn speed_from_normalized(rate: Option<f32>) -> f32 {
 /// are left alone: their spaces add no 、, and closing them moved the audio no
 /// more than resending the same text an hour later does. Captions keep the
 /// spaced text; only what is synthesized changes.
-fn close_number_spacing(text: &str) -> String {
+///
+/// Returns the indices of the characters kept, in order.
+fn number_spacing_kept(chars: &[char]) -> Vec<usize> {
     fn is_cjk(ch: char) -> bool {
         matches!(ch,
             '\u{3000}'..='\u{303f}'    // CJK punctuation: 。、「」
@@ -457,23 +479,19 @@ fn close_number_spacing(text: &str) -> String {
             .any(|ch| ch.is_ascii_digit())
     }
 
-    let chars: Vec<char> = text.chars().collect();
-    chars
-        .iter()
-        .enumerate()
-        .filter(|&(index, &ch)| {
+    (0..chars.len())
+        .filter(|&index| {
             let (Some(&before), Some(&after)) = (
                 index.checked_sub(1).and_then(|i| chars.get(i)),
                 chars.get(index + 1),
             ) else {
                 return true;
             };
-            let closes = ch == ' '
+            let closes = chars[index] == ' '
                 && ((is_cjk(before) && has_digit(chars[index + 1..].iter()))
                     || (is_cjk(after) && has_digit(chars[..index].iter().rev())));
             !closes
         })
-        .map(|(_, &ch)| ch)
         .collect()
 }
 
@@ -488,6 +506,10 @@ pub struct AliyunBackend {
     /// The current request's text as the pieces it was synthesized in,
     /// which is what `progress` reports on.
     pieces: Mutex<Vec<String>>,
+    /// Set instead for a read whose captions the service times; `progress`
+    /// then reports on this. Each read gets its own, so a superseded read
+    /// still finishing a frame cannot place captions in the next one.
+    timeline: Mutex<Option<Arc<Mutex<CaptionTimeline>>>>,
 }
 
 impl AliyunBackend {
@@ -497,6 +519,7 @@ impl AliyunBackend {
             playback: Arc::new(Mutex::new(None)),
             speaking: Arc::new(AtomicBool::new(false)),
             pieces: Mutex::new(Vec::new()),
+            timeline: Mutex::new(None),
         }
     }
 
@@ -587,7 +610,13 @@ impl TtsBackend for AliyunBackend {
     }
 
     fn progress(&self) -> Option<SpeechProgress> {
-        cloud_playback::progress(&self.speaking, &self.pieces, &self.playback)
+        let timeline = self.timeline.lock().ok().and_then(|slot| slot.clone());
+        match timeline {
+            Some(timeline) => {
+                caption_timeline::progress(&self.speaking, &*timeline.lock().ok()?, &self.playback)
+            }
+            None => cloud_playback::progress(&self.speaking, &self.pieces, &self.playback),
+        }
     }
 }
 
@@ -636,14 +665,18 @@ impl AliyunBackend {
         let instruction = Some(config.instruction.trim().to_string())
             .filter(|instruction| spec.accepts_instruction && !instruction.is_empty());
 
-        let pieces: Vec<String> = cloud_playback::split_pieces(
-            &request.text,
-            piece_limit_for(request.piece_limit, spec.piece_chars.min(spec.max_chars)),
-            &self.pieces,
-        )
-        .iter()
-        .map(|piece| close_number_spacing(piece))
-        .collect();
+        let (split_limit, caption_limit) = piece_plan(spec, request.piece_limit);
+        let written = cloud_playback::split_pieces(&request.text, split_limit, &self.pieces);
+        let timeline =
+            caption_limit.map(|_| Arc::new(Mutex::new(CaptionTimeline::new(sample_rate))));
+        if let Ok(mut slot) = self.timeline.lock() {
+            *slot = timeline.clone();
+        }
+        let pieces: Vec<SentPiece> = written
+            .iter()
+            .enumerate()
+            .map(|(index, piece)| SentPiece::new(index, piece, caption_limit.zip(timeline.clone())))
+            .collect();
 
         let (tx, rx) = mpsc::channel::<PieceStream>();
         // Lets the decode side tell "the provider failed" apart from "the audio
@@ -697,13 +730,15 @@ impl AliyunBackend {
                     &config.api_key,
                     spec,
                     &Synthesis {
-                        text: piece,
+                        text: &piece.text,
                         voice: &voice,
                         sample_rate,
                         rate: speed,
                         instruction: instruction.as_deref(),
+                        word_timestamps: piece.captions.is_some(),
                     },
                     &piece_tx,
+                    piece.captions.as_ref(),
                     &http_token,
                 )
                 .await;
@@ -730,7 +765,190 @@ impl AliyunBackend {
     }
 }
 
-/// Stream one synthesis response, forwarding decoded audio bytes to `tx`.
+/// How a read is split into requests, and the caption size when the service
+/// times the captions itself.
+///
+/// With captions on, a model is split into caption-sized requests, one
+/// caption each — except one that times its own speech: that read stays in as
+/// few requests as the service takes, and its captions are placed by the
+/// service's clock, so no cut of ours lands anywhere the service's own
+/// chunking would not.
+fn piece_plan(spec: &ModelSpec, caption_limit: Option<usize>) -> (usize, Option<usize>) {
+    let own_limit = spec.piece_chars.min(spec.max_chars);
+    match caption_limit.filter(|_| spec.timed_chunks) {
+        Some(limit) => (own_limit, Some(limit)),
+        None => (piece_limit_for(caption_limit, own_limit), None),
+    }
+}
+
+/// One request of a read: the text sent, and for a read whose captions the
+/// service times, what placing them needs.
+struct SentPiece {
+    text: String,
+    captions: Option<CaptionFeed>,
+}
+
+impl SentPiece {
+    /// `captions` is the caption size and the read's timeline, for a timed
+    /// read.
+    fn new(
+        request: usize,
+        written: &str,
+        captions: Option<(usize, Arc<Mutex<CaptionTimeline>>)>,
+    ) -> Self {
+        let written: Vec<char> = written.chars().collect();
+        let kept = number_spacing_kept(&written);
+        let text: String = kept.iter().map(|&index| written[index]).collect();
+        let captions = captions.map(|(limit, timeline)| {
+            let mut kept = kept;
+            kept.push(written.len());
+            CaptionFeed {
+                request,
+                sent: text.chars().collect(),
+                written,
+                kept,
+                limit,
+                timeline,
+            }
+        });
+        Self { text, captions }
+    }
+}
+
+/// What a timed request needs to place its captions.
+struct CaptionFeed {
+    request: usize,
+    /// The piece as written, which is what captions show.
+    written: Vec<char>,
+    /// The text sent: `written` less the spaces [`number_spacing_kept`]
+    /// drops. The service echoes it back chunk by chunk.
+    sent: Vec<char>,
+    /// Where each character of `sent` sits in `written`, then `written.len()`.
+    kept: Vec<usize>,
+    /// Longest caption, in characters.
+    limit: usize,
+    timeline: Arc<Mutex<CaptionTimeline>>,
+}
+
+impl CaptionFeed {
+    fn place(&self, start_ms: u64, text: String) {
+        if let Ok(mut timeline) = self.timeline.lock() {
+            timeline.push(self.request, start_ms, text);
+        }
+    }
+}
+
+/// One attempt at a timed request, following the service through its chunks.
+///
+/// A chunk's first caption goes up as soon as the chunk begins, starting
+/// where the previous chunk's speech ended; the timing of the rest arrives
+/// with the chunk's last frame, which the service sends long before playback
+/// gets there (it renders at ~12x realtime).
+struct ChunkReader<'a> {
+    feed: &'a CaptionFeed,
+    /// Characters of `feed.sent` the chunks so far have covered.
+    cursor: usize,
+    /// When the last finished chunk's speech ended, in request time.
+    spoken_until: u64,
+    /// The chunk being synthesized, as written, and its captions.
+    open: Option<(Vec<char>, Vec<String>)>,
+}
+
+impl<'a> ChunkReader<'a> {
+    fn new(feed: &'a CaptionFeed) -> Self {
+        if let Ok(mut timeline) = feed.timeline.lock() {
+            timeline.begin_request(feed.request);
+        }
+        Self {
+            feed,
+            cursor: 0,
+            spoken_until: 0,
+            open: None,
+        }
+    }
+
+    fn read(&mut self, event: ChunkEvent) {
+        match event {
+            ChunkEvent::Begin(text) => self.begin(&text),
+            ChunkEvent::End(words) => self.end(&words),
+        }
+    }
+
+    fn begin(&mut self, sent: &str) {
+        // A chunk that never reported its end still gets its captions up.
+        self.finish();
+        let feed = self.feed;
+        let chunk: Vec<char> = sent.chars().collect();
+        let end = self.cursor + chunk.len();
+        let written = if feed.sent.get(self.cursor..end) == Some(&chunk[..]) {
+            feed.written[feed.kept[self.cursor]..feed.kept[end]].to_vec()
+        } else {
+            // The echo is what lets a caption show the text as written. Off
+            // its track, the service's own text is still what is being said.
+            log_event(
+                "caption_chunk_mismatch",
+                &[
+                    ("offset", self.cursor.to_string()),
+                    ("chars", chunk.len().to_string()),
+                ],
+            );
+            chunk
+        };
+        self.cursor = end;
+        let captions = split_for_backend(&written.iter().collect::<String>(), feed.limit);
+        feed.place(self.spoken_until, captions[0].clone());
+        self.open = Some((written, captions));
+    }
+
+    fn end(&mut self, words: &[SpokenWord]) {
+        let Some((written, captions)) = self.open.take() else {
+            return;
+        };
+        let spoken: Vec<(char, u64)> = words
+            .iter()
+            .flat_map(|word| word.text.chars().map(move |ch| (ch, word.begin_ms)))
+            .collect();
+        let cuts: Vec<usize> = captions
+            .iter()
+            .scan(0, |at, caption| {
+                *at += caption.chars().count();
+                Some(*at)
+            })
+            .take(captions.len() - 1)
+            .collect();
+        let times = caption_timeline::cut_times(&written, &cuts, &spoken);
+        // Nothing recognizable after a cut: its caption comes up with the
+        // chunk's last word rather than never.
+        let last_word = words.last().map_or(self.spoken_until, |word| word.begin_ms);
+        let untimed = times.iter().filter(|time| time.is_none()).count();
+        let count = captions.len();
+        for (caption, time) in captions.into_iter().skip(1).zip(times) {
+            self.feed.place(time.unwrap_or(last_word), caption);
+        }
+        if let Some(last) = words.last() {
+            self.spoken_until = last.end_ms;
+        }
+        log_event(
+            "caption_chunk",
+            &[
+                ("chars", written.len().to_string()),
+                ("captions", count.to_string()),
+                ("untimed", untimed.to_string()),
+            ],
+        );
+    }
+
+    /// Place whatever the open chunk still holds, timed or not.
+    fn finish(&mut self) {
+        if self.open.is_some() {
+            self.end(&[]);
+        }
+    }
+}
+
+/// Stream one synthesis response, forwarding decoded audio bytes to `tx` and,
+/// for a timed request, placing its captions as the service reports its
+/// chunks.
 ///
 /// `Ok(true)` means the piece completed and the caller may stream the next
 /// one; `Ok(false)` means the read was cancelled or the decoder hung up, so
@@ -740,11 +958,12 @@ async fn stream_audio_with_retry(
     spec: &ModelSpec,
     synthesis: &Synthesis<'_>,
     tx: &Sender<Vec<u8>>,
+    captions: Option<&CaptionFeed>,
     token: &CancelToken,
 ) -> Result<bool, String> {
     let mut retries_done = 0;
     loop {
-        match stream_audio(api_key, spec, synthesis, tx, token).await {
+        match stream_audio(api_key, spec, synthesis, tx, captions, token).await {
             Ok(outcome) => return Ok(outcome),
             Err(err) => {
                 if token.is_cancelled() {
@@ -770,6 +989,7 @@ async fn stream_audio(
     spec: &ModelSpec,
     synthesis: &Synthesis<'_>,
     tx: &Sender<Vec<u8>>,
+    captions: Option<&CaptionFeed>,
     token: &CancelToken,
 ) -> Result<bool, CloudStreamError> {
     let response = cloud_http_client()?
@@ -792,6 +1012,8 @@ async fn stream_audio(
     let mut stream = response.bytes_stream();
     let mut pending = Vec::<u8>::new();
     let mut audio_emitted = false;
+    // Per attempt: a retry is sent the whole text again, chunks and all.
+    let mut chunks = captions.map(ChunkReader::new);
 
     while let Some(chunk) = stream.next().await {
         if token.is_cancelled() {
@@ -803,9 +1025,12 @@ async fn stream_audio(
         // Server-sent events are line-oriented and a chunk may split a line.
         while let Some(newline) = pending.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = pending.drain(..=newline).collect();
-            let audio = parse_line(&line[..line.len() - 1])
+            let frame = parse_line(&line[..line.len() - 1])
                 .map_err(|err| CloudStreamError::response(err, audio_emitted))?;
-            if let Some(audio) = audio {
+            if let (Some(chunks), Some(event)) = (chunks.as_mut(), frame.chunk) {
+                chunks.read(event);
+            }
+            if let Some(audio) = frame.audio {
                 if tx.send(audio).is_err() {
                     // The decoder is gone; nothing left to stream into.
                     return Ok(false);
@@ -816,30 +1041,63 @@ async fn stream_audio(
     }
 
     if !pending.is_empty() {
-        let audio = parse_line(&pending)
-            .map_err(|err| CloudStreamError::response(err, audio_emitted))?;
-        if let Some(audio) = audio {
+        let frame =
+            parse_line(&pending).map_err(|err| CloudStreamError::response(err, audio_emitted))?;
+        if let (Some(chunks), Some(event)) = (chunks.as_mut(), frame.chunk) {
+            chunks.read(event);
+        }
+        if let Some(audio) = frame.audio {
             if tx.send(audio).is_err() {
                 return Ok(false);
             }
         }
     }
+    if let Some(chunks) = chunks.as_mut() {
+        chunks.finish();
+    }
 
     Ok(true)
 }
 
-/// Decode one SSE line into audio bytes, or `None` when it carries none.
+/// One word as the service times it. Punctuation rides on the word after it:
+/// a sentence's first word reads `"。直"`.
+#[derive(Debug, Clone, PartialEq)]
+struct SpokenWord {
+    text: String,
+    begin_ms: u64,
+    end_ms: u64,
+}
+
+/// The service announcing its own chunks of a request (`output.type`).
+#[derive(Debug, Clone, PartialEq)]
+enum ChunkEvent {
+    /// `sentence-begin`, with the chunk's text as it was sent.
+    Begin(String),
+    /// `sentence-end`, with every word of the chunk when timestamps were
+    /// asked for.
+    End(Vec<SpokenWord>),
+}
+
+/// What one line of the stream carries.
+#[derive(Debug, Default)]
+struct Frame {
+    audio: Option<Vec<u8>>,
+    chunk: Option<ChunkEvent>,
+}
+
+/// Decode one SSE line into its audio bytes and chunk event, either of which
+/// may be absent.
 ///
 /// Everything but `data:` is framing — `id:`, `event:`, the `:HTTP_STATUS/200`
 /// comment, and the blank line between events.
-fn parse_line(line: &[u8]) -> Result<Option<Vec<u8>>, String> {
+fn parse_line(line: &[u8]) -> Result<Frame, String> {
     let text = std::str::from_utf8(line).map_err(|_| "response was not UTF-8".to_string())?;
     let Some(payload) = text.trim_end_matches('\r').strip_prefix("data:") else {
-        return Ok(None);
+        return Ok(Frame::default());
     };
     let payload = payload.trim_start();
     if payload.is_empty() {
-        return Ok(None);
+        return Ok(Frame::default());
     }
 
     let value: Value =
@@ -855,22 +1113,56 @@ fn parse_line(line: &[u8]) -> Result<Option<Vec<u8>>, String> {
         return Err(format!("provider error {code}: {message}"));
     }
 
-    let Some(data) = value
+    let audio = match value
         .pointer("/output/audio/data")
         .and_then(|data| data.as_str())
-    else {
-        return Ok(None);
+    {
+        // The final frame carries the finished file's URL and an empty `data`.
+        // We already have every byte it points at.
+        Some(data) if !data.is_empty() => Some(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|err| format!("bad base64 in response: {err}"))?,
+        ),
+        _ => None,
     };
-    // The final frame carries the finished file's URL and an empty `data`. We
-    // already have every byte it points at.
-    if data.is_empty() {
-        return Ok(None);
-    }
+    Ok(Frame {
+        audio,
+        chunk: chunk_event(&value),
+    })
+}
 
-    base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .map(Some)
-        .map_err(|err| format!("bad base64 in response: {err}"))
+fn chunk_event(value: &Value) -> Option<ChunkEvent> {
+    let output = value.get("output")?;
+    match output.get("type")?.as_str()? {
+        "sentence-begin" => Some(ChunkEvent::Begin(
+            output
+                .get("original_text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        )),
+        "sentence-end" => {
+            let words = output
+                .pointer("/sentence/words")
+                .and_then(Value::as_array)
+                .map(|words| {
+                    words
+                        .iter()
+                        .filter_map(|word| {
+                            Some(SpokenWord {
+                                text: word.get("text")?.as_str()?.to_string(),
+                                begin_ms: word.get("begin_time")?.as_u64()?,
+                                end_ms: word.get("end_time")?.as_u64()?,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(ChunkEvent::End(words))
+        }
+        _ => None,
+    }
 }
 
 /// Pull the useful part out of an error body, falling back to its first line.
@@ -914,16 +1206,17 @@ mod tests {
 
     #[test]
     fn spaces_around_numbers_are_closed_before_synthesis() {
+        let sent = |text: &str| SentPiece::new(0, text, None).text;
         // Read as 「共、六百九十八、片」 with the spaces in.
         assert_eq!(
-            close_number_spacing("共 698 片，从 M3 版本起，延迟 300 ms。"),
+            sent("共 698 片，从 M3 版本起，延迟 300 ms。"),
             "共698片，从M3版本起，延迟300 ms。"
         );
         // Letter-only words sound the same either way, and spaces between
         // two ASCII tokens are the text's own.
         let words = "使用 git commit --amend 即可，CORE 不变。";
-        assert_eq!(close_number_spacing(words), words);
-        assert_eq!(close_number_spacing(" 8 "), " 8 ");
+        assert_eq!(sent(words), words);
+        assert_eq!(sent(" 8 "), " 8 ");
     }
 
     #[test]
@@ -937,6 +1230,7 @@ mod tests {
             sample_rate: 24_000,
             rate: 1.5,
             instruction: None,
+            word_timestamps: false,
         };
 
         let qwen3 = (spec_for(MODEL_QWEN3).build_body)(MODEL_QWEN3, &synthesis);
@@ -1000,6 +1294,7 @@ mod tests {
             sample_rate: 24_000,
             rate: 1.0,
             instruction: Some(DEFAULT_INSTRUCTION),
+            word_timestamps: false,
         };
         let body = (spec_for(MODEL_QWEN_AUDIO_31).build_body)(MODEL_QWEN_AUDIO_31, &with);
         assert_eq!(body["input"]["instruction"], DEFAULT_INSTRUCTION);
@@ -1020,6 +1315,7 @@ mod tests {
             sample_rate: 24_000,
             rate: 1.0,
             instruction: None,
+            word_timestamps: false,
         };
         for spec in &SPECS {
             assert_eq!((spec.build_body)(spec.id, &synthesis)["model"], spec.id);
@@ -1043,13 +1339,14 @@ mod tests {
     fn audio_frames_yield_bytes_and_framing_lines_yield_none() {
         let audio = parse_line(br#"data:{"output":{"audio":{"data":"aGVsbG8="}}}"#)
             .unwrap()
+            .audio
             .unwrap();
         assert_eq!(audio, b"hello");
 
         // The final frame points at the finished file; we already have it.
         let last =
             parse_line(br#"data:{"output":{"audio":{"data":"","url":"http://x"}}}"#).unwrap();
-        assert!(last.is_none());
+        assert!(last.audio.is_none());
 
         for framing in [
             &b"id:1"[..],
@@ -1058,8 +1355,171 @@ mod tests {
             b"",
             b"data:",
         ] {
-            assert!(parse_line(framing).unwrap().is_none(), "{framing:?}");
+            let frame = parse_line(framing).unwrap();
+            assert!(
+                frame.audio.is_none() && frame.chunk.is_none(),
+                "{framing:?}"
+            );
         }
+    }
+
+    #[test]
+    fn only_qwen_audio_31_times_its_captions() {
+        let timed: Vec<&str> = SPECS
+            .iter()
+            .filter(|spec| spec.timed_chunks)
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(timed, vec![MODEL_QWEN_AUDIO_31]);
+
+        let synthesis = Synthesis {
+            text: "hi",
+            voice: "anxiaolan_v3.1",
+            sample_rate: 24_000,
+            rate: 1.0,
+            instruction: None,
+            word_timestamps: true,
+        };
+        let body = (spec_for(MODEL_QWEN_AUDIO_31).build_body)(MODEL_QWEN_AUDIO_31, &synthesis);
+        assert_eq!(body["input"]["word_timestamp_enabled"], true);
+        let untimed = Synthesis {
+            word_timestamps: false,
+            ..synthesis
+        };
+        let body = (spec_for(MODEL_QWEN_AUDIO_31).build_body)(MODEL_QWEN_AUDIO_31, &untimed);
+        assert!(body["input"].get("word_timestamp_enabled").is_none());
+    }
+
+    #[test]
+    fn only_a_timed_model_keeps_a_captioned_read_in_one_request() {
+        let plan = |model, captions| piece_plan(spec_for(model), captions);
+        assert_eq!(plan(MODEL_QWEN_AUDIO_31, Some(120)), (9_000, Some(120)));
+        assert_eq!(plan(MODEL_QWEN_AUDIO_31, None), (9_000, None));
+        // Every other model is split into caption-sized requests as before.
+        assert_eq!(plan(MODEL_QWEN_AUDIO, Some(120)), (120, None));
+        assert_eq!(plan(MODEL_QWEN3, Some(120)), (120, None));
+        assert_eq!(plan(MODEL_COSYVOICE, None), (120, None));
+    }
+
+    #[test]
+    fn chunk_frames_yield_their_text_and_timing() {
+        let begin = parse_line(
+            r#"data:{"output":{"type":"sentence-begin","original_text":"你好。","sentence":{"index":0}}}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(begin.chunk, Some(ChunkEvent::Begin("你好。".to_string())));
+
+        let end = parse_line(
+            r#"data:{"output":{"type":"sentence-end","sentence":{"index":0,"words":[{"text":"你","begin_time":200,"end_time":400,"begin_index":0,"end_index":1},{"text":"好","begin_time":400,"end_time":650,"begin_index":1,"end_index":2}]}}}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        let word = |text: &str, begin_ms, end_ms| SpokenWord {
+            text: text.to_string(),
+            begin_ms,
+            end_ms,
+        };
+        assert_eq!(
+            end.chunk,
+            Some(ChunkEvent::End(vec![
+                word("你", 200, 400),
+                word("好", 400, 650)
+            ]))
+        );
+    }
+
+    /// A timed request's feed and timeline, at 1 kHz so samples read as ms.
+    fn feed(written: &str, limit: usize) -> (SentPiece, Arc<Mutex<CaptionTimeline>>) {
+        let timeline = Arc::new(Mutex::new(CaptionTimeline::new(1_000)));
+        (
+            SentPiece::new(0, written, Some((limit, timeline.clone()))),
+            timeline,
+        )
+    }
+
+    fn spoken(list: &[(&str, u64)], end_ms: u64) -> Vec<SpokenWord> {
+        let mut words: Vec<SpokenWord> = list
+            .iter()
+            .map(|&(text, begin_ms)| SpokenWord {
+                text: text.to_string(),
+                begin_ms,
+                end_ms: begin_ms + 100,
+            })
+            .collect();
+        if let Some(last) = words.last_mut() {
+            last.end_ms = end_ms;
+        }
+        words
+    }
+
+    #[test]
+    fn a_timed_chunk_captions_the_text_as_written_by_the_services_clock() {
+        let (piece, timeline) = feed("共 698 片，最短的 24 字。直观地说：折返更早。", 20);
+        // The service echoes the spaces-closed text it was sent.
+        assert_eq!(piece.text, "共698片，最短的24字。直观地说：折返更早。");
+        let mut chunks = ChunkReader::new(piece.captions.as_ref().unwrap());
+        chunks.read(ChunkEvent::Begin(piece.text.clone()));
+        let heard = |ms| {
+            timeline
+                .lock()
+                .unwrap()
+                .at(0, ms)
+                .map(|p| (p.index, p.text))
+        };
+        // Up from the start, before any timing has arrived.
+        assert_eq!(
+            heard(10),
+            Some((0, "共 698 片，最短的 24 字。".to_string()))
+        );
+
+        chunks.read(ChunkEvent::End(spoken(
+            &[
+                ("共", 0),
+                ("六", 100),
+                ("百", 150),
+                ("九", 200),
+                ("十", 250),
+                ("八", 300),
+                ("片", 400),
+                ("，最", 600),
+                ("短", 700),
+                ("的", 800),
+                ("二", 900),
+                ("十", 950),
+                ("四", 1_000),
+                ("字", 1_100),
+                ("。直", 1_500),
+                ("观", 1_600),
+                ("说", 1_700),
+                ("：折", 1_900),
+                ("返", 2_000),
+                ("更", 2_100),
+                ("早", 2_200),
+            ],
+            2_400,
+        )));
+        assert_eq!(heard(1_400).unwrap().0, 0);
+        assert_eq!(heard(1_500), Some((1, "直观地说：折返更早。".to_string())));
+    }
+
+    #[test]
+    fn the_next_chunk_opens_where_the_last_ones_speech_ended() {
+        let (piece, timeline) = feed("第一句。第二句。", 120);
+        let mut chunks = ChunkReader::new(piece.captions.as_ref().unwrap());
+        chunks.read(ChunkEvent::Begin("第一句。".to_string()));
+        chunks.read(ChunkEvent::End(spoken(
+            &[("第", 0), ("一", 100), ("句", 200)],
+            900,
+        )));
+        chunks.read(ChunkEvent::Begin("第二句。".to_string()));
+        let heard = |ms| timeline.lock().unwrap().at(0, ms).map(|p| p.text);
+        assert_eq!(heard(899).as_deref(), Some("第一句。"));
+        assert_eq!(heard(900).as_deref(), Some("第二句。"));
+
+        // A retry is sent the text again; what the failed attempt placed goes.
+        let _retry = ChunkReader::new(piece.captions.as_ref().unwrap());
+        assert_eq!(heard(900), None);
     }
 
     #[test]
@@ -1079,6 +1539,7 @@ mod tests {
         // CRLF framing would otherwise leave a trailing \r inside the JSON.
         let audio = parse_line(b"data:{\"output\":{\"audio\":{\"data\":\"aGk=\"}}}\r")
             .unwrap()
+            .audio
             .unwrap();
         assert_eq!(audio, b"hi");
     }
@@ -1315,8 +1776,10 @@ mod tests {
                     sample_rate: rate,
                     rate: 1.0,
                     instruction: None,
+                    word_timestamps: false,
                 },
                 &tx,
+                None,
                 &token,
             ));
             drop(tx);
@@ -1342,6 +1805,77 @@ mod tests {
                 spec.id
             );
         }
+    }
+
+    /// The timed caption path end to end: Qwen-Audio 3.1 with captions on,
+    /// polled the way the HUD driver polls it. Plays audio (quietly), so it is
+    /// opt-in:
+    ///
+    /// ```text
+    /// ALIYUN_TTS_API_KEY=... cargo test --lib aliyun::tests::live_timed -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires network access and credentials"]
+    fn live_timed_captions_follow_the_service() {
+        use crate::tts::SessionSlot;
+        use std::time::{Duration, Instant};
+
+        let api_key = std::env::var("ALIYUN_TTS_API_KEY").expect("ALIYUN_TTS_API_KEY is not set");
+        let backend = AliyunBackend::new(AliyunConfig {
+            api_key,
+            model: MODEL_QWEN_AUDIO_31.to_string(),
+            instruction: DEFAULT_INSTRUCTION.to_string(),
+        });
+        // Sentences long enough that the service packs chunks past the
+        // caption size, so some captions are placed inside a chunk.
+        let text = "这次一共测了 25 句历史文本，其中 15 句带有数字，另外 10 句只含英文单词。\
+            服务端会把中文与数字之间的空格读成停顿，比如把每种配置有 8 个固定起点读成有、八、个。\
+            去掉这些空格以后，插入的顿号从 18 处降到 1 处，停顿也从 98 处减少到 83 处。\
+            纯英文单词两侧的空格不会产生顿号，所以 CORE 和 Agent 这样的词保持原样。\
+            字幕仍然显示原来的文字，只有发给服务端的文本去掉了空格。\
+            整段文字现在只发一次请求，字幕的切换时间来自服务端返回的逐字时间戳。";
+
+        let slot = SessionSlot::default();
+        let mut request = TtsRequest::plain(text.to_string());
+        request.piece_limit = Some(120);
+        request.rate = Some(0.6);
+        request.volume = Some(0.2);
+        backend.start(request, slot.claim()).expect("start");
+
+        let started = Instant::now();
+        let mut shown: Vec<SpeechProgress> = Vec::new();
+        while slot.is_active() && started.elapsed() < Duration::from_secs(180) {
+            if let Some(now) = backend.progress() {
+                if shown.last() != Some(&now) {
+                    eprintln!(
+                        "{:6.2}s  caption {} ({} chars): {}",
+                        started.elapsed().as_secs_f64(),
+                        now.index,
+                        now.text.chars().count(),
+                        now.text
+                    );
+                    shown.push(now);
+                }
+            }
+            thread::sleep(Duration::from_millis(60));
+        }
+
+        assert!(!slot.is_active(), "the read did not finish in time");
+        let indices: Vec<usize> = shown.iter().map(|caption| caption.index).collect();
+        assert_eq!(
+            indices,
+            (0..shown.len()).collect::<Vec<_>>(),
+            "captions skipped or repeated"
+        );
+        let joined: String = shown.iter().map(|caption| caption.text.as_str()).collect();
+        assert_eq!(
+            joined, text,
+            "captions must cover the text as written, spaces and all"
+        );
+        assert!(shown
+            .iter()
+            .all(|caption| caption.text.chars().count() <= 120));
+        assert!(shown.len() > 1);
     }
 
     /// Which voice ids the account actually accepts. Voice tables are hand-kept
@@ -1374,8 +1908,10 @@ mod tests {
                         sample_rate: spec.sample_rates[0],
                         rate: 1.0,
                         instruction: None,
+                        word_timestamps: false,
                     },
                     &tx,
+                    None,
                     &token,
                 ));
                 drop(tx);

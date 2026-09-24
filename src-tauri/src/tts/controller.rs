@@ -59,7 +59,9 @@ const HUD_ERROR_LINGER_MS: u64 = 2_600;
 /// A caption is the piece being spoken, so the piece has to be about a
 /// sentence: long enough that a normal sentence is not cut, short enough
 /// that the HUD's four lines hold it. CosyVoice already ran at this size;
-/// for the other providers it means more, smaller requests per read.
+/// for most other providers it means more, smaller requests per read. A
+/// model whose service times its own speech (Qwen-Audio 3.1) keeps one
+/// request per read and places captions of this size by that timing.
 const CAPTION_PIECE_LIMIT: usize = 120;
 
 /// Sentence-sized pieces cost extra requests, so a read is only split that
@@ -370,7 +372,10 @@ impl TtsController {
                                 "caption",
                                 &[
                                     ("index", next.index.to_string()),
-                                    ("total", next.total.to_string()),
+                                    (
+                                        "total",
+                                        next.total.map(|total| total.to_string()).unwrap_or_default(),
+                                    ),
                                 ],
                             );
                             hud.emit_caption(Some(&next));

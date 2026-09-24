@@ -191,9 +191,16 @@ impl PlaybackShared {
     /// been written to the device. `None` until the first piece's first
     /// sample has, so a caption never appears ahead of its audio.
     fn current_piece(&self) -> Option<usize> {
+        self.position().map(|(piece, _)| piece)
+    }
+
+    /// The piece being heard, as for [`current_piece`](Self::current_piece),
+    /// and how many of its samples the device has been given.
+    fn position(&self) -> Option<(usize, u64)> {
         let played = self.played.load(Ordering::SeqCst);
         let starts = self.piece_starts.lock().ok()?;
-        starts.iter().rposition(|&start| start < played)
+        let piece = starts.iter().rposition(|&start| start < played)?;
+        Some((piece, played - starts[piece]))
     }
 
     fn take_staged(&self, local: &mut VecDeque<f32>) {
@@ -228,6 +235,12 @@ impl PlaybackHandle {
     /// Index of the piece being heard; see [`Playback::begin_piece`].
     pub fn current_piece(&self) -> Option<usize> {
         self.shared.current_piece()
+    }
+
+    /// The piece being heard and how far into it the device has played, in
+    /// samples: what a caption timed within its piece is looked up by.
+    pub fn position(&self) -> Option<(usize, u64)> {
+        self.shared.position()
     }
 
     pub fn set_gain(&self, gain: f32) {
@@ -517,6 +530,8 @@ mod tests {
             shared.played.store(played, Ordering::SeqCst);
             assert_eq!(shared.current_piece(), expected, "played={played}");
         }
+        // And how far into that piece: one sample past the second's start.
+        assert_eq!(shared.position(), Some((1, 1)));
     }
 
     fn drain_into<T: Copy + Default + std::fmt::Debug>(

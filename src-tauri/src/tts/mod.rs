@@ -11,6 +11,7 @@
 
 pub mod aliyun;
 pub mod azure;
+pub mod caption_timeline;
 pub mod clipboard_text;
 pub mod cloud_playback;
 pub mod controller;
@@ -93,6 +94,10 @@ pub struct TtsRequest {
     /// sentence-sized value: the piece is what a backend reports progress on
     /// (see [`SpeechProgress`]), and only a short piece makes "the sentence
     /// being spoken" true rather than "the paragraph containing it".
+    ///
+    /// A backend whose service reports when it speaks each character may keep
+    /// the read in larger requests and still report progress on pieces this
+    /// size (see [`caption_timeline`]).
     pub piece_limit: Option<usize>,
 }
 
@@ -120,13 +125,14 @@ pub fn piece_limit_for(requested: Option<usize>, own: usize) -> usize {
 /// Which piece of a request is being heard, for captions.
 ///
 /// `index` counts pieces from zero and `total` is how many the request was
-/// split into; `text` is the piece itself, so the HUD needs no copy of the
-/// split. Equality is what the HUD driver polls on: a new value means a new
-/// caption event.
+/// split into — `None` when the service decides that as it goes (see
+/// [`caption_timeline`]); `text` is the piece itself, so the HUD needs no copy
+/// of the split. Equality is what the HUD driver polls on: a new value means a
+/// new caption event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeechProgress {
     pub index: usize,
-    pub total: usize,
+    pub total: Option<usize>,
     pub text: String,
 }
 
@@ -135,7 +141,7 @@ impl SpeechProgress {
     pub fn at(index: usize, pieces: &[String]) -> Option<Self> {
         Some(Self {
             index,
-            total: pieces.len(),
+            total: Some(pieces.len()),
             text: pieces.get(index)?.clone(),
         })
     }
