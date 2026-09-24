@@ -481,6 +481,17 @@ pub fn split_for_backend(text: &str, limit: usize) -> Vec<String> {
     fn is_clause_end(ch: char) -> bool {
         matches!(ch, '，' | '、' | '；' | '：' | ',' | ';' | ':')
     }
+    /// ASCII punctuation also sits inside tokens — `1.13`, `window.rs`,
+    /// `10:30`, `1,000` — and each piece is normalized on its own, so a cut
+    /// there reads the halves as two numbers: `10.` | `05千牛` came back from
+    /// Qwen-Audio 3.1 as 「十。零五千牛」. It is a boundary only when no
+    /// letter or digit follows it.
+    fn inside_token(chars: &[char], index: usize) -> bool {
+        chars[index].is_ascii_punctuation()
+            && chars
+                .get(index + 1)
+                .is_some_and(|next| next.is_ascii_alphanumeric())
+    }
 
     let chars: Vec<char> = text.chars().collect();
     if limit == 0 || chars.len() <= limit {
@@ -495,11 +506,16 @@ pub fn split_for_backend(text: &str, limit: usize) -> Vec<String> {
         // proportional one would happily push hundreds into the next piece
         // just to land on a full stop.
         let lookback = limit.saturating_sub(SENTENCE_LOOKBACK);
-        let cut = window[lookback..]
-            .iter()
-            .rposition(|ch| is_sentence_end(*ch))
-            .or_else(|| window[lookback..].iter().rposition(|ch| is_clause_end(*ch)))
-            .map(|offset| lookback + offset + 1)
+        // Indexed through `chars`, not `window`: whether a character ends a
+        // token can depend on the one just past the window's edge.
+        let last_boundary = |is_boundary: fn(char) -> bool| {
+            (start + lookback..start + limit)
+                .rev()
+                .find(|&index| is_boundary(chars[index]) && !inside_token(&chars, index))
+        };
+        let cut = last_boundary(is_sentence_end)
+            .or_else(|| last_boundary(is_clause_end))
+            .map(|index| index - start + 1)
             .unwrap_or(limit);
         pieces.push(window[..cut].iter().collect());
         start += cut;
@@ -547,6 +563,21 @@ mod tests {
         let text = "前一句话结束。之后是很长的、带着顿号的从句一直说下去说下去";
         let pieces = split_for_backend(text, 20);
         assert_eq!(pieces[0], "前一句话结束。");
+    }
+
+    #[test]
+    fn ascii_punctuation_inside_a_token_is_not_a_boundary() {
+        // Each piece is normalized alone: `10.` | `05千牛` was read as
+        // 「十。零五千牛」, and `1,000` or `10:30` split the same way.
+        let text = "测力差增加。到10.05千牛";
+        assert_eq!(split_for_backend(text, 11)[0], "测力差增加。");
+        let text = "共计一千件，合计1,000件";
+        assert_eq!(split_for_backend(text, 11)[0], "共计一千件，");
+        let text = "时间，从10:30开始";
+        assert_eq!(split_for_backend(text, 9)[0], "时间，");
+        // A full stop followed by a space still ends an English sentence.
+        let text = "First one. Second one goes on";
+        assert_eq!(split_for_backend(text, 20)[0], "First one.");
     }
 
     #[test]
