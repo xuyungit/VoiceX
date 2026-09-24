@@ -427,6 +427,56 @@ fn speed_from_normalized(rate: Option<f32>) -> f32 {
     (rate / 0.5).clamp(0.5, 2.0)
 }
 
+/// Drop the space between Chinese and a token that contains a digit — the
+/// typographic spacing the cleanup and translate prompts' LLMs put around
+/// every number — before the text reaches the service.
+///
+/// The service reads that space as a pause: Qwen-Audio 3.0 and 3.1 normalize
+/// 「每种配置有 8 个」 to 「有、八、个」. Over 15 sentences from translate-read
+/// history, closing these spaces took 3.1's inserted 、 from 18 to 1 and
+/// changed no reading otherwise; CosyVoice v3, which reports no normalized
+/// text, spoke four test sentences 13% faster (2026-09-24). Letter-only words
+/// are left alone: their spaces add no 、, and closing them moved the audio no
+/// more than resending the same text an hour later does. Captions keep the
+/// spaced text; only what is synthesized changes.
+fn close_number_spacing(text: &str) -> String {
+    fn is_cjk(ch: char) -> bool {
+        matches!(ch,
+            '\u{3000}'..='\u{303f}'    // CJK punctuation: 。、「」
+            | '\u{3400}'..='\u{4dbf}'  // extension A
+            | '\u{4e00}'..='\u{9fff}'  // unified ideographs
+            | '\u{f900}'..='\u{faff}'  // compatibility ideographs
+            | '\u{ff00}'..='\u{ffef}'  // full-width forms: ，：（）
+        )
+    }
+    // The run of non-CJK characters on one side of the space, up to the next
+    // whitespace: `0.94%` in 「为 0.94%，」, `M3` in 「从 M3 版本」.
+    fn has_digit<'a>(token: impl Iterator<Item = &'a char>) -> bool {
+        token
+            .take_while(|ch| !ch.is_whitespace() && !is_cjk(**ch))
+            .any(|ch| ch.is_ascii_digit())
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    chars
+        .iter()
+        .enumerate()
+        .filter(|&(index, &ch)| {
+            let (Some(&before), Some(&after)) = (
+                index.checked_sub(1).and_then(|i| chars.get(i)),
+                chars.get(index + 1),
+            ) else {
+                return true;
+            };
+            let closes = ch == ' '
+                && ((is_cjk(before) && has_digit(chars[index + 1..].iter()))
+                    || (is_cjk(after) && has_digit(chars[..index].iter().rev())));
+            !closes
+        })
+        .map(|(_, &ch)| ch)
+        .collect()
+}
+
 pub struct AliyunBackend {
     config: Mutex<AliyunConfig>,
     /// Filled in by the decode thread once it owns the output device, so `stop`
@@ -586,11 +636,14 @@ impl AliyunBackend {
         let instruction = Some(config.instruction.trim().to_string())
             .filter(|instruction| spec.accepts_instruction && !instruction.is_empty());
 
-        let pieces = cloud_playback::split_pieces(
+        let pieces: Vec<String> = cloud_playback::split_pieces(
             &request.text,
             piece_limit_for(request.piece_limit, spec.piece_chars.min(spec.max_chars)),
             &self.pieces,
-        );
+        )
+        .iter()
+        .map(|piece| close_number_spacing(piece))
+        .collect();
 
         let (tx, rx) = mpsc::channel::<PieceStream>();
         // Lets the decode side tell "the provider failed" apart from "the audio
@@ -857,6 +910,20 @@ mod tests {
     fn rates_outside_the_slider_are_clamped_to_what_the_provider_accepts() {
         assert_eq!(speed_from_normalized(Some(0.0)), 0.5);
         assert_eq!(speed_from_normalized(Some(5.0)), 2.0);
+    }
+
+    #[test]
+    fn spaces_around_numbers_are_closed_before_synthesis() {
+        // Read as 「共、六百九十八、片」 with the spaces in.
+        assert_eq!(
+            close_number_spacing("共 698 片，从 M3 版本起，延迟 300 ms。"),
+            "共698片，从M3版本起，延迟300 ms。"
+        );
+        // Letter-only words sound the same either way, and spaces between
+        // two ASCII tokens are the text's own.
+        let words = "使用 git commit --amend 即可，CORE 不变。";
+        assert_eq!(close_number_spacing(words), words);
+        assert_eq!(close_number_spacing(" 8 "), " 8 ");
     }
 
     #[test]
