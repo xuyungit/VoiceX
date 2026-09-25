@@ -3,7 +3,7 @@
 最后更新：2026-04-09  
 关联文档：
 
-- [ElevenLabs ASR Provider 接入分析](/Users/xuyun/Projects/VoiceX/docs/elevenlabs-asr-provider-analysis.md)
+- [ElevenLabs ASR Provider 接入分析](./elevenlabs-asr-provider-analysis.md)
 
 ## 状态说明
 
@@ -952,7 +952,7 @@ Rust 后端：
 
 ## 18. 参考资料
 
-- [ElevenLabs ASR Provider 接入分析](/Users/xuyun/Projects/VoiceX/docs/elevenlabs-asr-provider-analysis.md)
+- [ElevenLabs ASR Provider 接入分析](./elevenlabs-asr-provider-analysis.md)
 - [Speech to Text quickstart](https://elevenlabs.io/docs/eleven-api/guides/cookbooks/speech-to-text)
 - [Client-side streaming](https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/realtime/client-side-streaming)
 - [Server-side streaming](https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/realtime/server-side-streaming)

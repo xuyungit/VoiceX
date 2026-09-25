@@ -262,7 +262,7 @@ HUD 侧的期望：热键后 5 秒内出现；朗读结束（自然结束或停�
 ## 8. 派遣 Agent 的提示词模板
 
 ```text
-在 /Users/xuyun/Projects/VoiceX 按 docs/tts-regression-testing.md 执行一轮 L2 朗读回归。
+在 VoiceX 仓库根目录按 docs/tts-regression-testing.md 执行一轮 L2 朗读回归。
 
 范围：第 3 节 3.1–3.4 全部，3.5 [做 / 不做]，第 5 节 5.1 与 5.3，5.2 仅在你有带屏幕录制权限的 shell 时做。
 应用状态：[维护者已用 `pnpm tauri dev 2>&1 | tee /tmp/voicex-tts.log` 启动 / 未带日志启动，跳过依赖日志的脚本]。
