@@ -16,12 +16,12 @@ VoiceX is a cross-platform desktop voice input tool. Its overall pipeline is: re
 
 - **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
 - **Multiple ASR backends** — switch between fourteen cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
-- **Read selection** — select text in any application and one hotkey reads it aloud, through the system voice or any of the cloud TTS providers (macOS only for now).
+- **Read and translate-and-read** — select text in any application and one hotkey reads it aloud; another has an LLM translate it first and reads the translation. The HUD captions each sentence, and the clipboard is read when nothing is selected. Uses the system voice or any of the cloud TTS providers (macOS only for now).
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
 - **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status, and on macOS it follows the active Space when triggered from another desktop.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
 - **Smart text injection** — recognized text is pasted into the active app via clipboard (with automatic backup/restore) or simulated typing, with per-app overrides for apps that need a different injection strategy.
-- **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with audio playback, re-transcription, and replay injection testing.
+- **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with audio playback, re-transcription, and replay injection testing; the Overview counts reading alongside dictation.
 - **Cross-device sync** — a self-hosted sync server keeps history in sync across your machines.
 
 ## Interaction Modes
@@ -36,20 +36,33 @@ VoiceX maps three distinct intents to a single configurable hotkey:
 
 Hold threshold and double-tap window are configurable. Press **Escape** at any time to cancel and discard.
 
-## Read Selection
+## Reading and Translate-and-Read
 
-VoiceX also works in the other direction: select text in **any application**,
-press **⌥⌘R** (configurable), and it reads the selection aloud. Press again, or
-press **Escape**, to stop immediately.
+VoiceX also works in the other direction. Select text in **any application**:
+
+| Hotkey (configurable) | What it does |
+|---|---|
+| **⌥⌘R** Read | Reads the selection aloud |
+| **⌥⌘T** Translate and read | Has an LLM translate the selection into the target language (English by default), then reads the translation. Text already in the target language is tidied, not translated |
+
+Press either reading key again, or **Escape**, to stop immediately; while the
+translation is pending, the key or Escape cancels it.
 
 > **macOS only for now.** Reading the selection out of another application goes
 > through the macOS Accessibility API; there is no Windows implementation yet, so
-> the hotkey is not registered there and still reaches the foreground application.
+> neither hotkey is registered there and both still reach the foreground application.
+
+<p align="center">
+  <img src="assets/screenshots/en/reading-settings.png" alt="VoiceX Reading settings" width="720" />
+</p>
 
 | | Detail |
 |---|---|
-| **How text is read** | Straight from the Accessibility API where possible (8–15 ms); otherwise it falls back to a synthetic Command + C and restores your clipboard afterwards. The fallback can be switched off, at the cost of Safari and VS Code support |
-| **Speech engines** | The system voice (offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS); or, in the cloud, Volcengine Doubao Seed-TTS 2.0, Alibaba Cloud Model Studio (default `qwen-audio-3.1-tts-flash` for longer text at about a sixth of 3.0's price; `qwen-audio-3.0-tts-flash` for its 500+ extra basic voices; `qwen3-tts-flash` for dialect voices; `cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`, the latter taking a Voice Design / cloned `voice_id`), Xiaomi MiMo, or Microsoft Azure Speech. Cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey; long selections are split at sentence boundaries instead of being truncated. Voice, rate and volume are stored per engine |
+| **How text is read** | Straight from the Accessibility API where possible (8–15 ms); otherwise a synthetic Command + C, with your clipboard restored afterwards (the compatibility mode; switching it off loses Safari and VS Code). If there is still no selection, the **clipboard's** plain text is read instead and the HUD says so. Never in a password field, and content a password manager marks as concealed is never read |
+| **Captions** | On by default. The HUD switches to a text-only caption showing the sentence being spoken, for plain and translated reads alike. The default system voice (`say`) reports no progress, so it keeps the compact HUD |
+| **Translate and read** | Its own LLM choice (follow the LLM page, a provider, or a custom endpoint) and optional voices per target language; up to 5000 characters per read. A failed, timed-out or unconfigured LLM is reported on the HUD and **never falls back to reading the untranslated text**. Source and translation are kept on the History page by default (no audio, not synced), and the translation can also be copied to the clipboard |
+| **Tidy before reading** (optional) | Before a plain read, the LLM strips Markdown, HTML markup and link URLs so only the prose is read; if tidying fails, the original is read. The reading and translation prompts read a table copied from a web page as sentences rather than cell by cell |
+| **Speech engines** | The system voice (offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS); or, in the cloud, Volcengine Doubao Seed-TTS 2.0, Alibaba Cloud Model Studio (default `qwen-audio-3.1-tts-flash` for longer text at about a sixth of 3.0's price; `qwen-audio-3.0-tts-flash` for its 500+ extra basic voices; `qwen3-tts-flash` for dialect voices; `cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`, the latter taking a Voice Design / cloned `voice_id`), Xiaomi MiMo, or Microsoft Azure Speech. Cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey; long selections are split at sentence boundaries instead of being truncated. Voice, rate and volume are stored per engine; Alibaba Cloud models that accept one also take a plain-language style instruction, by default a calm delivery suited to technical text |
 | **Yields to dictation** | Starting dictation stops reading — otherwise the microphone would record the speech and transcribe it back |
 
 ### How this differs from the built-in "Speak selection"
@@ -74,11 +87,15 @@ working in places we cannot reach such as the login window.
 
 - The default engine is the **system voice, entirely local** — selected text
   never leaves the machine.
-- With a cloud engine selected, **the selected text is sent to that provider**
+- With a cloud engine selected, **the text being read is sent to that provider**
   for synthesis. The settings page says so when a cloud engine is chosen.
-- Reading history is **not** stored, and neither is synthesized audio. Ordinary
-  logs record length, how the text was read, the target application and error
-  codes — never the text itself.
+- Translate-and-read and tidy-before-reading also send the text to the chosen
+  LLM provider.
+- Plain reads store **no** text and no synthesized audio. Translate-and-read keeps
+  the source and translation in local history by default (it can be switched off),
+  and those rows are never uploaded by sync. The Overview records only counts,
+  characters and time. Ordinary logs record length, how the text was read, the
+  target application and error codes, never the text itself.
 
 ## ASR Backends
 
@@ -158,6 +175,7 @@ Features:
 - **Translation** — translate dictation to English, triggered by double-tap gesture.
 - **Prompt templates** — full control over correction and translation prompts, with `{{DICTIONARY}}` placeholder for hot-word injection.
 - **Connectivity test** — send one real correction request with the active provider and model to inspect latency and output quality.
+- **Lowest reasoning by default** — short corrections and translations gain nothing from thinking and lose seconds to it. Every provider defaults to "Auto lowest", resolved per provider, host and model into the spelling that vendor honours (for example `thinking: disabled` on Volcengine Ark), and the settings page shows the exact fields that will be sent. Custom endpoints can also merge an **extra request fields** JSON object into the body. There is no fixed output cap, and a reply cut off at the output limit is an error rather than half a result.
 
 ## Dictionary & Hot-Words
 
@@ -183,7 +201,8 @@ Features:
 - Re-transcribe any saved recording with a different ASR backend and optional LLM correction to compare providers on the same audio; replay the final text into the current app to test the full end-to-end flow.
 - Failed batch transcriptions are preserved locally with the original audio so you can retry later instead of repeating the whole dictation immediately.
 - Configurable retention policies for text and audio (7 / 30 / 180 / 365 days, or forever).
-- Overview dashboard: total duration, character count, AI correction calls, average dictation speed — aggregated per device.
+- Overview dashboard: total duration, character count, AI correction calls, average dictation speed; plus a Reading section with plain reads, translated reads, characters read, reading time and the AI calls reads triggered. Each shows the account total alongside this device.
+- Translate-and-read rows appear in History too, but stay on this device.
 
 ## Localization
 
@@ -197,6 +216,7 @@ Memory will likely remain a long-term theme in the AI era. If you use voice inpu
 
 - Token + shared-secret authentication.
 - Real-time sync status (live / connecting / reconnecting / blocked).
+- Reading statistics are uploaded per device and summed into account totals; an older server that lacks the endpoint simply leaves them unsummed, and history sync is unaffected.
 - See [sync-server/README.md](./sync-server/README.md) for setup.
 
 ## Tech Stack
