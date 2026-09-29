@@ -452,7 +452,8 @@ struct StandingsFile {
 ///
 /// - 0: every run recorded before the rules were versioned (up to 2026-09-23).
 /// - 1: cleanup sites inside clean, per-call log-scale speed ending at the app's timeout, latency 0.15.
-const SCORING_VERSION: u32 = 1;
+/// - 2: a late qualifier scores by whether the word rejoins its sentence; Abaqus and Midas count as dictionary.
+const SCORING_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct StandingRun {
@@ -3028,24 +3029,51 @@ mod tests {
         assert_eq!(by_code(&fixed_not_cleaned), (Some(1.0), Some(1.0), Some(adjudicate::FILLERS_KEPT_CREDIT)));
 
         let fea = cases.case.iter().find(|c| c.name == "Abaqus and Midas").unwrap();
-        let reference = Reference::new(&fea.input, &fea.expected, &terms);
+        let mut fea_terms = terms.to_vec();
+        fea_terms.extend(["Abaqus".to_string(), "Midas".to_string()]);
+        let reference = Reference::new(&fea.input, &fea.expected, &fea_terms);
         assert_eq!(
             reference.sites(),
             vec![
                 cleanup("这个"),
-                site(Tier::Semantic, "Abacus", "Abaqus"),
+                site(Tier::Dictionary, "Abacus", "Abaqus"),
                 cleanup("的，嗯，"),
                 cleanup("，呃，"),
-                site(Tier::Semantic, "Abacus", "Abaqus"),
+                site(Tier::Dictionary, "Abacus", "Abaqus"),
                 cleanup("，嗯，就是"),
-                site(Tier::Semantic, "Abacus", "Abaqus"),
+                site(Tier::Dictionary, "Abacus", "Abaqus"),
                 cleanup("，呃，"),
                 cleanup("这个"),
                 cleanup("呃，"),
-                site(Tier::Semantic, "麦达斯", "Midas"),
-                site(Tier::Semantic, "Abacus", "Abaqus"),
+                site(Tier::Dictionary, "麦达斯", "Midas"),
+                site(Tier::Dictionary, "Abacus", "Abaqus"),
             ]
         );
+        let named = fea.input.replace("Abacus", "Abaqus").replace("麦达斯", "Midas");
+        let analysis = reference.analyze(&named, &[]);
+        assert!(analysis.asks().is_empty(), "{:?}", analysis.asks());
+        let mut tallies = Tallies::default();
+        tallies.add(&adjudicate::score(&analysis, &Answers::new()));
+        assert_eq!(tallies.dictionary.rate(), Some(1.0));
+
+        // 暂时 was spoken after the question. Joining it to that sentence passes, whichever
+        // slot it lands in; deleting it, or leaving the fragment, does not.
+        let late = cases.case.iter().find(|c| c.name == "Late qualifier").unwrap();
+        let reference = Reference::new(&late.input, &late.expected, &[]);
+        assert_eq!(reference.sites(), vec![site(Tier::Semantic, "都不需要吗？暂时。", "暂时都不需要吗？")]);
+        let credit = |output: &str| {
+            let analysis = reference.analyze(output, &[]);
+            assert!(analysis.asks().is_empty(), "{output}: {:?}", analysis.asks());
+            match &analysis.sites[0].outcome {
+                adjudicate::Outcome::Settled { credit, .. } => *credit,
+                adjudicate::Outcome::Ask(_) => panic!("expected code to settle {output}"),
+            }
+        };
+        assert_eq!(credit(&late.expected), 1.0);
+        assert_eq!(credit("这个分支里暂时任何改动都不需要吗？"), 1.0);
+        assert_eq!(credit("这个分支里暂时不需要任何改动吗？"), 1.0);
+        assert_eq!(credit(&late.input), 0.0);
+        assert_eq!(credit("这个分支里任何改动都不需要吗？"), 0.0);
     }
 
     #[test]

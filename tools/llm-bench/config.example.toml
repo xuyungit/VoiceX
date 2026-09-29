@@ -42,6 +42,8 @@ Kubernetes
 Docker
 VoiceX
 Claude
+Abaqus
+Midas
 """
 
 # --- Scoring ---
@@ -54,6 +56,10 @@ Claude
 #               CLAUDE.md, Claude md). Settled by code.
 #   semantic    any other fix (下一集 → 下一级). Code settles the exact answer
 #               and the untouched error; anything else goes to the judge.
+#               A word spoken as its own sentence after the one it belongs in is
+#               one site: it passes when that word stands inside the earlier
+#               sentence and the trailing fragment is gone. Order is not scored,
+#               and at most two characters may be added or missing.
 #   clean       the model changed nothing else. Spacing, sentence punctuation
 #               and casing cost nothing; other changes go to the judge.
 #

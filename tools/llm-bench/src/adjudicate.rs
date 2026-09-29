@@ -7,6 +7,11 @@
 //!                     place in the output, in any casing and with any suffix. Settled by code, never by a model.
 //!   semantic site     every other difference. Code settles what is exact by definition (written as expected, left as
 //!                     heard, a casing variant of either); anything else becomes a question for the judge.
+//!   late qualifier    a semantic site whose difference is a short sentence spoken after the one it belongs in
+//!                     (`都不需要吗？暂时。`). It passes when those words stand inside the earlier sentence, that
+//!                     trailing fragment is gone, and the other characters are the same apart from at most
+//!                     [`LATE_WORD_SLACK`] added or missing. Order is not part of the requirement. A larger rewrite of a
+//!                     sentence that did take the words in goes to the judge.
 //!   clean             what the model changed outside the sites. Spacing, sentence punctuation and casing are neutral
 //!                     by code; any other change becomes a question, and only then is the output as a whole gated.
 //!
@@ -38,6 +43,9 @@ pub const EDIT_CREDIT: [(&str, f64); 5] = [
 pub const GATE_KINDS: [&str; 4] = ["transcript", "incomplete", "extended", "not_transcript"];
 /// Punctuation that separates clauses and sentences. Changing it (outside a number) does not change a word.
 const SENTENCE_PUNCT: [char; 14] = ['，', '。', '、', '；', '：', '？', '！', ',', '.', ';', ':', '?', '!', '-'];
+/// Characters that may be added or missing once a late qualifier is back in its sentence. Order is ignored;
+/// replacing one character costs two, one added and one missing.
+const LATE_WORD_SLACK: usize = 2;
 
 // ── Text primitives ─────────────────────────────────────────────────────────
 
@@ -499,6 +507,153 @@ struct Spec {
     intended: String,
     own: Vec<usize>,
     terms: Vec<TermReq>,
+    /// Set when this site is a word spoken as its own sentence after the one it belongs in.
+    late_word: Option<LateWord>,
+}
+
+/// Words said in their own sentence after the sentence they qualify.
+struct LateWord {
+    word: String,
+    /// Words of the earlier sentence, punctuation removed.
+    body: String,
+}
+
+enum LateSettle {
+    /// The word is inside the earlier sentence, the fragment is gone, and the rest is within [`LATE_WORD_SLACK`].
+    Pass,
+    /// The word is inside that sentence, but more than [`LATE_WORD_SLACK`] characters were added or lost.
+    Ask,
+    Miss(&'static str),
+}
+
+/// Added characters plus missing ones. The same characters in a different order cost nothing.
+fn multiset_distance(a: &str, b: &str) -> usize {
+    let mut count: HashMap<char, i32> = HashMap::new();
+    for c in a.chars() {
+        *count.entry(c).or_default() += 1;
+    }
+    for c in b.chars() {
+        *count.entry(c).or_default() -= 1;
+    }
+    count.values().map(|n| n.unsigned_abs() as usize).sum()
+}
+
+/// Distance from `body` after deleting one occurrence of `needle`. `None` when `needle` is absent.
+fn removal_distance(words: &str, needle: &str, body: &str) -> Option<usize> {
+    let mut start = 0;
+    let mut best: Option<usize> = None;
+    while let Some(i) = words[start..].find(needle) {
+        let at = start + i;
+        let rest = format!("{}{}", &words[..at], &words[at + needle.len()..]);
+        let dist = multiset_distance(&rest, body);
+        best = Some(best.map(|so_far| so_far.min(dist)).unwrap_or(dist));
+        start = at + needle.len();
+    }
+    best
+}
+
+fn sentence_words(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.trim().chars().collect();
+    sentences(&chars).into_iter().map(|(l, r)| words_only(&string(&chars[l..r]))).filter(|s| !s.is_empty()).collect()
+}
+
+/// The sentence whose words are closest to `body`, and whether that sentence contains `word`.
+fn closest_sentence_has_word(sents: &[String], word: &str, body: &str) -> bool {
+    let mut best = usize::MAX;
+    let mut has = false;
+    for sent in sents {
+        let (dist, contains) = match removal_distance(sent, word, body) {
+            Some(dist) => (dist, true),
+            None => (multiset_distance(sent, body), false),
+        };
+        if dist < best || (dist == best && contains && !has) {
+            best = dist;
+            has = contains;
+        }
+    }
+    has && best != usize::MAX
+}
+
+fn late_verdict(input: &str, late: &LateWord, output: &str) -> LateSettle {
+    let (input_words, output_words) = (words_only(input), words_only(output));
+    let miss = || {
+        LateSettle::Miss(if output_words == input_words {
+            "code:unchanged"
+        } else if !output_words.contains(&late.word) {
+            "code:dropped"
+        } else {
+            "code:unmerged"
+        })
+    };
+    let sents = sentence_words(output);
+    // The afterthought still stands as its own sentence, or the word never joined the earlier one.
+    if sents.iter().any(|s| s == &late.word) || !closest_sentence_has_word(&sents, &late.word, &late.body) {
+        return miss();
+    }
+    match removal_distance(&output_words, &late.word, &late.body) {
+        Some(dist) if dist <= LATE_WORD_SLACK => LateSettle::Pass,
+        Some(_) => LateSettle::Ask,
+        None => miss(),
+    }
+}
+
+/// An insertion of `word` into an earlier sentence plus deletion of a following sentence that is only `word`
+/// is one site: the word was spoken late. Any other shape of difference is left as the sites the diff made.
+fn collapse_late_word(specs: &mut Vec<Spec>, req: &[Edit], inp: &[char], exp: &[char]) {
+    let semantic: Vec<usize> = specs.iter().enumerate().filter(|(_, s)| s.tier == Tier::Semantic).map(|(i, _)| i).collect();
+    if semantic.len() != 2 {
+        return;
+    }
+    let heard_intended = |s: &Spec| (words_only(&string(&inp[s.a0..s.a1])), words_only(&s.intended));
+    let (left, right) = (semantic[0], semantic[1]);
+    let (heard_l, intended_l) = heard_intended(&specs[left]);
+    let (heard_r, intended_r) = heard_intended(&specs[right]);
+    let (ins, del, word) = if heard_l.is_empty() && !intended_l.is_empty() && intended_r.is_empty() && heard_r == intended_l {
+        (left, right, intended_l)
+    } else if heard_r.is_empty() && !intended_r.is_empty() && intended_l.is_empty() && heard_l == intended_r {
+        (right, left, intended_r)
+    } else {
+        return;
+    };
+    let sents = sentences(inp);
+    let del_spec = &specs[del];
+    let Some(&(late_l, late_r)) = sents.iter().find(|(l, r)| *l <= del_spec.a0 && del_spec.a1 <= *r) else { return };
+    if words_only(&string(&inp[late_l..late_r])) != word {
+        return;
+    }
+    let ins_at = specs[ins].a0;
+    if ins_at >= late_l {
+        return;
+    }
+    let Some(&(body_l, body_r)) = sents.iter().find(|(l, r)| *l <= ins_at && ins_at < *r) else { return };
+    if body_r != late_l {
+        return;
+    }
+    let body = words_only(&string(&inp[body_l..body_r]));
+    if body.is_empty() || specs[ins].own.is_empty() || specs[del].own.is_empty() {
+        return;
+    }
+    let (ins_edit, del_edit) = (&req[specs[ins].own[0]], &req[specs[del].own[0]]);
+    if ins_edit.b0 > del_edit.b1 {
+        return;
+    }
+    let mut own = specs[ins].own.clone();
+    own.extend(specs[del].own.iter().copied());
+    own.sort_unstable();
+    let merged = Spec {
+        tier: Tier::Semantic,
+        a0: specs[ins].a0.min(specs[del].a0),
+        a1: specs[ins].a1.max(specs[del].a1),
+        intended: string(&exp[ins_edit.b0..del_edit.b1]),
+        own,
+        terms: Vec::new(),
+        late_word: Some(LateWord { word, body }),
+    };
+    let (first, second) = if ins < del { (ins, del) } else { (del, ins) };
+    specs.remove(second);
+    specs.remove(first);
+    specs.push(merged);
+    specs.sort_by_key(|s| (s.a0, s.a1));
 }
 
 pub struct Reference {
@@ -588,7 +743,7 @@ impl Reference {
             for &k in &own {
                 in_dictionary_site[k] = true;
             }
-            specs.push(Spec { tier: Tier::Dictionary, a0, a1, intended: string(&exp[b0..b1]), own, terms: required });
+            specs.push(Spec { tier: Tier::Dictionary, a0, a1, intended: string(&exp[b0..b1]), own, terms: required, late_word: None });
         }
         for (k, e) in req.iter().enumerate() {
             // spacing and sentence punctuation are formatting: required, but not what a site is scored for
@@ -598,9 +753,10 @@ impl Reference {
             }
             // words that only go away were never meant: a filler, a stutter, a half word before the whole one
             let tier = if is_cleanup(&inp, e.a0, e.a1, &old, &new) { Tier::Cleanup } else { Tier::Semantic };
-            specs.push(Spec { tier, a0: e.a0, a1: e.a1, intended: e.new.clone(), own: vec![k], terms: Vec::new() });
+            specs.push(Spec { tier, a0: e.a0, a1: e.a1, intended: e.new.clone(), own: vec![k], terms: Vec::new(), late_word: None });
         }
         specs.sort_by_key(|s| (s.a0, s.a1));
+        collapse_late_word(&mut specs, &req, &inp, &exp);
         let sents = sentences(&inp);
         Reference { inp, expected: string(&exp), req, sents, specs, terms: terms.to_vec() }
     }
@@ -691,9 +847,35 @@ impl Reference {
                 }
             }
 
+            let late = spec.late_word.as_ref().map(|lw| late_verdict(&string(inp), lw, &string(&out)));
             let mut depends_on_gate = false;
+            let mut late_display = false;
             let outcome = if let Some(credit) = pinned(pins, &h, &w) {
                 Outcome::settled("pin", credit)
+            } else if let Some(settle) = late {
+                late_display = true;
+                match settle {
+                    LateSettle::Pass => {
+                        claimed.fill(true);
+                        Outcome::settled("code:merged", 1.0)
+                    }
+                    LateSettle::Miss(how) => {
+                        let word = spec.late_word.as_ref().map(|lw| lw.word.as_str()).unwrap_or("");
+                        for (k, edit) in act.iter().enumerate() {
+                            let (old, new) = (words_only(&string(&inp[edit.a0..edit.a1])), words_only(&edit.new));
+                            if (old.is_empty() && new == word) || (new.is_empty() && old == word) {
+                                claimed[k] = true;
+                            }
+                        }
+                        Outcome::settled(how, 0.0)
+                    }
+                    LateSettle::Ask => {
+                        claimed.fill(true);
+                        let phrase = json!({ "heard": string(&inp[s..e]), "intended": spec.intended, "written": string(&out) });
+                        let state = json!({ "heard": string(inp), "intended": self.expected, "written": string(&out), "phrase": phrase });
+                        Outcome::Ask(Ask { kind: AskKind::Site, state, label: format!("site  {:?} → (late)", string(&inp[s..e])) })
+                    }
+                }
             } else if spec.tier == Tier::Dictionary {
                 if w == i {
                     Outcome::settled("code:exact", 1.0)
@@ -766,6 +948,11 @@ impl Reference {
                 }
             };
 
+            let (h, i, w) = if late_display {
+                (string(inp), self.expected.clone(), string(&out))
+            } else {
+                (h, i, w)
+            };
             let (hc, ic, wc): (Vec<char>, Vec<char>, Vec<char>) = (h.chars().collect(), i.chars().collect(), w.chars().collect());
             let half_fix = hc.len() == ic.len()
                 && ic.len() == wc.len()
@@ -1319,6 +1506,43 @@ mod tests {
         let kept = reference("嗯，我们看下一集。", "嗯，我们看下一级。", &[]);
         let analysis = kept.analyze("我们看下一级。", &[]);
         assert_eq!((analysis.sites.len(), analysis.groups.len()), (1, 1));
+    }
+
+    #[test]
+    fn a_late_qualifier_passes_when_the_word_joins_its_sentence() {
+        let input = "这个分支里任何改动都不需要吗？暂时。";
+        let expected = "这个分支里任何改动暂时都不需要吗？";
+        let r = reference(input, expected, &[]);
+        let site = |tier, heard: &str, intended: &str| (tier, heard.to_string(), intended.to_string());
+        assert_eq!(r.sites(), vec![site(Tier::Semantic, "都不需要吗？暂时。", "暂时都不需要吗？")]);
+
+        let judge = |output: &str| {
+            let analysis = r.analyze(output, &[]);
+            let scored = score(&analysis, &Answers::new());
+            let site = &scored.sites[0];
+            (site.how.clone(), site.credit, analysis.asks().len(), analysis.groups.len(), scored.clean)
+        };
+        // one canonical wording, and other places the same word can stand in the sentence
+        for output in [
+            expected,
+            "这个分支里暂时任何改动都不需要吗？",
+            "暂时这个分支里任何改动都不需要吗？",
+            "这个分支里任何改动，暂时都不需要吗？",
+            "这个分支里任何改动暂时都不需要。",
+            "这个分支里任何改动暂时都不需要嘛？",
+            // 任何改动都不需要 → 不需要任何改动, and 都 dropped: same characters apart from one
+            "这个分支里暂时不需要任何改动吗？",
+        ] {
+            assert_eq!(judge(output), ("code:merged".to_string(), Some(1.0), 0, 0, Some(1.0)), "{output}");
+        }
+        // left where it was said, deleted, or copied in without retiring the fragment
+        assert_eq!(judge(input), ("code:unchanged".to_string(), Some(0.0), 0, 0, Some(1.0)));
+        assert_eq!(judge("这个分支里任何改动都不需要吗？"), ("code:dropped".to_string(), Some(0.0), 0, 0, Some(1.0)));
+        assert_eq!(judge("这个分支里任何改动暂时都不需要吗？暂时。"), ("code:unmerged".to_string(), Some(0.0), 0, 0, Some(1.0)));
+        assert_eq!(judge("这个分支里任何改动都不需要吗？暂时先这样。"), ("code:unmerged".to_string(), Some(0.0), 0, 0, Some(1.0)));
+        // the word did join the sentence, but the sentence was rewritten past a couple of characters
+        let drifted = judge("我觉得这个分支暂时不用改了。");
+        assert_eq!((drifted.0.as_str(), drifted.1, drifted.2, drifted.3), ("unjudged", None, 1, 0));
     }
 
     #[test]

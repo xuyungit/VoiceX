@@ -60,11 +60,21 @@ name = "Bearing reactions"
 input = "嗯，把这这个数据稍微处理一下，然后可视化。我其实是想得到一个可交互的一个呃数据展示页面。这里边的每个这个呃支座，嗯反力，呃横坐标是这个时间，纵坐标是制作反力的测量值。啊，我希望这个嗯通过一个页HTML页面来实现。然后呃通过一个时序图，这个时序图可以交互。啊，比如说我想选中其中的一块，那就可以去呃去去去呃图放大只显示这一块。呃，然后十二个制作的这个图可以显示在一个图上，下边可以可以选选中或者取消选中某个制作。本本质上我们是要用它来观察数据，然后呃这个看看这个数据在某些时候的变化。所以这个每个图上也要有拖 tip，拖 tip 上有名字以及当前的这个值是多少。听明白了吗？"
 expected = "把这个数据稍微处理一下，然后可视化。我其实是想得到一个可交互的数据展示页面。这里边的每个支座反力，横坐标是时间，纵坐标是支座反力的测量值。我希望通过一个 HTML 页面来实现。然后通过一个时序图，这个时序图可以交互。比如说我想选中其中的一块，那就可以去图放大只显示这一块。然后十二个支座的图可以显示在一个图上，下边可以选中或者取消选中某个支座。本质上我们是要用它来观察数据，然后看看这个数据在某些时候的变化。所以每个图上也要有tooltip，tooltip 上有名字以及当前的值是多少。听明白了吗？"
 
-# Same rule. Abacus → Abaqus four times, 麦达斯 → Midas once. Neither term is
-# in the example dictionary, so those five sites are semantic; the 嗯/呃 and the
+# Abacus → Abaqus four times, 麦达斯 → Midas once. Both names are in the bench
+# dictionary, so these five sites are dictionary sites. The 嗯/呃 and the
 # 就是 / 这个 said while thinking are cleanup sites.
 
 [[case]]
 name = "Abaqus and Midas"
 input = "我们需要综合考虑我们的这个 Abacus 的模型，以及我们当前这个项目的，嗯，遇到的问题，呃，和挑战。要考虑就是到底我们遇到的问题是不是用 Abacus 模型能得到更好的结果，或者是，嗯，就是 Abacus 模型能更加去，呃，建模石桥的这个行为。所以我们现在要决策，呃，是不是要把之前基于跟麦达斯对齐的一个内部实现的有限元，然后如何换成 Abacus 这样的一个实现，我们可以讨论一下。"
 expected = "我们需要综合考虑我们的 Abaqus 的模型，以及我们当前这个项目遇到的问题和挑战。要考虑就是到底我们遇到的问题是不是用 Abaqus 模型能得到更好的结果，或者是 Abaqus 模型能更加去建模石桥的行为。所以我们现在要决策，是不是要把之前基于跟Midas对齐的一个内部实现的有限元，然后如何换成 Abaqus 这样的一个实现，我们可以讨论一下。"
+
+# 暂时 was spoken as its own sentence after the question. It belongs inside that
+# sentence. Word order may change, and up to two characters may be added or
+# missing. `expected` is one wording that passes. Dropping 暂时, or leaving it
+# after the question, does not. A larger rewrite goes to the judge.
+
+[[case]]
+name = "Late qualifier"
+input = "这个分支里任何改动都不需要吗？暂时。"
+expected = "这个分支里任何改动暂时都不需要吗？"
