@@ -181,7 +181,7 @@ pub struct AppSettings {
     // between them, and the split removes the "is this shared or specific?"
     // question entirely for every provider added later.
     pub tts_enabled: bool,
-    pub tts_provider_type: String, // "system" | "volcengine" | "aliyun" | "mimo" | "azure"
+    pub tts_provider_type: String, // "system" | "volcengine" | "aliyun" | "mimo" | "azure" | "edge"
     /// `None` means the built-in default binding (Option+Command+R).
     pub tts_hotkey_config: Option<String>,
     /// Compatibility mode: fall back to a synthetic Cmd-C when the
@@ -301,6 +301,14 @@ pub struct AppSettings {
     pub azure_tts_rate: f32,
     /// Local playback gain, like the other cloud providers.
     pub azure_tts_volume: f32,
+
+    // Microsoft Edge online Read Aloud: no user credentials or region.
+    pub edge_tts_voice: String,
+    pub edge_tts_rate: f32,
+    /// Pitch offset in Hz, matching Edge's prosody parameter.
+    pub edge_tts_pitch_hz: i32,
+    /// Local playback gain.
+    pub edge_tts_volume: f32,
 
     // Input
     pub input_device_uid: Option<String>,
@@ -584,6 +592,10 @@ impl Default for AppSettings {
             azure_tts_voice: crate::tts::azure::default_voice().to_string(),
             azure_tts_rate: 0.5,
             azure_tts_volume: 1.0,
+            edge_tts_voice: crate::tts::edge::default_voice().to_string(),
+            edge_tts_rate: 0.5,
+            edge_tts_pitch_hz: 0,
+            edge_tts_volume: 1.0,
 
             input_device_uid: None,
             text_injection_mode: "pasteboard".to_string(),
@@ -1342,6 +1354,19 @@ mod tests {
     };
     use crate::foreground_app::TextInjectionAppOverride;
     use crate::services::llm_service::build_llm_config_from_settings;
+
+    #[test]
+    fn legacy_settings_gain_edge_defaults_and_round_trip_hz_pitch() {
+        let mut settings: AppSettings = serde_json::from_str(r#"{"ttsProviderType":"azure","azureTtsVoice":"existing-voice"}"#).unwrap();
+        assert_eq!(settings.azure_tts_voice, "existing-voice");
+        assert_eq!(settings.edge_tts_voice, crate::tts::edge::default_voice());
+        assert_eq!(settings.edge_tts_rate, 0.5);
+        assert_eq!(settings.edge_tts_pitch_hz, 0);
+        settings.edge_tts_pitch_hz = -25;
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["edgeTtsPitchHz"], -25);
+        assert_eq!(serde_json::from_value::<AppSettings>(json).unwrap().edge_tts_pitch_hz, -25);
+    }
 
     #[test]
     fn reading_settings_survive_the_persistence_round_trip() {

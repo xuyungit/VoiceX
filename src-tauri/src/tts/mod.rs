@@ -16,6 +16,8 @@ pub mod clipboard_text;
 pub mod cloud_playback;
 pub mod controller;
 pub mod decode;
+pub mod edge;
+mod resample;
 pub mod llm_stage;
 #[cfg(target_os = "macos")]
 pub mod mac_say;
@@ -99,6 +101,8 @@ pub struct TtsRequest {
     /// the read in larger requests and still report progress on pieces this
     /// size (see [`caption_timeline`]).
     pub piece_limit: Option<usize>,
+    /// Edge prosody offset in Hz; distinct from the system pitch multiplier.
+    pub pitch_hz: Option<i32>,
 }
 
 impl TtsRequest {
@@ -111,6 +115,7 @@ impl TtsRequest {
             volume: None,
             pitch: None,
             piece_limit: None,
+            pitch_hz: None,
         }
     }
 }
@@ -435,6 +440,11 @@ pub trait TtsBackend: Send + Sync {
     fn start(&self, request: TtsRequest, token: CancelToken) -> Result<(), TtsError>;
     fn stop(&self) -> Result<(), TtsError>;
     fn status(&self) -> TtsStatus;
+
+    /// Asynchronous failure of the current read, for the HUD and preview UI.
+    fn failure(&self) -> Option<String> {
+        None
+    }
 
     /// Recent output level in 0..=1, for the HUD waveform.
     ///

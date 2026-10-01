@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { NButton, NInput, NSelect, NSlider, NSwitch } from 'naive-ui'
+import { NButton, NInput, NSelect, NSlider, NSwitch, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '../stores/settings'
@@ -10,6 +10,7 @@ import { formatHotkey } from '../utils/hotkey'
 import { buildLlmProviderOptions } from '../utils/llmOptions'
 import { getDefaultPrompt } from '../utils/llmPrompts'
 import { isMacOS } from '../utils/platform'
+import { buildTtsProviderOptions, type TtsProviderValue as ProviderValue } from '../utils/ttsOptions'
 
 interface TtsVoiceOption {
   id: string
@@ -45,6 +46,8 @@ const voices = ref<TtsVoiceOption[]>([])
 // text field without the view having to know which models those are.
 const customVoiceOnly = ref(false)
 const voicesError = ref('')
+const voicesLoading = ref(false)
+let voiceLoadGeneration = 0
 const hotkeyStatus = ref<ReadSelectionStatus | null>(null)
 const isRecording = ref(false)
 const translateHotkeyStatus = ref<ReadSelectionStatus | null>(null)
@@ -72,20 +75,15 @@ const ttsEnabled = computed({
   }
 })
 
-type ProviderValue = 'system' | 'volcengine' | 'aliyun' | 'mimo' | 'azure'
 type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash' | 'qwen-audio-3.1-tts-flash' | 'cosyvoice-v3-flash' | 'cosyvoice-v3.5-flash'
 
-const providerOptions = computed(() => [
-  { label: t('reading.providerSystem'), value: 'system' },
-  { label: t('reading.providerVolcengine'), value: 'volcengine' },
-  { label: t('reading.providerAliyun'), value: 'aliyun' },
-  { label: t('reading.providerMimo'), value: 'mimo' },
-  { label: t('reading.providerAzure'), value: 'azure' }
-])
+const providerOptions = computed(() => buildTtsProviderOptions(t))
 
 const ttsProviderType = computed({
   get: () => settingsStore.settings.ttsProviderType,
   set: (value: ProviderValue) => {
+    void stopPreview()
+    previewError.value = ''
     settingsStore.updateSetting('ttsProviderType', value)
     // The voice list is per provider and shares nothing across them.
     void loadVoices(value)
@@ -96,11 +94,12 @@ const isVolcengine = computed(() => settingsStore.settings.ttsProviderType === '
 const isAliyun = computed(() => settingsStore.settings.ttsProviderType === 'aliyun')
 const isMimo = computed(() => settingsStore.settings.ttsProviderType === 'mimo')
 const isAzure = computed(() => settingsStore.settings.ttsProviderType === 'azure')
+const isEdge = computed(() => settingsStore.settings.ttsProviderType === 'edge')
 // Everything that distinguishes "speaks over the network" from "speaks through
-// macOS" — voice list availability, the missing pitch control, whether the
+// macOS" — voice list availability, supported controls, whether the
 // controls work off macOS at all.
 const isCloud = computed(
-  () => isVolcengine.value || isAliyun.value || isMimo.value || isAzure.value
+  () => isVolcengine.value || isAliyun.value || isMimo.value || isAzure.value || isEdge.value
 )
 // Empty id is the `say` path (Siri / Spoken Content). Compact AVSpeech voices
 // are everything else in the picker; pitch and volume only exist there.
@@ -113,11 +112,12 @@ const isSystemDefaultVoice = computed(
 // the engine drops would look like a broken setting, so the row is not shown.
 //   - MiMo has no speed parameter; its only delivery control is the
 //     instruction text. Volume is local playback gain, so that one is real.
-//   - The other cloud engines take a rate and no pitch; volume is again local
-//     playback gain, not a synthesis parameter.
+//   - Edge takes rate and pitch in Hz; the other cloud engines take no pitch.
+//     Volume is local playback gain, not a synthesis parameter.
 //   - `say` (the system default voice) takes rate only. The compact AVSpeech
 //     voices take all three.
 const engineControls = computed(() => {
+  if (isEdge.value) return { rate: true, pitch: true, volume: true }
   if (isMimo.value) return { rate: false, pitch: false, volume: true }
   if (isCloud.value) return { rate: true, pitch: false, volume: true }
   const compact = !isSystemDefaultVoice.value
@@ -169,7 +169,13 @@ const voiceOptions = computed(() => {
   return isCloud.value ? listed : [{ label: t('reading.voiceDefault'), value: '' }, ...listed]
 })
 
+function filterVoice(pattern: string, option: SelectOption) {
+  const query = pattern.toLocaleLowerCase()
+  return `${option.label ?? ''} ${option.value ?? ''}`.toLocaleLowerCase().includes(query)
+}
+
 const voiceNote = computed(() => {
+  if (isEdge.value) return t('reading.edgeVoiceNote')
   if (customVoiceOnly.value) return t('reading.aliyunCustomVoiceNote')
   if (isCloud.value) return t('reading.cloudSpeakerNote')
   return isSystemDefaultVoice.value ? t('reading.voiceNoteDefault') : t('reading.voiceNote')
@@ -182,6 +188,7 @@ const ttsVoiceId = computed({
     if (isAliyun.value) return settingsStore.settings[aliyunVoiceKey.value]
     if (isMimo.value) return settingsStore.settings.mimoTtsVoice
     if (isAzure.value) return settingsStore.settings.azureTtsVoice
+    if (isEdge.value) return settingsStore.settings.edgeTtsVoice
     return settingsStore.settings.systemTtsVoiceId
   },
   set: (value: string) => {
@@ -189,6 +196,7 @@ const ttsVoiceId = computed({
     else if (isAliyun.value) settingsStore.updateSetting(aliyunVoiceKey.value, value)
     else if (isMimo.value) settingsStore.updateSetting('mimoTtsVoice', value)
     else if (isAzure.value) settingsStore.updateSetting('azureTtsVoice', value)
+    else if (isEdge.value) settingsStore.updateSetting('edgeTtsVoice', value)
     else settingsStore.updateSetting('systemTtsVoiceId', value)
   }
 })
@@ -252,7 +260,9 @@ const rateMultiplier = computed({
         ? settingsStore.settings.aliyunTtsRate
         : isAzure.value
           ? settingsStore.settings.azureTtsRate
-          : settingsStore.settings.systemTtsRate
+          : isEdge.value
+            ? settingsStore.settings.edgeTtsRate
+            : settingsStore.settings.systemTtsRate
     return round2(stored / DEFAULT_RATE)
   },
   set: (value: number) => {
@@ -260,6 +270,7 @@ const rateMultiplier = computed({
     if (isVolcengine.value) settingsStore.updateSetting('volcTtsRate', stored)
     else if (isAliyun.value) settingsStore.updateSetting('aliyunTtsRate', stored)
     else if (isAzure.value) settingsStore.updateSetting('azureTtsRate', stored)
+    else if (isEdge.value) settingsStore.updateSetting('edgeTtsRate', stored)
     else settingsStore.updateSetting('systemTtsRate', stored)
   }
 })
@@ -274,7 +285,9 @@ const volumePercent = computed({
           ? settingsStore.settings.mimoTtsVolume
           : isAzure.value
             ? settingsStore.settings.azureTtsVolume
-            : settingsStore.settings.systemTtsVolume
+            : isEdge.value
+              ? settingsStore.settings.edgeTtsVolume
+              : settingsStore.settings.systemTtsVolume
     return Math.round(stored * 100)
   },
   set: (value: number) => {
@@ -283,11 +296,17 @@ const volumePercent = computed({
     else if (isAliyun.value) settingsStore.updateSetting('aliyunTtsVolume', stored)
     else if (isMimo.value) settingsStore.updateSetting('mimoTtsVolume', stored)
     else if (isAzure.value) settingsStore.updateSetting('azureTtsVolume', stored)
+    else if (isEdge.value) settingsStore.updateSetting('edgeTtsVolume', stored)
     else settingsStore.updateSetting('systemTtsVolume', stored)
   }
 })
 
-// System voice only — no cloud provider exposes pitch.
+const edgePitchHz = computed({
+  get: () => settingsStore.settings.edgeTtsPitchHz,
+  set: (value: number) => settingsStore.updateSetting('edgeTtsPitchHz', Math.round(clamp(value, -100, 100)))
+})
+
+// Compact system voices use a multiplier; Edge uses a separate Hz offset.
 const pitchMultiplier = computed({
   get: () => round2(settingsStore.settings.systemTtsPitch),
   set: (value: number) => settingsStore.updateSetting('systemTtsPitch', clamp(value, 0.5, 2))
@@ -573,29 +592,37 @@ async function loadVoices(
   provider: ProviderValue = settingsStore.settings.ttsProviderType,
   model: AliyunModel = settingsStore.settings.aliyunTtsModel
 ) {
+  const generation = ++voiceLoadGeneration
+  voicesError.value = ''
   // The cloud providers are network-only, so their voice lists work everywhere;
   // only the system voice needs macOS.
   if (!isMacOS && provider === 'system') {
     voices.value = []
     customVoiceOnly.value = false
+    voicesLoading.value = false
     return
   }
   // Clear first: a slow reply must not leave the previous provider's voices on
   // screen, which is how system voices used to show up under the cloud engine.
-  // The custom-voice flag is left alone until the reply: clearing it would
-  // flip the control to a picker for the duration of every fetch.
+  // Reset the custom-voice flag too: it belongs to the previous provider/model.
   voices.value = []
+  customVoiceOnly.value = false
+  voicesLoading.value = true
   try {
     // Both passed explicitly — the store's save is debounced, so the backend
     // would still read the previous provider and model from the database.
     const list = await invoke<TtsVoiceList>('list_tts_voices', { provider, model })
+    if (generation !== voiceLoadGeneration) return
     voices.value = list.voices
     customVoiceOnly.value = list.customVoiceOnly
     voicesError.value = ''
   } catch (error) {
+    if (generation !== voiceLoadGeneration) return
     voices.value = []
     customVoiceOnly.value = false
     voicesError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (generation === voiceLoadGeneration) voicesLoading.value = false
   }
 }
 
@@ -606,13 +633,13 @@ async function togglePreview() {
   }
 
   previewLoading.value = true
+  previewSpeaking.value = true
   previewError.value = ''
   try {
     // The backend reads the voice parameters from the store, so the debounced
     // save has to land before the preview starts or it auditions stale values.
     await settingsStore.forceSaveSettings()
     await invoke('preview_tts', { text: t('reading.previewText') })
-    previewSpeaking.value = true
   } catch (error) {
     previewError.value = error instanceof Error ? error.message : String(error)
     previewSpeaking.value = false
@@ -679,13 +706,15 @@ onMounted(async () => {
     console.error('Failed to read the reading hotkey status', error)
   }
   await refreshTranslateHotkeyStatus()
-  await loadVoices()
-  unlistenPreviewEnded = await listen('tts:preview_ended', () => {
+  unlistenPreviewEnded = await listen<string | null>('tts:preview_ended', (event) => {
     previewSpeaking.value = false
+    if (event.payload) previewError.value = event.payload
   })
+  await loadVoices()
 })
 
 onBeforeUnmount(() => {
+  voiceLoadGeneration += 1
   unlistenPreviewEnded?.()
   unlistenPreviewEnded = null
   if (diagnoseTimer !== null) {
@@ -820,6 +849,13 @@ onBeforeUnmount(() => {
             size="small"
             class="field-control"
           />
+        </div>
+
+        <div v-if="isEdge" class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.edgeConnection') }}</div>
+            <div class="field-note">{{ t('reading.edgeConnectionNote') }}</div>
+          </div>
         </div>
 
         <template v-if="isVolcengine">
@@ -976,12 +1012,23 @@ onBeforeUnmount(() => {
             v-else
             v-model:value="ttsVoiceId"
             :options="voiceOptions"
+            :filter="filterVoice"
+            :loading="voicesLoading"
             :disabled="!isMacOS && !isCloud"
             :tag="isCloud"
             filterable
             size="small"
             class="field-control"
           />
+        </div>
+
+        <div v-if="isEdge" class="field-row">
+          <div class="field-text">
+            <div class="field-note">{{ t('reading.edgeStreamNote') }}</div>
+          </div>
+          <NButton size="small" :loading="voicesLoading" @click="loadVoices()">
+            {{ t('reading.refreshVoices') }}
+          </NButton>
         </div>
 
         <div v-if="voicesError" class="warning-box">
@@ -1007,7 +1054,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="engineControls.pitch" class="field-row">
+        <div v-if="engineControls.pitch && !isEdge" class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.pitch') }}</div>
           </div>
@@ -1021,6 +1068,17 @@ onBeforeUnmount(() => {
               class="slider"
             />
             <span class="slider-value">{{ pitchMultiplier.toFixed(2) }}x</span>
+          </div>
+        </div>
+
+        <div v-if="isEdge" class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('reading.pitch') }}</div>
+            <div class="field-note">{{ t('reading.edgePitchNote') }}</div>
+          </div>
+          <div class="field-control end">
+            <NSlider v-model:value="edgePitchHz" :min="-100" :max="100" :step="5" class="slider" />
+            <span class="slider-value">{{ edgePitchHz > 0 ? '+' : '' }}{{ edgePitchHz }} Hz</span>
           </div>
         </div>
 
@@ -1137,6 +1195,7 @@ onBeforeUnmount(() => {
             v-else
             v-model:value="translateVoiceOverride"
             :options="translateVoiceOptions"
+            :filter="filterVoice"
             :disabled="!isMacOS && !isCloud"
             :tag="isCloud"
             filterable
@@ -1169,7 +1228,7 @@ onBeforeUnmount(() => {
         <div class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.captions') }}</div>
-            <div class="field-note">{{ t('reading.captionsNote') }}</div>
+            <div class="field-note">{{ t(isEdge ? 'reading.edgeCaptionsNote' : 'reading.captionsNote') }}</div>
           </div>
           <div class="field-control end">
             <NSwitch v-model:value="captionsEnabled" />

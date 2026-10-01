@@ -16,6 +16,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::aliyun::{self, AliyunBackend, AliyunConfig};
 use super::azure::{self, AzureBackend, AzureConfig};
 use super::clipboard_text;
+use super::edge::EdgeBackend;
 use super::llm_stage::{self, LlmStageError, TRANSLATE_MAX_CHARS};
 use super::mimo::{MimoBackend, MimoConfig};
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
@@ -101,6 +102,7 @@ const PROVIDER_VOLCENGINE: &str = "volcengine";
 const PROVIDER_ALIYUN: &str = "aliyun";
 const PROVIDER_MIMO: &str = "mimo";
 const PROVIDER_AZURE: &str = "azure";
+const PROVIDER_EDGE: &str = "edge";
 
 /// What a reading session does with its text before speaking it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,7 +170,7 @@ struct StagedText {
 fn is_cloud_provider(provider: &str) -> bool {
     matches!(
         provider,
-        PROVIDER_VOLCENGINE | PROVIDER_ALIYUN | PROVIDER_MIMO | PROVIDER_AZURE
+        PROVIDER_VOLCENGINE | PROVIDER_ALIYUN | PROVIDER_MIMO | PROVIDER_AZURE | PROVIDER_EDGE
     )
 }
 
@@ -186,6 +188,7 @@ struct ControllerInner {
     aliyun: Mutex<Option<Arc<AliyunBackend>>>,
     mimo: Mutex<Option<Arc<MimoBackend>>>,
     azure: Mutex<Option<Arc<AzureBackend>>>,
+    edge: Mutex<Option<Arc<EdgeBackend>>>,
     /// Whichever backend owns the current session. `stop` has to reach that
     /// one, not whichever provider the settings happen to name right now.
     active: Mutex<Option<Arc<dyn TtsBackend>>>,
@@ -252,6 +255,9 @@ impl TtsController {
                 api_key: String::new(),
                 instruction: String::new(),
             })));
+        }
+        if let Ok(mut slot) = self.inner.edge.lock() {
+            *slot = Some(Arc::new(EdgeBackend::new()));
         }
         if let Ok(mut slot) = self.inner.azure.lock() {
             *slot = Some(Arc::new(AzureBackend::new(AzureConfig {
@@ -394,7 +400,8 @@ impl TtsController {
                     hud.emit_caption(None);
                     return;
                 }
-                let reported = failure.lock().ok().and_then(|slot| slot.clone());
+                let reported = failure.lock().ok().and_then(|slot| slot.clone())
+                    .or_else(|| backend.failure());
                 let hud_for_hide = hud.clone();
                 match reported {
                     // Without this a failed read is completely silent: the user
@@ -449,6 +456,11 @@ impl TtsController {
         settings: Option<&AppSettings>,
     ) -> Option<Arc<dyn TtsBackend>> {
         match provider {
+            PROVIDER_EDGE => {
+                // An unavailable Edge backend is visible, never a system-voice fallback.
+                return self.inner.edge.lock().ok().and_then(|slot| slot.clone())
+                    .map(|backend| backend as Arc<dyn TtsBackend>);
+            }
             PROVIDER_VOLCENGINE => {
                 let cloud = self
                     .inner
@@ -630,7 +642,7 @@ impl TtsController {
         // Tell the settings page when it ends, so its button can be one toggle
         // rather than a separate Preview and Stop. Before the delegate existed
         // there was no end event to report, which is why it was two buttons.
-        self.spawn_preview_watcher();
+        self.spawn_preview_watcher(backend.clone(), token.clone());
 
         backend.start(request, token).inspect_err(|err| {
             log_event(
@@ -647,17 +659,21 @@ impl TtsController {
     ///
     /// The preview deliberately has no HUD — the user is looking at the settings
     /// page — so this is the only signal the page can act on.
-    fn spawn_preview_watcher(&self) {
+    fn spawn_preview_watcher(&self, backend: Arc<dyn TtsBackend>, token: super::CancelToken) {
         let Some(app) = self.app() else { return };
         let session = self.inner.session.clone();
 
         thread::Builder::new()
             .name("voicex-tts-preview".to_string())
             .spawn(move || {
-                while session.is_active() {
+                while !token.is_cancelled() {
                     thread::sleep(HUD_POLL);
                 }
-                let _ = app.emit("tts:preview_ended", ());
+                // A newer read/preview owns the UI now.
+                if session.is_active() {
+                    return;
+                }
+                let _ = app.emit("tts:preview_ended", backend.failure());
             })
             .expect("failed to spawn the preview watcher");
     }
@@ -1134,6 +1150,7 @@ fn apply_translate_voice_override(settings: &mut AppSettings) -> Option<String> 
         }
         PROVIDER_MIMO => &mut settings.mimo_tts_voice,
         PROVIDER_AZURE => &mut settings.azure_tts_voice,
+        PROVIDER_EDGE => &mut settings.edge_tts_voice,
         _ => &mut settings.system_tts_voice_id,
     };
     *slot = voice.clone();
@@ -1278,16 +1295,20 @@ fn uses_say_voice(settings: &AppSettings) -> bool {
 /// compromise between them — and keeping them separate means adding a provider
 /// never reopens the question of which settings are shared.
 ///
-/// Rate and volume are stored normalized (0..=1) on both sides and each backend
-/// maps them onto its own scale. Pitch exists only for compact system voices
-/// (AVSpeech). Cloud engines and the empty-id `say` path carry `None` rather
-/// than a value that would be dropped.
+/// Rate and volume are stored normalized (0..=1). The pitch multiplier belongs
+/// to compact system voices; Edge has its own separate Hz offset.
 ///
 /// An empty voice id means "backend default", which is not the same as a voice
 /// literally named "". For the system provider that default is `say` without
 /// `-v`, not AVSpeech's locale compact voice.
 fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
     let (voice, rate, volume, pitch) = match settings.tts_provider_type.as_str() {
+        PROVIDER_EDGE => (
+            settings.edge_tts_voice.clone(),
+            Some(settings.edge_tts_rate),
+            Some(settings.edge_tts_volume),
+            None,
+        ),
         PROVIDER_VOLCENGINE => (
             settings.volc_tts_speaker.clone(),
             Some(settings.volc_tts_rate),
@@ -1335,6 +1356,8 @@ fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
         volume,
         pitch,
         piece_limit: None,
+        pitch_hz: (settings.tts_provider_type == PROVIDER_EDGE)
+            .then_some(settings.edge_tts_pitch_hz),
     }
 }
 
@@ -1417,8 +1440,31 @@ mod tests {
     use std::thread;
 
     use super::super::SessionSlot;
-    use super::{voice_request, wait_for_read_to_end, StopReason, TtsController, HUD_POLL};
+    use super::{
+        is_cloud_provider, voice_request, wait_for_read_to_end, StopReason, TtsController, HUD_POLL,
+    };
     use crate::commands::settings::AppSettings;
+
+    #[test]
+    fn edge_translation_override_preserves_reading_parameters() {
+        let mut settings = AppSettings::default();
+        settings.tts_provider_type = "edge".to_string();
+        settings.edge_tts_rate = 0.75;
+        settings.edge_tts_pitch_hz = 25;
+        settings.edge_tts_volume = 0.6;
+        settings.tts_translate_voice_overrides.insert(
+            "edge".to_string(), "en-US-EmmaMultilingualNeural".to_string(),
+        );
+        apply_translate_voice_override(&mut settings);
+        let request = voice_request(&settings, "hello".to_string());
+        assert_eq!(request.voice.as_deref(), Some("en-US-EmmaMultilingualNeural"));
+        assert_eq!(request.rate, Some(0.75));
+        assert_eq!(request.pitch_hz, Some(25));
+        assert_eq!(request.volume, Some(0.6));
+        assert_eq!(request.pitch, None);
+        assert!(is_cloud_provider("edge"));
+        assert_eq!(settings.system_tts_voice_id, "");
+    }
 
     #[test]
     fn an_unset_voice_means_engine_default_not_a_voice_named_empty() {

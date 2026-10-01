@@ -1,3 +1,4 @@
+import type { TtsProviderValue } from '../utils/ttsOptions'
 import { ASR_MODEL_DEFAULTS } from '../utils/asrModels'
 import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, watch } from 'vue'
@@ -165,7 +166,7 @@ export interface AppSettings {
     // synthesis parameter belongs to a provider block below, rate and volume
     // included: engines differ in baseline speed and loudness.
     ttsEnabled: boolean
-    ttsProviderType: 'system' | 'volcengine' | 'aliyun' | 'mimo' | 'azure'
+    ttsProviderType: TtsProviderValue
     ttsHotkeyConfig: string | null
     ttsClipboardFallback: boolean
     // Both reading keys read the clipboard when no selection can be read.
@@ -238,6 +239,12 @@ export interface AppSettings {
     azureTtsRate: number
     /** Local playback gain, like the other cloud providers. */
     azureTtsVolume: number
+
+    // Microsoft Edge online Read Aloud (no credentials).
+    edgeTtsVoice: string
+    edgeTtsRate: number
+    edgeTtsPitchHz: number
+    edgeTtsVolume: number
 
     // Input
     inputDeviceUid: string | null
@@ -482,6 +489,11 @@ const defaultSettings: AppSettings = {
     azureTtsVoice: 'zh-CN-XiaoyuMultilingualNeural',
     azureTtsRate: 0.5,
     azureTtsVolume: 1,
+
+    edgeTtsVoice: 'zh-CN-XiaoxiaoNeural',
+    edgeTtsRate: 0.5,
+    edgeTtsPitchHz: 0,
+    edgeTtsVolume: 1,
 
     inputDeviceUid: null,
     textInjectionMode: 'pasteboard',

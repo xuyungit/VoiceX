@@ -5,8 +5,8 @@
 //! Pieces arrive as a channel of channels: the producer opens one byte channel
 //! per synthesis request and hands the receiving end over before streaming
 //! into it, so the sink knows where each piece begins in the sample stream.
-//! That boundary is what captions follow (see [`Playback::begin_piece`]); the
-//! providers' own timestamp interfaces are not involved.
+//! Captions can follow that boundary (see [`Playback::begin_piece`]) or add
+//! provider timestamps within each piece through `CaptionTimeline`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -36,9 +36,40 @@ pub fn run_playback(
     handle_slot: Arc<Mutex<Option<PlaybackHandle>>>,
     speaking: Arc<AtomicBool>,
 ) {
+    run_playback_with_rates(
+        pieces,
+        sample_rate,
+        sample_rate,
+        gain,
+        prebuffer,
+        token,
+        network_error,
+        handle_slot,
+        speaking,
+    );
+}
+
+/// Fixed-rate cloud audio is resampled to the output device's supported rate.
+#[allow(clippy::too_many_arguments)]
+pub fn run_playback_with_rates(
+    pieces: Receiver<PieceStream>,
+    stream_rate: u32,
+    sample_rate: u32,
+    gain: f32,
+    prebuffer: u64,
+    token: CancelToken,
+    network_error: Arc<Mutex<Option<String>>>,
+    handle_slot: Arc<Mutex<Option<PlaybackHandle>>>,
+    speaking: Arc<AtomicBool>,
+) {
+    let mut resampler = super::resample::LinearResampler::new(stream_rate, sample_rate);
+    let mut samples_out = Vec::new();
     let playback = match Playback::open(sample_rate, gain, prebuffer) {
         Ok(playback) => playback,
         Err(err) => {
+            if let Ok(mut slot) = network_error.lock() {
+                *slot = Some(err.to_string());
+            }
             if token.finish() {
                 log_event(
                     "speak_err",
@@ -75,14 +106,15 @@ pub fn run_playback(
         playback.begin_piece();
         decoded = decode_mp3_stream(
             ChunkSource::new(piece, token.clone()),
-            sample_rate,
+            stream_rate,
             |samples| {
                 if !started {
                     started = true;
                     speaking.store(true, Ordering::SeqCst);
                     log_event("speak_started", &[]);
                 }
-                playback.push(samples)
+                resampler.process(samples, &mut samples_out);
+                playback.push(&samples_out)
             },
         );
         // A piece that failed to decode ends the read; so does a stop, which
@@ -109,6 +141,11 @@ pub fn run_playback(
                 // is what the smoke scripts need to assert on.
                 Ok(false) => log_event("speak_cancelled", &[]),
                 Err(err) => {
+                    if !token.is_cancelled() {
+                        if let Ok(mut slot) = network_error.lock() {
+                            *slot = Some(err.to_string());
+                        }
+                    }
                     if token.finish() {
                         log_event(
                             "speak_err",
@@ -132,6 +169,11 @@ pub fn run_playback(
                 Err(err) => err.to_string(),
                 Ok(_) => "the audio stream ended early".to_string(),
             });
+            if !token.is_cancelled() {
+                if let Ok(mut slot) = network_error.lock() {
+                    *slot = Some(detail.clone());
+                }
+            }
             if token.finish() {
                 log_event(
                     "speak_err",

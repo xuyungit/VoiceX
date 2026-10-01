@@ -411,6 +411,7 @@ impl TtsBackend for MacSystemBackend {
             volume,
             pitch,
             piece_limit,
+            ..
         } = request;
 
         // One utterance per piece: the engine reports each utterance's start,
