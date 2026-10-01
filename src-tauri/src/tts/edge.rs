@@ -23,6 +23,9 @@ use super::{
     CloudStreamError, SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
 };
 
+mod captions;
+use captions::{Boundary, CaptionFeed};
+
 const CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const EDGE_VERSION: &str = "143.0.3650.75";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
@@ -30,7 +33,8 @@ const BASE_URL: &str = "speech.platform.bing.com/consumer/speech/synthesize/read
 const STREAM_RATE: u32 = 24_000;
 const OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
 const MAX_MESSAGE_BYTES: usize = 4096;
-const MAX_PIECE_CHARS: usize = 700;
+const MAX_PIECE_CHARS: usize = 1800;
+const DEFAULT_CAPTION_CHARS: usize = 120;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub fn default_voice() -> &'static str {
@@ -110,19 +114,15 @@ fn ssml_message(body: &str, id: &str) -> String {
 }
 
 /// Budget the actual UTF-8/XML message, preserving all text and natural cuts.
-fn split_requests(
-    text: &str,
-    voice: &str,
-    rate: f32,
-    pitch: i32,
-    limit: Option<usize>,
-) -> Result<Vec<String>, String> {
+fn split_requests(text: &str, voice: &str, rate: f32, pitch: i32) -> Result<Vec<String>, String> {
     let overhead = ssml_message(&ssml("", voice, rate, pitch), &"0".repeat(32)).len();
     let budget = MAX_MESSAGE_BYTES
         .checked_sub(overhead)
         .filter(|b| *b >= 6)
         .ok_or("Edge voice identifier is too long")?;
-    let cap = limit.unwrap_or(MAX_PIECE_CHARS).clamp(1, MAX_PIECE_CHARS);
+    // The subtitle length never caps synthesis. Slow speech uses a smaller
+    // character ceiling; all rates still obey the actual UTF-8/XML budget.
+    let cap = (MAX_PIECE_CHARS as f32 * rate.clamp(0.5, 1.0)) as usize;
     let mut rest = text;
     let mut pieces = Vec::new();
     while !rest.is_empty() {
@@ -271,8 +271,9 @@ impl EdgeBackend {
             .to_string();
         let pace = speed(request.rate);
         let pitch = request.pitch_hz.unwrap_or(0).clamp(-100, 100);
-        let pieces = split_requests(&request.text, &voice, pace, pitch, request.piece_limit)
-            .map_err(TtsError::Backend)?;
+        let caption_limit = request.piece_limit.unwrap_or(DEFAULT_CAPTION_CHARS);
+        let pieces =
+            split_requests(&request.text, &voice, pace, pitch).map_err(TtsError::Backend)?;
         if pieces.is_empty() {
             return Err(TtsError::Backend("Nothing to speak".to_string()));
         }
@@ -310,7 +311,7 @@ impl EdgeBackend {
         let clock = self.clock.clone();
         tauri::async_runtime::spawn(async move {
             for (index, piece) in pieces.iter().enumerate() {
-                if token.is_cancelled() {
+                if !wait_for_request_window(index, &read.playback, &token).await {
                     break;
                 }
                 let (audio_tx, audio_rx) = mpsc::channel();
@@ -324,6 +325,7 @@ impl EdgeBackend {
                     pitch,
                     index,
                     timeline: &timeline,
+                    caption_limit,
                 };
                 let outcome = stream_with_retry(&synthesis, &audio_tx, &token, &clock).await;
                 // Publish the failure before closing the audio channel: the
@@ -403,6 +405,33 @@ struct Synthesis<'a> {
     pitch: i32,
     index: usize,
     timeline: &'a Mutex<CaptionTimeline>,
+    caption_limit: usize,
+}
+
+fn request_in_window(index: usize, playing: Option<usize>) -> bool {
+    index <= playing.unwrap_or(0).saturating_add(1)
+}
+
+/// Receive the next request while the current one plays, but don't synthesize
+/// the rest of a long document into unbounded buffers ahead of playback.
+async fn wait_for_request_window(
+    index: usize,
+    playback: &Mutex<Option<PlaybackHandle>>,
+    token: &CancelToken,
+) -> bool {
+    loop {
+        if token.is_cancelled() {
+            return false;
+        }
+        let playing = playback
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(PlaybackHandle::current_piece));
+        if request_in_window(index, playing) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
+    }
 }
 
 /// Poll cancellation even while connection, send or receive futures are parked.
@@ -500,7 +529,7 @@ fn frame<'a>(bytes: &'a [u8], binary: bool) -> Result<(&'a str, &'a [u8]), Strin
         .ok_or("Edge frame has no path")?;
     Ok((path, body))
 }
-fn metadata(body: &[u8]) -> Result<Vec<(u64, String)>, String> {
+fn metadata(body: &[u8]) -> Result<Vec<Boundary>, String> {
     let value: Value =
         serde_json::from_slice(body).map_err(|_| "Invalid Edge sentence metadata")?;
     let entries = value
@@ -510,7 +539,7 @@ fn metadata(body: &[u8]) -> Result<Vec<(u64, String)>, String> {
     let mut captions = Vec::new();
     for entry in entries {
         match entry.get("Type").and_then(Value::as_str) {
-            Some("SentenceBoundary") => {
+            Some(kind @ ("SentenceBoundary" | "WordBoundary")) => {
                 let offset = entry
                     .pointer("/Data/Offset")
                     .and_then(Value::as_u64)
@@ -519,7 +548,22 @@ fn metadata(body: &[u8]) -> Result<Vec<(u64, String)>, String> {
                     .pointer("/Data/text/Text")
                     .and_then(Value::as_str)
                     .ok_or("Edge sentence has no text")?;
-                captions.push((offset / 10_000, unescape_xml(text)));
+                let start_ms = offset / 10_000;
+                let text = unescape_xml(text);
+                captions.push(if kind == "SentenceBoundary" {
+                    let duration_ms = entry
+                        .pointer("/Data/Duration")
+                        .and_then(Value::as_u64)
+                        .ok_or("Edge sentence has no duration")?
+                        / 10_000;
+                    Boundary::Sentence {
+                        start_ms,
+                        duration_ms,
+                        text,
+                    }
+                } else {
+                    Boundary::Word { start_ms, text }
+                });
             }
             Some("SessionEnd") => {}
             _ => return Err("Unexpected Edge metadata type".to_string()),
@@ -564,7 +608,7 @@ async fn stream_audio(
     };
     let (mut ws, _) = connection.map_err(|e| ws_error(e, false, clock))?;
     let body = ssml(s.text, s.voice, s.rate, s.pitch);
-    let configuration = json!({"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"true","wordBoundaryEnabled":"false"},"outputFormat":OUTPUT_FORMAT}}}});
+    let configuration = json!({"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"true","wordBoundaryEnabled":"true"},"outputFormat":OUTPUT_FORMAT}}}});
     let messages=[format!("X-Timestamp:{}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{configuration}",timestamp()),ssml_message(&body,&id)];
     log_event(
         "edge_request",
@@ -592,6 +636,7 @@ async fn stream_audio(
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     let mut emitted = false;
+    let mut captions = CaptionFeed::new(s.caption_limit);
     loop {
         let receive = tokio::time::timeout_at(
             deadline.min(tokio::time::Instant::now() + IDLE_TIMEOUT),
@@ -629,21 +674,32 @@ async fn stream_audio(
                     frame(text.as_bytes(), false).map_err(|e| protocol_error(e, emitted))?;
                 match path {
                     "audio.metadata" => {
-                        for (ms, text) in metadata(data).map_err(|e| protocol_error(e, emitted))? {
+                        for event in metadata(data).map_err(|e| protocol_error(e, emitted))? {
+                            captions.read(event);
+                        }
+                        if let Some(schedule) = captions.schedule(false) {
                             s.timeline
                                 .lock()
                                 .map_err(|_| {
                                     protocol_error("Edge captions lock is poisoned", emitted)
                                 })?
-                                .push(s.index, ms, text);
+                                .replace_request(s.index, schedule);
                         }
                     }
                     "turn.end" => {
+                        if let Some(schedule) = captions.schedule(true) {
+                            s.timeline
+                                .lock()
+                                .map_err(|_| {
+                                    protocol_error("Edge captions lock is poisoned", emitted)
+                                })?
+                                .replace_request(s.index, schedule);
+                        }
                         return if emitted {
                             Ok(true)
                         } else {
                             Err(protocol_error("Edge returned no audio", false))
-                        }
+                        };
                     }
                     "turn.start" | "response" => {}
                     _ => return Err(protocol_error("Unexpected Edge text frame", emitted)),
@@ -718,7 +774,7 @@ mod tests {
     #[test]
     fn xml_and_utf8_budget_preserve_every_character() {
         let text = "中文😀<&\"'>。".repeat(180);
-        let pieces = split_requests(&text, default_voice(), 2.0, 100, None).unwrap();
+        let pieces = split_requests(&text, default_voice(), 2.0, 100).unwrap();
         assert_eq!(pieces.concat(), text);
         for piece in pieces {
             assert!(
@@ -727,6 +783,97 @@ mod tests {
             );
         }
         assert!(ssml("<&", default_voice(), 0.5, -100).contains("&lt;&amp;"));
+    }
+
+    #[test]
+    fn large_requests_keep_the_byte_budget_and_reduce_caption_sized_requests() {
+        let text = "这是一段长文测试，包含反力10.05千牛和English words，验证完整性与自然停顿。"
+            .repeat(100);
+        let old = split_for_backend(&text, DEFAULT_CAPTION_CHARS);
+        let new = split_requests(&text, default_voice(), 1.0, 0).unwrap();
+        assert_eq!(new.concat(), text);
+        assert!(new.len() * 5 < old.len());
+        assert!(new[..new.len() - 1]
+            .iter()
+            .all(|piece| piece.chars().count() > 700));
+        for rate in [0.5, 1.0, 2.0] {
+            for piece in split_requests(&text, default_voice(), rate, 0).unwrap() {
+                assert!(
+                    ssml_message(&ssml(&piece, default_voice(), rate, 0), &"0".repeat(32)).len()
+                        <= MAX_MESSAGE_BYTES
+                );
+                assert!(piece.chars().count() <= (MAX_PIECE_CHARS as f32 * rate.min(1.0)) as usize);
+            }
+        }
+    }
+
+    #[test]
+    fn only_one_request_is_prefetched_ahead_of_playback() {
+        assert!(request_in_window(0, None));
+        assert!(request_in_window(1, None));
+        assert!(!request_in_window(2, None));
+        assert!(request_in_window(4, Some(3)));
+        assert!(!request_in_window(5, Some(3)));
+    }
+
+    #[tokio::test]
+    async fn stop_releases_a_producer_waiting_for_the_prefetch_window() {
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        let playback = Arc::new(Mutex::new(None));
+        let task = tokio::spawn(async move { wait_for_request_window(2, &playback, &token).await });
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        slot.release();
+        assert!(!tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .unwrap()
+            .unwrap());
+    }
+
+    #[test]
+    #[ignore = "contacts Microsoft for a large mixed-language request"]
+    fn live_large_request_keeps_short_timed_captions() {
+        let text = format!("{}最后验证小于符号&lt;、实际符号<和&，English words with spaces。", "本次测试反力10.05千牛，检查长句字幕的边界，保留数字和中英文之间的空格，分段只影响合成请求而不丢失任何正文，字幕继续按照实际播放的句子与单词时间切换，".repeat(28));
+        let pieces = split_requests(&text, default_voice(), 1.0, 0).unwrap();
+        assert_eq!(pieces.len(), 2);
+        let clock = EdgeClock::default();
+        let timeline = Mutex::new(CaptionTimeline::new(STREAM_RATE));
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        for (index, piece) in pieces.iter().enumerate() {
+            let (tx, rx) = mpsc::channel();
+            let synthesis = Synthesis {
+                text: piece,
+                voice: default_voice(),
+                rate: 1.0,
+                pitch: 0,
+                index,
+                timeline: &timeline,
+                caption_limit: DEFAULT_CAPTION_CHARS,
+            };
+            assert!(tauri::async_runtime::block_on(stream_with_retry(
+                &synthesis, &tx, &token, &clock
+            ))
+            .unwrap());
+            drop(tx);
+            let count = super::super::decode::decode_mp3_stream(
+                super::super::decode::ChunkSource::new(rx, token.clone()),
+                STREAM_RATE,
+                |_| true,
+            )
+            .unwrap();
+            assert!(count > u64::from(STREAM_RATE) * 10);
+            let mut shown = std::collections::BTreeMap::new();
+            for position in (0..count).step_by(STREAM_RATE as usize / 1000) {
+                if let Some(caption) = timeline.lock().unwrap().at(index, position) {
+                    assert!(caption.text.chars().count() <= DEFAULT_CAPTION_CHARS);
+                    shown.insert(caption.index, caption.text);
+                }
+            }
+            assert!(shown.len() >= 2);
+            assert_eq!(shown.into_values().collect::<String>(), *piece);
+        }
     }
     #[test]
     fn client_hash_rotates_only_at_five_minute_boundaries() {
@@ -746,10 +893,20 @@ mod tests {
     }
     #[test]
     fn sentence_metadata_uses_service_time_and_decodes_entities_once() {
-        let body=br#"{"Metadata":[{"Type":"SentenceBoundary","Data":{"Offset":1230000,"text":{"Text":"A &amp;lt; B"}}},{"Type":"SentenceBoundary","Data":{"Offset":9000000,"text":{"Text":"second"}}}]}"#;
+        let body=br#"{"Metadata":[{"Type":"SentenceBoundary","Data":{"Offset":1230000,"Duration":10000000,"text":{"Text":"A &amp;lt; B"}}},{"Type":"WordBoundary","Data":{"Offset":9000000,"text":{"Text":"second"}}}]}"#;
         assert_eq!(
             metadata(body).unwrap(),
-            vec![(123, "A &lt; B".to_string()), (900, "second".to_string())]
+            vec![
+                Boundary::Sentence {
+                    start_ms: 123,
+                    duration_ms: 1000,
+                    text: "A &lt; B".into()
+                },
+                Boundary::Word {
+                    start_ms: 900,
+                    text: "second".into()
+                }
+            ]
         );
         assert!(metadata(br#"{"Metadata":[{"Type":"SentenceBoundary","Data":{}}]}"#).is_err());
     }
@@ -789,6 +946,7 @@ mod tests {
             pitch: 0,
             index: 0,
             timeline: &timeline,
+            caption_limit: DEFAULT_CAPTION_CHARS,
         };
         assert!(
             tauri::async_runtime::block_on(stream_with_retry(&synthesis, &tx, &token, &clock))

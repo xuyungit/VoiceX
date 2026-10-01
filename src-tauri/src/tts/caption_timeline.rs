@@ -57,6 +57,20 @@ impl CaptionTimeline {
         captions.push(TimedCaption { start_ms, text });
     }
 
+    /// Replace a request's schedule when sentence and word metadata arrive
+    /// interleaved. Late boundaries must retain their timestamps, not be
+    /// clamped to the previously received boundary's time.
+    pub fn replace_request(&mut self, request: usize, mut captions: Vec<(u64, String)>) {
+        if self.requests.len() <= request {
+            self.requests.resize_with(request + 1, Vec::new);
+        }
+        captions.sort_by_key(|(ms, _)| *ms);
+        self.requests[request] = captions
+            .into_iter()
+            .map(|(start_ms, text)| TimedCaption { start_ms, text })
+            .collect();
+    }
+
     /// The caption being heard once `samples` of request `request` have
     /// played. `total` is `None`: how many captions a read has is only known
     /// once the service has sent its last chunk.
@@ -245,6 +259,27 @@ mod tests {
         timeline.push(0, 0, "attempt two".to_string());
         let heard = timeline.at(0, 10).unwrap();
         assert_eq!((heard.index, heard.text.as_str()), (0, "attempt two"));
+    }
+
+    #[test]
+    fn late_word_cuts_are_inserted_at_their_time_without_advancing_playback() {
+        let mut timeline = CaptionTimeline::new(1000);
+        timeline.replace_request(
+            0,
+            vec![(2000, "second sentence".into()), (0, "first part".into())],
+        );
+        assert_eq!(timeline.at(0, 1500).unwrap().text, "first part");
+        timeline.replace_request(
+            0,
+            vec![
+                (2000, "second sentence".into()),
+                (0, "first part".into()),
+                (1000, "second part".into()),
+            ],
+        );
+        assert_eq!(timeline.at(0, 500).unwrap().text, "first part");
+        assert_eq!(timeline.at(0, 1500).unwrap().text, "second part");
+        assert_eq!(timeline.at(0, 2500).unwrap().text, "second sentence");
     }
 
     #[test]
