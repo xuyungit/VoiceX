@@ -10,7 +10,7 @@ English | [中文](./README.md)
   <img src="assets/screenshots/en/hud-window.png" alt="VoiceX HUD Window" width="480" />
 </p>
 
-VoiceX is a cross-platform desktop voice input tool. Its overall pipeline is: record audio, provide real-time feedback, recognize speech, optionally correct or translate the result, inject text into the active application, and save or sync the history. The core workflow is similar to other modern voice input tools, but VoiceX still makes its own product choices and trade-offs.
+VoiceX is a cross-platform voice workspace for your desktop: dictate, translate, and listen in any app. The dictation pipeline is: record audio, provide real-time feedback, recognize speech, optionally correct or translate the result, inject text into the active application, and save or sync the history. In the other direction, it reads selected text aloud, optionally translating it first. The dictation workflow is similar to other modern voice input tools, but VoiceX still makes its own product choices and trade-offs.
 
 ## Highlights
 
