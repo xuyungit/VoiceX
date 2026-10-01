@@ -377,6 +377,19 @@ impl HotkeyManager {
 
             // Use grab so we can optionally swallow the active hotkey from the system (e.g., IME).
             let callback = move |event: Event| -> Option<Event> {
+                // Our own menu mask key passes straight through: it exists to
+                // reach the system, and it must not touch the modifier state,
+                // match a binding, or be captured while recording one.
+                #[cfg(target_os = "windows")]
+                if matches!(
+                    event.event_type,
+                    EventType::KeyPress(Key::Unknown(code))
+                        | EventType::KeyRelease(Key::Unknown(code))
+                        if code == super::menu_mask::MASK_KEY_CODE
+                ) {
+                    return Some(event);
+                }
+
                 let mut suppress = false;
                 match event.event_type {
                     EventType::KeyPress(key) => {
@@ -504,6 +517,10 @@ impl HotkeyManager {
                                 // held must not re-trigger the action.
                                 if read_selection_key.borrow().is_none() {
                                     *read_selection_key.borrow_mut() = Some(key);
+                                    #[cfg(target_os = "windows")]
+                                    if super::menu_mask::needs_mask(snapshot.modifiers) {
+                                        super::menu_mask::send();
+                                    }
                                     let _ = hook_tx.send(HookEvent::ReadSelectionPressed);
                                 }
                                 suppress = true;
@@ -512,6 +529,10 @@ impl HotkeyManager {
                             {
                                 if translate_selection_key.borrow().is_none() {
                                     *translate_selection_key.borrow_mut() = Some(key);
+                                    #[cfg(target_os = "windows")]
+                                    if super::menu_mask::needs_mask(snapshot.modifiers) {
+                                        super::menu_mask::send();
+                                    }
                                     let _ = hook_tx.send(HookEvent::TranslateSelectionPressed);
                                 }
                                 suppress = true;

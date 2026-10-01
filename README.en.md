@@ -16,7 +16,7 @@ VoiceX is a cross-platform voice workspace for your desktop: dictate, translate,
 
 - **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
 - **Multiple ASR backends** — switch between fourteen cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
-- **Read and translate-and-read** — select text in any application and one hotkey reads it aloud; another has an LLM translate it first and reads the translation. The HUD captions each sentence, and the clipboard is read when nothing is selected. Uses the system voice or any of the cloud TTS providers (macOS only for now).
+- **Read and translate-and-read** — select text in any application and one hotkey reads it aloud; another has an LLM translate it first and reads the translation. The HUD captions each sentence, and the clipboard is read when nothing is selected. Uses the system voice (macOS only) or any of the cloud TTS providers, on macOS and Windows.
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
 - **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status, and on macOS it follows the active Space when triggered from another desktop.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
@@ -42,15 +42,18 @@ VoiceX also works in the other direction. Select text in **any application**:
 
 | Hotkey (configurable) | What it does |
 |---|---|
-| **⌥⌘R** Read | Reads the selection aloud |
-| **⌥⌘T** Translate and read | Has an LLM translate the selection into the target language (English by default), then reads the translation. Text already in the target language is tidied, not translated |
+| **⌥⌘R** Read (Windows: Alt + Win + R) | Reads the selection aloud |
+| **⌥⌘T** Translate and read (Windows: Alt + Win + T) | Has an LLM translate the selection into the target language (English by default), then reads the translation. Text already in the target language is tidied, not translated |
 
 Press either reading key again, or **Escape**, to stop immediately; while the
 translation is pending, the key or Escape cancels it.
 
-> **macOS only for now.** Reading the selection out of another application goes
-> through the macOS Accessibility API; there is no Windows implementation yet, so
-> neither hotkey is registered there and both still reach the foreground application.
+> **On Windows** the selection is read through UI Automation, falling back to a
+> synthetic Ctrl + C with the clipboard restored — the same two layers as on macOS.
+> There is no system voice on Windows, so pick a cloud engine (Microsoft Edge online
+> speech needs no key). The default Alt + Win + R / T are also Xbox Game Bar recording
+> shortcuts and are taken by VoiceX while reading is on; change them in the Reading
+> settings. Apps running as administrator cannot be read unless VoiceX runs elevated too.
 
 <p align="center">
   <img src="assets/screenshots/en/reading-settings.png" alt="VoiceX Reading settings" width="720" />
@@ -58,11 +61,11 @@ translation is pending, the key or Escape cancels it.
 
 | | Detail |
 |---|---|
-| **How text is read** | Straight from the Accessibility API where possible (8–15 ms); otherwise a synthetic Command + C, with your clipboard restored afterwards (the compatibility mode; switching it off loses Safari and VS Code). If there is still no selection, the **clipboard's** plain text is read instead and the HUD says so. Never in a password field, and content a password manager marks as concealed is never read |
+| **How text is read** | Straight from the Accessibility API where possible (8–15 ms on macOS; UI Automation on Windows); otherwise a synthetic Command + C (Ctrl + C on Windows), with your clipboard restored afterwards (the compatibility mode; on macOS, switching it off loses Safari and VS Code). If there is still no selection, the **clipboard's** plain text is read instead and the HUD says so. Never in a password field, and content a password manager marks as concealed is never read |
 | **Captions** | On by default. The HUD switches to a text-only caption showing the sentence being spoken, for plain and translated reads alike. The default system voice (`say`) reports no progress, so it keeps the compact HUD |
 | **Translate and read** | Its own LLM choice (follow the LLM page, a provider, or a custom endpoint) and optional voices per target language; up to 5000 characters per read. A failed, timed-out or unconfigured LLM is reported on the HUD and **never falls back to reading the untranslated text**. Source and translation are kept on the History page by default (no audio, not synced), and the translation can also be copied to the clipboard |
 | **Tidy before reading** (optional) | Before a plain read, the LLM strips Markdown, HTML markup and link URLs so only the prose is read; if tidying fails, the original is read. The reading and translation prompts read a table copied from a web page as sentences rather than cell by cell |
-| **Speech engines** | The system voice (offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS); or, in the cloud, Volcengine Doubao Seed-TTS 2.0, Alibaba Cloud Model Studio (default `qwen-audio-3.1-tts-flash` for longer text at about a sixth of 3.0's price; `qwen-audio-3.0-tts-flash` for its 500+ extra basic voices; `qwen3-tts-flash` for dialect voices; `cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`, the latter taking a Voice Design / cloned `voice_id`), Xiaomi MiMo, or Microsoft Azure Speech. Cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey; long selections are split at sentence boundaries instead of being truncated. Voice, rate and volume are stored per engine; Alibaba Cloud models that accept one also take a plain-language style instruction, by default a calm delivery suited to technical text |
+| **Speech engines** | The system voice (macOS only; offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS); or, in the cloud, Volcengine Doubao Seed-TTS 2.0, Alibaba Cloud Model Studio (default `qwen-audio-3.1-tts-flash` for longer text at about a sixth of 3.0's price; `qwen-audio-3.0-tts-flash` for its 500+ extra basic voices; `qwen3-tts-flash` for dialect voices; `cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`, the latter taking a Voice Design / cloned `voice_id`), Xiaomi MiMo, or Microsoft Azure Speech. Cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey; long selections are split at sentence boundaries instead of being truncated. Voice, rate and volume are stored per engine; Alibaba Cloud models that accept one also take a plain-language style instruction, by default a calm delivery suited to technical text |
 | **Yields to dictation** | Starting dictation stops reading — otherwise the microphone would record the speech and transcribe it back |
 
 ### How this differs from the built-in "Speak selection"

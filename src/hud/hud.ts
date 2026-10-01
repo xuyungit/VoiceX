@@ -258,10 +258,14 @@ const readingErrorMessages: Record<string, keyof typeof zhCN.hud> = {
   no_selection: "readingNoSelection",
   permission_denied: "readingPermissionDenied",
   secure_input: "readingSecureInput",
+  // Windows: UIPI keeps a normal process out of an elevated one.
+  target_elevated: "readingTargetElevated",
   focus_is_self: "readingFocusIsSelf",
   unsupported_control: "readingUnsupported",
   copy_timeout: "readingUnsupported",
   backend: "readingBackendError",
+  // No engine to speak with at all — the system voice off macOS.
+  unsupported: "readingEngineUnavailable",
   start_timeout: "readingBackendError",
   // LLM stage failures. The read is refused outright — never a fallback to
   // the untranslated text.

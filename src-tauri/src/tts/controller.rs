@@ -430,6 +430,22 @@ impl TtsController {
             .expect("failed to spawn the TTS HUD driver");
     }
 
+    /// Put `code` on the HUD for a read that never started, with the same
+    /// linger as a failed one. No session is claimed: there is nothing to stop.
+    fn show_failure_without_read(&self, kind: ReadKind, code: &str) {
+        let Some(hud) = self.hud() else { return };
+        hud.cancel_hide();
+        hud.show(HudPresentation::Batch);
+        hud.emit_caption(None);
+        hud.emit_reading(kind.hud_kind(), ReadingSource::Selection, None);
+        hud.emit_error(Some(code));
+        let hud_for_hide = hud.clone();
+        hud.schedule_hide(HUD_ERROR_LINGER_MS, move || {
+            hud_for_hide.emit_error(None);
+            hud_for_hide.hide();
+        });
+    }
+
     /// Lock-free "is a read or speech in progress" view for the keyboard hook,
     /// which must not take locks inside the event tap callback.
     pub fn active_handle(&self) -> Arc<AtomicU64> {
@@ -814,7 +830,15 @@ impl TtsController {
             .map(|s| s.tts_provider_type.clone())
             .unwrap_or_default();
         let Some(backend) = self.backend_for(&provider, settings.as_ref()) else {
-            log_event("speak_err", &[("error", "unsupported".to_string())]);
+            // Today: the system voice selected on Windows, which has none.
+            // The selection is not even read — there is nothing to speak it
+            // with — but the key must not look dead either.
+            let code = TtsError::Unsupported.code();
+            log_event(
+                "speak_err",
+                &[("error", code.to_string()), ("provider", provider)],
+            );
+            self.show_failure_without_read(kind, code);
             return;
         };
 
@@ -1384,10 +1408,10 @@ fn aliyun_voice(settings: &AppSettings) -> String {
 /// setting allows it. Each is "there is no selection we can read here":
 /// nothing selected, a control that does not expose its selection, a copy
 /// that changed nothing. The rest are left alone on purpose — a secure input
-/// field is where a password is about to be pasted, a missing permission or
-/// VoiceX's own focus is something the user has to fix, and a refused
-/// clipboard snapshot or a changed foreground app may still have a selection
-/// the user meant.
+/// field is where a password is about to be pasted, a missing permission, an
+/// elevated target or VoiceX's own focus is something the user has to fix,
+/// and a refused clipboard snapshot or a changed foreground app may still have
+/// a selection the user meant.
 fn falls_back_to_clipboard(err: &SelectionError) -> bool {
     matches!(
         err,
@@ -1872,6 +1896,8 @@ mod tests {
             // A password field: the clipboard likely holds what goes into it.
             SelectionError::SecureInput,
             SelectionError::PermissionDenied,
+            // Like a missing permission, something for the user to resolve.
+            SelectionError::TargetElevated,
             SelectionError::FocusIsSelf,
             SelectionError::ClipboardSnapshotRefused("promised type".to_string()),
             SelectionError::ForegroundChanged,

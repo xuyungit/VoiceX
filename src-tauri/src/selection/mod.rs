@@ -1,13 +1,15 @@
 //! Cross-application selected-text reading.
 //!
 //! This module is the platform-agnostic surface of the selection subsystem.
-//! Platform types (AX element handles, `NSPasteboard`, …) never cross this
-//! boundary, so a future `WindowsSelectionReader` only has to provide the same
-//! [`read_selection`] entry point.
+//! Platform types (AX element handles, `NSPasteboard`, UI Automation
+//! interfaces, clipboard handles) never cross this boundary: the macOS and
+//! Windows readers each provide the same `read_selection` entry point and
+//! report through the same [`SelectionOutcome`] and [`SelectionProbe`].
 //!
 //! Reads are serialized on a dedicated worker thread: the macOS Accessibility
-//! API is documented as single-threaded, and serializing also keeps the
-//! clipboard fallback from interleaving with itself.
+//! API is documented as single-threaded, the Windows reader keeps its COM
+//! apartment and UI Automation client on that one thread, and serializing also
+//! keeps the clipboard fallback from interleaving with itself.
 
 use std::sync::{
     mpsc::{self, Sender, SyncSender},
@@ -17,6 +19,12 @@ use std::thread;
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
+// The Windows reader's pure decisions, compiled everywhere so their tests run
+// on every development machine.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod windows_rules;
 
 /// Which layer of the fallback chain produced the text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +36,11 @@ pub enum SelectionSource {
     /// `AXSelectedText` nor `AXSelectedTextRange`, so this is the only
     /// Accessibility read that works for Safari (plan §5.1).
     AxMarkerRange,
-    /// Synthetic Cmd-C with clipboard snapshot/restore.
+    /// Windows: the UI Automation `TextPattern` selection of the focused
+    /// element or its nearest ancestor that has one.
+    Uia,
+    /// Synthetic Cmd-C (macOS) or Ctrl+C (Windows) with clipboard
+    /// snapshot/restore.
     ClipboardCopy,
 }
 
@@ -37,6 +49,7 @@ impl SelectionSource {
         match self {
             SelectionSource::Ax => "ax",
             SelectionSource::AxMarkerRange => "ax_marker_range",
+            SelectionSource::Uia => "uia",
             SelectionSource::ClipboardCopy => "clipboard_copy",
         }
     }
@@ -51,15 +64,22 @@ impl SelectionSource {
 /// collected on every path including the early returns.
 ///
 /// Platform types never appear here: the macOS reader flattens its `AXError`
-/// and attribute list into plain fields, so a future Windows reader can fill
-/// the same shape.
+/// and attribute list into plain fields, and the Windows reader fills the same
+/// shape from UI Automation (`focusedRole` is the control type, `axStatus` the
+/// HRESULT). The few facts only one platform has are their own optional
+/// fields, left `None` elsewhere.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SelectionProbe {
     pub app_bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub focused_role: Option<String>,
+    /// macOS: `AXSubrole`. Windows: the UI Automation class name, which is
+    /// what tells a Chromium render widget from a RichEdit from a console.
     pub focused_subrole: Option<String>,
+    /// Windows only: the UI Automation framework id (`Win32`, `WPF`, `XAML`,
+    /// `Chrome`, …).
+    pub focused_framework: Option<String>,
     /// `text` | `empty` | `unsupported` | `api_disabled`, or `None` when there
     /// was no focused element to ask.
     pub ax_attribute: Option<String>,
@@ -76,6 +96,13 @@ pub struct SelectionProbe {
     /// range and the layer was skipped.
     pub marker_attribute: Option<String>,
     pub marker_status: Option<i32>,
+    /// Windows only: how many ancestors above the focused element the
+    /// `TextPattern` was found — 0 is the focused element itself. `None` when
+    /// no element on the way up had one.
+    pub text_pattern_depth: Option<u32>,
+    /// Windows only: whether the foreground process runs elevated, when that
+    /// could be determined.
+    pub target_elevated: Option<bool>,
     /// We asked this application to build its accessibility tree.
     pub enabled_manual_accessibility: bool,
     pub used_clipboard_fallback: bool,
@@ -109,8 +136,17 @@ pub enum SelectionError {
     #[error("Accessibility permission is not granted")]
     PermissionDenied,
 
-    #[error("Secure keyboard entry is active, so the copy fallback cannot run")]
+    /// macOS: secure keyboard entry is active. Windows: the focused control is
+    /// a password field. Either way the selection cannot be read, and the
+    /// clipboard is likely about to be pasted into it.
+    #[error("Secure input is active, so the selection cannot be read")]
     SecureInput,
+
+    /// Windows: the foreground application runs elevated and VoiceX does not.
+    /// User Interface Privilege Isolation then blocks both the UI Automation
+    /// read and the synthesized copy — the latter silently.
+    #[error("The foreground application runs as administrator")]
+    TargetElevated,
 
     #[error("The application did not respond to the copy command in time")]
     CopyTimeout,
@@ -150,6 +186,7 @@ impl SelectionError {
             SelectionError::UnsupportedControl => "unsupported_control",
             SelectionError::PermissionDenied => "permission_denied",
             SelectionError::SecureInput => "secure_input",
+            SelectionError::TargetElevated => "target_elevated",
             SelectionError::CopyTimeout => "copy_timeout",
             SelectionError::ClipboardSnapshotRefused(_) => "clipboard_snapshot_refused",
             SelectionError::ModifiersHeld => "modifiers_held",
@@ -166,8 +203,9 @@ impl SelectionError {
 #[derive(Clone)]
 pub struct SelectionRequest {
     pub app: tauri::AppHandle,
-    /// Compatibility mode: synthesize Cmd-C when the Accessibility path comes
-    /// up empty. Subject to the fail-closed clipboard rules regardless.
+    /// Compatibility mode: synthesize Cmd-C (Ctrl+C on Windows) when the
+    /// accessibility path comes up empty. Subject to the fail-closed clipboard
+    /// rules regardless.
     pub allow_clipboard_fallback: bool,
     /// Session cancellation, polled during the slow parts of a read — waiting
     /// for the hotkey modifiers to clear, waiting for the copy to land. A
@@ -208,7 +246,14 @@ fn read_selection_on_worker(request: &SelectionRequest) -> SelectionReport {
         SelectionReport { outcome, probe }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let mut probe = SelectionProbe::default();
+        let outcome = windows::read_selection(request, &mut probe);
+        SelectionReport { outcome, probe }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = request;
         SelectionReport {
@@ -227,7 +272,9 @@ pub struct SelectionReport {
 /// Read the current selection from the foreground application.
 ///
 /// Blocking. Must not be called from the main thread: the macOS implementation
-/// hops to the main thread for AppKit queries and would deadlock.
+/// hops to the main thread for AppKit queries and would deadlock, and the
+/// Windows one makes cross-process UI Automation calls that must not run on a
+/// thread with windows of its own.
 pub fn read_selection(request: SelectionRequest) -> Result<SelectionOutcome, SelectionError> {
     read_selection_reporting(request).outcome
 }
@@ -305,6 +352,8 @@ mod tests {
     fn error_codes_are_stable() {
         assert_eq!(SelectionError::NoSelection.code(), "no_selection");
         assert_eq!(SelectionError::SecureInput.code(), "secure_input");
+        assert_eq!(SelectionError::TargetElevated.code(), "target_elevated");
+        assert_eq!(SelectionSource::Uia.as_str(), "uia");
         assert_eq!(SelectionError::Cancelled.code(), "cancelled");
         assert_eq!(
             SelectionError::ClipboardSnapshotRefused("x".to_string()).code(),

@@ -40,7 +40,7 @@
 | 里程碑 | 内容 | 说明 |
 |---|---|---|
 | M1 改读剪贴板 | 设置项、改读判定、剪贴板取词与 concealed 拒绝、HUD 来源标签与错误文案 | 本次实现 |
-| M2 Windows | 打开 Windows 上的朗读快捷键时，一并实现 Windows 的 concealed 判定 | 跟随 Windows 朗读整体上线 |
+| M2 Windows | 打开 Windows 上的朗读快捷键时，一并实现 Windows 的 concealed 判定 | 已实现（2026-10-01），见 `windows-selection-reading-2026-10-01.md` §5 |
 
 ## 3. 功能需求
 

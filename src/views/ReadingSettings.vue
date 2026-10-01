@@ -9,7 +9,7 @@ import { useSettingsStore } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
 import { buildLlmProviderOptions } from '../utils/llmOptions'
 import { getDefaultPrompt } from '../utils/llmPrompts'
-import { isMacOS } from '../utils/platform'
+import { isMacOS, isWindows } from '../utils/platform'
 import { buildTtsProviderOptions, type TtsProviderValue as ProviderValue } from '../utils/ttsOptions'
 
 interface TtsVoiceOption {
@@ -36,6 +36,18 @@ interface ReadSelectionStatus {
 // The engine's own default rate, i.e. where the 1x mark sits on the stored
 // 0..1 scale. Everything the sliders show is a multiple of it.
 const DEFAULT_RATE = 0.5
+
+// Shown when no binding has been stored; the same defaults as
+// `default_read_selection` / `default_translate_selection` in
+// src-tauri/src/hotkey/config.rs, named with this platform's modifier keys.
+const DEFAULT_READ_HOTKEY = '82|2304|0'
+const DEFAULT_TRANSLATE_HOTKEY = '84|2304|0'
+
+// Two different platform questions. Reading text out of other applications is
+// implemented for macOS and Windows; the local system voice exists only on
+// macOS, so elsewhere reading needs one of the network engines.
+const selectionReadingSupported = isMacOS || isWindows
+const systemVoiceSupported = isMacOS
 
 const settingsStore = useSettingsStore()
 const { t, locale } = useI18n()
@@ -77,7 +89,25 @@ const ttsEnabled = computed({
 
 type AliyunModel = 'qwen3-tts-flash' | 'qwen-audio-3.0-tts-flash' | 'qwen-audio-3.1-tts-flash' | 'cosyvoice-v3-flash' | 'cosyvoice-v3.5-flash'
 
-const providerOptions = computed(() => buildTtsProviderOptions(t))
+const providerOptions = computed(() =>
+  buildTtsProviderOptions(t).map((option) =>
+    option.value === 'system' && !systemVoiceSupported
+      ? {
+          ...option,
+          label: t('reading.providerSystemUnsupported'),
+          // Still selectable if it already is the provider — the default
+          // setting names it — so the picker keeps showing what is in effect.
+          disabled: settingsStore.settings.ttsProviderType !== 'system'
+        }
+      : option
+  )
+)
+
+// The stored default on a platform without a system voice: every read would
+// stop at "no engine", so the page says so where the engine is chosen.
+const showSystemVoiceUnsupported = computed(
+  () => !systemVoiceSupported && settingsStore.settings.ttsProviderType === 'system'
+)
 
 const ttsProviderType = computed({
   get: () => settingsStore.settings.ttsProviderType,
@@ -320,11 +350,22 @@ const clipboardFallback = computed({
 const displayHotkey = computed(
   () =>
     hotkeyStatus.value?.display ??
-    formatHotkey(settingsStore.settings.ttsHotkeyConfig) ??
-    'Option + Command + R'
+    formatHotkey(settingsStore.settings.ttsHotkeyConfig ?? DEFAULT_READ_HOTKEY)
 )
 
 const showConflict = computed(() => hotkeyStatus.value?.conflictsWithDictation ?? false)
+
+// What the default keys collide with, and how the compatibility mode copies,
+// differ per platform; everything else on the page reads the same.
+const hotkeyNote = computed(() =>
+  isWindows ? t('reading.hotkeyNoteWindows') : t('reading.hotkeyNote')
+)
+const translateHotkeyNote = computed(() =>
+  isWindows ? t('reading.translateHotkeyNoteWindows') : t('reading.translateHotkeyNote')
+)
+const clipboardFallbackNote = computed(() =>
+  isWindows ? t('reading.clipboardFallbackNoteWindows') : t('reading.clipboardFallbackNote')
+)
 
 // --- Translate and read -----------------------------------------------------
 
@@ -472,6 +513,9 @@ const effectiveTranslateVoice = computed(() => translateVoiceOverride.value || t
 
 const translateVoiceHint = computed(() => {
   const id = effectiveTranslateVoice.value
+  // The page already says the engine is unavailable; a hint about its voice
+  // would only add noise.
+  if (showSystemVoiceUnsupported.value) return ''
   if (!id) {
     // Cloud engines always name a voice; only the system engine falls back to
     // `say`, whose voice follows the OS language, not the target.
@@ -486,8 +530,7 @@ const translateVoiceHint = computed(() => {
 const displayTranslateHotkey = computed(
   () =>
     translateHotkeyStatus.value?.display ??
-    formatHotkey(settingsStore.settings.ttsTranslateHotkeyConfig) ??
-    'Option + Command + T'
+    formatHotkey(settingsStore.settings.ttsTranslateHotkeyConfig ?? DEFAULT_TRANSLATE_HOTKEY)
 )
 
 const translateConflict = computed<'dictation' | 'reading' | null>(() => {
@@ -596,7 +639,7 @@ async function loadVoices(
   voicesError.value = ''
   // The cloud providers are network-only, so their voice lists work everywhere;
   // only the system voice needs macOS.
-  if (!isMacOS && provider === 'system') {
+  if (!systemVoiceSupported && provider === 'system') {
     voices.value = []
     customVoiceOnly.value = false
     voicesLoading.value = false
@@ -730,7 +773,7 @@ onBeforeUnmount(() => {
       <h1 class="page-title">{{ t('reading.title') }}</h1>
     </div>
 
-    <div v-if="!isMacOS" class="surface-card asr-card">
+    <div v-if="!selectionReadingSupported" class="surface-card asr-card">
       <div class="warning-box">{{ t('reading.unsupportedPlatform') }}</div>
     </div>
 
@@ -751,7 +794,7 @@ onBeforeUnmount(() => {
         <div class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.hotkey') }}</div>
-            <div class="field-note">{{ t('reading.hotkeyNote') }}</div>
+            <div class="field-note">{{ hotkeyNote }}</div>
           </div>
           <div class="field-control end">
             <div class="hotkey-display" :class="{ recording: isRecording }">
@@ -759,7 +802,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="hotkey-actions">
               <NButton
-                :disabled="isRecording || !ttsEnabled || !isMacOS"
+                :disabled="isRecording || !ttsEnabled || !selectionReadingSupported"
                 size="small"
                 @click="startRecording"
               >
@@ -774,7 +817,7 @@ onBeforeUnmount(() => {
                 {{ t('reading.clear') }}
               </NButton>
             </div>
-            <NSwitch v-model:value="ttsEnabled" :disabled="!isMacOS" size="small" />
+            <NSwitch v-model:value="ttsEnabled" :disabled="!selectionReadingSupported" size="small" />
           </div>
         </div>
 
@@ -785,7 +828,7 @@ onBeforeUnmount(() => {
         <div class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.translateHotkey') }}</div>
-            <div class="field-note">{{ t('reading.translateHotkeyNote') }}</div>
+            <div class="field-note">{{ translateHotkeyNote }}</div>
           </div>
           <div class="field-control end">
             <div class="hotkey-display" :class="{ recording: isRecordingTranslate }">
@@ -793,7 +836,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="hotkey-actions">
               <NButton
-                :disabled="isRecordingTranslate || !translateEnabled || !isMacOS"
+                :disabled="isRecordingTranslate || !translateEnabled || !selectionReadingSupported"
                 size="small"
                 @click="startRecordingTranslate"
               >
@@ -808,7 +851,11 @@ onBeforeUnmount(() => {
                 {{ t('reading.clear') }}
               </NButton>
             </div>
-            <NSwitch v-model:value="translateEnabled" :disabled="!isMacOS" size="small" />
+            <NSwitch
+              v-model:value="translateEnabled"
+              :disabled="!selectionReadingSupported"
+              size="small"
+            />
           </div>
         </div>
 
@@ -827,7 +874,11 @@ onBeforeUnmount(() => {
             <div class="field-note">{{ t('reading.clipboardWhenNoSelectionNote') }}</div>
           </div>
           <div class="field-control end">
-            <NSwitch v-model:value="clipboardWhenNoSelection" :disabled="!isMacOS" size="small" />
+            <NSwitch
+              v-model:value="clipboardWhenNoSelection"
+              :disabled="!selectionReadingSupported"
+              size="small"
+            />
           </div>
         </div>
       </div>
@@ -849,6 +900,10 @@ onBeforeUnmount(() => {
             size="small"
             class="field-control"
           />
+        </div>
+
+        <div v-if="showSystemVoiceUnsupported" class="warning-box">
+          {{ t('reading.systemVoiceUnsupported') }}
         </div>
 
         <div v-if="isEdge" class="field-row">
@@ -991,137 +1046,141 @@ onBeforeUnmount(() => {
              the ids do not carry across, and which sliders exist is the
              engine's call. They used to be a card of their own two cards
              further down, which hid that the two pickers move together. -->
-        <div class="subsection-header">
-          <div class="subsection-title">{{ t('reading.voice') }}</div>
-          <div class="card-sub">{{ t('reading.voiceSub') }}</div>
-        </div>
+        <!-- Nothing below works without an engine; the warning above says
+             what to do instead. -->
+        <template v-if="!showSystemVoiceUnsupported">
+          <div class="subsection-header">
+            <div class="subsection-title">{{ t('reading.voice') }}</div>
+            <div class="card-sub">{{ t('reading.voiceSub') }}</div>
+          </div>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.voiceLabel') }}</div>
-            <div class="field-note">{{ voiceNote }}</div>
-          </div>
-          <NInput
-            v-if="customVoiceOnly"
-            v-model:value="ttsVoiceId"
-            size="small"
-            class="field-control"
-            placeholder="cosyvoice-v3.5-flash-vd-..."
-          />
-          <NSelect
-            v-else
-            v-model:value="ttsVoiceId"
-            :options="voiceOptions"
-            :filter="filterVoice"
-            :loading="voicesLoading"
-            :disabled="!isMacOS && !isCloud"
-            :tag="isCloud"
-            filterable
-            size="small"
-            class="field-control"
-          />
-        </div>
-
-        <div v-if="isEdge" class="field-row">
-          <div class="field-text">
-            <div class="field-note">{{ t('reading.edgeStreamNote') }}</div>
-          </div>
-          <NButton size="small" :loading="voicesLoading" @click="loadVoices()">
-            {{ t('reading.refreshVoices') }}
-          </NButton>
-        </div>
-
-        <div v-if="voicesError" class="warning-box">
-          {{ t('reading.voiceLoadFailed') }} — {{ voicesError }}
-        </div>
-
-        <!-- Which of the three sliders exist is the engine's call; see
-             engineControls for the table. -->
-        <div v-if="engineControls.rate" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.rate') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSlider
-              v-model:value="rateMultiplier"
-              :min="0.5"
-              :max="2"
-              :step="0.05"
-              :disabled="!isMacOS && !isCloud"
-              class="slider"
-            />
-            <span class="slider-value">{{ rateMultiplier.toFixed(2) }}x</span>
-          </div>
-        </div>
-
-        <div v-if="engineControls.pitch && !isEdge" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.pitch') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSlider
-              v-model:value="pitchMultiplier"
-              :min="0.5"
-              :max="2"
-              :step="0.05"
-              :disabled="!isMacOS"
-              class="slider"
-            />
-            <span class="slider-value">{{ pitchMultiplier.toFixed(2) }}x</span>
-          </div>
-        </div>
-
-        <div v-if="isEdge" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.pitch') }}</div>
-            <div class="field-note">{{ t('reading.edgePitchNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSlider v-model:value="edgePitchHz" :min="-100" :max="100" :step="5" class="slider" />
-            <span class="slider-value">{{ edgePitchHz > 0 ? '+' : '' }}{{ edgePitchHz }} Hz</span>
-          </div>
-        </div>
-
-        <div v-if="engineControls.volume" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.volume') }}</div>
-            <div v-if="isCloud" class="field-note">{{ t('reading.volumeCloudNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSlider
-              v-model:value="volumePercent"
-              :min="0"
-              :max="100"
-              :step="5"
-              :disabled="!isMacOS && !isCloud"
-              class="slider"
-            />
-            <span class="slider-value">{{ volumePercent }}%</span>
-          </div>
-        </div>
-
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.preview') }}</div>
-            <div class="field-note">{{ t('reading.previewNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NButton
-              :loading="previewLoading"
-              :disabled="!isMacOS && !isCloud"
-              :type="previewSpeaking ? 'default' : 'primary'"
-              secondary
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.voiceLabel') }}</div>
+              <div class="field-note">{{ voiceNote }}</div>
+            </div>
+            <NInput
+              v-if="customVoiceOnly"
+              v-model:value="ttsVoiceId"
               size="small"
-              @click="togglePreview"
-            >
-              {{ previewSpeaking ? t('reading.previewStop') : t('reading.preview') }}
+              class="field-control"
+              placeholder="cosyvoice-v3.5-flash-vd-..."
+            />
+            <NSelect
+              v-else
+              v-model:value="ttsVoiceId"
+              :options="voiceOptions"
+              :filter="filterVoice"
+              :loading="voicesLoading"
+              :disabled="!systemVoiceSupported && !isCloud"
+              :tag="isCloud"
+              filterable
+              size="small"
+              class="field-control"
+            />
+          </div>
+
+          <div v-if="isEdge" class="field-row">
+            <div class="field-text">
+              <div class="field-note">{{ t('reading.edgeStreamNote') }}</div>
+            </div>
+            <NButton size="small" :loading="voicesLoading" @click="loadVoices()">
+              {{ t('reading.refreshVoices') }}
             </NButton>
           </div>
-        </div>
 
-        <div v-if="previewError" class="warning-box">
-          {{ t('reading.previewFailed') }} — {{ previewError }}
-        </div>
+          <div v-if="voicesError" class="warning-box">
+            {{ t('reading.voiceLoadFailed') }} — {{ voicesError }}
+          </div>
+
+          <!-- Which of the three sliders exist is the engine's call; see
+               engineControls for the table. -->
+          <div v-if="engineControls.rate" class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.rate') }}</div>
+            </div>
+            <div class="field-control end">
+              <NSlider
+                v-model:value="rateMultiplier"
+                :min="0.5"
+                :max="2"
+                :step="0.05"
+                :disabled="!systemVoiceSupported && !isCloud"
+                class="slider"
+              />
+              <span class="slider-value">{{ rateMultiplier.toFixed(2) }}x</span>
+            </div>
+          </div>
+
+          <div v-if="engineControls.pitch && !isEdge" class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.pitch') }}</div>
+            </div>
+            <div class="field-control end">
+              <NSlider
+                v-model:value="pitchMultiplier"
+                :min="0.5"
+                :max="2"
+                :step="0.05"
+                :disabled="!systemVoiceSupported"
+                class="slider"
+              />
+              <span class="slider-value">{{ pitchMultiplier.toFixed(2) }}x</span>
+            </div>
+          </div>
+
+          <div v-if="isEdge" class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.pitch') }}</div>
+              <div class="field-note">{{ t('reading.edgePitchNote') }}</div>
+            </div>
+            <div class="field-control end">
+              <NSlider v-model:value="edgePitchHz" :min="-100" :max="100" :step="5" class="slider" />
+              <span class="slider-value">{{ edgePitchHz > 0 ? '+' : '' }}{{ edgePitchHz }} Hz</span>
+            </div>
+          </div>
+
+          <div v-if="engineControls.volume" class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.volume') }}</div>
+              <div v-if="isCloud" class="field-note">{{ t('reading.volumeCloudNote') }}</div>
+            </div>
+            <div class="field-control end">
+              <NSlider
+                v-model:value="volumePercent"
+                :min="0"
+                :max="100"
+                :step="5"
+                :disabled="!systemVoiceSupported && !isCloud"
+                class="slider"
+              />
+              <span class="slider-value">{{ volumePercent }}%</span>
+            </div>
+          </div>
+
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('reading.preview') }}</div>
+              <div class="field-note">{{ t('reading.previewNote') }}</div>
+            </div>
+            <div class="field-control end">
+              <NButton
+                :loading="previewLoading"
+                :disabled="!systemVoiceSupported && !isCloud"
+                :type="previewSpeaking ? 'default' : 'primary'"
+                secondary
+                size="small"
+                @click="togglePreview"
+              >
+                {{ previewSpeaking ? t('reading.previewStop') : t('reading.preview') }}
+              </NButton>
+            </div>
+          </div>
+
+          <div v-if="previewError" class="warning-box">
+            {{ t('reading.previewFailed') }} — {{ previewError }}
+          </div>
+        </template>
       </div>
     </div>
 
@@ -1196,7 +1255,7 @@ onBeforeUnmount(() => {
             v-model:value="translateVoiceOverride"
             :options="translateVoiceOptions"
             :filter="filterVoice"
-            :disabled="!isMacOS && !isCloud"
+            :disabled="!systemVoiceSupported && !isCloud"
             :tag="isCloud"
             filterable
             size="small"
@@ -1332,10 +1391,10 @@ onBeforeUnmount(() => {
         <div class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('reading.clipboardFallback') }}</div>
-            <div class="field-note">{{ t('reading.clipboardFallbackNote') }}</div>
+            <div class="field-note">{{ clipboardFallbackNote }}</div>
           </div>
           <div class="field-control end">
-            <NSwitch v-model:value="clipboardFallback" :disabled="!isMacOS" />
+            <NSwitch v-model:value="clipboardFallback" :disabled="!selectionReadingSupported" />
           </div>
         </div>
       </div>

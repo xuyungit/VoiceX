@@ -6210,6 +6210,7 @@ dependencies = [
  "tonic-build",
  "urlencoding",
  "uuid",
+ "windows 0.61.3",
  "windows-sys 0.59.0",
 ]
 

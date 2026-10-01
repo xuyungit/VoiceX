@@ -129,7 +129,29 @@ core-foundation = "0.10"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows specific - SendInput API for direct unicode injection
-windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Threading", "Win32_Networking_WinHttp"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_Networking_WinHttp",
+    # Selected-text reading: clipboard snapshot/restore needs the sequence
+    # number and per-format enumeration, neither of which `arboard` exposes.
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    # Enhanced metafiles are a GDI handle, not memory, and are captured as bits.
+    "Win32_Graphics_Gdi",
+    # Whether the foreground process runs elevated (UIPI blocks reading it).
+    "Win32_Security",
+] }
+# Selected-text reading through UI Automation. COM interfaces are only in the
+# `windows` crate, not `windows-sys`; this is the version Tauri's WebView2
+# bindings already pull in.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+] }
 
 # MP3 encoding for MiMo batch ASR. Excluded on Windows: mp3lame-sys builds
 # libmp3lame via autotools, which is unreliable on the GitHub Actions Windows

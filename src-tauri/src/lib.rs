@@ -19,6 +19,8 @@ pub mod state;
 pub mod storage;
 pub mod tts;
 pub mod ui_locale;
+#[cfg(target_os = "windows")]
+mod win_clipboard;
 
 use crate::audio::AudioService;
 use crate::commands::settings::AppSettings;
@@ -178,10 +180,10 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         manager.set_config(Some(HotkeyConfiguration::default()));
     }
 
-    // Selected-text reading. Bound only where a backend exists — registering
-    // the key elsewhere would swallow the combination from the foreground app
-    // and then do nothing.
-    #[cfg(target_os = "macos")]
+    // Selected-text reading. Bound only where a selection reader exists
+    // (macOS and Windows) — registering the key elsewhere would swallow the
+    // combination from the foreground app and then do nothing.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if persisted_settings.tts_enabled {
         let read_selection_hotkey = persisted_settings
             .tts_hotkey_config
@@ -196,7 +198,7 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         log::info!("Selected-text reading is switched off in settings");
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if persisted_settings.tts_translate_enabled {
         let translate_hotkey = persisted_settings
             .tts_translate_hotkey_config
@@ -211,7 +213,7 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         log::info!("Translate-and-read is switched off in settings");
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     log::info!("Selected-text reading is not available on this platform yet");
 
     log::info!("VoiceX initialized successfully");

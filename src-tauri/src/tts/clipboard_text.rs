@@ -15,6 +15,16 @@ use super::log_event;
 #[cfg(target_os = "macos")]
 const CONCEALED_TYPE: &str = "org.nspasteboard.ConcealedType";
 
+/// Registered clipboard format with the same meaning on Windows. Microsoft
+/// documents it as the way to keep content out of clipboard history and
+/// monitors; KeePass, 1Password and other password managers set it.
+#[cfg(target_os = "windows")]
+const CONCEALED_FORMAT: &str = "ExcludeClipboardContentFromMonitorProcessing";
+
+/// How long a read waits for another process to let go of the clipboard.
+#[cfg(target_os = "windows")]
+const OPEN_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Why the clipboard gave us nothing to read. [`ClipboardTextError::code`] is
 /// what the HUD and the log key off.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -111,11 +121,29 @@ fn read_platform() -> Result<String, ClipboardTextError> {
     classify(!types.is_empty(), concealed, text)
 }
 
-/// Elsewhere: plain text through `arboard`. There is no concealed check yet —
-/// Windows marks secrets with the `ExcludeClipboardContentFromMonitorProcessing`
-/// format, and honouring it is part of turning reading on for Windows (the
-/// hotkey is not bound there until then).
-#[cfg(not(target_os = "macos"))]
+/// Windows: the Win32 clipboard directly, for the same reason as macOS —
+/// `arboard` does not expose formats. The concealed check and the text read
+/// happen under one `OpenClipboard`, so nothing can be copied in between and
+/// slip a password past the check.
+#[cfg(target_os = "windows")]
+fn read_platform() -> Result<String, ClipboardTextError> {
+    use crate::win_clipboard::{registered_format, OpenClipboardGuard};
+
+    let concealed_format = registered_format(CONCEALED_FORMAT);
+    let clipboard =
+        OpenClipboardGuard::open(OPEN_BUDGET).map_err(ClipboardTextError::Unavailable)?;
+    let concealed = concealed_format.is_some_and(|format| clipboard.has_format(format));
+    let text = if concealed {
+        // Not even read into memory.
+        None
+    } else {
+        clipboard.unicode_text()
+    };
+    classify(!clipboard.is_empty(), concealed, text)
+}
+
+/// Elsewhere: plain text through `arboard`, with no concealed marker to honour.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn read_platform() -> Result<String, ClipboardTextError> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|err| ClipboardTextError::Unavailable(err.to_string()))?;
