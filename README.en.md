@@ -67,7 +67,7 @@ translation is pending, the key or Escape cancels it.
 | **Captions** | On by default. The HUD switches to a text-only caption showing the sentence being spoken, for plain and translated reads alike. The default system voice (`say`) reports no progress, so it keeps the compact HUD |
 | **Translate and read** | Its own LLM choice (follow the LLM page, a provider, or a custom endpoint) and optional voices per target language; up to 5000 characters per read. A failed, timed-out or unconfigured LLM is reported on the HUD and **never falls back to reading the untranslated text**. Source and translation are kept on the History page by default (no audio, not synced), and the translation can also be copied to the clipboard |
 | **Tidy before reading** (optional) | Before a plain read, the LLM strips Markdown, HTML markup and link URLs so only the prose is read; if tidying fails, the original is read. The reading and translation prompts read a table copied from a web page as sentences rather than cell by cell |
-| **Speech engines** | The system voice (macOS only; offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS); or, in the cloud, Volcengine Doubao Seed-TTS 2.0, Alibaba Cloud Model Studio (default `qwen-audio-3.1-tts-flash` for longer text at about a sixth of 3.0's price; `qwen-audio-3.0-tts-flash` for its 500+ extra basic voices; `qwen3-tts-flash` for dialect voices; `cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`, the latter taking a Voice Design / cloned `voice_id`), Xiaomi MiMo, or Microsoft Azure Speech. Cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey; long selections are split at sentence boundaries instead of being truncated. Voice, rate and volume are stored per engine; Alibaba Cloud models that accept one also take a plain-language style instruction, by default a calm delivery suited to technical text |
+| **Speech engines** | The system voice (macOS only; offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS); or, in the cloud, Volcengine Doubao Seed-TTS 2.0, Alibaba Cloud Model Studio (default `qwen-audio-3.1-tts-flash` for longer text at about a sixth of 3.0's price; `qwen-audio-3.0-tts-flash` for its 500+ extra basic voices; `qwen3-tts-flash` for dialect voices; `cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`, the latter taking a Voice Design / cloned `voice_id`), Xiaomi MiMo, Microsoft Azure Speech, or Microsoft Edge online speech (no account or key; voices searchable by language, pitch in Hz, captions timed by the service's sentence and word boundaries; the default engine on Windows). Cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey; long selections are split at sentence boundaries instead of being truncated. Voice, rate and volume are stored per engine; Alibaba Cloud models that accept one also take a plain-language style instruction, by default a calm delivery suited to technical text |
 | **Yields to dictation** | Starting dictation stops reading — otherwise the microphone would record the speech and transcribe it back |
 
 ### How this differs from the built-in "Speak selection"
@@ -90,8 +90,10 @@ working in places we cannot reach such as the login window.
 
 ### Where the text goes
 
-- The default engine is the **system voice, entirely local** — selected text
-  never leaves the machine.
+- On macOS the default engine is the **system voice, entirely local** — selected
+  text never leaves the machine. Windows has no system voice; its default engine
+  is **Microsoft Edge online speech**, which sends the text to Microsoft's online
+  service for synthesis.
 - With a cloud engine selected, **the text being read is sent to that provider**
   for synthesis. The settings page says so when a cloud engine is chosen.
 - Translate-and-read and tidy-before-reading also send the text to the chosen

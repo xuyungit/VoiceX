@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.0] - 2026-10-01
+
+### Added
+- **Read selection and translate-and-read on Windows** — both reading keys, captions, tidy-before-reading and reading the clipboard when nothing is selected now work on Windows, which had the settings but no way to take text out of another application. The selection is read through UI Automation (the selection of the focused control, or of the nearest ancestor that exposes one: Notepad, Word, pages in Edge, Windows Terminal and the console) and otherwise through a synthetic Ctrl + C with the clipboard snapshotted and restored — the compatibility mode, as on macOS. The snapshot keeps every clipboard format that can be put back exactly, in its original order, and refuses the fallback when one cannot rather than risk your clipboard. A password field reports secure input; an application running as administrator is reported as such, since Windows blocks both paths into it unless VoiceX runs elevated too. Content a password manager marks with `ExcludeClipboardContentFromMonitorProcessing` is never read. Default keys are **Ctrl + Alt + Win + R** and **Ctrl + Alt + Win + T** (see Changed). This is the feature's first Windows release and it has not yet been tried across many applications; when one does not work, the selection diagnostic in Settings → Reading (shown with diagnostics enabled) reports what UI Automation saw. Design notes and the device checklist: `docs/windows-selection-reading-2026-10-01.md`.
+- **Microsoft Edge online speech as a reading engine** — Microsoft's free online Read Aloud voices, with no account, key or Edge installation. The voice list comes from the service and is searchable by name, language or id; rate and a pitch offset in Hz are stored on this engine alone, and volume is local playback gain. Audio plays as it arrives: long text is sent in requests sized to the service's capacity, with the next one fetched ahead of playback, and captions are cut from the service's sentence and word timestamps, so they stay sentence-sized without extra requests. The text is sent to Microsoft's online service; if Microsoft changes the protocol, reads fail visibly rather than switching engines.
+
+### Changed
+- **Windows reads with Edge by default** — there is no system voice on Windows, so a fresh install starts with Microsoft Edge online speech. Settings still holding the old shared default (`system`, which never spoke on Windows) move to Edge on launch; an engine you picked is kept. macOS keeps the system voice as its default.
+- **Reading keys have their own Windows defaults** — macOS keeps **⌥⌘R** / **⌥⌘T**. Their Windows counterparts, Win + Alt + R / T, are Xbox Game Bar's recording keys, and every other pair of modifiers there is taken as well (Ctrl + Alt is AltGr, Win + Ctrl + T is PowerToys Always On Top, Win + Shift + R is Snipping Tool recording), so Windows uses the dictation key's modifiers: Ctrl + Alt + Win + R / T. Keys you recorded yourself are unchanged.
+- On Windows, swallowing a reading key held with Alt or Win no longer leaves a bare Alt or Win tap behind, which would open the Start menu or the window's menu bar.
+- A reading key pressed while the selected engine does not exist on this platform (the system voice off macOS) now says so on the HUD instead of doing nothing; the Reading settings page marks the system voice "macOS only" there.
+
+### Developer tooling
+- `tools/llm-bench` passes a word spoken after its sentence when it stands inside that sentence, even with other words reordered, and counts Abaqus and Midas as dictionary terms.
+- The Windows reader's decisions — which clipboard formats are captured, the snapshot budget, when elevation blocks a read — live in the platform-neutral `selection/windows_rules.rs`, so their tests run on macOS and Linux as well.
+
 ## [0.16.0] - 2026-09-25
 
 ### Added
