@@ -59,14 +59,15 @@ impl HotkeyConfiguration {
         }
     }
 
-    /// Default selected-text reading hotkey: Option+Command+R.
+    /// Default selected-text reading hotkey: Option+Command+R on macOS,
+    /// Ctrl+Alt+Win+R on Windows (see [`reading_default_modifiers`]).
     ///
-    /// Avoids the system's own "Speak selected text" shortcut (Option-Esc) so
-    /// both can coexist.
+    /// On macOS it avoids the system's own "Speak selected text" shortcut
+    /// (Option-Esc) so both can coexist.
     pub fn default_read_selection() -> Self {
         Self {
             key_code: 'R' as u32,
-            modifiers: 0x0800 | 0x0100, // option | cmd
+            modifiers: reading_default_modifiers(cfg!(target_os = "windows")),
             uses_fn: false,
         }
     }
@@ -78,7 +79,7 @@ impl HotkeyConfiguration {
     pub fn default_translate_selection() -> Self {
         Self {
             key_code: 'T' as u32,
-            modifiers: 0x0800 | 0x0100, // option | cmd
+            modifiers: reading_default_modifiers(cfg!(target_os = "windows")),
             uses_fn: false,
         }
     }
@@ -245,6 +246,32 @@ impl HotkeyConfiguration {
     }
 }
 
+/// The modifiers of both reading keys' defaults.
+///
+/// macOS: Option+Command. The same keys on Windows, Alt+Win, are taken —
+/// Win+Alt+R and Win+Alt+T are Xbox Game Bar's "start/stop recording" and
+/// "show recording timer" — and so is every other pair of modifiers:
+///
+/// - Ctrl+Alt is how Windows spells AltGr, so Ctrl+Alt+letter types a
+///   character on many layouts (Ctrl+Alt+R is ® on US-International) and
+///   Microsoft's own guidelines rule it out for shortcuts;
+/// - Win+Ctrl+T is PowerToys' Always On Top, and Win+Ctrl itself holds
+///   Windows' virtual desktop and accessibility keys;
+/// - Win+Shift+R starts a Snipping Tool recording, Ctrl+Shift+R/T are a
+///   browser's hard reload and reopen tab, Alt+Shift switches input language.
+///
+/// Ctrl+Alt+Win is free of all of that, and it is already the chord of the
+/// dictation default (Ctrl+Alt+Win+Space), so the three VoiceX keys are one
+/// chord plus Space, R or T. With Win in the chord no AltGr character is ever
+/// typed by it.
+pub fn reading_default_modifiers(windows: bool) -> u32 {
+    if windows {
+        0x1000 | 0x0800 | 0x0100 // ctrl | alt | win
+    } else {
+        0x0800 | 0x0100 // option | cmd
+    }
+}
+
 impl Default for HotkeyConfiguration {
     fn default() -> Self {
         Self::default_primary()
@@ -254,6 +281,35 @@ impl Default for HotkeyConfiguration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reading_defaults_differ_per_platform_but_stay_a_pair() {
+        // macOS keeps Option+Command; Windows takes the dictation chord.
+        assert_eq!(reading_default_modifiers(false), 0x0800 | 0x0100);
+        assert_eq!(
+            reading_default_modifiers(true),
+            HotkeyConfiguration::default_primary().modifiers,
+            "on Windows the reading keys share the dictation default's chord"
+        );
+        // The stored forms the settings page falls back to when nothing is
+        // stored (`DEFAULT_*_HOTKEY` in ReadingSettings.vue).
+        let windows = reading_default_modifiers(true);
+        assert_eq!(
+            HotkeyConfiguration::new('R' as u32, windows, false).to_storage(),
+            "82|6400|0"
+        );
+        assert_eq!(
+            HotkeyConfiguration::new('T' as u32, windows, false).to_storage(),
+            "84|6400|0"
+        );
+
+        let read = HotkeyConfiguration::default_read_selection();
+        let translate = HotkeyConfiguration::default_translate_selection();
+        assert_eq!(read.modifiers, translate.modifiers);
+        assert_eq!(read.key_code, 'R' as u32);
+        assert_eq!(translate.key_code, 'T' as u32);
+        assert_ne!(read, HotkeyConfiguration::default_primary());
+    }
 
     #[test]
     fn a_digit_binding_round_trips_through_storage_and_names_itself() {

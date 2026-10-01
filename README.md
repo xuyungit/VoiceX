@@ -42,12 +42,12 @@ VoiceX 通过一个可配置的全局热键映射三种不同意图：
 
 | 热键（可改） | 作用 |
 |---|---|
-| **⌥⌘R** 朗读（Windows：Alt + Win + R） | 直接读出选中的文字 |
-| **⌥⌘T** 翻译朗读（Windows：Alt + Win + T） | 先交给大模型翻译成目标语言（默认英文），再读出译文；已经是目标语言的文本只做整理、不翻译 |
+| **⌥⌘R** 朗读（Windows：Ctrl + Alt + Win + R） | 直接读出选中的文字 |
+| **⌥⌘T** 翻译朗读（Windows：Ctrl + Alt + Win + T） | 先交给大模型翻译成目标语言（默认英文），再读出译文；已经是目标语言的文本只做整理、不翻译 |
 
 再按一次任一朗读热键或按 **Escape** 立即停止；等待翻译时按热键或 Escape 取消。
 
-> **Windows 说明。** 取词走 UI 自动化（UI Automation），取不到时降级为模拟 Ctrl + C 并还原剪贴板，与 macOS 的两层做法对应。Windows 上没有系统语音，需要选一个云端引擎（Microsoft Edge 在线朗读无需密钥）。默认热键 Alt + Win + R / T 同时是 Xbox Game Bar 的录制快捷键，开启朗读后由 VoiceX 占用，可在朗读设置里改。以管理员身份运行的应用读不到，除非 VoiceX 也以管理员身份运行。
+> **Windows 说明。** 取词走 UI 自动化（UI Automation），取不到时降级为模拟 Ctrl + C 并还原剪贴板，与 macOS 的两层做法对应。Windows 上没有系统语音，默认引擎是 Microsoft Edge 在线朗读（无需密钥，文字会发到微软在线服务合成），可换成其他云端引擎。默认热键和听写热键（Ctrl + Alt + Win + Space）用同一组修饰键，避开了 Windows 自带（如 Game Bar 的 Win + Alt + R）和 PowerToys 已占用的组合。以管理员身份运行的应用读不到，除非 VoiceX 也以管理员身份运行。
 
 <p align="center">
   <img src="assets/screenshots/zh/reading-settings.png" alt="VoiceX 朗读设置" width="720" />

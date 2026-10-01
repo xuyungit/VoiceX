@@ -1490,9 +1490,19 @@ mod tests {
         assert_eq!(settings.system_tts_voice_id, "");
     }
 
+    /// Settings with the system engine selected. These tests pin that
+    /// engine's request rules, which hold on every platform, while the default
+    /// engine is `system` only where a system voice exists.
+    fn system_voice_settings() -> AppSettings {
+        AppSettings {
+            tts_provider_type: "system".to_string(),
+            ..AppSettings::default()
+        }
+    }
+
     #[test]
     fn an_unset_voice_means_engine_default_not_a_voice_named_empty() {
-        let mut settings = AppSettings::default();
+        let mut settings = system_voice_settings();
         assert!(settings.system_tts_voice_id.is_empty());
         assert_eq!(voice_request(&settings, "hi".to_string()).voice, None);
 
@@ -1507,7 +1517,7 @@ mod tests {
     fn voice_parameters_reach_the_request_on_their_stored_scales() {
         // Empty system voice is the `say` path: rate still applies, volume and
         // pitch do not exist on that engine so they stay `None`.
-        let settings = AppSettings::default();
+        let settings = system_voice_settings();
         let request = voice_request(&settings, "hi".to_string());
         assert_eq!(request.rate, Some(0.5), "0.5 is the engine's 1x mark");
         assert_eq!(request.volume, None);
@@ -1518,7 +1528,7 @@ mod tests {
     fn a_listed_system_voice_keeps_pitch_and_volume() {
         // Compact AVSpeech voices honour both; sending them only then means a
         // value is never silently dropped on the `say` path.
-        let mut settings = AppSettings::default();
+        let mut settings = system_voice_settings();
         settings.system_tts_voice_id = "com.apple.voice.compact.zh-CN.Tingting".to_string();
         settings.system_tts_volume = 0.4;
         settings.system_tts_pitch = 1.2;
@@ -1970,7 +1980,7 @@ mod tests {
     fn a_system_override_switches_say_to_avspeech() {
         // The empty reading voice means `say`; an override id can only be
         // spoken by AVSpeech, and that choice is made from the same field.
-        let mut settings = AppSettings::default();
+        let mut settings = system_voice_settings();
         assert!(super::uses_say_voice(&settings));
         settings.tts_translate_voice_overrides.insert(
             "system".to_string(),

@@ -39,9 +39,11 @@ const DEFAULT_RATE = 0.5
 
 // Shown when no binding has been stored; the same defaults as
 // `default_read_selection` / `default_translate_selection` in
-// src-tauri/src/hotkey/config.rs, named with this platform's modifier keys.
-const DEFAULT_READ_HOTKEY = '82|2304|0'
-const DEFAULT_TRANSLATE_HOTKEY = '84|2304|0'
+// src-tauri/src/hotkey/config.rs. macOS: Option + Command; Windows:
+// Ctrl + Alt + Win, the dictation chord, since every two-modifier pair there
+// is already taken (see `reading_default_modifiers`).
+const DEFAULT_READ_HOTKEY = isWindows ? '82|6400|0' : '82|2304|0'
+const DEFAULT_TRANSLATE_HOTKEY = isWindows ? '84|6400|0' : '84|2304|0'
 
 // Two different platform questions. Reading text out of other applications is
 // implemented for macOS and Windows; the local system voice exists only on

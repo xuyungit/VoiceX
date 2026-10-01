@@ -182,7 +182,8 @@ pub struct AppSettings {
     // question entirely for every provider added later.
     pub tts_enabled: bool,
     pub tts_provider_type: String, // "system" | "volcengine" | "aliyun" | "mimo" | "azure" | "edge"
-    /// `None` means the built-in default binding (Option+Command+R).
+    /// `None` means the built-in default binding (Option+Command+R on macOS,
+    /// Ctrl+Alt+Win+R on Windows).
     pub tts_hotkey_config: Option<String>,
     /// Compatibility mode: fall back to a synthetic Cmd-C when the
     /// Accessibility path comes up empty. Turning it off loses Safari and
@@ -531,7 +532,7 @@ impl Default for AppSettings {
             max_recording_minutes: 5,
 
             tts_enabled: true,
-            tts_provider_type: "system".to_string(),
+            tts_provider_type: default_tts_provider_type().to_string(),
             tts_hotkey_config: None,
             tts_clipboard_fallback: true,
             tts_clipboard_when_no_selection: true,
@@ -717,6 +718,44 @@ pub fn apply_llm_provider_selection(settings: &mut AppSettings, key: &str) {
     } else {
         settings.llm_provider_type = key.to_string();
     }
+}
+
+/// The local system voice exists only on macOS (`say` / AVSpeechSynthesizer).
+const SYSTEM_VOICE_AVAILABLE: bool = cfg!(target_os = "macos");
+
+/// The reading engine a fresh install starts with: the system voice where
+/// there is one — offline, nothing to configure — and elsewhere Microsoft
+/// Edge's online voices, the one network engine that needs no account or key.
+pub fn default_tts_provider_type() -> &'static str {
+    if SYSTEM_VOICE_AVAILABLE {
+        "system"
+    } else {
+        "edge"
+    }
+}
+
+/// Settings stored before reading worked on Windows carry the old shared
+/// default, `system`, which never spoke there. It was nobody's choice — the
+/// picker offered nothing that worked — so it becomes this platform's
+/// default instead of leaving every read to fail with "no engine".
+pub fn migrate_tts_provider_without_system_voice(value: &mut serde_json::Value) -> bool {
+    rewrite_unavailable_system_provider(value, SYSTEM_VOICE_AVAILABLE)
+}
+
+fn rewrite_unavailable_system_provider(
+    value: &mut serde_json::Value,
+    system_voice_available: bool,
+) -> bool {
+    if system_voice_available {
+        return false;
+    }
+    let Some(object) = value.as_object_mut() else { return false; };
+    let key = "ttsProviderType";
+    if object.get(key).and_then(serde_json::Value::as_str) != Some("system") {
+        return false;
+    }
+    object.insert(key.into(), serde_json::Value::from("edge"));
+    true
 }
 
 /// `minimal` was the Volcengine page's default and its way of saying "lowest".
@@ -1347,13 +1386,44 @@ pub async fn clear_soniox_debug_overrides(
 #[cfg(test)]
 mod tests {
     use super::{
-        active_custom_endpoint, apply_llm_provider_selection, migrate_hotkey_digit_key_codes,
-        migrate_llm_custom_endpoints, migrate_text_injection_override_restore_flag,
-        migrate_volcengine_minimal_effort, normalize_qwen_settings,
-        normalize_text_injection_overrides, preview_llm_reasoning, AppSettings,
+        active_custom_endpoint, apply_llm_provider_selection, default_tts_provider_type,
+        migrate_hotkey_digit_key_codes, migrate_llm_custom_endpoints,
+        migrate_text_injection_override_restore_flag, migrate_volcengine_minimal_effort,
+        normalize_qwen_settings, normalize_text_injection_overrides, preview_llm_reasoning,
+        rewrite_unavailable_system_provider, AppSettings,
     };
     use crate::foreground_app::TextInjectionAppOverride;
     use crate::services::llm_service::build_llm_config_from_settings;
+
+    #[test]
+    fn a_fresh_install_reads_with_the_system_voice_only_where_there_is_one() {
+        let expected = if cfg!(target_os = "macos") { "system" } else { "edge" };
+        assert_eq!(default_tts_provider_type(), expected);
+        assert_eq!(AppSettings::default().tts_provider_type, expected);
+    }
+
+    #[test]
+    fn the_old_system_default_becomes_edge_where_there_is_no_system_voice() {
+        let mut stored = serde_json::json!({ "ttsProviderType": "system" });
+        assert!(rewrite_unavailable_system_provider(&mut stored, false));
+        assert_eq!(stored["ttsProviderType"], "edge");
+        // Idempotent: it runs on every load.
+        assert!(!rewrite_unavailable_system_provider(&mut stored, false));
+
+        // On macOS the system voice is a real choice and stays.
+        let mut mac = serde_json::json!({ "ttsProviderType": "system" });
+        assert!(!rewrite_unavailable_system_provider(&mut mac, true));
+        assert_eq!(mac["ttsProviderType"], "system");
+
+        // An engine somebody picked is never touched.
+        let mut chosen = serde_json::json!({ "ttsProviderType": "aliyun" });
+        assert!(!rewrite_unavailable_system_provider(&mut chosen, false));
+        assert_eq!(chosen["ttsProviderType"], "aliyun");
+
+        // No stored value: the struct default applies, nothing to rewrite.
+        let mut missing = serde_json::json!({});
+        assert!(!rewrite_unavailable_system_provider(&mut missing, false));
+    }
 
     #[test]
     fn legacy_settings_gain_edge_defaults_and_round_trip_hz_pitch() {

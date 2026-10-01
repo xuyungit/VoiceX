@@ -5,6 +5,7 @@ import { ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { UiLanguage } from '../i18n'
 import { getDefaultPrompt } from '../utils/llmPrompts'
+import { isMacOS } from '../utils/platform'
 import type { LlmApiModeValue, LlmProviderValue } from '../utils/llmOptions'
 
 export interface CustomLlmEndpoint {
@@ -438,7 +439,9 @@ const defaultSettings: AppSettings = {
     maxRecordingMinutes: 5,
 
     ttsEnabled: true,
-    ttsProviderType: 'system',
+    // Mirrors `default_tts_provider_type` in src-tauri/src/commands/settings.rs:
+    // the system voice only exists on macOS; elsewhere Edge needs no key.
+    ttsProviderType: isMacOS ? 'system' : 'edge',
     ttsHotkeyConfig: null,
     ttsClipboardFallback: true,
     ttsClipboardWhenNoSelection: true,

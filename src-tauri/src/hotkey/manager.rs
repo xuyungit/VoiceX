@@ -1003,7 +1003,10 @@ mod tests {
         assert!(!clash.enabled, "but the hook will not act on it");
         assert!(clash.conflicts_with_dictation);
         assert!(!clash.conflicts_with_reading, "reading never conflicts with itself");
-        assert_eq!(clash.display.as_deref(), Some("Option + Command + R"));
+        assert_eq!(
+            clash.display,
+            Some(HotkeyConfiguration::default_read_selection().display_string())
+        );
     }
 
     #[test]
@@ -1056,7 +1059,10 @@ mod tests {
         let status = manager.translate_selection_status();
         assert!(status.bound && status.enabled);
         assert!(!status.conflicts_with_dictation && !status.conflicts_with_reading);
-        assert_eq!(status.display.as_deref(), Some("Option + Command + T"));
+        assert_eq!(
+            status.display,
+            Some(HotkeyConfiguration::default_translate_selection().display_string())
+        );
     }
 
     #[test]

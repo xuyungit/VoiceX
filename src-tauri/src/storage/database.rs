@@ -245,11 +245,14 @@ fn migrate_settings_blob(conn: &Connection) {
     let migrated_hotkeys = crate::commands::settings::migrate_hotkey_digit_key_codes(&mut value);
     let migrated_reasoning =
         crate::commands::settings::migrate_volcengine_minimal_effort(&mut value);
+    let migrated_tts_provider =
+        crate::commands::settings::migrate_tts_provider_without_system_voice(&mut value);
     if !migrated_endpoints
         && !migrated_restore
         && !migrated_asr
         && !migrated_hotkeys
         && !migrated_reasoning
+        && !migrated_tts_provider
     {
         return;
     }
@@ -1092,6 +1095,9 @@ pub fn get_settings() -> Result<AppSettings, StorageError> {
                     );
                     crate::commands::settings::migrate_hotkey_digit_key_codes(&mut raw);
                     crate::commands::settings::migrate_volcengine_minimal_effort(&mut raw);
+                    crate::commands::settings::migrate_tts_provider_without_system_voice(
+                        &mut raw,
+                    );
                     match serde_json::from_value::<AppSettings>(raw) {
                         Ok(mut settings) => {
                             crate::commands::settings::normalize_text_injection_overrides(

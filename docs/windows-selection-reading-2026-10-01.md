@@ -1,7 +1,7 @@
 # Windows 选中朗读：技术分析与实现
 
 > 文档状态：分析 + 首版实现（代码已合入分支，**尚未在 Windows 真机验证**）
-> 日期：2026-10-01
+> 日期：2026-10-01（同日修订：Windows 默认引擎改为 Edge，默认热键与 macOS 分开，见 §4.2、§6）
 > 前置：`tts_plan.md`（macOS 方案与 §3.4 失败关闭合同）、`clipboard-read-requirements-2026-09-23.md`（M2 Windows concealed）、`selection-safari-failure-and-clipboard-fallback-2026-09-11.md`
 
 ## 0. 结论摘要
@@ -12,8 +12,9 @@
 | 取词怎么做 | 与 macOS 同构的两层：**UI Automation `TextPattern` 选区**（无副作用）→ 取不到时**模拟 Ctrl+C + 全格式快照还原**（可关闭的兼容模式） |
 | 剪贴板的难点 | Windows 剪贴板是全局锁、有延迟渲染、有 GDI 句柄格式和系统合成格式。快照按格式分类处理，拿不准就拒绝（失败关闭），读取与还原在同一次 `OpenClipboard` 内完成 |
 | 必须新增的 Windows 专属处理 | ① 吞掉含 Alt/Win 的热键后要注入"菜单遮罩键"，否则会弹开始菜单/激活菜单栏；② 前台应用以管理员身份运行时直接报 `target_elevated`（UIPI 会让读取失败、让 Ctrl+C 被静默丢弃）；③ 焦点在密码框时报 `secure_input` |
-| 系统语音 | Windows 不提供（`say` / AVSpeech 是 macOS 专有）。选"系统语音"时设置页给警告，按热键时 HUD 明确报错，**不会**自动改用云端引擎 |
-| 风险 | 未在真机验证；UIA 查询会让 Chromium/Electron 应用打开无障碍树（VS Code 可能因此进入屏幕阅读器优化模式，待实测）；默认热键与 Xbox Game Bar 录制快捷键重合 |
+| 引擎 | Windows 没有系统语音（`say` / AVSpeech 是 macOS 专有），**默认引擎改为 Microsoft Edge 在线朗读**（无需密钥）；已有安装里存着的旧默认值 `system` 迁移为 `edge` |
+| 默认热键 | 与 macOS 分开：Windows 用 **Ctrl + Alt + Win + R / T**，与听写默认键 Ctrl + Alt + Win + Space 同一组修饰键；两修饰键组合在 Windows 上都已被系统或常用工具占用 |
+| 风险 | 未在真机验证；UIA 查询会让 Chromium/Electron 应用打开无障碍树（VS Code 可能因此进入屏幕阅读器优化模式，待实测） |
 
 ## 1. 现状：为什么之前只开 macOS
 
@@ -128,13 +129,32 @@ Windows 上 Chromium 检测到 UIA/MSAA 客户端查询后会打开自己的无�
 - 裸 Alt 轻点 → 前台窗口激活菜单栏（Office 显示 KeyTips）。之后的 Ctrl+C 会被菜单模式吃掉，兼容模式失败。
 - 裸 Win 轻点 → **弹出开始菜单**，开始菜单变成前台窗口，取词直接报 `foreground_changed`。
 
-默认热键 Alt + Win + R 两种都会发生（取决于按键顺序）。处理沿用 AutoHotkey 的"menu mask key"做法：在钩子里吞掉朗读热键的同时，若 Alt 或 Win 按着，立即注入一次未分配的虚拟键 `0xE8` 的按下/松开，让修饰键不再"孤立"（`hotkey/menu_mask.rs`）。钩子对这个键直接放行，不更新修饰键状态、不参与绑定匹配、不会被录进热键。
+含 Alt 和 Win 的热键（默认的 Ctrl + Alt + Win + R / T，以及用户自设的 Alt + Win 等组合）视按键和松键顺序，两种都可能发生。处理沿用 AutoHotkey 的"menu mask key"做法：在钩子里吞掉朗读热键的同时，若 Alt 或 Win 按着，立即注入一次未分配的虚拟键 `0xE8` 的按下/松开，让修饰键不再"孤立"（`hotkey/menu_mask.rs`）。钩子对这个键直接放行，不更新修饰键状态、不参与绑定匹配、不会被录进热键。
 
 > 听写热键（默认 Ctrl + Alt + Win + Space）理论上有同样的问题，但它是既有行为、本次没有改动，也没有在真机确认是否会触发，列为待验证项。
 
-### 4.2 默认热键与系统快捷键
+### 4.2 默认热键：与 macOS 分开
 
-macOS 默认 ⌥⌘R / ⌥⌘T 映射到 Windows 是 **Alt + Win + R / T**，恰好是 Xbox Game Bar 的"开始/停止录制"和"显示/隐藏录制计时器"。低级钩子先于系统热键处理，开启朗读后这两个组合归 VoiceX。本次**保留**与 macOS 一致的默认值（同一个物理位置的修饰键），在设置页和 README 写明冲突、提示可改。备选方案（未采用）：Ctrl + Alt + 字母在很多欧洲布局上等同 AltGr，会吞掉字符；Ctrl + Win + 字母同样需要遮罩键且记忆性差。是否换默认值是产品决定，留待确认。
+macOS 默认 ⌥⌘R / ⌥⌘T 直接映射到 Windows 是 Alt + Win + R / T，恰好是 Xbox Game Bar 的"开始/停止录制"和"显示/隐藏录制计时器"。再看其他两修饰键组合，在 Windows 上全部有主：
+
+| 组合 | 已被占用 |
+|---|---|
+| Win + Alt + 字母 | Game Bar：R 录制、T 计时器、G 录最近片段、M 麦克风；Win11：D 日期时间、K 通话静音 |
+| Win + Ctrl + 字母 | 系统：D 新建虚拟桌面、C 颜色滤镜、Q 快速助手、F 搜索电脑、M 放大镜、Enter 讲述人；PowerToys：**T 置顶窗口** |
+| Win + Shift + 字母 | 系统：S 截图、**R 截图工具录屏**；PowerToys：T 文字识别、C 取色、V 高级粘贴 |
+| Win + Ctrl + Shift + 字母 | PowerToys 裁剪锁定：**R、T**；屏幕标尺 M |
+| Ctrl + Alt + 字母 | Windows 把 Ctrl + Alt 当作 AltGr，许多布局用它打字（US-International 上 Ctrl + Alt + R 是 ®）；微软界面规范明确不建议用作快捷键。另有放大镜、Word、Google 表格等占用 Ctrl + Alt + R |
+| Ctrl + Shift + 字母 | 浏览器：R 强制刷新、T 重新打开标签页 |
+| Alt + Shift | 切换输入法 |
+
+**采用：Ctrl + Alt + Win + R（朗读）/ Ctrl + Alt + Win + T（翻译朗读）。** 理由：
+
+- 查不到 Windows、Game Bar、PowerToys 对这两个组合的占用（PowerToys 在这组修饰键上只用了 V，纯文本粘贴）。
+- 与听写默认键 Ctrl + Alt + Win + Space 是同一组修饰键：VoiceX 的三个键 = 同一个和弦 + Space / R / T，好记。这三个键在大多数键盘左下角相邻。
+- 有 Win 参与，不会和 AltGr 打字冲突。
+- 仍然含 Alt 和 Win，所以 §4.1 的遮罩键照样生效。
+
+macOS 默认值不变。实现：`hotkey/config.rs` 的 `reading_default_modifiers`（含选型理由与单测），设置页的未存储兜底显示同步按平台取值。已存过自定义热键的用户不受影响；之前在 Windows 上没存过热键的用户会直接得到新默认值。
 
 ## 5. 读剪贴板（需求文档 M2）
 
@@ -142,8 +162,10 @@ macOS 默认 ⌥⌘R / ⌥⌘T 映射到 Windows 是 **Alt + Win + R / T**，恰
 
 ## 6. TTS 引擎
 
-- 云端引擎（火山 / 阿里 / MiMo / Azure / Edge）原样可用。Microsoft Edge 在线朗读无需密钥，是 Windows 上最省事的选择。
-- 默认引擎仍是"系统语音"。在 Windows 上：引擎下拉里显示"系统语音（仅 macOS）"且不可新选；当前就是它时显示警告并隐藏用不了的音色与参数；按朗读热键时 HUD 显示「当前平台没有系统语音，请在朗读设置中选择引擎」。**不**自动改用 Edge——那会在用户没选择的情况下把文字发到在线服务。
+- 云端引擎（火山 / 阿里 / MiMo / Azure / Edge）原样可用。
+- **Windows 默认引擎是 Microsoft Edge 在线朗读**：无需账号和密钥，开箱即可朗读。文字会发到微软在线服务合成，设置页选中 Edge 时的说明里写明了这一点。实现为 `commands/settings.rs` 的 `default_tts_provider_type`（有系统语音的平台用 `system`，否则用 `edge`），前端默认值同步。
+- **已有安装的迁移**：之前的共用默认值 `system` 在 Windows 上从来不能发声，不可能是用户的有意选择，因此加载设置时迁移为 `edge`（`migrate_tts_provider_without_system_voice`，与其他设置迁移同一入口，幂等，macOS 不受影响）。用户自己选过的其他引擎不动。
+- 兜底仍保留：万一引擎仍是"系统语音"（例如手工改了配置），设置页给警告并隐藏用不了的音色与参数，按热键时 HUD 显示「当前平台没有系统语音，请在朗读设置中选择引擎」。
 - Windows 本地语音（SAPI / WinRT `SpeechSynthesizer`）可以作为后续独立任务。
 
 ## 7. 实现清单
@@ -159,6 +181,8 @@ macOS 默认 ⌥⌘R / ⌥⌘T 映射到 Windows 是 **Alt + Win + R / T**，恰
 | `src-tauri/src/selection/mod.rs` | 新来源 `uia`、新错误 `target_elevated`、诊断探针新增 `focusedFramework` / `textPatternDepth` / `targetElevated`（`focusedRole` 填 UIA 控件类型，`focusedSubrole` 填类名，`axStatus` 填 HRESULT） |
 | `src-tauri/src/tts/clipboard_text.rs` | Windows concealed 判定 |
 | `src-tauri/src/tts/controller.rs` | 无可用引擎时 HUD 报错；`target_elevated` 不改读剪贴板 |
+| `src-tauri/src/commands/settings.rs`、`storage/database.rs` | Windows 默认引擎 Edge；旧默认值 `system` 的迁移 |
+| `src-tauri/src/hotkey/config.rs` | 朗读热键默认值按平台区分 |
 | `src-tauri/src/lib.rs`、`commands/tts.rs` | 热键在 Windows 上也注册 |
 | `src/views/ReadingSettings.vue`、`src/hud/hud.ts`、i18n | 平台判断拆成"能取词"与"有系统语音"两件事；Windows 专属说明与错误文案 |
 | `Cargo.toml` | `windows` 0.61（UIA 的 COM 接口，Tauri 已间接依赖同版本）；`windows-sys` 增加 DataExchange / Memory / Gdi / Security 特性 |
@@ -177,14 +201,14 @@ macOS 默认 ⌥⌘R / ⌥⌘T 映射到 Windows 是 **Alt + Win + R / T**，恰
 
 ## 9. Windows 真机验证清单
 
-1. 热键：Alt + Win + R 触发朗读；按住时**不弹开始菜单**、记事本**不激活菜单栏**；Alt + Win + T 同理；朗读中再按停止、Esc 停止且 Esc 不传给前台应用；空闲时 Esc 正常传给前台应用。
+1. 热键：Ctrl + Alt + Win + R 触发朗读；以不同顺序按下、松开时**不弹开始菜单**、记事本**不激活菜单栏**；Ctrl + Alt + Win + T 同理；与听写键 Ctrl + Alt + Win + Space 互不干扰；朗读中再按停止、Esc 停止且 Esc 不传给前台应用；空闲时 Esc 正常传给前台应用。
 2. UIA 路径（`selection_ok source=uia`）：记事本、Word、Edge 网页（含焦点在链接上）、Windows Terminal、PowerShell 控制台、设置页的文本框。
 3. Copy 路径（`source=clipboard_copy`）：Excel 单元格、VS Code、一个 Electron 应用、微信。确认读后剪贴板恢复为原内容：纯文本、富文本（从 Word 复制）、截图（Win+Shift+S）、资源管理器复制的文件、Excel 区域。
 4. 剪贴板历史开启时的条目变化与说明一致。
 5. 密码框中按热键 → HUD「安全输入中，无法取词」，且不读剪贴板。
 6. 管理员身份运行的记事本 → HUD「目标应用以管理员身份运行，无法取词」。
 7. 没选中文字 → 读剪贴板；KeePass 复制的密码 → 「剪贴板里是密码，未朗读」。
-8. 引擎为"系统语音"时按热键 → HUD 报引擎不可用；换成 Edge 后正常朗读，字幕正常。
+8. 全新安装默认引擎为 Edge，直接可读、字幕正常；用旧版本留下的设置（引擎为 `system`）启动后自动变为 Edge。
 9. VS Code（`editor.accessibilitySupport: auto`）被读取一次后是否进入屏幕阅读器优化模式（§3.5）。
 10. 一个卡死的应用（或调试器暂停的进程）中按热键：HUD 在约 1–2 s 内报错而不是长时间停在"准备中"。
 11. 设置页"取词诊断"在 Windows 上输出 UIA 探针字段。
@@ -193,7 +217,6 @@ macOS 默认 ⌥⌘R / ⌥⌘T 映射到 Windows 是 **Alt + Win + R / T**，恰
 ## 10. 后续
 
 - 视 §9 第 9 项结果决定是否对 Electron 应用跳过 UIA。
-- 视真机结果决定 Windows 默认热键是否改为不与 Game Bar 冲突的组合。
 - Windows 本地语音后端（WinRT `SpeechSynthesizer`），让零配置也能朗读。
 - 若听写热键确有开始菜单问题，复用 `menu_mask` 修复。
 - `scripts/tts/` 下的自动化 harness 目前是 macOS（CGEvent 注入）专用，Windows 版可用 `SendInput` 同构实现。

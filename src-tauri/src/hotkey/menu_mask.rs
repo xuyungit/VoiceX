@@ -71,9 +71,10 @@ mod tests {
     fn only_alt_and_win_taps_need_masking() {
         assert!(needs_mask(0x0800), "Alt");
         assert!(needs_mask(0x0100), "Win");
+        assert!(needs_mask(0x0800 | 0x0100), "Alt + Win");
         assert!(
-            needs_mask(0x0800 | 0x0100),
-            "Alt + Win, the default reading key"
+            needs_mask(0x1000 | 0x0800 | 0x0100),
+            "Ctrl + Alt + Win, the default reading chord"
         );
         assert!(needs_mask(0x1000 | 0x0100), "Ctrl + Win");
         assert!(!needs_mask(0x1000), "Ctrl");

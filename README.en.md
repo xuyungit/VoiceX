@@ -42,18 +42,20 @@ VoiceX also works in the other direction. Select text in **any application**:
 
 | Hotkey (configurable) | What it does |
 |---|---|
-| **⌥⌘R** Read (Windows: Alt + Win + R) | Reads the selection aloud |
-| **⌥⌘T** Translate and read (Windows: Alt + Win + T) | Has an LLM translate the selection into the target language (English by default), then reads the translation. Text already in the target language is tidied, not translated |
+| **⌥⌘R** Read (Windows: Ctrl + Alt + Win + R) | Reads the selection aloud |
+| **⌥⌘T** Translate and read (Windows: Ctrl + Alt + Win + T) | Has an LLM translate the selection into the target language (English by default), then reads the translation. Text already in the target language is tidied, not translated |
 
 Press either reading key again, or **Escape**, to stop immediately; while the
 translation is pending, the key or Escape cancels it.
 
 > **On Windows** the selection is read through UI Automation, falling back to a
 > synthetic Ctrl + C with the clipboard restored — the same two layers as on macOS.
-> There is no system voice on Windows, so pick a cloud engine (Microsoft Edge online
-> speech needs no key). The default Alt + Win + R / T are also Xbox Game Bar recording
-> shortcuts and are taken by VoiceX while reading is on; change them in the Reading
-> settings. Apps running as administrator cannot be read unless VoiceX runs elevated too.
+> There is no system voice on Windows; the default engine there is Microsoft Edge
+> online speech (no key; the text goes to Microsoft's online service), and any other
+> cloud engine can be chosen instead. The default keys use the same modifiers as the
+> dictation key (Ctrl + Alt + Win + Space), clear of what Windows itself (such as Game
+> Bar's Win + Alt + R) and PowerToys already use. Apps running as administrator cannot
+> be read unless VoiceX runs elevated too.
 
 <p align="center">
   <img src="assets/screenshots/en/reading-settings.png" alt="VoiceX Reading settings" width="720" />
