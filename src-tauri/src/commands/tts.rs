@@ -168,6 +168,8 @@ pub async fn diagnose_selection(
     let report = tauri::async_runtime::spawn_blocking(move || {
         crate::selection::read_selection_reporting(crate::selection::SelectionRequest {
             app,
+            // The countdown has the user switch back to the target first.
+            target: crate::selection::SelectionTarget::Foreground,
             allow_clipboard_fallback,
             // The diagnostic read has no session to cancel it; it runs to
             // completion or to its own timeouts.

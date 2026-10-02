@@ -1235,6 +1235,9 @@ pub fn save_settings(
 
     let text_changed = settings.dictionary_text != current_settings.dictionary_text;
     let ui_language_changed = settings.ui_language != current_settings.ui_language;
+    let tray_menu_changed = ui_language_changed
+        || settings.tts_enabled != current_settings.tts_enabled
+        || settings.tts_translate_enabled != current_settings.tts_translate_enabled;
     if text_changed {
         settings.local_hotword_updated_at = chrono::Utc::now().to_rfc3339();
         log::info!(
@@ -1256,13 +1259,15 @@ pub fn save_settings(
         debug.clear_soniox_debug_overrides_now()?;
     }
 
+    #[cfg(desktop)]
+    if tray_menu_changed {
+        if let Err(err) = crate::tray::apply_menu(&app, &settings) {
+            log::warn!("Failed to rebuild the tray menu after a settings change: {}", err);
+        }
+    }
+
     if ui_language_changed {
         let resolved_locale = crate::ui_locale::resolve_ui_locale(&settings.ui_language);
-
-        #[cfg(desktop)]
-        if let Err(err) = crate::i18n::apply_tray_menu(&app, &settings.ui_language) {
-            log::warn!("Failed to rebuild tray menu after language change: {}", err);
-        }
 
         if let Err(err) = app.emit(
             "ui:locale-changed",

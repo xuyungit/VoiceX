@@ -1,28 +1,17 @@
-use crate::ui_locale::{resolve_ui_locale, LOCALE_ZH_CN};
+use crate::ui_locale::LOCALE_ZH_CN;
 
-fn tray_label(locale: &str, key: &str) -> &'static str {
+pub fn tray_label(locale: &str, key: &str) -> &'static str {
     match (locale, key) {
+        (LOCALE_ZH_CN, "read_selection") => "朗读选中文字",
+        (LOCALE_ZH_CN, "translate_selection") => "翻译并朗读",
+        (LOCALE_ZH_CN, "stop_reading") => "停止朗读",
         (LOCALE_ZH_CN, "show_main_window") => "显示 VoiceX",
         (LOCALE_ZH_CN, "quit_app") => "退出 VoiceX",
+        (_, "read_selection") => "Read Selection",
+        (_, "translate_selection") => "Translate and Read",
+        (_, "stop_reading") => "Stop Reading",
         (_, "show_main_window") => "Show VoiceX",
         (_, "quit_app") => "Quit VoiceX",
         _ => "",
     }
-}
-
-pub fn apply_tray_menu(app: &tauri::AppHandle, preferred_language: &str) -> Result<(), String> {
-    let locale = resolve_ui_locale(preferred_language);
-
-    let menu = tauri::menu::MenuBuilder::new(app)
-        .text("show_main_window", tray_label(&locale, "show_main_window"))
-        .separator()
-        .text("quit_app", tray_label(&locale, "quit_app"))
-        .build()
-        .map_err(|err| err.to_string())?;
-
-    let Some(tray) = app.tray_by_id("main") else {
-        return Err("Tray icon 'main' not found".to_string());
-    };
-
-    tray.set_menu(Some(menu)).map_err(|err| err.to_string())
 }

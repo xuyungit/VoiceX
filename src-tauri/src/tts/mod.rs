@@ -402,6 +402,8 @@ pub enum StopReason {
     /// Distinct from `Hotkey` so the harness assertion on `reason=hotkey`
     /// keeps meaning "the global hotkey did it".
     Ui,
+    /// Stopped from the tray menu.
+    Menu,
     /// Dictation started and takes priority over reading.
     Dictation,
     /// A newer read request superseded this one.
@@ -414,6 +416,7 @@ impl StopReason {
             StopReason::Hotkey => "hotkey",
             StopReason::Escape => "escape",
             StopReason::Ui => "ui",
+            StopReason::Menu => "menu",
             StopReason::Dictation => "dictation",
             StopReason::Superseded => "superseded",
         }

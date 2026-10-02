@@ -25,7 +25,7 @@ use super::{
     TtsStatus, TtsVoiceList,
 };
 use crate::commands::settings::AppSettings;
-use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest};
+use crate::selection::{self, SelectionError, SelectionOutcome, SelectionRequest, SelectionTarget};
 use crate::services::history_service::{
     sync_owns_counters, HistoryService, HISTORY_MODE_TRANSLATE_READ,
 };
@@ -138,6 +138,40 @@ impl ReadSource {
     }
 }
 
+/// What asked for a read: the global hotkey or the tray menu. Everything from
+/// the selection onward is the same; the two differ in where the selection
+/// is, how the request is logged, and how a stop is attributed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadTrigger {
+    Hotkey,
+    Menu,
+}
+
+impl ReadTrigger {
+    /// `hotkey_action` is part of the regression harness contract; the menu
+    /// gets its own event rather than a field on that one.
+    fn log_event_name(self) -> &'static str {
+        match self {
+            ReadTrigger::Hotkey => "hotkey_action",
+            ReadTrigger::Menu => "menu_action",
+        }
+    }
+
+    fn stop_reason(self) -> StopReason {
+        match self {
+            ReadTrigger::Hotkey => StopReason::Hotkey,
+            ReadTrigger::Menu => StopReason::Menu,
+        }
+    }
+
+    fn selection_target(self) -> SelectionTarget {
+        match self {
+            ReadTrigger::Hotkey => SelectionTarget::Foreground,
+            ReadTrigger::Menu => SelectionTarget::BeforeTrayMenu,
+        }
+    }
+}
+
 impl ReadKind {
     /// The key's name in the log (`hotkey_action`, `speak_start`, …). Named
     /// after the selection because that is what the key reads first; where
@@ -209,6 +243,11 @@ struct ControllerInner {
     /// afterwards — dictation is about to use the same window, and a linger
     /// hide would take it down a few hundred milliseconds into recording.
     hud_yielded: Arc<AtomicBool>,
+    /// Told when a read starts and again once it has ended, so the tray menu
+    /// can offer "stop" only while there is something to stop. Carries no
+    /// state on purpose: notifications from different reads can arrive out
+    /// of order, so the listener asks [`TtsController::is_active`] itself.
+    activity_listener: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Clone, Default)]
@@ -284,6 +323,43 @@ impl TtsController {
 
     fn hud(&self) -> Option<HudService> {
         self.inner.hud.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    /// See [`ControllerInner::activity_listener`].
+    pub fn set_activity_listener(&self, listener: impl Fn() + Send + Sync + 'static) {
+        if let Ok(mut slot) = self.inner.activity_listener.lock() {
+            *slot = Some(Arc::new(listener));
+        }
+    }
+
+    /// Tell the listener a read has started, and again once the session is
+    /// idle. Watched on a thread of its own rather than from the HUD driver,
+    /// which does not run when there is no HUD.
+    fn announce_read(&self) {
+        let Some(listener) = self
+            .inner
+            .activity_listener
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+        else {
+            return;
+        };
+        listener();
+        let session = self.inner.session.clone();
+        let spawned = thread::Builder::new()
+            .name("voicex-tts-activity".to_string())
+            .spawn(move || {
+                while session.is_active() {
+                    thread::sleep(HUD_POLL);
+                }
+                listener();
+            });
+        if let Err(err) = spawned {
+            log::warn!(
+                "Could not watch for the read to end; the tray menu will not follow it: {err}"
+            );
+        }
     }
 
     /// Show the read's progress until the session ends, then get out of the way.
@@ -701,24 +777,53 @@ impl TtsController {
     /// the clipboard fallback can block for hundreds of milliseconds and this
     /// is called from the hotkey hook's worker.
     pub fn handle_read_selection_hotkey(&self) {
-        self.handle_hotkey(ReadKind::Read);
+        self.handle_request(ReadKind::Read, ReadTrigger::Hotkey);
     }
 
     pub fn handle_translate_selection_hotkey(&self) {
-        self.handle_hotkey(ReadKind::Translate);
+        self.handle_request(ReadKind::Translate, ReadTrigger::Hotkey);
     }
 
-    /// Either reading hotkey while a session is active stops it, whichever
+    /// A reading item in the tray menu was chosen. Same single-click
+    /// semantics as the hotkey; the menu greys both items out while a read
+    /// is active, so the stop branch is only reached by a click that races
+    /// a read starting.
+    ///
+    /// Blocking for as long as `start` and `stop` are (a settings read, a
+    /// backend stop), so not for the main thread — the system voice's stop
+    /// waits on it.
+    pub fn handle_menu_read(&self, kind: ReadKind) {
+        self.handle_request(kind, ReadTrigger::Menu);
+    }
+
+    /// The tray menu's stop item. Only offered while a read is active; a
+    /// click that arrives after the read has ended does nothing.
+    pub fn handle_menu_stop(&self) {
+        let active = self.is_active();
+        log_event(
+            ReadTrigger::Menu.log_event_name(),
+            &[
+                ("action", "stop".to_string()),
+                ("state", if active { "active" } else { "idle" }.to_string()),
+            ],
+        );
+        if active {
+            self.stop(StopReason::Menu);
+        }
+    }
+
+    /// Either reading request while a session is active stops it, whichever
     /// kind started it: the user wants silence, not a second read queued
     /// behind the first.
-    fn handle_hotkey(&self, kind: ReadKind) {
+    fn handle_request(&self, kind: ReadKind, trigger: ReadTrigger) {
         let active = self.is_active();
         // Dictation keeps the microphone. A new read would be inaudible and
-        // would get transcribed, so the key is swallowed. An already-running
-        // read is the stuck case takeover missed — stopping it is still right.
+        // would get transcribed, so the request is swallowed. An
+        // already-running read is the stuck case takeover missed — stopping
+        // it is still right.
         if self.is_recording() && !active {
             log_event(
-                "hotkey_action",
+                trigger.log_event_name(),
                 &[
                     ("action", kind.action().to_string()),
                     ("state", "recording".to_string()),
@@ -728,7 +833,7 @@ impl TtsController {
         }
 
         log_event(
-            "hotkey_action",
+            trigger.log_event_name(),
             &[
                 ("action", kind.action().to_string()),
                 ("state", if active { "active" } else { "idle" }.to_string()),
@@ -736,9 +841,9 @@ impl TtsController {
         );
 
         if active {
-            self.stop(StopReason::Hotkey);
+            self.stop(trigger.stop_reason());
         } else {
-            self.start(kind);
+            self.start(kind, trigger.selection_target());
         }
     }
 
@@ -797,7 +902,7 @@ impl TtsController {
         }
     }
 
-    fn start(&self, kind: ReadKind) {
+    fn start(&self, kind: ReadKind, target: SelectionTarget) {
         if self.is_recording() {
             // Dictation wins: reading aloud during recording would feed the
             // speech straight back into the microphone.
@@ -851,6 +956,7 @@ impl TtsController {
         let captions = piece_limit.is_some() && backend.reports_progress();
 
         let token = self.inner.session.claim();
+        self.announce_read();
         // The read outlives `backend.start()`, which returns as soon as the
         // engine accepts the request. This clone is how the worker learns the
         // read is over: the token stops owning the session when the backend
@@ -874,12 +980,19 @@ impl TtsController {
         thread::Builder::new()
             .name("voicex-tts-read".to_string())
             .spawn(move || {
-                log_event("selection_start", &[("kind", kind.action().to_string())]);
+                log_event(
+                    "selection_start",
+                    &[
+                        ("kind", kind.action().to_string()),
+                        ("target", target.as_str().to_string()),
+                    ],
+                );
                 let clipboard_when_no_selection = settings
                     .as_ref()
                     .is_some_and(|s| s.tts_clipboard_when_no_selection);
                 let result = selection::read_selection(SelectionRequest {
                     app,
+                    target,
                     // Compatibility mode, off by choice in the reading settings.
                     // The fail-closed clipboard rules apply either way.
                     allow_clipboard_fallback: settings
@@ -1459,7 +1572,7 @@ fn log_selection_error(err: &SelectionError) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
 
@@ -1763,6 +1876,7 @@ mod tests {
             StopReason::Hotkey,
             StopReason::Escape,
             StopReason::Ui,
+            StopReason::Menu,
             StopReason::Superseded,
         ] {
             let controller = TtsController::default();
@@ -1848,6 +1962,47 @@ mod tests {
         let _token = controller.inner.session.claim();
         controller.handle_read_selection_hotkey();
         assert!(!controller.is_active());
+    }
+
+    #[test]
+    fn the_menu_stop_ends_a_read_and_is_harmless_once_it_has_ended() {
+        let controller = TtsController::default();
+        controller.handle_menu_stop();
+        assert!(!controller.is_active());
+
+        let _token = controller.inner.session.claim();
+        controller.handle_menu_stop();
+        assert!(!controller.is_active());
+    }
+
+    #[test]
+    fn a_menu_read_that_races_an_active_read_stops_it() {
+        // The menu greys the reading items out during a read; a click that
+        // gets through anyway gets the hotkey's answer, not a second read.
+        let controller = TtsController::default();
+        let _token = controller.inner.session.claim();
+        controller.handle_menu_read(ReadKind::Translate);
+        assert!(!controller.is_active());
+    }
+
+    #[test]
+    fn the_activity_listener_hears_a_read_start_and_again_after_it_ends() {
+        let controller = TtsController::default();
+        let heard = Arc::new(AtomicUsize::new(0));
+        let counter = heard.clone();
+        controller.set_activity_listener(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let _token = controller.inner.session.claim();
+        controller.announce_read();
+        assert_eq!(heard.load(Ordering::SeqCst), 1, "heard at the start");
+        thread::sleep(HUD_POLL * 2);
+        assert_eq!(heard.load(Ordering::SeqCst), 1, "silent while reading");
+
+        controller.inner.session.release();
+        thread::sleep(HUD_POLL * 3);
+        assert_eq!(heard.load(Ordering::SeqCst), 2, "heard once it ended");
     }
 
     #[test]

@@ -216,18 +216,185 @@ mod macos {
     }
 }
 
+/// Windows: start remembering the last window the user worked in, for
+/// [`reactivate_window_behind_tray_menu`]. Call once at startup.
+#[cfg(target_os = "windows")]
+pub fn track_user_foreground() {
+    windows::track_user_foreground();
+}
+
+/// Windows: give the foreground back to the window that had it before the
+/// tray menu was opened, and wait until it has taken keyboard focus back.
+///
+/// Opening the notification-area menu takes the foreground away from the
+/// user's window twice over — the click activates the taskbar, then the menu
+/// owner (VoiceX's hidden tray window) is brought to the front so the menu
+/// closes on an outside click — and Windows keeps no record of the window
+/// before that. Hence the tracker. Returns how long the handover took.
+#[cfg(target_os = "windows")]
+pub fn reactivate_window_behind_tray_menu() -> Result<std::time::Duration, String> {
+    windows::reactivate_window_behind_tray_menu()
+}
+
+/// Window classes that take the foreground on the way to the tray menu
+/// without being anywhere the user could have selected text: the taskbar
+/// that hosts the notification area, the taskbar on other monitors, and the
+/// hidden-icons flyout (Windows 10, then Windows 11).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const TRAY_HOST_WINDOW_CLASSES: [&str; 4] = [
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
+    "NotifyIconOverflowWindow",
+    "TopLevelWindowForOverflowXamlIsland",
+];
+
+/// Whether a foreground change to a window of `class` is part of opening the
+/// tray menu rather than the user switching windows.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_tray_host_window_class(class: &str) -> bool {
+    TRAY_HOST_WINDOW_CLASSES.contains(&class)
+}
+
 #[cfg(target_os = "windows")]
 mod windows {
+    use std::ptr::null_mut;
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
     use windows_sys::Win32::{
-        Foundation::CloseHandle,
+        Foundation::{CloseHandle, HWND},
         System::Threading::{
             OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
             PROCESS_QUERY_LIMITED_INFORMATION,
         },
-        UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
+        UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK},
+        UI::WindowsAndMessaging::{
+            DispatchMessageW, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetMessageW,
+            GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow,
+            TranslateMessage, EVENT_SYSTEM_FOREGROUND, GUITHREADINFO, MSG, WINEVENT_OUTOFCONTEXT,
+        },
     };
 
-    use crate::foreground_app::{process_name_from_path, ForegroundAppInfo};
+    use crate::foreground_app::{
+        is_tray_host_window_class, process_name_from_path, ForegroundAppInfo,
+    };
+
+    /// The last foreground window the user could have been working in, as an
+    /// `HWND` value; 0 before the first one is seen.
+    static LAST_USER_WINDOW: AtomicIsize = AtomicIsize::new(0);
+
+    /// How long the handover may take: `SetForegroundWindow` returns before
+    /// the target's own thread has processed its activation.
+    const REACTIVATE_TIMEOUT: Duration = Duration::from_millis(500);
+    const REACTIVATE_POLL: Duration = Duration::from_millis(10);
+
+    pub fn track_user_foreground() {
+        let spawned = thread::Builder::new()
+            .name("voicex-foreground".to_string())
+            .spawn(|| unsafe {
+                remember(GetForegroundWindow());
+                let hook = SetWinEventHook(
+                    EVENT_SYSTEM_FOREGROUND,
+                    EVENT_SYSTEM_FOREGROUND,
+                    null_mut(),
+                    Some(on_foreground_changed),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                );
+                if hook.is_null() {
+                    log::warn!("No foreground hook; tray-menu reads will miss the selection");
+                    return;
+                }
+                // An out-of-context hook is delivered through this thread's
+                // message queue, so the thread lives on pumping it.
+                let mut msg: MSG = std::mem::zeroed();
+                while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            });
+        if let Err(err) = spawned {
+            log::warn!("Could not start the foreground tracker: {err}");
+        }
+    }
+
+    unsafe extern "system" fn on_foreground_changed(
+        _hook: HWINEVENTHOOK,
+        _event: u32,
+        hwnd: HWND,
+        _id_object: i32,
+        _id_child: i32,
+        _event_thread: u32,
+        _event_time: u32,
+    ) {
+        remember(hwnd);
+    }
+
+    /// Record `hwnd` unless it is a stop on the way to the tray menu: the
+    /// taskbar and the overflow flyout, or VoiceX's own tray window, which
+    /// is never shown. VoiceX's main window is recorded like any other — a
+    /// menu read from there ends as `focus_is_self`, as it does on macOS.
+    unsafe fn remember(hwnd: HWND) {
+        if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
+            return;
+        }
+        let mut class = [0u16; 64];
+        let len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+        let class = String::from_utf16_lossy(&class[..len.max(0) as usize]);
+        if is_tray_host_window_class(&class) {
+            return;
+        }
+        LAST_USER_WINDOW.store(hwnd as isize, Ordering::SeqCst);
+    }
+
+    pub fn reactivate_window_behind_tray_menu() -> Result<Duration, String> {
+        let started = Instant::now();
+        let hwnd = LAST_USER_WINDOW.load(Ordering::SeqCst) as HWND;
+        unsafe {
+            if hwnd.is_null() || IsWindow(hwnd) == 0 {
+                return Err("no window to return to".to_string());
+            }
+            // Allowed without the usual foreground lock: the menu click was
+            // the last input and VoiceX's tray window holds the foreground.
+            if GetForegroundWindow() != hwnd && SetForegroundWindow(hwnd) == 0 {
+                return Err("SetForegroundWindow was refused".to_string());
+            }
+
+            let owner_thread = GetWindowThreadProcessId(hwnd, null_mut());
+            let deadline = started + REACTIVATE_TIMEOUT;
+            loop {
+                let in_front = GetForegroundWindow() == hwnd;
+                // The window puts keyboard focus back on its last focused
+                // control while its own thread handles the activation; UI
+                // Automation's focused element and a synthesized Ctrl+C both
+                // go wherever that lands, so the read has to wait for it.
+                if in_front && focus_restored(owner_thread, hwnd) {
+                    return Ok(started.elapsed());
+                }
+                if Instant::now() >= deadline {
+                    // In front but with no focused control reported: let the
+                    // read see for itself what the window offers. Not in
+                    // front: reading now would read some other window.
+                    return if in_front {
+                        Ok(started.elapsed())
+                    } else {
+                        Err("the window did not come to the front".to_string())
+                    };
+                }
+                thread::sleep(REACTIVATE_POLL);
+            }
+        }
+    }
+
+    unsafe fn focus_restored(thread: u32, hwnd: HWND) -> bool {
+        let mut info: GUITHREADINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        GetGUIThreadInfo(thread, &mut info) != 0
+            && info.hwndActive == hwnd
+            && !info.hwndFocus.is_null()
+    }
 
     pub fn detect_foreground_app() -> Result<ForegroundAppInfo, String> {
         unsafe {

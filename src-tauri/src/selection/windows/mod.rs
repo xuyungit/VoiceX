@@ -37,7 +37,7 @@ use crate::foreground_app;
 use crate::selection::windows_rules::elevation_blocks_reading;
 use crate::selection::{
     normalize_text, SelectionError, SelectionOutcome, SelectionProbe, SelectionRequest,
-    SelectionSource,
+    SelectionSource, SelectionTarget,
 };
 use crate::tts::log_event;
 
@@ -48,6 +48,21 @@ pub fn read_selection(
     probe: &mut SelectionProbe,
 ) -> Result<SelectionOutcome, SelectionError> {
     let started = Instant::now();
+
+    // A tray-menu read starts with VoiceX in front; the selection is in the
+    // window the menu took the foreground from (see `SelectionTarget`).
+    if request.target == SelectionTarget::BeforeTrayMenu {
+        match foreground_app::reactivate_window_behind_tray_menu() {
+            Ok(waited) => log_event(
+                "selection_reactivate",
+                &[("ms", waited.as_millis().to_string())],
+            ),
+            Err(detail) => {
+                log_event("selection_reactivate", &[("error", detail)]);
+                return Err(SelectionError::NoForegroundApp);
+            }
+        }
+    }
 
     // Freeze the foreground application first, so every later decision
     // refers to the one that was in front when the hotkey fired.

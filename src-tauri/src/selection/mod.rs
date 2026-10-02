@@ -200,9 +200,44 @@ impl SelectionError {
     }
 }
 
+/// Which application the selection is read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionTarget {
+    /// Whatever is in front right now — a hotkey press leaves the foreground
+    /// where the user was working.
+    Foreground,
+    /// The application that was in front before the tray menu was opened.
+    ///
+    /// macOS: the same application as `Foreground`. A status-item menu is
+    /// tracked without activating its owner, so the frontmost application
+    /// keeps key focus — and with it the focused control and its selection —
+    /// while the menu is open and after an item is chosen.
+    ///
+    /// Windows: not the foreground. The notification-area menu has to be
+    /// owned by a foreground window to close on an outside click, so VoiceX
+    /// takes the foreground before showing it, and the click on the taskbar
+    /// had already taken it from the user's window before that. The reader
+    /// gives the foreground back to that window before reading; the window
+    /// keeps its selection while inactive and restores focus to the same
+    /// control on reactivation.
+    BeforeTrayMenu,
+}
+
+impl SelectionTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SelectionTarget::Foreground => "foreground",
+            SelectionTarget::BeforeTrayMenu => "before_tray_menu",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SelectionRequest {
     pub app: tauri::AppHandle,
+    /// Only Windows has to act on this; see [`SelectionTarget::BeforeTrayMenu`].
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub target: SelectionTarget,
     /// Compatibility mode: synthesize Cmd-C (Ctrl+C on Windows) when the
     /// accessibility path comes up empty. Subject to the fail-closed clipboard
     /// rules regardless.

@@ -17,6 +17,7 @@ pub mod services;
 pub mod session;
 pub mod state;
 pub mod storage;
+pub mod tray;
 pub mod tts;
 pub mod ui_locale;
 #[cfg(target_os = "windows")]
@@ -148,6 +149,15 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(hud) = session_controller.hud_service() {
         tts_controller.attach_hud(hud);
     }
+    // The tray menu offers reading or stopping, whichever applies.
+    {
+        let app = app.handle().clone();
+        tts_controller.set_activity_listener(move || tray::reading_state_changed(&app));
+    }
+    // A tray-menu read on Windows has to find the window the menu took the
+    // foreground from.
+    #[cfg(target_os = "windows")]
+    foreground_app::track_user_foreground();
 
     manager.start_listener(
         app.handle().clone(),
@@ -273,31 +283,7 @@ pub fn run() {
                 }
             }
         })
-        .on_menu_event(|app, event| {
-            if event.id() == "show_main_window" {
-                if let Some(main) = app.get_webview_window("main") {
-                    let _ = main.show();
-                    let _ = main.set_focus();
-
-                    // Under Accessory policy the app has no Dock presence,
-                    // so we must explicitly activate it to bring the window
-                    // to the foreground.
-                    #[cfg(target_os = "macos")]
-                    {
-                        let _ = main.run_on_main_thread(|| {
-                            use objc2::MainThreadMarker;
-                            use objc2_app_kit::NSApplication;
-                            // Safe: run_on_main_thread guarantees we are on the main thread.
-                            let mtm = unsafe { MainThreadMarker::new_unchecked() };
-                            let ns_app = NSApplication::sharedApplication(mtm);
-                            ns_app.activate();
-                        });
-                    }
-                }
-            } else if event.id() == "quit_app" {
-                app.exit(0);
-            }
-        })
+        .on_menu_event(|app, event| tray::handle_menu_event(app, event.id().as_ref()))
         .setup(|app| {
             #[cfg(target_os = "macos")]
             if let Err(err) = enforce_macos_release_install_path() {
@@ -333,11 +319,11 @@ pub fn run() {
             apply_windows_tray_icon(app);
             #[cfg(desktop)]
             {
-                let preferred_language = storage::get_settings()
-                    .map(|settings| settings.ui_language)
-                    .unwrap_or_else(|_| ui_locale::UI_LANGUAGE_SYSTEM.to_string());
-
-                if let Err(err) = i18n::apply_tray_menu(&app.handle(), &preferred_language) {
+                let settings = storage::get_settings().unwrap_or_else(|err| {
+                    log::warn!("Failed to load settings for the tray menu: {}", err);
+                    AppSettings::default()
+                });
+                if let Err(err) = tray::apply_menu(&app.handle(), &settings) {
                     log::warn!("Failed to attach tray menu: {}", err);
                 }
             }
