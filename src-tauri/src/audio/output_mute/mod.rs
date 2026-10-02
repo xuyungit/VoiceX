@@ -446,18 +446,35 @@ fn worker() -> &'static Sender<Command> {
     })
 }
 
+/// When the worker next wakes to tick. `None` while idle: nothing is muted,
+/// pending or failing, so the worker sleeps until the next command and the
+/// feature costs nothing while it is off. The settings page re-reads the
+/// default output itself on focus and on toggle. Engaging shortens the
+/// interval, so a tick already scheduled moves up; a command never pushes one
+/// back.
+fn next_tick(
+    poll_interval: Option<Duration>,
+    scheduled: Option<Instant>,
+    now: Instant,
+) -> Option<Instant> {
+    let latest = now + poll_interval?;
+    Some(scheduled.map_or(latest, |due| due.min(latest)))
+}
+
 fn run<B: Backend>(
     mut muter: Muter<B>,
     rx: Receiver<Command>,
     mut publish: impl FnMut(&OutputMuteStatus),
 ) {
     let mut previous = None;
-    let mut next_tick = Instant::now();
+    let mut scheduled = None;
     loop {
-        // Poll capability while idle too, so a device change updates the UI.
-        let interval = muter.poll_interval().unwrap_or(RECONNECT_INTERVAL);
-        next_tick = next_tick.min(Instant::now() + interval);
-        let command = match rx.recv_timeout(next_tick.saturating_duration_since(Instant::now())) {
+        scheduled = next_tick(muter.poll_interval(), scheduled, Instant::now());
+        let received = match scheduled {
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(due) => rx.recv_timeout(due.saturating_duration_since(Instant::now())),
+        };
+        let command = match received {
             Ok(command) => Some(command),
             Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => return,
@@ -465,7 +482,7 @@ fn run<B: Backend>(
         match command {
             None => {
                 muter.tick();
-                next_tick = Instant::now() + interval;
+                scheduled = None;
             }
             Some(Command::Engage) => muter.engage(),
             Some(Command::Release) => muter.release(),
@@ -900,6 +917,31 @@ mod tests {
         m.engage();
         assert!(m.retry_restore().is_err());
         assert_eq!(muted(&m, "speakers"), Some(true));
+    }
+
+    #[test]
+    fn idle_worker_has_no_tick_to_wait_for() {
+        let now = Instant::now();
+        assert_eq!(
+            next_tick(None, Some(now), now),
+            None,
+            "idle: sleep until a command"
+        );
+        assert_eq!(
+            next_tick(Some(FOLLOW_INTERVAL), None, now),
+            Some(now + FOLLOW_INTERVAL)
+        );
+        assert_eq!(
+            next_tick(Some(FOLLOW_INTERVAL), Some(now + RECONNECT_INTERVAL), now),
+            Some(now + FOLLOW_INTERVAL),
+            "engaging moves a scheduled reconnect tick up"
+        );
+        let soon = now + Duration::from_millis(100);
+        assert_eq!(
+            next_tick(Some(RECONNECT_INTERVAL), Some(soon), now),
+            Some(soon),
+            "a command does not push a due tick back"
+        );
     }
 
     fn shutdown_with_failures(failures: u32, timeout: Duration) -> OutputMuteStatus {

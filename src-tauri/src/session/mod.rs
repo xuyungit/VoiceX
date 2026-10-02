@@ -1095,28 +1095,24 @@ impl SessionController {
     fn start_audio_capture(&self) {
         let audio_epoch = self.next_audio_epoch();
         if let Some(manager) = self.audio_manager() {
-            let is_batch = crate::storage::get_settings()
-                .map(|settings| {
-                    let config = crate::asr::AsrConfig::from(&settings);
-                    config.is_batch()
-                })
-                .unwrap_or(false);
-            let capture_refinement_pcm = if is_batch {
-                // Batch mode always needs the full PCM buffer for post-recording recognition.
-                true
-            } else {
-                crate::storage::get_settings()
-                    .map(|settings| {
-                        let config = crate::asr::AsrConfig::from(&settings);
-                        config.provider_type == crate::asr::AsrProviderType::Coli
-                            && config.coli_final_refinement_mode
-                                != crate::asr::ColiRefinementMode::Off
-                    })
-                    .unwrap_or(false)
+            let settings = match crate::storage::get_settings() {
+                Ok(settings) => Some(settings),
+                Err(err) => {
+                    log::warn!("Cannot read settings for capture, using defaults: {}", err);
+                    None
+                }
             };
-            let mute_output = crate::storage::get_settings()
-                .map(|settings| settings.mute_output_while_recording)
-                .unwrap_or(false);
+            let asr_config = settings.as_ref().map(crate::asr::AsrConfig::from);
+            let is_batch = asr_config.as_ref().is_some_and(|config| config.is_batch());
+            // Batch mode always needs the full PCM buffer for post-recording recognition.
+            let capture_refinement_pcm = is_batch
+                || asr_config.as_ref().is_some_and(|config| {
+                    config.provider_type == crate::asr::AsrProviderType::Coli
+                        && config.coli_final_refinement_mode != crate::asr::ColiRefinementMode::Off
+                });
+            let mute_output = settings
+                .as_ref()
+                .is_some_and(|settings| settings.mute_output_while_recording);
             log::info!(
                 "capture_buffer_enabled={} is_batch={}",
                 capture_refinement_pcm,
