@@ -46,28 +46,21 @@ Abaqus
 Midas
 """
 
-# --- Scoring ---
-# A test case is `input` (what the recognizer heard) and `expected` (what was
-# said). The places to correct are the differences between the two, and each
-# one is scored where it stands in the model's output:
-#
-#   dictionary  the intended word is in the dictionary above. Passes when that
-#               term stands there, in any casing or with a suffix (Claude,
-#               CLAUDE.md, Claude md). Settled by code.
-#   semantic    any other fix (下一集 → 下一级). Code settles the exact answer
-#               and the untouched error; anything else goes to the judge.
-#               A word spoken as its own sentence after the one it belongs in is
-#               one site: it passes when that word stands inside the earlier
-#               sentence and the trailing fragment is gone. Order is not scored,
-#               and at most two characters may be added or missing.
-#   clean       the model changed nothing else. Spacing, sentence punctuation
-#               and casing cost nothing; other changes go to the judge.
-#
-# The judge is only asked what code cannot settle, each distinct question once,
-# after all timing is done. Without a [judge], or with --skip-judge, those
-# verdicts are listed as unjudged and left out of the rates — never counted as
-# misses. Low-confidence verdicts are listed for review; settle one for good
-# with a [[case.pin]] in test_cases.toml.
+# --- Scoring version 6 ---
+# Each case is 100 points, with equal case weight. Average rounds within each case.
+# Correction (30): fixed repair tasks from input/expected. Repeated occurrences of
+# the same dictionary repair share one task; partial repair gets proportional credit.
+# Fidelity (40): preserve substantive facts/entities/versions and core intent.
+# Cleanup (20): filler/stutter removal (10), readability (5), conversational style (5).
+# Speed (10): measured correction latency only, full at 500 ms and zero at the
+# app's text-dependent timeout (10 s up to 120 chars, 1.5x per doubling, max 60 s).
+# Missing repair credit is confined to that task. A severe hallucination, confirmed
+# by automatic second review, zeros only that output's quality; speed remains.
+# Failed correction calls score zero everywhere. Evaluator failures remain visible,
+# score zero in the affected component, and never wait for a human to rank models.
+# JEV judges contextual repairs and whole-text fidelity/readability/style outside timing.
+# Equal questions are deduplicated. All severe/uncertain/missing JEV fidelity verdicts
+# go to [hallucination_reviewer]; malformed reviews get one retry before zero quality.
 #
 # Keep [judge] / [eval] below prompt and dictionary — a TOML table owns
 # every following key until the next table header.
@@ -79,39 +72,34 @@ Midas
 # model = "jev-1.13.0"     # pin a version: `jev-latest` changes verdicts between runs
 # type = "typesafe"
 
+# Independent final reviewer, used for severe/ambiguous/missing JEV hallucination answers.
+# Uses the same Provider schema/API modes as correction models. Reasoning is outside latency.
+# Configure a model verified against the severe-hallucination probes before use.
+# [hallucination_reviewer]
+# name = "Automatic hallucination reviewer"
+# base_url = "https://api.openai.com/v1"
+# api_key = "${OPENAI_API_KEY}"
+# model = "gpt-6-luna"
+# type = "openai"
+# reasoning_effort = "high"
+
 # [eval]
-# Composite = weighted mean over the dimensions a model has a rate for.
-# The board is sorted by this composite: it is the dictation pick. Able# reranks
-# on dictionary/semantic/clean only. Fast# is average milliseconds of successful
-# calls. The header names the ability leader, and the fastest model at or under
-# latency_full_ms whose dictionary rate is at least 50%. Season standings follow
-# the composite places, and count only runs placed under the current scoring
-# rules (SCORING_VERSION in src/main.rs); earlier runs stay in standings.json.
-# weight_dictionary = 0.40  # homophones fixed from the dictionary
-# weight_latency = 0.15     # each doubling of latency costs about a quarter of this
-# weight_semantic = 0.15    # fixes that need the context
-# weight_clean = 0.10       # nothing changed beyond the fixes, and the fillers gone
-# weight_success = 0.0      # a failed call already scores zero everywhere
-# latency_full_ms = 1000    # header only: fastest model under this with dictionary ≥ 50%
-# Speed is scored per call on an absolute scale, so it means the same in every
-# run: 1 at or under 500 ms, 0 at the app's own timeout for that text (10 s up
-# to 120 characters, half again per doubling, 60 s at most), log-linear between
-# so every doubling of the wait costs the same. Each call carries that timeout;
-# one that runs past it fails, as it does in the app (raw transcript pasted):
-# every site missed, transcript unclean, no speed. latency_zero_ms is not read.
-# Clean also carries the cleanup sites: the fillers, stutters and half-sentences
-# that `expected` leaves out (a removal that is neither a filler nor said again
-# nearby is a semantic site instead). Code alone settles whether each is gone; an output
-# that keeps every one of them keeps half of its clean credit, all gone costs
-# nothing, in between pro rata. Deleting them never reaches the judge.
-# typesafe_questions = "typesafe_questions.json"   # override the built-in judge questions
+# Weights are explicit fractions and MUST sum to 1. Legacy tier weights are rejected
+# with migration guidance, so obsolete configurations cannot silently change results.
+# The composite sorts the board and awards season points. Able# uses quality only;
+# Fast# uses successful-call latency. Earlier scoring seasons stay in standings.json.
+# weight_correction = 0.30
+# weight_fidelity = 0.40
+# weight_clean = 0.20
+# weight_latency = 0.10
+# latency_full_ms = 1000  # callout only: fastest model under this with correction >= 50%
+# typesafe_questions = "typesafe_questions.json"   # local questions; optional fidelity override
+# The default whole-transcript question is embedded from severe_hallucination_rubric.json.
 # typesafe_concurrency = 8   # parallel judge calls
 # standing_scheme = "borda"  # or "f1" (25/18/15/... for top 10)
 # standing_decay = 0.9       # older races fade; 1.0 = no decay
 # standing_window = 10       # only last N races feed form; 0 = all history
 # standing_retire_after = 3  # hide models absent this many races in a row; 0 = never
-# Older names still work: weight_basic + weight_cloud (summed) = weight_dictionary,
-# weight_bonus = weight_semantic, weight_quality = weight_clean.
 
 # --- Providers ---
 # Each [[provider]] is one model to benchmark.

@@ -78,3 +78,17 @@ expected = "我们需要综合考虑我们的 Abaqus 的模型，以及我们当
 name = "Late qualifier"
 input = "这个分支里任何改动都不需要吗？暂时。"
 expected = "这个分支里任何改动暂时都不需要吗？"
+
+# Real VoiceX history, read from history_record.original_text (never the corrected text).
+# Record: 4eea0a10-4eb4-4efb-8c6b-bd7745cf00c6
+# Recorded at: 2026-10-01T12:21:16.719525+00:00 (2026-10-01 20:21:16 Asia/Shanghai)
+# ASR: Qwen / qwen-audio-3.1-asr-flash-streaming
+# Historical corrector: Gemini / gemini-3.8-flash
+# Historical output replaced Luna with Llama, GPT 6.1 with GPT-4o, and omitted Sora.
+# expected is a conservative cleanup reference, not a required verbatim output.
+# All outputs receive a severe hallucination check alongside correction scoring.
+
+[[case]]
+name = "Model names and versions fidelity"
+input = "如果 Luna 读图或者是读中文不太好的话，我们可以尝试某些情况我们用读图能力更强的，比如说 Deepseek 的模型，看看行不行。这块我们是可以选我们的武器库里更强的一些工具的。包括我们个别可以做一个简单的评测， GLM 呀这些，包括 GPT 6.1， Sora 这类的模型，看他们读出图图会会不会稍微好一点，比 Luna Luna 是最。最最便宜的一个大模型吧。"
+expected = "如果 Luna 读图或者是读中文不太好的话，我们可以尝试某些情况我们用读图能力更强的，比如说 Deepseek 的模型，看看行不行。这块我们是可以选我们的武器库里更强的一些工具的。包括我们个别可以做一个简单的评测，GLM 这些，包括 GPT 6.1，Sora 这类的模型，看他们读图会不会稍微好一点，比 Luna。Luna 是最便宜的一个大模型吧。"

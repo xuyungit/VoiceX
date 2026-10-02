@@ -1,17 +1,30 @@
-//! The judge: TypeSafe System One. Three fixed questions, each distinct state asked once.
+//! The judge: TypeSafe System One. Four fixed questions, each distinct state asked once.
 //!
 //! An answer is used only when it is complete: every level or option with its probability, and a confidence. Anything
 //! else is a failure of the judge, reported as one, and leaves the items that waited for it unjudged.
 
 use crate::adjudicate::{Answer, Answers, Ask, AskKind, EDIT_CREDIT, GATE_KINDS, SITE_CREDIT};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
 const BUILT_IN_QUESTIONS: &str = include_str!("../typesafe_questions.json");
+const SEVERE_QUESTION: &str = include_str!("../severe_hallucination_rubric.json");
+fn default_fidelity_question() -> Value {
+    serde_json::from_str(SEVERE_QUESTION).expect("invalid embedded severe hallucination question")
+}
+fn default_quality_question(name: &str) -> Value {
+    serde_json::from_str::<Value>(include_str!("../quality_questions.json")).unwrap()[name].clone()
+}
+fn default_readability() -> Value {
+    default_quality_question("readability")
+}
+fn default_style() -> Value {
+    default_quality_question("style")
+}
 const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 /// 429 (rate limit), 529 (overloaded) and transport errors are retried after 1, 2 and 4 seconds.
 const ATTEMPTS: u32 = 4;
@@ -28,15 +41,28 @@ pub fn endpoint(base_url: &str) -> String {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Questions {
     site: Value,
     edit: Value,
     gate: Value,
+    #[serde(default = "default_fidelity_question")]
+    fidelity: Value,
+    #[serde(default = "default_readability")]
+    readability: Value,
+    #[serde(default = "default_style")]
+    style: Value,
 }
 
 impl Questions {
+    pub fn replace_fidelity(&mut self, question: Value) -> Result<(), String> {
+        let mut all = serde_json::to_value(&*self).map_err(|e| e.to_string())?;
+        all["fidelity"] = question;
+        *self = Self::parse(&all.to_string())?;
+        Ok(())
+    }
+
     /// The built-in questions, or the file named by `eval.typesafe_questions`.
     pub fn load(path: Option<&str>) -> Result<Self, String> {
         match path {
@@ -52,12 +78,25 @@ impl Questions {
     fn parse(text: &str) -> Result<Self, String> {
         let questions: Questions = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let kind = |q: &Value| q["type"].as_str().map(str::to_string);
-        let levels = questions.site["criteria"].as_array().map(Vec::len);
-        if kind(&questions.site).as_deref() != Some("score") || levels != Some(SITE_CREDIT.len()) {
-            return Err(format!("`site` must be a `score` question with {} criteria", SITE_CREDIT.len()));
+        for (name, question) in [
+            ("site", &questions.site),
+            ("readability", &questions.readability),
+            ("style", &questions.style),
+        ] {
+            if kind(question).as_deref() != Some("score")
+                || question["criteria"].as_array().map(Vec::len) != Some(SITE_CREDIT.len()) {
+            return Err(format!(
+                    "`{name}` must be a `score` question with {} criteria", SITE_CREDIT.len()));
+            }
         }
         let edit_kinds: Vec<&str> = EDIT_CREDIT.iter().map(|(k, _)| *k).collect();
-        for (name, question, options) in [("edit", &questions.edit, &edit_kinds[..]), ("gate", &questions.gate, &GATE_KINDS[..])] {
+        for (name, question, options) in [("edit", &questions.edit, &edit_kinds[..]), ("gate", &questions.gate, &GATE_KINDS[..]),
+            (
+                "fidelity",
+                &questions.fidelity,
+                &["faithful", "changed", "uncertain"][..],
+            ),
+        ] {
             let offered: Option<HashSet<&str>> = question["criteria"].as_object().map(|c| c.keys().map(String::as_str).collect());
             if kind(question).as_deref() != Some("choice") || offered != Some(options.iter().copied().collect()) {
                 return Err(format!("`{}` must be a `choice` question between exactly: {}", name, options.join(", ")));
@@ -71,6 +110,9 @@ impl Questions {
             AskKind::Site => &self.site,
             AskKind::Edit => &self.edit,
             AskKind::Gate => &self.gate,
+            AskKind::Fidelity => &self.fidelity,
+            AskKind::Readability => &self.readability,
+            AskKind::Style => &self.style,
         }
     }
 }
@@ -97,12 +139,24 @@ struct RawAnswer {
 fn read_answer(kind: AskKind, raw: RawAnswer) -> Result<Answer, String> {
     let confidence = raw.confidence.ok_or("answer without `confidence`")?;
     let p = raw.probabilities.ok_or("answer without `probabilities`")?;
-    let of = |option: &str| p.get(option).copied().ok_or(format!("answer without a probability for `{}`", option));
-    if kind == AskKind::Site {
-        return Ok(Answer::Levels { p: [of("0")?, of("1")?, of("2")?], confidence });
+    if !confidence.is_finite()
+        || !(0.0..=1.0).contains(&confidence)
+        || p.values()
+            .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+        || (p.values().sum::<f64>() - 1.0).abs() > 0.021
+    {
+        return Err("invalid judgment confidence or probability distribution".into());
+    }
+    let of = |option: &str| {
+        p.get(option).copied().ok_or(format!("answer without a probability for `{}`", option))
+    };
+    if matches!(kind, AskKind::Site | AskKind::Readability | AskKind::Style) {
+        return Ok(Answer::Levels { p: [of("0")?, of("1")?, of("2")?], confidence,
+        });
     }
     let options: Vec<&str> = match kind {
         AskKind::Edit => EDIT_CREDIT.iter().map(|(k, _)| *k).collect(),
+        AskKind::Fidelity => vec!["faithful", "changed", "uncertain"],
         _ => GATE_KINDS.to_vec(),
     };
     let choice = raw.choice.ok_or("answer without `choice`")?;
@@ -112,7 +166,8 @@ fn read_answer(kind: AskKind, raw: RawAnswer) -> Result<Answer, String> {
     for option in &options {
         of(option)?;
     }
-    Ok(Answer::Choice { choice, p, confidence })
+    Ok(Answer::Choice { choice, p, confidence,
+    })
 }
 
 fn short(text: &str) -> String {
@@ -124,11 +179,13 @@ fn short(text: &str) -> String {
     }
 }
 
-async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: AskKind) -> Result<(Answer, u64, u64), String> {
+async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: AskKind,
+) -> Result<(Answer, u64, u64), String> {
     let mut attempt = 0;
     let text = loop {
         attempt += 1;
-        let failure = match http.post(&url).bearer_auth(&api_key).json(&body).send().await {
+        let failure = match http.post(&url)
+            .timeout(Duration::from_secs(45)).bearer_auth(&api_key).json(&body).send().await {
             Err(e) => format!("request failed: {}", e),
             Ok(response) => {
                 let status = response.status();
@@ -151,7 +208,8 @@ async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: 
     let mut response: Response = serde_json::from_str(&text).map_err(|e| format!("{}: {}", e, short(&text)))?;
     let raw = response.answers.remove("q").ok_or_else(|| format!("no answer in response: {}", short(&text)))?;
     let answer = read_answer(kind, raw).map_err(|e| format!("{}: {}", e, short(&text)))?;
-    let usage = response.usage.unwrap_or(Usage { input_tokens: 0, output_tokens: 0 });
+    let usage = response.usage.unwrap_or(Usage { input_tokens: 0, output_tokens: 0,
+    });
     Ok((answer, usage.input_tokens, usage.output_tokens))
 }
 
@@ -186,10 +244,12 @@ impl Judge {
             while running.len() < self.concurrency.max(1) {
                 let Some(ask) = pending.next() else { break };
                 let body = json!({ "state": ask.state, "model": self.model, "questions": { "q": self.questions.of(ask.kind) } });
-                let call = ask_one(self.http.clone(), self.url.clone(), self.api_key.clone(), body, ask.kind);
+                let call = ask_one(self.http.clone(), self.url.clone(), self.api_key.clone(), body, ask.kind,
+                );
                 running.spawn(async move { (ask, call.await) });
             }
-            let Some(joined) = running.join_next().await else { break };
+            let Some(joined) = running.join_next().await else { break;
+            };
             let (ask, result) = joined.expect("a judge call panicked");
             match result {
                 Ok((answer, input_tokens, output_tokens)) => {
@@ -223,16 +283,36 @@ mod tests {
         assert!(Questions::parse(&without_a_kind).unwrap_err().contains("`edit` must be a `choice` question"));
     }
 
+    #[test]
+    fn probe_override_keeps_other_questions_and_rejects_invalid_choices_atomically() {
+        let mut questions = Questions::parse(BUILT_IN_QUESTIONS).unwrap();
+        let before = serde_json::to_value(&questions).unwrap();
+        let mut replacement = before["fidelity"].clone();
+        replacement["instructions"]["question"] = json!("Severe hallucinations only?");
+        questions.replace_fidelity(replacement).unwrap();
+        assert_eq!(questions.edit, before["edit"]);
+        assert_eq!(questions.site, before["site"]);
+        let valid = serde_json::to_value(&questions).unwrap();
+        assert!(questions
+            .replace_fidelity(json!({"type": "choice", "criteria": {"ok": "ok"}}))
+            .is_err());
+        assert_eq!(serde_json::to_value(&questions).unwrap(), valid);
+    }
+
     fn raw(json: &str) -> RawAnswer {
         serde_json::from_str(json).unwrap()
     }
 
     #[test]
     fn an_incomplete_answer_is_a_failure_not_a_default() {
-        let levels = raw(r#"{"score": 1.4, "probabilities": {"0": 0.1, "1": 0.4, "2": 0.5}, "confidence": 0.2}"#);
+        let levels = raw(r#"{"score": 1.4, "probabilities": {"0": 0.1, "1": 0.4, "2": 0.5}, "confidence": 0.2}"#,
+        );
         assert!(matches!(read_answer(AskKind::Site, levels), Ok(Answer::Levels { p, .. }) if p == [0.1, 0.4, 0.5]));
         let no_level = raw(r#"{"probabilities": {"0": 0.1, "1": 0.9}, "confidence": 0.2}"#);
         assert!(read_answer(AskKind::Site, no_level).unwrap_err().contains("probability for `2`"));
+        let malformed =
+            raw(r#"{"probabilities": {"0": 0.1, "1": 0.4, "2": 0.9}, "confidence": 0.8}"#);
+        assert!(read_answer(AskKind::Readability, malformed).is_err());
         let no_confidence = raw(r#"{"probabilities": {"0": 0.1, "1": 0.4, "2": 0.5}}"#);
         assert!(read_answer(AskKind::Site, no_confidence).unwrap_err().contains("confidence"));
         let unknown = raw(r#"{"choice": "fine", "probabilities": {"fine": 1.0}, "confidence": 0.9}"#);

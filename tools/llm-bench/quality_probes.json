@@ -1,0 +1,86 @@
+[
+  {
+    "name": "natural cleanup",
+    "input": "先用 Abacus 建模，再用麦达斯对比。",
+    "reference": "先用 Abaqus 建模，再用 Midas 对比。",
+    "output": "先用 Abaqus 建模，再用 Midas 对比。",
+    "readability_range": [
+      0.7,
+      1
+    ],
+    "style_range": [
+      0.7,
+      1
+    ]
+  },
+  {
+    "name": "missed repairs do not contaminate readability or style",
+    "input": "先用 Abacus 建模，再用麦达斯对比。",
+    "reference": "先用 Abaqus 建模，再用 Midas 对比。",
+    "output": "先用 Abacus 建模，再用麦达斯对比。",
+    "readability_range": [
+      0.7,
+      1
+    ],
+    "style_range": [
+      0.7,
+      1
+    ]
+  },
+  {
+    "name": "light synonyms and punctuation",
+    "input": "先用 Abacus 建模，再用麦达斯对比。",
+    "reference": "先用 Abaqus 建模，再用 Midas 对比。",
+    "output": "先用 Abaqus 建模，然后用 Midas 对比。",
+    "readability_range": [
+      0.7,
+      1
+    ],
+    "style_range": [
+      0.7,
+      1
+    ]
+  },
+  {
+    "name": "formal rewrite",
+    "input": "咱们先试试这个办法吧，不行就再想别的。明天我找小王一起看看，应该也不费事。",
+    "reference": "咱们先试试这个办法吧，不行就再想别的。明天我找小王一起看看，应该也不费事。",
+    "output": "实施方案：首先开展方法试验；如试验未达预期，则研究备选路径。后续安排：明日组织王先生参与联合研判。预期资源投入较低。",
+    "readability_range": [
+      0.7,
+      1
+    ],
+    "style_range": [
+      0,
+      0.5
+    ]
+  },
+  {
+    "name": "multiple mild edits assessed once",
+    "input": "咱们先试一下这个方法，接着看看效果，要是还不行，再想想其他办法。",
+    "reference": "咱们先试一下这个方法，接着看看效果，要是还不行，再想想其他办法。",
+    "output": "咱们先试试这个方法，然后看看效果。如果还不行，再想想别的办法。",
+    "readability_range": [
+      0.7,
+      1
+    ],
+    "style_range": [
+      0.7,
+      1
+    ]
+  },
+  {
+    "name": "not a transcript",
+    "input": "先用 Abacus 建模，再用麦达斯对比。",
+    "reference": "先用 Abaqus 建模，再用 Midas 对比。",
+    "output": "无法处理您的请求。",
+    "readability_range": [
+      0.7,
+      1
+    ],
+    "style_range": [
+      0,
+      0.5
+    ]
+  }
+]

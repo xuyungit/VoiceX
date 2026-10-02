@@ -42,7 +42,8 @@ pub const EDIT_CREDIT: [(&str, f64); 5] = [
 /// What the gate can call an output. Only `transcript` keeps its clean credit; `not_transcript` also voids the sites.
 pub const GATE_KINDS: [&str; 4] = ["transcript", "incomplete", "extended", "not_transcript"];
 /// Punctuation that separates clauses and sentences. Changing it (outside a number) does not change a word.
-const SENTENCE_PUNCT: [char; 14] = ['，', '。', '、', '；', '：', '？', '！', ',', '.', ';', ':', '?', '!', '-'];
+const SENTENCE_PUNCT: [char; 14] = ['，', '。', '、', '；', '：', '？', '！', ',', '.', ';', ':', '?', '!', '-',
+];
 /// Characters that may be added or missing once a late qualifier is back in its sentence. Order is ignored;
 /// replacing one character costs two, one added and one missing.
 const LATE_WORD_SLACK: usize = 2;
@@ -89,7 +90,8 @@ fn subsequence(part: &str, whole: &str) -> bool {
 }
 
 /// Hesitations that carry nothing wherever they stand: taking one out is cleanup, never a correction.
-const FILLERS: [&str; 15] = ["这个", "那个", "就是", "然后", "嗯", "呃", "额", "啊", "唔", "哦", "噢", "诶", "欸", "哎", "唉"];
+const FILLERS: [&str; 15] = ["这个", "那个", "就是", "然后", "嗯", "呃", "额", "啊", "唔", "哦", "噢", "诶", "欸", "哎", "唉",
+];
 /// How far on either side of a removal a copy of a removed character makes it a repeat: the stutter in
 /// 去去去, the half word in 页HTML页面, the second 一个 in 一个可交互的一个呃数据.
 const REPEAT_REACH: usize = 8;
@@ -149,7 +151,10 @@ fn find_term(text: &[char], term: &[char], exact_case: bool) -> Vec<(usize, usiz
     if n == 0 || n > text.len() {
         return Vec::new();
     }
-    let same = |x: char, y: char| if exact_case { x == y } else { fold(x) == fold(y) };
+    let same = |x: char, y: char| {
+        if exact_case { x == y } else { fold(x) == fold(y)
+        }
+    };
     (0..=text.len() - n)
         .filter(|&k| {
             (0..n).all(|d| same(text[k + d], term[d]))
@@ -419,6 +424,9 @@ pub enum AskKind {
     Site,
     Edit,
     Gate,
+    Fidelity,
+    Readability,
+    Style,
 }
 
 impl AskKind {
@@ -427,6 +435,9 @@ impl AskKind {
             AskKind::Site => "site",
             AskKind::Edit => "edit",
             AskKind::Gate => "gate",
+            AskKind::Fidelity => "fidelity",
+            AskKind::Readability => "readability",
+            AskKind::Style => "style",
         }
     }
 }
@@ -451,7 +462,8 @@ pub enum Answer {
     /// A `score` question: probability of each of the three site levels.
     Levels { p: [f64; 3], confidence: f64 },
     /// A `choice` question: the chosen option and the probability of every option.
-    Choice { choice: String, p: BTreeMap<String, f64>, confidence: f64 },
+    Choice { choice: String, p: BTreeMap<String, f64>, confidence: f64,
+    },
 }
 
 pub type Answers = HashMap<String, Answer>;
@@ -471,7 +483,7 @@ fn pinned(pins: &[Pin], heard: &str, written: &str) -> Option<f64> {
 
 // ── Reference: what a case requires ─────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
     Dictionary,
@@ -604,7 +616,10 @@ fn collapse_late_word(specs: &mut Vec<Spec>, req: &[Edit], inp: &[char], exp: &[
     if semantic.len() != 2 {
         return;
     }
-    let heard_intended = |s: &Spec| (words_only(&string(&inp[s.a0..s.a1])), words_only(&s.intended));
+    let heard_intended = |s: &Spec| {
+        (words_only(&string(&inp[s.a0..s.a1])), words_only(&s.intended),
+        )
+    };
     let (left, right) = (semantic[0], semantic[1]);
     let (heard_l, intended_l) = heard_intended(&specs[left]);
     let (heard_r, intended_r) = heard_intended(&specs[right]);
@@ -617,7 +632,8 @@ fn collapse_late_word(specs: &mut Vec<Spec>, req: &[Edit], inp: &[char], exp: &[
     };
     let sents = sentences(inp);
     let del_spec = &specs[del];
-    let Some(&(late_l, late_r)) = sents.iter().find(|(l, r)| *l <= del_spec.a0 && del_spec.a1 <= *r) else { return };
+    let Some(&(late_l, late_r)) = sents.iter().find(|(l, r)| *l <= del_spec.a0 && del_spec.a1 <= *r) else { return;
+    };
     if words_only(&string(&inp[late_l..late_r])) != word {
         return;
     }
@@ -625,7 +641,8 @@ fn collapse_late_word(specs: &mut Vec<Spec>, req: &[Edit], inp: &[char], exp: &[
     if ins_at >= late_l {
         return;
     }
-    let Some(&(body_l, body_r)) = sents.iter().find(|(l, r)| *l <= ins_at && ins_at < *r) else { return };
+    let Some(&(body_l, body_r)) = sents.iter().find(|(l, r)| *l <= ins_at && ins_at < *r) else { return;
+    };
     if body_r != late_l {
         return;
     }
@@ -656,6 +673,15 @@ fn collapse_late_word(specs: &mut Vec<Spec>, req: &[Edit], inp: &[char], exp: &[
     specs.sort_by_key(|s| (s.a0, s.a1));
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CorrectionTask {
+    pub id: String,
+    pub tier: Tier,
+    pub heard: String,
+    pub intended: String,
+    pub site_indices: Vec<usize>,
+}
+
 pub struct Reference {
     inp: Vec<char>,
     expected: String,
@@ -675,11 +701,14 @@ impl Reference {
         let mut occ: Vec<(usize, usize, usize)> = Vec::new();
         for (t, term) in terms.iter().enumerate() {
             let term: Vec<char> = term.chars().collect();
-            occ.extend(find_term(&exp, &term, false).into_iter().map(|(s, e)| (s, e, t)));
+            occ.extend(find_term(&exp, &term, false).into_iter().map(|(s, e)| (s, e, t)),
+            );
         }
         let longest: Vec<(usize, usize, usize)> = occ
             .iter()
-            .filter(|x| !occ.iter().any(|y| y.0 <= x.0 && x.1 <= y.1 && y.1 - y.0 > x.1 - x.0))
+            .filter(|x| {
+                !occ.iter().any(|y| y.0 <= x.0 && x.1 <= y.1 && y.1 - y.0 > x.1 - x.0)
+            })
             .copied()
             .collect();
 
@@ -743,7 +772,8 @@ impl Reference {
             for &k in &own {
                 in_dictionary_site[k] = true;
             }
-            specs.push(Spec { tier: Tier::Dictionary, a0, a1, intended: string(&exp[b0..b1]), own, terms: required, late_word: None });
+            specs.push(Spec { tier: Tier::Dictionary, a0, a1, intended: string(&exp[b0..b1]), own, terms: required, late_word: None,
+            });
         }
         for (k, e) in req.iter().enumerate() {
             // spacing and sentence punctuation are formatting: required, but not what a site is scored for
@@ -753,12 +783,21 @@ impl Reference {
             }
             // words that only go away were never meant: a filler, a stutter, a half word before the whole one
             let tier = if is_cleanup(&inp, e.a0, e.a1, &old, &new) { Tier::Cleanup } else { Tier::Semantic };
-            specs.push(Spec { tier, a0: e.a0, a1: e.a1, intended: e.new.clone(), own: vec![k], terms: Vec::new(), late_word: None });
+            specs.push(Spec { tier, a0: e.a0, a1: e.a1, intended: e.new.clone(), own: vec![k], terms: Vec::new(), late_word: None,
+            });
         }
         specs.sort_by_key(|s| (s.a0, s.a1));
         collapse_late_word(&mut specs, &req, &inp, &exp);
         let sents = sentences(&inp);
-        Reference { inp, expected: string(&exp), req, sents, specs, terms: terms.to_vec() }
+        Reference { inp, expected: string(&exp), req, sents, specs, terms: terms.to_vec(),
+        }
+    }
+
+    pub fn input(&self) -> String {
+        string(&self.inp)
+    }
+    pub fn expected(&self) -> &str {
+        &self.expected
     }
 
     /// The sites of this case: tier, what was heard, what was intended.
@@ -766,8 +805,48 @@ impl Reference {
         self.specs.iter().map(|s| (s.tier, string(&self.inp[s.a0..s.a1]), s.intended.clone())).collect()
     }
 
+    /// Stable correction groups, materialized from input/reference before outputs.
+    pub fn correction_tasks(&self) -> Vec<CorrectionTask> {
+        let mut tasks: Vec<CorrectionTask> = Vec::new();
+        for (index, spec) in self.specs.iter().enumerate() {
+            if spec.tier == Tier::Cleanup {
+                continue;
+            }
+            let heard = string(&self.inp[spec.a0..spec.a1]);
+            let key = if spec.tier == Tier::Dictionary {
+                let mut terms: Vec<String> =
+                    spec.terms.iter().map(|t| t.form.to_lowercase()).collect();
+                terms.sort();
+                terms.dedup();
+                format!("dictionary:{}", serde_json::to_string(&terms).unwrap())
+            } else {
+                format!(
+                    "semantic:{}",
+                    serde_json::to_string(&[
+                        folded(&words_only(&heard)),
+                        folded(&words_only(&spec.intended))
+                    ])
+                    .unwrap()
+                )
+            };
+            if let Some(task) = tasks.iter_mut().find(|t| t.id == key) {
+                task.site_indices.push(index);
+            } else {
+                tasks.push(CorrectionTask {
+                    id: key,
+                    tier: spec.tier,
+                    heard,
+                    intended: spec.intended.clone(),
+                    site_indices: vec![index],
+                });
+            }
+        }
+        tasks
+    }
+
     /// The whole sentences around `[lo, hi)`, widened until no edit of `edits` reaches across the border.
-    fn window<'a>(&self, lo: usize, hi: usize, edits: impl Iterator<Item = &'a Edit> + Clone) -> (usize, usize) {
+    fn window<'a>(&self, lo: usize, hi: usize, edits: impl Iterator<Item = &'a Edit> + Clone,
+    ) -> (usize, usize) {
         let hit: Vec<&(usize, usize)> = self.sents.iter().filter(|(l, r)| touches(*l, *r, lo, hi)).collect();
         let mut l = hit.iter().map(|s| s.0).fold(lo, usize::min);
         let mut r = hit.iter().map(|s| s.1).fold(hi, usize::max);
@@ -792,7 +871,9 @@ impl Reference {
             .req
             .iter()
             .enumerate()
-            .filter(|(k, x)| !spec.own.contains(k) && within(x, l, r) && !touches(x.a0, x.a1, lo, hi))
+            .filter(|(k, x)| {
+                !spec.own.contains(k) && within(x, l, r) && !touches(x.a0, x.a1, lo, hi)
+            })
             .map(|(_, x)| replacement(x))
             .collect();
         let ctx = |x: &str| {
@@ -862,7 +943,8 @@ impl Reference {
                     LateSettle::Miss(how) => {
                         let word = spec.late_word.as_ref().map(|lw| lw.word.as_str()).unwrap_or("");
                         for (k, edit) in act.iter().enumerate() {
-                            let (old, new) = (words_only(&string(&inp[edit.a0..edit.a1])), words_only(&edit.new));
+                            let (old, new) = (words_only(&string(&inp[edit.a0..edit.a1])), words_only(&edit.new),
+                            );
                             if (old.is_empty() && new == word) || (new.is_empty() && old == word) {
                                 claimed[k] = true;
                             }
@@ -873,7 +955,8 @@ impl Reference {
                         claimed.fill(true);
                         let phrase = json!({ "heard": string(&inp[s..e]), "intended": spec.intended, "written": string(&out) });
                         let state = json!({ "heard": string(inp), "intended": self.expected, "written": string(&out), "phrase": phrase });
-                        Outcome::Ask(Ask { kind: AskKind::Site, state, label: format!("site  {:?} → (late)", string(&inp[s..e])) })
+                        Outcome::Ask(Ask { kind: AskKind::Site, state, label: format!("site  {:?} → (late)", string(&inp[s..e])),
+                        })
                     }
                 }
             } else if spec.tier == Tier::Dictionary {
@@ -891,11 +974,13 @@ impl Reference {
                     };
                     let credit = spec.terms.iter().filter(|t| stands(t)).count() as f64 / spec.terms.len() as f64;
                     depends_on_gate = !local && credit > 0.0;
-                    Outcome::settled(if credit > 0.0 { "code:term" } else { "code:term-missing" }, credit)
+                    Outcome::settled(if credit > 0.0 { "code:term" } else { "code:term-missing" }, credit,
+                    )
                 }
             } else if spec.tier == Tier::Cleanup && local {
                 // the job is that the words are gone, and code can see that; what else changed here is an edit
-                let (hw, iw, ww) = (folded(&words_only(&h)), folded(&words_only(&i)), folded(&words_only(&w)));
+                let (hw, iw, ww) = (folded(&words_only(&h)), folded(&words_only(&i)), folded(&words_only(&w)),
+                );
                 let n = |x: &str| x.chars().count() as f64;
                 let (credit, claim) = if ww == iw {
                     (1.0, true)
@@ -913,14 +998,17 @@ impl Reference {
                         claimed[k] = false;
                     }
                 }
-                Outcome::settled(if credit >= 1.0 { "code:removed" } else if credit <= 0.0 { "code:kept" } else { "code:part" }, credit)
+                Outcome::settled(if credit >= 1.0 { "code:removed" } else if credit <= 0.0 { "code:kept" } else { "code:part" }, credit,
+                )
             } else if spec.tier == Tier::Cleanup {
                 let [heard, intended, written] = self.rewritten((lo, hi), &act);
-                let (hw, iw, ww) = (folded(&words_only(&heard)), folded(&words_only(&intended)), folded(&words_only(&written)));
+                let (hw, iw, ww) = (folded(&words_only(&heard)), folded(&words_only(&intended)), folded(&words_only(&written)),
+                );
                 let filler = folded(&words_only(&string(&inp[s..e])));
                 let gone = ww == iw || ww.matches(filler.as_str()).count() < hw.matches(filler.as_str()).count();
                 depends_on_gate = gone;
-                Outcome::settled(if gone { "code:removed" } else { "code:kept" }, if gone { 1.0 } else { 0.0 })
+                Outcome::settled(if gone { "code:removed" } else { "code:kept" }, if gone { 1.0 } else { 0.0 },
+                )
             } else if local && !entangled {
                 let (ch, ci, cw) = (core(&h), core(&i), core(&w));
                 let casing_is_content = folded(ci) == folded(ch);
@@ -935,7 +1023,8 @@ impl Reference {
                 } else if cw.is_empty() {
                     Outcome::settled("code:dropped", 0.0)
                 } else {
-                    Outcome::Ask(Ask { kind: AskKind::Site, state: self.isolated(spec, (lo, hi), [&h, &i, &w]), label: format!("site  {:?} → {:?}", h, w) })
+                    Outcome::Ask(Ask { kind: AskKind::Site, state: self.isolated(spec, (lo, hi), [&h, &i, &w]), label: format!("site  {:?} → {:?}", h, w),
+                    })
                 }
             } else {
                 let [heard, intended, written] = self.rewritten((lo, hi), &act);
@@ -944,7 +1033,8 @@ impl Reference {
                 } else {
                     let phrase = json!({ "heard": string(&inp[s..e]), "intended": spec.intended });
                     let state = json!({ "heard": heard, "intended": intended, "written": written, "phrase": phrase });
-                    Outcome::Ask(Ask { kind: AskKind::Site, state, label: format!("site  {:?} → (rewritten)", string(&inp[s..e])) })
+                    Outcome::Ask(Ask { kind: AskKind::Site, state, label: format!("site  {:?} → (rewritten)", string(&inp[s..e])),
+                    })
                 }
             };
 
@@ -953,7 +1043,8 @@ impl Reference {
             } else {
                 (h, i, w)
             };
-            let (hc, ic, wc): (Vec<char>, Vec<char>, Vec<char>) = (h.chars().collect(), i.chars().collect(), w.chars().collect());
+            let (hc, ic, wc): (Vec<char>, Vec<char>, Vec<char>) = (h.chars().collect(), i.chars().collect(), w.chars().collect(),
+            );
             let half_fix = hc.len() == ic.len()
                 && ic.len() == wc.len()
                 && wc != hc
@@ -966,7 +1057,8 @@ impl Reference {
                 w,
                 string(&inp[hi..(hi + 6).min(inp.len())])
             );
-            sites.push(SiteFinding { tier: spec.tier, heard: h, intended: i, written: w, context, outcome, half_fix, depends_on_gate });
+            sites.push(SiteFinding { tier: spec.tier, heard: h, intended: i, written: w, context, outcome, half_fix, depends_on_gate,
+            });
         }
 
         // everything else the model changed, grouped by the sentences it touches
@@ -1013,14 +1105,17 @@ impl Reference {
                     let mut reps: Vec<Replacement> = self
                         .req
                         .iter()
-                        .filter(|q| within(q, l, r) && !xs.iter().any(|&k| touches(act[k].a0, act[k].a1, q.a0, q.a1)))
+                        .filter(|q| {
+                            within(q, l, r) && !xs.iter().any(|&k| touches(act[k].a0, act[k].a1, q.a0, q.a1))
+                        })
                         .map(replacement)
                         .collect();
                     let before = splice(inp, l, r, &reps);
                     reps.extend(xs.iter().map(|&k| replacement(&act[k])));
                     let after = splice(inp, l, r, &reps);
                     let label = format!("edit  {}", changes_label(&changes));
-                    Outcome::Ask(Ask { kind: AskKind::Edit, state: json!({ "before": before, "after": after }), label })
+                    Outcome::Ask(Ask { kind: AskKind::Edit, state: json!({ "before": before, "after": after }), label,
+                    })
                 };
                 GroupFinding { changes, outcome }
             })
@@ -1028,8 +1123,10 @@ impl Reference {
 
         let open = groups.iter().any(|g| matches!(g.outcome, Outcome::Ask(_))) || sites.iter().any(|s| s.depends_on_gate);
         let state = json!({ "reference": self.expected, "output": string(&out) });
-        let gate = open.then(|| Ask { kind: AskKind::Gate, state, label: "gate  is this output a transcript at all?".to_string() });
-        Analysis { sites, groups, gate, neutral }
+        let gate = open.then(|| Ask { kind: AskKind::Gate, state, label: "gate  is this output a transcript at all?".to_string(),
+        });
+        Analysis { sites, groups, gate, neutral,
+        }
     }
 
     /// A dictionary term stood in `old` exactly as the dictionary spells it, and `new` no longer has it.
@@ -1098,7 +1195,7 @@ impl Analysis {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteScore {
     pub tier: Tier,
     pub heard: String,
@@ -1112,7 +1209,7 @@ pub struct SiteScore {
     pub probabilities: Option<[f64; 3]>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditScore {
     pub changes: Vec<[String; 2]>,
     pub how: String,
@@ -1121,14 +1218,14 @@ pub struct EditScore {
     pub probabilities: Option<BTreeMap<String, f64>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateScore {
     pub kind: Option<String>,
     pub confidence: Option<f64>,
     pub probabilities: Option<BTreeMap<String, f64>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scored {
     pub sites: Vec<SiteScore>,
     pub edits: Vec<EditScore>,
@@ -1143,6 +1240,31 @@ pub struct Scored {
     /// What needed the judge and has no answer.
     #[serde(skip)]
     pub unjudged: Vec<String>,
+    #[serde(default)]
+    pub evaluation_errors: Vec<String>,
+}
+
+impl Scored {
+    /// Missing evaluator answers are explicit zero credit, never omitted from a
+    /// final ranking's denominator. Preserve their evidence in the saved score.
+    pub fn finalize_missing(&mut self) {
+        for site in &mut self.sites {
+            if site.credit.is_none() {
+                site.credit = Some(0.0);
+                site.how = "evaluation_failed".into();
+            }
+        }
+        for edit in &mut self.edits {
+            if edit.credit.is_none() {
+                edit.credit = Some(0.0);
+                edit.how = "evaluation_failed".into();
+            }
+        }
+        if self.clean.is_none() {
+            self.clean = Some(0.0);
+        }
+        self.evaluation_errors.append(&mut self.unjudged);
+    }
 }
 
 fn changes_label(changes: &[[String; 2]]) -> String {
@@ -1153,15 +1275,18 @@ pub fn score(analysis: &Analysis, answers: &Answers) -> Scored {
     let (mut review, mut unjudged) = (Vec::new(), Vec::new());
 
     let gate = analysis.gate.as_ref().map(|ask| match answers.get(&ask.key()) {
-        Some(Answer::Choice { choice, p, confidence }) => {
+        Some(Answer::Choice { choice, p, confidence,
+            }) => {
             if *confidence < REVIEW_BELOW {
                 review.push(format!("gate  output called `{}` (conf {:.2})", choice, confidence));
             }
-            GateScore { kind: Some(choice.clone()), confidence: Some(*confidence), probabilities: Some(p.clone()) }
+            GateScore { kind: Some(choice.clone()), confidence: Some(*confidence), probabilities: Some(p.clone()),
+                }
         }
         _ => {
             unjudged.push("gate  is this output a transcript at all?".to_string());
-            GateScore { kind: None, confidence: None, probabilities: None }
+            GateScore { kind: None, confidence: None, probabilities: None,
+                }
         }
     });
     let kind = gate.as_ref().and_then(|g| g.kind.as_deref());
@@ -1214,11 +1339,15 @@ pub fn score(analysis: &Analysis, answers: &Answers) -> Scored {
 
     let mut edits = Vec::new();
     for g in &analysis.groups {
-        let mut e = EditScore { changes: g.changes.clone(), how: String::new(), credit: None, confidence: None, probabilities: None };
+        let mut e = EditScore { changes: g.changes.clone(), how: String::new(), credit: None, confidence: None, probabilities: None,
+        };
         match &g.outcome {
-            Outcome::Settled { how, credit } => (e.how, e.credit) = (how.to_string(), Some(*credit)),
+            Outcome::Settled { how, credit } => {
+                (e.how, e.credit) = (how.to_string(), Some(*credit))
+            }
             Outcome::Ask(ask) => match answers.get(&ask.key()) {
-                Some(Answer::Choice { choice, p, confidence }) => {
+                Some(Answer::Choice { choice, p, confidence,
+                }) => {
                     let credit: f64 = EDIT_CREDIT.iter().map(|(k, c)| p[*k] * c).sum();
                     (e.how, e.credit) = (format!("judge:{}", choice), Some(credit));
                     (e.confidence, e.probabilities) = (Some(*confidence), Some(p.clone()));
@@ -1244,11 +1373,16 @@ pub fn score(analysis: &Analysis, answers: &Answers) -> Scored {
     } else {
         let tidy = match cleanup.len() {
             0 => 1.0,
-            n => FILLERS_KEPT_CREDIT + (1.0 - FILLERS_KEPT_CREDIT) * cleanup.iter().flatten().sum::<f64>() / n as f64,
+            n => {
+                FILLERS_KEPT_CREDIT + (1.0 - FILLERS_KEPT_CREDIT) * cleanup.iter().flatten().sum::<f64>() / n as f64
+            }
         };
         Some(edits.iter().filter_map(|e| e.credit).product::<f64>() * tidy)
     };
-    Scored { sites, edits, gate, clean, neutral_edits: analysis.neutral, review, unjudged }
+    Scored {
+        evaluation_errors: Vec::new(),
+        sites, edits, gate, clean, neutral_edits: analysis.neutral, review, unjudged,
+    }
 }
 
 #[cfg(test)]
@@ -1263,7 +1397,8 @@ mod tests {
     }
 
     fn reference(input: &str, expected: &str, terms: &[&str]) -> Reference {
-        Reference::new(input, expected, &terms.iter().map(|t| t.to_string()).collect::<Vec<_>>())
+        Reference::new(input, expected, &terms.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+        )
     }
 
     /// Credit of every site, by code alone.
@@ -1278,7 +1413,8 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!((string(&a[found[0].a0..found[0].a1]).as_str(), found[0].new.as_str()), ("cloud md", "CLAUDE.md"));
         // applying the edits to the first text gives the second, whatever grew or merged
-        for (a, b) in [("用 docker 库伯 部署", "用 Docker Kube 部署"), ("跑 k8s 的 pod", "在 K8s 跑 Pod。"), ("", "x y"), ("a-b c", "")] {
+        for (a, b) in [("用 docker 库伯 部署", "用 Docker Kube 部署"), ("跑 k8s 的 pod", "在 K8s 跑 Pod。"), ("", "x y"), ("a-b c", ""),
+        ] {
             let (a, b) = (chars(a), chars(b));
             let reps = edits(&a, &b);
             assert_eq!(splice(&a, 0, a.len(), &reps.iter().map(replacement).collect::<Vec<_>>()), string(&b));
@@ -1304,7 +1440,8 @@ mod tests {
     #[test]
     fn a_dictionary_site_passes_iff_the_term_stands_there() {
         let r = reference(HEARD, SAID, &["Claude"]);
-        for (written, credit) in [("CLAUDE.md", 1.0), ("Claude.md", 1.0), ("Claude md", 1.0), ("Claude", 1.0), ("claude.md", 1.0)] {
+        for (written, credit) in [("CLAUDE.md", 1.0), ("Claude.md", 1.0), ("Claude md", 1.0), ("Claude", 1.0), ("claude.md", 1.0),
+        ] {
             assert_eq!(credits(&r, &SAID.replace("CLAUDE.md", written))[1], Some(credit), "{}", written);
         }
         for written in ["Cloud.md", "cloud.md", "cloud md", "Claudette.md", ""] {
@@ -1325,7 +1462,9 @@ mod tests {
     #[test]
     fn code_settles_a_semantic_site_only_where_that_is_exact() {
         let r = reference(HEARD, SAID, &["Claude"]);
-        let readme = |written: &str| r.analyze(&SAID.replace("README", written), &[]).sites[2].outcome.clone();
+        let readme = |written: &str| {
+            r.analyze(&SAID.replace("README", written), &[]).sites[2].outcome.clone()
+        };
         let settled = |o: Outcome| match o {
             Outcome::Settled { how, credit } => Some((how, credit)),
             Outcome::Ask(_) => None,
@@ -1350,7 +1489,8 @@ mod tests {
     fn changes_outside_the_sites_are_neutral_lost_terms_or_questions() {
         let r = reference(HEARD, SAID, &["Claude"]);
         // spacing, sentence punctuation and casing: clean by code, no question at all
-        let tidy = r.analyze(&SAID.replace("high level", "high-level").replace("，但是", "。但是").replace(" 的项目", "的项目"), &[]);
+        let tidy = r.analyze(&SAID.replace("high level", "high-level").replace("，但是", "。但是").replace(" 的项目", "的项目"), &[],
+        );
         assert_eq!((tidy.neutral, tidy.groups.len(), tidy.asks().len()), (2, 0, 0));
         assert_eq!(score(&tidy, &Answers::new()).clean, Some(1.0));
         // a wrapper is not neutral, and one question covers all changes to a sentence
@@ -1374,7 +1514,8 @@ mod tests {
         let open = score(&r.analyze(&output, &[]), &Answers::new());
         assert_eq!((open.sites[0].credit, open.sites[0].how.as_str(), open.unjudged.len()), (None, "unjudged", 1));
         assert_eq!(open.clean, Some(1.0));
-        let pin = Pin { heard: "集".to_string(), written: "层".to_string(), credit: 1.0 };
+        let pin = Pin { heard: "集".to_string(), written: "层".to_string(), credit: 1.0,
+        };
         let pinned = r.analyze(&output, &[pin]);
         assert!(pinned.asks().is_empty());
         assert_eq!(score(&pinned, &Answers::new()).sites[0].credit, Some(1.0));
@@ -1384,11 +1525,13 @@ mod tests {
         Answer::Levels { p, confidence }
     }
 
-    fn choice(options: &[&str], chosen: &str, p_chosen: f64, other: &str, confidence: f64) -> Answer {
+    fn choice(options: &[&str], chosen: &str, p_chosen: f64, other: &str, confidence: f64,
+    ) -> Answer {
         let mut p: BTreeMap<String, f64> = options.iter().map(|o| (o.to_string(), 0.0)).collect();
         p.insert(other.to_string(), 1.0 - p_chosen);
         p.insert(chosen.to_string(), p_chosen);
-        Answer::Choice { choice: chosen.to_string(), p, confidence }
+        Answer::Choice { choice: chosen.to_string(), p, confidence,
+        }
     }
 
     /// Twelve outputs for one case: the perfect one, the untouched one, and ten with one known defect each. Code settles
@@ -1402,25 +1545,32 @@ mod tests {
         let gate = |chosen, confidence| Some(choice(&GATE_KINDS, chosen, 0.9, "transcript", confidence));
         // output, the judge's site / edit / gate verdict, expected [dictionary, semantic, clean]
         let outputs: Vec<(&str, String, [Option<Answer>; 3], [f64; 3])> = vec![
-            ("perfect", SAID.to_string(), [None, None, None], [1.0, 2.0, 1.0]),
-            ("untouched", HEARD.to_string(), [None, None, None], [0.0, 0.0, 1.0]),
-            ("synonym", SAID.replace("下一级", "下一层"), [Some(levels([0.40, 0.04, 0.56], 0.0)), None, None], [1.0, 1.58, 1.0]),
-            ("extension", SAID.replace("README", "README.md"), [Some(levels([0.05, 0.20, 0.75], 0.6)), None, None], [1.0, 1.85, 1.0]),
-            ("misheard term reformatted", SAID.replace("CLAUDE.md", "Cloud.md"), [None, None, None], [0.0, 2.0, 1.0]),
+            ("perfect", SAID.to_string(), [None, None, None], [1.0, 2.0, 1.0],
+            ),
+            ("untouched", HEARD.to_string(), [None, None, None], [0.0, 0.0, 1.0],
+            ),
+            ("synonym", SAID.replace("下一级", "下一层"), [Some(levels([0.40, 0.04, 0.56], 0.0)), None, None], [1.0, 1.58, 1.0],
+            ),
+            ("extension", SAID.replace("README", "README.md"), [Some(levels([0.05, 0.20, 0.75], 0.6)), None, None], [1.0, 1.85, 1.0],
+            ),
+            ("misheard term reformatted", SAID.replace("CLAUDE.md", "Cloud.md"), [None, None, None], [0.0, 2.0, 1.0],
+            ),
             (
                 "term only mentioned",
                 SAID.replace("CLAUDE.md", "Cloud.md") + "（注：Claude 相关）",
                 [None, edit("commentary", 1.0, 0.9), gate("transcript", 0.32)],
                 [0.0, 2.0, 0.0],
             ),
-            ("negation flipped", SAID.replace("不要记录细节", "要记录细节"), [None, edit("damages", 0.97, 0.9), gate("transcript", 0.9)], [1.0, 2.0, 0.03]),
+            ("negation flipped", SAID.replace("不要记录细节", "要记录细节"), [None, edit("damages", 0.97, 0.9), gate("transcript", 0.9)], [1.0, 2.0, 0.03],
+            ),
             (
                 "hallucinated tail",
                 SAID.to_string() + "此外，建议你使用 Git 进行版本管理，并定期归档旧文档到 archive 目录。",
                 [None, edit("damages", 0.9, 0.8), gate("extended", 0.9)],
                 [1.0, 2.0, 0.0],
             ),
-            ("preamble", format!("好的，以下是纠正后的文本：\n\n{}", SAID), [None, edit("commentary", 1.0, 0.9), gate("extended", 0.9)], [1.0, 2.0, 0.0]),
+            ("preamble", format!("好的，以下是纠正后的文本：\n\n{}", SAID), [None, edit("commentary", 1.0, 0.9), gate("extended", 0.9)], [1.0, 2.0, 0.0],
+            ),
             (
                 "answered instead of correcting",
                 "你说得对，CLAUDE.md 应该只做高层导航，指向 README，并且清理过时文档。".to_string(),
@@ -1435,7 +1585,8 @@ mod tests {
             ),
             (
                 "restyled",
-                SAID.replace("然后把一些过时的文档做一下清理。", "然后清理一些过时的文档。"),
+                SAID.replace("然后把一些过时的文档做一下清理。", "然后清理一些过时的文档。",
+                ),
                 [None, edit("rephrases", 1.0, 0.9), gate("transcript", 0.9)],
                 [1.0, 2.0, 0.7],
             ),
@@ -1450,8 +1601,11 @@ mod tests {
             }
             assert_eq!(verdicts.iter().all(Option::is_none), analysis.asks().is_empty(), "{}: what needs the judge", name);
             let scored = score(&analysis, &answers);
-            let tier = |t| scored.sites.iter().filter(|s| s.tier == t).map(|s| s.credit.expect("judged")).sum::<f64>();
-            let got = [tier(Tier::Dictionary), tier(Tier::Semantic), scored.clean.expect("judged")];
+            let tier = |t| {
+                scored.sites.iter().filter(|s| s.tier == t).map(|s| s.credit.expect("judged")).sum::<f64>()
+            };
+            let got = [tier(Tier::Dictionary), tier(Tier::Semantic), scored.clean.expect("judged"),
+            ];
             for k in 0..3 {
                 assert!((got[k] - expected[k]).abs() < 1e-9, "{}: got {:?}, expected {:?}", name, got, expected);
             }
@@ -1465,7 +1619,8 @@ mod tests {
     #[test]
     fn fillers_are_cleanup_sites_that_code_settles_into_clean() {
         let site = |tier, heard: &str, intended: &str| (tier, heard.to_string(), intended.to_string());
-        let r = reference("嗯，把这这个数据处理一下，然后呃看看变化。", "把这个数据处理一下，然后看看变化。", &[]);
+        let r = reference("嗯，把这这个数据处理一下，然后呃看看变化。", "把这个数据处理一下，然后看看变化。", &[],
+        );
         assert_eq!(r.sites(), vec![site(Tier::Cleanup, "嗯，", ""), site(Tier::Cleanup, "这", ""), site(Tier::Cleanup, "呃", "")]);
         let clean = |output: &str| {
             let analysis = r.analyze(output, &[]);
@@ -1487,7 +1642,8 @@ mod tests {
         // a stutter half taken out is half done
         let stutter = reference("那就可以去呃去去去呃图放大。", "那就可以去图放大。", &[]);
         assert_eq!(stutter.sites(), vec![site(Tier::Cleanup, "呃去去去呃", "")]);
-        let part = score(&stutter.analyze("那就可以去去图放大。", &[]), &Answers::new());
+        let part = score(&stutter.analyze("那就可以去去图放大。", &[]), &Answers::new(),
+        );
         assert_eq!((part.sites[0].how.as_str(), part.sites[0].credit), ("code:part", Some(0.8)));
         // more than the filler went: the site is done, the rest is an edit for the judge like any other
         let collateral = reference("呃，然后我们看图。", "然后我们看图。", &[]);
@@ -1520,7 +1676,8 @@ mod tests {
             let analysis = r.analyze(output, &[]);
             let scored = score(&analysis, &Answers::new());
             let site = &scored.sites[0];
-            (site.how.clone(), site.credit, analysis.asks().len(), analysis.groups.len(), scored.clean)
+            (site.how.clone(), site.credit, analysis.asks().len(), analysis.groups.len(), scored.clean,
+            )
         };
         // one canonical wording, and other places the same word can stand in the sentence
         for output in [
@@ -1548,7 +1705,8 @@ mod tests {
     #[test]
     fn degenerate_outputs_are_analyzed_without_a_panic() {
         let r = reference(HEARD, SAID, &["Claude"]);
-        for output in ["", "。", "cloud md", "README", &SAID.repeat(2), &SAID.chars().rev().collect::<String>()] {
+        for output in ["", "。", "cloud md", "README", &SAID.repeat(2), &SAID.chars().rev().collect::<String>(),
+        ] {
             let analysis = r.analyze(output, &[]);
             assert!(analysis.gate.is_some(), "{:?}", output);
             score(&analysis, &Answers::new());
