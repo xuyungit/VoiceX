@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.1] - 2026-10-02
+
+### Added
+- **Mute the system output while recording** — music playing through the speakers leaks into the microphone and ends up in the transcript. A new switch in Settings → Input → Microphone, **Mute while recording** (off by default), mutes the default output device while dictation records and restores it afterwards. Only the mute switch changes: volume is untouched and players keep playing. Muting follows the capture rather than the hotkey: it engages once the microphone has opened and is released at every ending — key release, hands-free stop, timeout, Escape, an ASR error — and quitting the app restores the output before exit. A device that was already muted is never touched, and one you unmute yourself mid-recording is not muted again. The default output is re-checked every 250 ms while recording, so a device selected mid-recording is muted too, and each device is restored on release. Devices are tracked by their stable id (Core Audio UID, MMDevice endpoint id): one that disconnects while muted is restored when it reconnects, and a device still waiting to be restored is recorded on this machine (never synced) and restored on the next launch, so a crash cannot leave the output muted for good. Failed restores are retried with backoff. The Microphone section shows the current output device, warns when it cannot be muted by software (HDMI and multi-output devices on macOS) and lists devices still being restored. Not covered: applications playing to a non-default device, and the first tens of milliseconds after the microphone opens, since muting is asynchronous. The Windows backend (`IAudioEndpointVolume` on the default render endpoint) ships in this release but has not yet been tried on a Windows machine.
+
+### Developer tooling
+- `tools/llm-bench` scoring version 6 — every case is worth 100 points: correction 30, fidelity 40, filler and stutter removal 10, readability 5, conversational style 5, speed 10, with explicit weights that must sum to 1. Every output goes through an automatic severe-hallucination check against the raw ASR input and the approved reference; uncertain verdicts go to an independent reviewer model, and a confirmed severe hallucination zeroes that round's quality. Each run also prints a one-sentence Chinese assessment per model built from the measured evidence. Earlier runs can be replayed or rescored under the new rules without new correction calls, finalized into a separate season, and checked offline with `scripts/verify_rescore.py`; `severe_hallucination_probes.json` and `quality_probes.json` calibrate the judges. See `tools/llm-bench/README.md`.
+
 ## [0.17.0] - 2026-10-01
 
 ### Added

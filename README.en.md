@@ -36,6 +36,8 @@ VoiceX maps three distinct intents to a single configurable hotkey:
 
 Hold threshold and double-tap window are configurable. Press **Escape** at any time to cancel and discard.
 
+**Mute while recording** (optional, off by default): enabled under Input → Microphone, it mutes the default system output while dictation records and restores it afterwards. Only the mute switch changes — volume is untouched and players keep playing — so music no longer leaks into the microphone. A device that was already muted is never touched, one you unmute mid-recording stays unmuted, and an output device selected mid-recording is muted too and restored at the end. Devices still waiting to be restored are recorded on this machine (never synced) and restored when they reconnect or on the next launch. Output devices that cannot be muted by software (HDMI and multi-output devices on macOS) are flagged on the settings page. The Windows side has not yet been tried on a real machine.
+
 ## Reading and Translate-and-Read
 
 VoiceX also works in the other direction. Select text in **any application**:
