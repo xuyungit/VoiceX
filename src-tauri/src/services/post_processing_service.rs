@@ -13,10 +13,12 @@ impl PostProcessingService {
         let mut processed = text.to_string();
 
         // 1. Trailing Punctuation Removal
+        // The threshold measures the sentence itself; ASR/LLM output nearly
+        // always ends in a terminator, which must not push a short sentence over.
         if remove_punctuation {
-            let char_count = processed.chars().count();
-            if char_count > 0 && char_count <= threshold as usize {
-                processed = Self::trim_trailing_punctuation(&processed);
+            let without_punctuation = Self::trim_trailing_punctuation(&processed);
+            if without_punctuation.chars().count() <= threshold as usize {
+                processed = without_punctuation;
             }
         }
 
@@ -28,7 +30,9 @@ impl PostProcessingService {
 
             match rule.match_mode.as_str() {
                 "exact" => {
-                    if processed.trim().to_lowercase() == rule.keyword.trim().to_lowercase() {
+                    // Compare the spoken content only, so "keyword。" from a long
+                    // sentence (not stripped above) still matches.
+                    if Self::exact_match_key(&processed) == Self::exact_match_key(&rule.keyword) {
                         processed = rule.replacement.clone();
                     }
                 }
@@ -50,6 +54,12 @@ impl PostProcessingService {
         }
 
         processed
+    }
+
+    fn exact_match_key(text: &str) -> String {
+        Self::trim_trailing_punctuation(text.trim())
+            .trim()
+            .to_lowercase()
     }
 
     fn trim_trailing_punctuation(text: &str) -> String {
@@ -105,6 +115,24 @@ mod tests {
         let processed = PostProcessingService::process("Hello WORLD", false, 5, &rules);
 
         assert_eq!(processed, "Hello VoiceX");
+    }
+
+    #[test]
+    fn threshold_counts_characters_without_trailing_punctuation() {
+        let processed = PostProcessingService::process("我家的地址。", true, 5, &[]);
+        assert_eq!(processed, "我家的地址");
+
+        let processed = PostProcessingService::process("下一步该做什么？", true, 5, &[]);
+        assert_eq!(processed, "下一步该做什么？");
+    }
+
+    #[test]
+    fn exact_match_ignores_trailing_punctuation() {
+        let rules = vec![rule("目前公司的地址", "公司地址", "exact")];
+
+        let processed = PostProcessingService::process("目前公司的地址。", true, 5, &rules);
+
+        assert_eq!(processed, "公司地址");
     }
 
     #[test]
