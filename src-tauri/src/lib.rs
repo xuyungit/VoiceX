@@ -345,6 +345,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::audio::get_input_devices,
             commands::audio::set_input_device,
+            commands::audio::get_output_mute_status,
             commands::audio::start_audio_capture,
             commands::audio::stop_audio_capture,
             commands::audio::get_recordings_dir,
@@ -394,6 +395,13 @@ pub fn run() {
             commands::retranscribe::replay_history_injection,
             commands::retranscribe::cancel_retranscribe,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Quitting mid-recording never reaches the session's stop, so
+                // a muted output is given back here.
+                audio::output_mute::release_before_exit(std::time::Duration::from_secs(2));
+            }
+        });
 }

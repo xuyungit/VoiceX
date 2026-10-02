@@ -93,6 +93,50 @@ const hudTransparent = computed({
   }
 })
 
+type OutputMuteStatus =
+  | { support: 'supported' | 'unsupported'; device: string }
+  | { support: 'no_device' }
+  | { support: 'error'; message: string }
+
+const outputMuteStatus = ref<OutputMuteStatus | null>(null)
+
+const muteOutputWhileRecording = computed({
+  get: () => settingsStore.settings.muteOutputWhileRecording,
+  set: (v: boolean) => settingsStore.updateSetting('muteOutputWhileRecording', v)
+})
+
+// Only problems are worth a line: a device that cannot be muted would
+// otherwise look muted to someone who just turned the switch on.
+const outputMuteHint = computed(() => {
+  const status = outputMuteStatus.value
+  if (!muteOutputWhileRecording.value || !status) return null
+  if (status.support === 'unsupported') {
+    return t('input.muteWhileRecordingUnsupported', { device: status.device })
+  }
+  if (status.support === 'error') {
+    return t('input.muteWhileRecordingError', { message: status.message })
+  }
+  return null
+})
+
+async function refreshOutputMuteStatus() {
+  if (!settingsStore.settings.muteOutputWhileRecording) {
+    outputMuteStatus.value = null
+    return
+  }
+  try {
+    outputMuteStatus.value = await invoke<OutputMuteStatus>('get_output_mute_status')
+  } catch (error) {
+    outputMuteStatus.value = { support: 'error', message: String(error) }
+  }
+}
+
+watch(
+  () => settingsStore.settings.muteOutputWhileRecording,
+  () => void refreshOutputMuteStatus(),
+  { immediate: true }
+)
+
 const asrRecordingHardLimitMinutes = computed(() =>
   resolveAsrRecordingHardLimitMinutes(settingsStore.settings)
 )
@@ -299,13 +343,16 @@ async function loadRecentTargetApps() {
   }
 }
 
+// The default output may have changed while the window was away.
 function handleWindowFocus() {
   void loadRecentTargetApps()
+  void refreshOutputMuteStatus()
 }
 
 function handleVisibilityChange() {
   if (!document.hidden) {
     void loadRecentTargetApps()
+    void refreshOutputMuteStatus()
   }
 }
 
@@ -516,6 +563,14 @@ onBeforeUnmount(() => {
               {{ t('input.refreshDevices') }}
             </NButton>
           </div>
+        </div>
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('input.muteWhileRecording') }}</div>
+            <div class="field-note">{{ t('input.muteWhileRecordingNote') }}</div>
+            <div v-if="outputMuteHint" class="field-note limit-hint">{{ outputMuteHint }}</div>
+          </div>
+          <NSwitch v-model:value="muteOutputWhileRecording" />
         </div>
       </div>
     </div>

@@ -249,6 +249,7 @@ export interface AppSettings {
 
     // Input
     inputDeviceUid: string | null
+    muteOutputWhileRecording: boolean
     textInjectionMode: 'pasteboard' | 'typing'
     textInjectionOverrides: Array<{
         platform: string
@@ -499,6 +500,7 @@ const defaultSettings: AppSettings = {
     edgeTtsVolume: 1,
 
     inputDeviceUid: null,
+    muteOutputWhileRecording: false,
     textInjectionMode: 'pasteboard',
     textInjectionOverrides: [],
     hudTransparent: false,

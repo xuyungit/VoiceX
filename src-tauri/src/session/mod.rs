@@ -1114,6 +1114,9 @@ impl SessionController {
                     })
                     .unwrap_or(false)
             };
+            let mute_output = crate::storage::get_settings()
+                .map(|settings| settings.mute_output_while_recording)
+                .unwrap_or(false);
             log::info!(
                 "capture_buffer_enabled={} is_batch={}",
                 capture_refinement_pcm,
@@ -1121,6 +1124,11 @@ impl SessionController {
             );
             match manager.start_capture(capture_refinement_pcm) {
                 Ok(handle) => {
+                    // Only once the microphone is actually open: a capture that
+                    // fails to start never touches the output.
+                    if mute_output {
+                        crate::audio::output_mute::engage();
+                    }
                     let crate::audio::AudioCaptureHandle {
                         receiver: rx,
                         viz_receiver: level_rx,
@@ -1232,6 +1240,12 @@ impl SessionController {
                 reason: "Audio manager not initialized; cannot stop capture".to_string(),
             });
         }
+
+        // Every recording ends here (release, hands-free stop, timeout, cancel,
+        // terminal ASR error), whether or not the stop succeeded, so this is
+        // where a muted output comes back. Unconditional: turning the setting
+        // off mid-recording must not strand the output muted.
+        crate::audio::output_mute::release();
     }
 
     fn next_audio_epoch(&self) -> u64 {

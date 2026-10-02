@@ -1,10 +1,12 @@
 //! Audio capture module
 //!
-//! Handles microphone input capture with platform-specific backends.
+//! Handles microphone input capture with platform-specific backends, and
+//! muting the system output while it records.
 
 mod capture;
 mod chunker;
 mod device;
+pub mod output_mute;
 
 use std::{path::PathBuf, sync::Mutex};
 

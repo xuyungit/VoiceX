@@ -313,6 +313,9 @@ pub struct AppSettings {
 
     // Input
     pub input_device_uid: Option<String>,
+    /// Mute the default system output while the microphone records, and
+    /// restore it afterwards (see `audio::output_mute`).
+    pub mute_output_while_recording: bool,
     pub text_injection_mode: String, // "pasteboard" or "typing"
     pub text_injection_overrides: Vec<TextInjectionAppOverride>,
     /// Overlay see-through. macOS uses `NSWindow::setAlphaValue`; Windows
@@ -599,6 +602,7 @@ impl Default for AppSettings {
             edge_tts_volume: 1.0,
 
             input_device_uid: None,
+            mute_output_while_recording: false,
             text_injection_mode: "pasteboard".to_string(),
             text_injection_overrides: Vec::new(),
             hud_transparent: false,
@@ -1524,6 +1528,10 @@ mod tests {
         assert!(
             !settings.hud_transparent,
             "legacy blobs default to an opaque HUD"
+        );
+        assert!(
+            !settings.mute_output_while_recording,
+            "the output is only muted once the user opts in"
         );
         assert!(
             settings.tts_hotkey_config.is_none(),

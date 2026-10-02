@@ -1,5 +1,6 @@
 //! Audio-related commands
 
+use crate::audio::output_mute::OutputMuteStatus;
 use crate::audio::{AudioDevice, AudioInputDeviceManager, AudioRecordingResult, AudioService};
 use serde::Serialize;
 use tauri_plugin_opener::OpenerExt;
@@ -35,6 +36,14 @@ pub fn set_input_device(uid: String, audio: tauri::State<'_, AudioService>) -> R
     log::info!("Setting input device to: {}", uid);
     audio
         .set_preferred_device(Some(uid))
+        .map_err(|e| e.to_string())
+}
+
+/// Whether the current default output device can be muted while recording.
+#[tauri::command]
+pub async fn get_output_mute_status() -> Result<OutputMuteStatus, String> {
+    tauri::async_runtime::spawn_blocking(crate::audio::output_mute::status)
+        .await
         .map_err(|e| e.to_string())
 }
 
