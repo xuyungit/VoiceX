@@ -6,6 +6,7 @@ import { NButton, NSelect, NInputNumber, NCheckbox, NSwitch } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore, type AppSettings } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
+import type { OutputMuteStatus } from '../utils/outputMute'
 import {
   exceedsRecordingHardLimit,
   resolveAsrRecordingHardLimitMinutes
@@ -93,41 +94,50 @@ const hudTransparent = computed({
   }
 })
 
-type OutputMuteStatus =
-  | { support: 'supported' | 'unsupported'; device: string }
-  | { support: 'no_device' }
-  | { support: 'error'; message: string }
-
 const outputMuteStatus = ref<OutputMuteStatus | null>(null)
+const outputMuteQueryError = ref<string | null>(null)
+let unlistenOutputMute: UnlistenFn | null = null
+let inputSettingsDisposed = false
 
 const muteOutputWhileRecording = computed({
   get: () => settingsStore.settings.muteOutputWhileRecording,
-  set: (v: boolean) => settingsStore.updateSetting('muteOutputWhileRecording', v)
+  set: (v: boolean) => {
+    settingsStore.updateSetting('muteOutputWhileRecording', v)
+    void settingsStore.forceSaveSettings()
+  }
 })
 
 // Only problems are worth a line: a device that cannot be muted would
 // otherwise look muted to someone who just turned the switch on.
 const outputMuteHint = computed(() => {
   const status = outputMuteStatus.value
-  if (!muteOutputWhileRecording.value || !status) return null
+  if (outputMuteQueryError.value) return t('input.muteWhileRecordingError', { message: outputMuteQueryError.value })
+  if (!status) return null
+  if (status.recoveryError) return t('input.muteRecoveryError', { message: status.recoveryError })
+  if (status.pendingRestores.length) {
+    const devices = status.pendingRestores.map(d => d.error ? `${d.device}: ${d.error}` : d.device).join('; ')
+    return t('input.muteRestorePending', { devices })
+  }
+  if (!muteOutputWhileRecording.value && !status.recording) return null
   if (status.support === 'unsupported') {
     return t('input.muteWhileRecordingUnsupported', { device: status.device })
   }
   if (status.support === 'error') {
     return t('input.muteWhileRecordingError', { message: status.message })
   }
+  if (status.support === 'no_device') return t('input.muteNoOutputDevice')
   return null
 })
 
 async function refreshOutputMuteStatus() {
-  if (!settingsStore.settings.muteOutputWhileRecording) {
-    outputMuteStatus.value = null
-    return
-  }
   try {
-    outputMuteStatus.value = await invoke<OutputMuteStatus>('get_output_mute_status')
+    const status = await invoke<OutputMuteStatus>('get_output_mute_status')
+    if (!inputSettingsDisposed && status.revision >= (outputMuteStatus.value?.revision ?? 0)) {
+      outputMuteStatus.value = status
+      outputMuteQueryError.value = null
+    }
   } catch (error) {
-    outputMuteStatus.value = { support: 'error', message: String(error) }
+    if (!inputSettingsDisposed) outputMuteQueryError.value = String(error)
   }
 }
 
@@ -453,15 +463,28 @@ function getAppBadgeLabel(appName: string) {
 }
 
 onMounted(async () => {
-  unlistenRecentTargetApps = await listen('input:recent-target-apps-updated', () => {
+  const unlistenMute = await listen<OutputMuteStatus>('audio:output-mute-status', event => {
+    if (event.payload.revision < (outputMuteStatus.value?.revision ?? 0)) return
+    outputMuteStatus.value = event.payload
+    outputMuteQueryError.value = null
+  })
+  if (inputSettingsDisposed) { unlistenMute(); return }
+  unlistenOutputMute = unlistenMute
+  await refreshOutputMuteStatus()
+  if (inputSettingsDisposed) return
+  const unlistenRecent = await listen('input:recent-target-apps-updated', () => {
     void loadRecentTargetApps()
   })
+  if (inputSettingsDisposed) { unlistenRecent(); return }
+  unlistenRecentTargetApps = unlistenRecent
   window.addEventListener('focus', handleWindowFocus)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   await Promise.all([refreshDevices(), loadRecentTargetApps()])
 })
 
 onBeforeUnmount(() => {
+  inputSettingsDisposed = true
+  unlistenOutputMute?.()
   if (unlistenRecentTargetApps) {
     unlistenRecentTargetApps()
     unlistenRecentTargetApps = null
@@ -568,6 +591,9 @@ onBeforeUnmount(() => {
           <div class="field-text">
             <div class="field-label">{{ t('input.muteWhileRecording') }}</div>
             <div class="field-note">{{ t('input.muteWhileRecordingNote') }}</div>
+            <div v-if="outputMuteStatus && 'device' in outputMuteStatus" class="field-note">
+              {{ t('input.muteOutputDevice', { device: outputMuteStatus.device }) }}
+            </div>
             <div v-if="outputMuteHint" class="field-note limit-hint">{{ outputMuteHint }}</div>
           </div>
           <NSwitch v-model:value="muteOutputWhileRecording" />

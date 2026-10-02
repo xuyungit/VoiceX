@@ -1462,6 +1462,16 @@ pub fn delete_outbox_upsert_for_record(record_id: &str) -> Result<(), StorageErr
     })
 }
 
+/// Local device recovery obligations. These are intentionally outside
+/// app_settings, which is exported/synced to other machines.
+pub(crate) fn get_output_mute_recovery() -> Result<Option<String>, StorageError> {
+    get_user_config_value("output_mute_recovery")
+}
+
+pub(crate) fn save_output_mute_recovery(json: &str) -> Result<(), StorageError> {
+    set_user_config_value("output_mute_recovery", json)
+}
+
 fn get_user_config_value(key: &str) -> Result<Option<String>, StorageError> {
     with_db(|conn| {
         conn.query_row(

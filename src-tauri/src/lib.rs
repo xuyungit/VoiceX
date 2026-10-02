@@ -88,6 +88,7 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize storage
     storage::init_database(&db_path)?;
+    audio::output_mute::init(app.handle());
 
     // Initialize audio recordings directory
     let recordings_dir = app_data_dir.join("recordings");
