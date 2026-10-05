@@ -1,6 +1,6 @@
 [package]
 name = "voicex"
-version = "0.17.1"
+version = "0.17.2"
 description = "A cross-platform voice workspace for your desktop: dictate, translate, and listen in any app"
 authors = ["VoiceX Contributors"]
 license = "MIT"

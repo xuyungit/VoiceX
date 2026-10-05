@@ -4,6 +4,7 @@ import { NConfigProvider, darkTheme, NMessageProvider, NDialogProvider } from 'n
 import { listen } from '@tauri-apps/api/event'
 import Sidebar from './components/Sidebar.vue'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
+import PageErrorBoundary from './components/PageErrorBoundary.vue'
 import type { ResolvedLocale, UiLanguage } from './i18n'
 import { resolveLocale, setLocale } from './i18n'
 import { useSettingsStore } from './stores/settings'
@@ -164,10 +165,12 @@ onBeforeUnmount(() => {
             </div>
             <div class="content-body">
               <div class="page-shell">
-                <router-view v-slot="{ Component }">
-                  <transition name="fade" mode="out-in">
-                    <component :is="Component" />
-                  </transition>
+                <router-view v-slot="{ Component, route }">
+                  <PageErrorBoundary :route-key="route.fullPath">
+                    <transition name="fade" mode="out-in">
+                      <component :is="Component" />
+                    </transition>
+                  </PageErrorBoundary>
                 </router-view>
               </div>
             </div>

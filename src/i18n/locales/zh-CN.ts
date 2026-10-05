@@ -19,6 +19,11 @@ const zhCN = {
   appHeader: {
     systemResolved: 'System · {language}'
   },
+  pageError: {
+    title: '页面无法显示',
+    description: '请尝试重新加载此页面。若仍然失败，可切换其他页面，并反馈下面的错误信息。',
+    retry: '重新加载此页面'
+  },
   nav: {
     overview: '概览',
     hotwords: '热词',
@@ -397,10 +402,11 @@ const zhCN = {
     reasoningNone: '关闭（none）',
     reasoningMinimal: '最小（minimal）',
     extraBody: '额外请求字段',
-    extraBodySub: 'JSON 对象，合并进每次请求体并覆盖同名字段。用于没有统一写法的开关，如通义 `{"enable_thinking": false}`、DeepSeek `{"thinking": {"type": "disabled"}}`，或 `{"max_tokens": 8192}`。',
-    extraBodyPlaceholder: '{"enable_thinking": false}',
+    // JSON examples are literal text, not Vue I18n named interpolation.
+    extraBodySub: "JSON 对象，合并进每次请求体并覆盖同名字段。用于没有统一写法的开关，如通义 `{'{\"enable_thinking\": false}'}`、DeepSeek `{'{\"thinking\": {\"type\": \"disabled\"}}'}`，或 `{'{\"max_tokens\": 8192}'}`。",
+    extraBodyPlaceholder: "{'{\"enable_thinking\": false}'}",
     extraBodyInvalid: '不是合法的 JSON',
-    extraBodyNotObject: '必须是 JSON 对象（{ ... }）',
+    extraBodyNotObject: "必须是 JSON 对象（{'{ ... }'}）",
     customBaseUrlSub: '填写兼容服务的 Base URL，不要附带 `/chat/completions` 或 `/responses`。',
     customEndpointName: '节点名称',
     customEndpointNameSub: '用于在下拉菜单中区分多个自定义节点。',
@@ -417,7 +423,7 @@ const zhCN = {
     translatePrompt: '翻译提示词',
     assistantPromptPlaceholder: '留空使用默认模板',
     translatePromptPlaceholder: '翻译模式提示词',
-    promptHint: 'Assistant 模板支持 {DICTIONARY} 与 {INPUT_HISTORY} 占位符；Translate 模板默认只输出英文结果。',
+    promptHint: "Assistant 模板支持 {'{DICTIONARY}'} 与 {'{INPUT_HISTORY}'} 占位符；Translate 模板默认只输出英文结果。",
     providerVolcengine: '火山引擎 (Doubao)',
     providerOpenAI: 'OpenAI',
     providerQwen: '千问 (Qwen)',

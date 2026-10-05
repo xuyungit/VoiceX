@@ -22,6 +22,10 @@ const naive = create({
 
 const app = createApp(App)
 
+app.config.errorHandler = (error, _instance, info) => {
+    console.error(`[VoiceX] Vue error (${info}):`, error)
+}
+
 app.use(createPinia())
 app.use(router)
 app.use(naive)

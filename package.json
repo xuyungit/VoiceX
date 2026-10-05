@@ -1,11 +1,12 @@
 {
   "name": "voicex",
-  "version": "0.17.1",
+  "version": "0.17.2",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev-server.mjs",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "node scripts/check-i18n.mjs && vue-tsc --noEmit && vite build",
+    "test:i18n": "node scripts/check-i18n.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "mac:setup-signing": "bash ./scripts/setup-macos-local-signing.sh",

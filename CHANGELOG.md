@@ -4,29 +4,54 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.2] - 2026-10-05
+
+### Added
+
+- **Tray reading controls** — start Read Selection or Translate and Read from the tray menu, and stop an active read there. Windows tray reading still needs testing on a real machine.
+- Page rendering errors now show an error message and a retry button, while other pages remain accessible.
+
+### Fixed
+
+- **Blank LLM settings after adding a custom endpoint** — upgrading restores the page and preserves existing configuration; no database editing or reset is needed.
+- Short-sentence punctuation cleanup now excludes trailing punctuation from the character count. Exact replacement rules also match text that ends in punctuation.
+- LLM prompt hints now display the literal `{DICTIONARY}` and `{INPUT_HISTORY}` placeholders correctly.
+
+### Developer tooling
+
+- Production translation checks run before every build and reject invalid message syntax.
+
 ## [0.17.1] - 2026-10-02
 
 ### Added
-- **Mute the system output while recording** — music playing through the speakers leaks into the microphone and ends up in the transcript. A new switch in Settings → Input → Microphone, **Mute while recording** (off by default), mutes the default output device while dictation records and restores it afterwards. Only the mute switch changes: volume is untouched and players keep playing. Muting follows the capture rather than the hotkey: it engages once the microphone has opened and is released at every ending — key release, hands-free stop, timeout, Escape, an ASR error — and quitting the app restores the output before exit. A device that was already muted is never touched, and one you unmute yourself mid-recording is not muted again. The default output is re-checked every 250 ms while recording, so a device selected mid-recording is muted too, and each device is restored on release. Devices are tracked by their stable id (Core Audio UID, MMDevice endpoint id): one that disconnects while muted is restored when it reconnects, and a device still waiting to be restored is recorded on this machine (never synced) and restored on the next launch, so a crash cannot leave the output muted for good. Failed restores are retried with backoff. The Microphone section shows the current output device, warns when it cannot be muted by software (HDMI and multi-output devices on macOS) and lists devices still being restored. Not covered: applications playing to a non-default device, and the first tens of milliseconds after the microphone opens, since muting is asynchronous. The Windows backend (`IAudioEndpointVolume` on the default render endpoint) ships in this release but has not yet been tried on a Windows machine.
+
+- **Mute while recording** — an optional switch under Input → Microphone mutes the default output during dictation and restores it afterwards, without changing volume. Devices awaiting restoration are retried after reconnecting or restarting VoiceX. Unsupported devices and restore failures appear in settings; Windows device behavior still needs testing on a real machine.
 
 ### Developer tooling
-- `tools/llm-bench` scoring version 6 — every case is worth 100 points: correction 30, fidelity 40, filler and stutter removal 10, readability 5, conversational style 5, speed 10, with explicit weights that must sum to 1. Every output goes through an automatic severe-hallucination check against the raw ASR input and the approved reference; uncertain verdicts go to an independent reviewer model, and a confirmed severe hallucination zeroes that round's quality. Each run also prints a one-sentence Chinese assessment per model built from the measured evidence. Earlier runs can be replayed or rescored under the new rules without new correction calls, finalized into a separate season, and checked offline with `scripts/verify_rescore.py`; `severe_hallucination_probes.json` and `quality_probes.json` calibrate the judges. See `tools/llm-bench/README.md`.
+
+- `tools/llm-bench` scoring v6 adds balanced quality and speed scores, severe-hallucination checks, and a short assessment per model. Saved runs can be replayed or rescored. See [the benchmark guide](tools/llm-bench/README.md).
 
 ## [0.17.0] - 2026-10-01
 
 ### Added
-- **Read selection and translate-and-read on Windows** — both reading keys, captions, tidy-before-reading and reading the clipboard when nothing is selected now work on Windows, which had the settings but no way to take text out of another application. The selection is read through UI Automation (the selection of the focused control, or of the nearest ancestor that exposes one: Notepad, Word, pages in Edge, Windows Terminal and the console) and otherwise through a synthetic Ctrl + C with the clipboard snapshotted and restored — the compatibility mode, as on macOS. The snapshot keeps every clipboard format that can be put back exactly, in its original order, and refuses the fallback when one cannot rather than risk your clipboard. A password field reports secure input; an application running as administrator is reported as such, since Windows blocks both paths into it unless VoiceX runs elevated too. Content a password manager marks with `ExcludeClipboardContentFromMonitorProcessing` is never read. Default keys are **Ctrl + Alt + Win + R** and **Ctrl + Alt + Win + T** (see Changed). This is the feature's first Windows release and it has not yet been tried across many applications; when one does not work, the selection diagnostic in Settings → Reading (shown with diagnostics enabled) reports what UI Automation saw. Design notes and the device checklist: `docs/windows-selection-reading-2026-10-01.md`.
-- **Microsoft Edge online speech as a reading engine** — Microsoft's free online Read Aloud voices, with no account, key or Edge installation. The voice list comes from the service and is searchable by name, language or id; rate and a pitch offset in Hz are stored on this engine alone, and volume is local playback gain. Audio plays as it arrives: long text is sent in requests sized to the service's capacity, with the next one fetched ahead of playback, and captions are cut from the service's sentence and word timestamps, so they stay sentence-sized without extra requests. The text is sent to Microsoft's online service; if Microsoft changes the protocol, reads fail visibly rather than switching engines.
+
+- **Reading on Windows** — Read Selection, Translate and Read, captions, and clipboard reading now work on Windows. Compatibility across applications still needs broader testing.
+- **Microsoft Edge online speech** — use searchable online voices without an account, API key, or Edge installation. Supports streaming playback, timed captions, and per-engine voice settings; text is sent to Microsoft's service.
 
 ### Changed
-- **Windows reads with Edge by default** — there is no system voice on Windows, so a fresh install starts with Microsoft Edge online speech. Settings still holding the old shared default (`system`, which never spoke on Windows) move to Edge on launch; an engine you picked is kept. macOS keeps the system voice as its default.
-- **Reading keys have their own Windows defaults** — macOS keeps **⌥⌘R** / **⌥⌘T**. Their Windows counterparts, Win + Alt + R / T, are Xbox Game Bar's recording keys, and every other pair of modifiers there is taken as well (Ctrl + Alt is AltGr, Win + Ctrl + T is PowerToys Always On Top, Win + Shift + R is Snipping Tool recording), so Windows uses the dictation key's modifiers: Ctrl + Alt + Win + R / T. Keys you recorded yourself are unchanged.
-- On Windows, swallowing a reading key held with Alt or Win no longer leaves a bare Alt or Win tap behind, which would open the Start menu or the window's menu bar.
-- A reading key pressed while the selected engine does not exist on this platform (the system voice off macOS) now says so on the HUD instead of doing nothing; the Reading settings page marks the system voice "macOS only" there.
+
+- Windows defaults to Edge online speech; macOS keeps the system voice. Existing Windows settings using the unavailable system voice migrate to Edge.
+- Default Windows reading keys are **Ctrl + Alt + Win + R / T** to avoid common shortcut conflicts. Custom bindings are preserved.
+
+### Fixed
+
+- Windows reading shortcuts no longer leave a bare Alt or Win tap that opens a menu.
+- Reading with an unsupported engine now reports an error on the HUD.
 
 ### Developer tooling
-- `tools/llm-bench` passes a word spoken after its sentence when it stands inside that sentence, even with other words reordered, and counts Abaqus and Midas as dictionary terms.
-- The Windows reader's decisions — which clipboard formats are captured, the snapshot budget, when elevation blocks a read — live in the platform-neutral `selection/windows_rules.rs`, so their tests run on macOS and Linux as well.
+
+- `tools/llm-bench` improves word-order scoring and adds Abaqus and Midas dictionary terms.
+- Windows selection rules can be tested on macOS and Linux.
 
 ## [0.16.0] - 2026-09-25
 

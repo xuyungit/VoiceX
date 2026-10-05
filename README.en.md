@@ -50,6 +50,9 @@ VoiceX also works in the other direction. Select text in **any application**:
 Press either reading key again, or **Escape**, to stop immediately; while the
 translation is pending, the key or Escape cancels it.
 
+You can also choose **Read Selection**, **Translate and Read**, or **Stop Reading**
+from the tray menu. Tray reading on Windows still needs testing on a real machine.
+
 > **On Windows** the selection is read through UI Automation, falling back to a
 > synthetic Ctrl + C with the clipboard restored — the same two layers as on macOS.
 > There is no system voice on Windows; the default engine there is Microsoft Edge
@@ -179,6 +182,10 @@ VoiceX can optionally pass ASR output through an LLM for correction or translati
 
 > **Note:** Each LLM provider requires an API key from the respective platform. Configure your chosen provider in **Settings → LLM**.
 
+If adding a custom endpoint left the LLM settings page blank, upgrade to **0.17.2
+or later** to restore it. Existing endpoints and history are preserved; no database
+editing is needed. Page rendering errors now show details and a retry button.
+
 Features:
 - **ASR correction** — fix recognition errors using dictionary context and customizable prompts.
 - **Translation** — translate dictation to English, triggered by double-tap gesture.
@@ -194,8 +201,8 @@ Features:
 
 ## Post-Processing
 
-- **Smart punctuation cleanup** — auto-remove trailing punctuation from short sentences (configurable threshold).
-- **Keyword substitution** — regex/exact/contains replacement rules applied before text injection.
+- **Smart punctuation cleanup** — auto-remove trailing punctuation from short sentences (configurable threshold, excluding trailing punctuation from the character count).
+- **Keyword substitution** — regex/exact/contains replacement rules applied before text injection; exact matches ignore trailing punctuation.
 
 ## Text Injection
 

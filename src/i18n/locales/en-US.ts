@@ -19,6 +19,11 @@ const enUS = {
   appHeader: {
     systemResolved: 'System · {language}'
   },
+  pageError: {
+    title: 'Unable to display this page',
+    description: 'Try reloading this page. If it still fails, you can open another page and report the error below.',
+    retry: 'Reload this page'
+  },
   nav: {
     overview: 'Overview',
     hotwords: 'Hotwords',
@@ -397,10 +402,11 @@ const enUS = {
     reasoningNone: 'Off (none)',
     reasoningMinimal: 'Minimal',
     extraBody: 'Extra request fields',
-    extraBodySub: 'A JSON object merged into every request body, overriding fields of the same name. For knobs with no common spelling: DashScope `{"enable_thinking": false}`, DeepSeek `{"thinking": {"type": "disabled"}}`, or `{"max_tokens": 8192}`.',
-    extraBodyPlaceholder: '{"enable_thinking": false}',
+    // JSON examples are literal text, not Vue I18n named interpolation.
+    extraBodySub: "A JSON object merged into every request body, overriding fields of the same name. For knobs with no common spelling: DashScope `{'{\"enable_thinking\": false}'}`, DeepSeek `{'{\"thinking\": {\"type\": \"disabled\"}}'}`, or `{'{\"max_tokens\": 8192}'}`.",
+    extraBodyPlaceholder: "{'{\"enable_thinking\": false}'}",
     extraBodyInvalid: 'Not valid JSON',
-    extraBodyNotObject: 'Must be a JSON object ({ ... })',
+    extraBodyNotObject: "Must be a JSON object ({'{ ... }'})",
     customBaseUrlSub: 'Enter the compatible service base URL without `/chat/completions` or `/responses`.',
     customEndpointName: 'Endpoint name',
     customEndpointNameSub: 'Used to tell multiple custom endpoints apart in the dropdown.',
@@ -417,7 +423,7 @@ const enUS = {
     translatePrompt: 'Translate Prompt',
     assistantPromptPlaceholder: 'Leave empty to use the default template',
     translatePromptPlaceholder: 'Translation prompt',
-    promptHint: 'Assistant prompts support {DICTIONARY} and {INPUT_HISTORY}; Translate prompts should output English only by default.',
+    promptHint: "Assistant prompts support {'{DICTIONARY}'} and {'{INPUT_HISTORY}'}; Translate prompts should output English only by default.",
     providerVolcengine: 'Volcengine (Doubao)',
     providerOpenAI: 'OpenAI',
     providerQwen: 'Qwen',
