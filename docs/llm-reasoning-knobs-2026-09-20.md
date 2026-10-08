@@ -45,9 +45,17 @@ Single samples: the latencies show the order of magnitude, not a benchmark.
 
 `thinking: disabled` means the body field `"thinking": {"type": "disabled"}`.
 
-Gemini was not re-probed here. Its rules are the ones already in the app and
-the bench: `thinkingBudget: 0` on 2.5 Flash, `thinkingLevel: LOW` on 2.5 Pro
-and on 3.x Flash (which reject `MINIMAL`), nothing on Flash-Lite.
+Gemini was not re-probed here. The original 2.5 Pro / blanket 3.x rules
+were corrected on 2026-10-07 using the [official thinking table](https://ai.google.dev/gemini-api/docs/generate-content/thinking):
+2.5 Pro uses `thinkingBudget: 128` (not `thinkingLevel`), 2.5 Flash keeps
+`thinkingBudget: 0`, 3 / 3.5 / 3.6 Flash use `MINIMAL`, 3.7 / 3.8 Flash
+and 3.1 Pro use `LOW`. Flash-Lite uses its minimum default; unknown models
+omit automatic thinking controls. These are documented rules, not new live probes.
+The app, batch ASR and bench share `src-tauri/src/gemini.rs`. Gemini 3.x
+sampling parameters are omitted per the [3.5 migration guide](https://ai.google.dev/gemini-api/docs/whats-new-gemini-3.5)
+and [latest model guide](https://ai.google.dev/gemini-api/docs/latest-model);
+recognized older models retain their previous LLM temperature. Bench overrides
+are validated before sending, including budget ranges and incompatible controls.
 
 ## Rules drawn from the table
 

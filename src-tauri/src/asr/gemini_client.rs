@@ -50,6 +50,35 @@ fn build_transcribe_request(config: &AsrConfig, uri: &str, mime: &str) -> Value 
     })
 }
 
+fn build_generate_content_request(
+    config: &AsrConfig,
+    file: &GeminiFile,
+) -> GeminiGenerateContentRequest {
+    GeminiGenerateContentRequest {
+        system_instruction: GeminiSystemInstruction {
+            parts: vec![GeminiTextPart {
+                text: build_system_instruction(&config.gemini_language, &config.hotwords),
+            }],
+        },
+        contents: vec![GeminiContent {
+            parts: vec![
+                GeminiPart::Text {
+                    text: build_transcription_prompt(),
+                },
+                GeminiPart::FileData {
+                    file_data: GeminiFileData {
+                        mime_type: file.mime_type.clone(),
+                        file_uri: file.uri.clone(),
+                    },
+                },
+            ],
+        }],
+        generation_config: GeminiGenerationConfig {
+            thinking_config: crate::gemini::lowest_thinking_config(&config.gemini_model),
+        },
+    }
+}
+
 fn parse_transcribe_response(body: &[u8]) -> Result<String, AsrError> {
     let response: Value = serde_json::from_slice(body)
         .map_err(|e| AsrError::ProtocolError(format!("Invalid Gemini transcription JSON: {e}")))?;
@@ -145,14 +174,8 @@ enum GeminiPart {
 
 #[derive(Debug, Serialize)]
 struct GeminiGenerationConfig {
-    #[serde(rename = "thinkingConfig")]
-    thinking_config: GeminiThinkingConfig,
-}
-
-#[derive(Debug, Serialize)]
-struct GeminiThinkingConfig {
-    #[serde(rename = "thinkingLevel")]
-    thinking_level: &'static str,
+    #[serde(rename = "thinkingConfig", skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<crate::gemini::ThinkingConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -365,34 +388,7 @@ impl GeminiTranscriptionClient {
                 GEMINI_BASE_URL, self.config.gemini_model
             ))
             .query(&[("key", self.config.gemini_api_key.as_str())])
-            .json(&GeminiGenerateContentRequest {
-                system_instruction: GeminiSystemInstruction {
-                    parts: vec![GeminiTextPart {
-                        text: build_system_instruction(
-                            &self.config.gemini_language,
-                            &self.config.hotwords,
-                        ),
-                    }],
-                },
-                contents: vec![GeminiContent {
-                    parts: vec![
-                        GeminiPart::Text {
-                            text: build_transcription_prompt(),
-                        },
-                        GeminiPart::FileData {
-                            file_data: GeminiFileData {
-                                mime_type: file.mime_type.clone(),
-                                file_uri: file.uri.clone(),
-                            },
-                        },
-                    ],
-                }],
-                generation_config: GeminiGenerationConfig {
-                    thinking_config: GeminiThinkingConfig {
-                        thinking_level: "MINIMAL",
-                    },
-                },
-            })
+            .json(&build_generate_content_request(&self.config, file))
             .send()
             .await
             .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
@@ -630,6 +626,41 @@ fn http_error(context: &str, status: u16, body: &[u8]) -> AsrError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generate_content_serializes_only_supported_thinking_parameters() {
+        let mut config = AsrConfig::default();
+        let file = GeminiFile {
+            name: "files/test".into(),
+            uri: "files/test".into(),
+            mime_type: "audio/ogg".into(),
+            state: Some(FILE_STATE_ACTIVE.into()),
+        };
+        for (model, thinking) in [
+            ("gemini-3-flash-preview", json!({"thinkingLevel":"MINIMAL"})),
+            ("gemini-3.5-flash-lite", Value::Null),
+            ("gemini-3.8-flash", json!({"thinkingLevel":"LOW"})),
+            ("gemini-2.5-pro", json!({"thinkingBudget":128})),
+            ("gemini-2.5-flash", json!({"thinkingBudget":0})),
+            ("gemini-2.0-flash", Value::Null),
+            ("gemini-4-flash", Value::Null),
+        ] {
+            config.gemini_model = model.into();
+            let request = serde_json::to_value(build_generate_content_request(&config, &file)).unwrap();
+            assert_eq!(
+                request["generationConfig"]["thinkingConfig"], thinking,
+                "{model}"
+            );
+            if thinking.is_null() {
+                assert!(request["generationConfig"].get("thinkingConfig").is_none(), "{model}");
+            }
+            assert!(request["generationConfig"].get("temperature").is_none());
+            assert_eq!(
+                request["contents"][0]["parts"][1]["file_data"]["file_uri"],
+                "files/test"
+            );
+        }
+    }
+
     #[test]
     fn transcribe_reads_only_model_text_and_rejects_incomplete_responses() {
         let body = json!({"status":"completed", "steps":[

@@ -3,10 +3,10 @@
 //! VoiceX corrects and translates short dictated text, where thinking buys
 //! nothing and costs seconds (no knob at all: 10 s on api.deepseek.com, 70 s
 //! on DashScope). There is no portable "off" — the same value is the floor on
-//! one model, ignored by the next and a 400 on a third — so every rule here
-//! was read off `usage.completion_tokens_details.reasoning_tokens` against the
-//! live API. The probes are written up in `docs/llm-reasoning-knobs-2026-09-20.md`,
-//! and `tools/llm-bench` sends the same knobs.
+//! one model, ignored by the next and a 400 on a third. Endpoint floors were
+//! measured from live reasoning-token usage; Gemini follows the official
+//! model-specific policy in `crate::gemini`. Evidence and corrections are in
+//! `docs/llm-reasoning-knobs-2026-09-20.md`; the bench shares the Gemini policy.
 
 use super::config::{LLMApiMode, LLMConfig, LLMProviderType};
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ pub enum LowestKnob {
     /// Vendor fields. Gemini's belong in `generation_config`, the rest at the
     /// top level of the body.
     Fields(Map<String, Value>),
-    /// The model does not reason and rejects the field.
+    /// No field is needed: the default is already minimal, or the model does not reason.
     NotNeeded,
 }
 
@@ -57,7 +57,7 @@ pub enum LowestKnob {
 pub enum ReasoningSource {
     /// `Lowest`, resolved for this endpoint and model.
     Lowest,
-    /// `Lowest`, and the model does not reason: nothing to send.
+    /// `Lowest` already applies without an explicit control.
     NotNeeded,
     /// `Lowest` asked of an endpoint no rule covers: nothing is sent, so the
     /// server default applies until the user picks a value or fills in the
@@ -136,7 +136,7 @@ pub fn lowest_knob(
         LLMProviderType::Volcengine => Some(thinking_disabled()),
         LLMProviderType::Openai => openai_knob(&model),
         LLMProviderType::Qwen => Some(enable_thinking_false()),
-        LLMProviderType::Gemini => Some(gemini_knob(&model)),
+        LLMProviderType::Gemini => gemini_knob(&model),
         LLMProviderType::Custom => custom_knob(&host_of(base_url)?, &model),
     }
 }
@@ -219,23 +219,14 @@ fn openai_knob(model: &str) -> Option<LowestKnob> {
     None
 }
 
-/// 3.7/3.8 Flash reject MINIMAL; 2.5 Flash can set thinkingBudget=0;
-/// Flash-Lite already has thinking off by default.
-fn gemini_knob(model: &str) -> LowestKnob {
-    let thinking_config = if model.contains("2.5") {
-        if model.contains("pro") {
-            json!({ "thinkingLevel": "LOW" })
-        } else {
-            json!({ "thinkingBudget": 0 })
-        }
-    } else if model.contains("lite") {
-        return LowestKnob::NotNeeded;
-    } else {
-        json!({ "thinkingLevel": "LOW" })
+/// Resolve only documented models; unknown IDs use server defaults.
+fn gemini_knob(model: &str) -> Option<LowestKnob> {
+    let Some(thinking_config) = crate::gemini::lowest_thinking_config(model) else {
+        return crate::gemini::is_known_model(model).then_some(LowestKnob::NotNeeded);
     };
     let mut fields = Map::new();
-    fields.insert("thinkingConfig".to_string(), thinking_config);
-    LowestKnob::Fields(fields)
+    fields.insert("thinkingConfig".to_string(), json!(thinking_config));
+    Some(LowestKnob::Fields(fields))
 }
 
 #[cfg(test)]
@@ -317,12 +308,19 @@ mod tests {
         let low = fields(json!({ "thinkingConfig": { "thinkingLevel": "LOW" } }));
         assert_eq!(gemini("gemini-3.7-flash"), Some(low.clone()));
         assert_eq!(gemini("gemini-3.8-flash"), Some(low.clone()));
-        assert_eq!(gemini("gemini-2.5-pro"), Some(low));
+        assert_eq!(
+            gemini("gemini-2.5-pro"),
+            Some(fields(
+                json!({ "thinkingConfig": { "thinkingBudget": 128 } })
+            ))
+        );
         assert_eq!(
             gemini("gemini-2.5-flash"),
             Some(fields(json!({ "thinkingConfig": { "thinkingBudget": 0 } })))
         );
         assert_eq!(gemini("gemini-3.5-flash-lite"), Some(LowestKnob::NotNeeded));
+        assert_eq!(gemini("gemini-2.0-flash"), Some(LowestKnob::NotNeeded));
+        assert_eq!(gemini("gemini-4-flash"), None);
     }
 
     fn config(provider_type: LLMProviderType, base_url: &str, reasoning: ReasoningChoice) -> LLMConfig {

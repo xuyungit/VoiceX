@@ -395,7 +395,7 @@ const zhCN = {
     reasoningLowest: '自动最低（默认）',
     reasoningServerDefault: '不发送（服务端默认）',
     reasoningPreviewSends: '将发送：',
-    reasoningPreviewNotNeeded: '该模型不做推理，无需发送推理字段。',
+    reasoningPreviewNotNeeded: '该模型无需显式推理参数，使用默认设置。',
     reasoningPreviewNothing: '不发送推理字段，沿用服务端默认。',
     reasoningPreviewUnknown: '未识别该节点的最低档写法，不会发送任何推理字段。请手动选择档位，或在「额外请求字段」中填写厂商的开关。',
     reasoningPreviewUnknownExtra: '未识别该节点的最低档写法，推理开关以「额外请求字段」为准。',

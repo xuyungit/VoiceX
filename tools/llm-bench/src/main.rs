@@ -8,6 +8,10 @@ mod fidelity;
 mod scoring;
 mod typesafe;
 
+#[path = "../../../src-tauri/src/gemini.rs"]
+mod gemini;
+use gemini::ThinkingConfig as GeminiThinkingConfig;
+
 use adjudicate::{Analysis, Answers, Ask, Pin, Reference, Scored, Tier};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -270,16 +274,6 @@ struct GeminiGenerationConfig {
     max_output_tokens: Option<u32>,
     #[serde(rename = "thinkingConfig", skip_serializing_if = "Option::is_none")]
     thinking_config: Option<GeminiThinkingConfig>,
-}
-
-#[derive(Serialize, Default)]
-struct GeminiThinkingConfig {
-    /// Gemini 3.x: MINIMAL / LOW / MEDIUM / HIGH. MINIMAL is rejected by 3.7/3.8 Flash.
-    #[serde(rename = "thinkingLevel", skip_serializing_if = "Option::is_none")]
-    thinking_level: Option<String>,
-    /// Gemini 2.5 Flash: 0 disables thinking. Invalid on current 3.x Flash-Lite.
-    #[serde(rename = "thinkingBudget", skip_serializing_if = "Option::is_none")]
-    thinking_budget: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -1960,28 +1954,28 @@ async fn run_once_response(
 
 // ── Gemini API call ─────────────────────────────────────────────────────────
 
-async fn run_once_gemini(
-    http: &Client,
+fn build_gemini_request_body(
     provider: &Provider,
     system_prompt: &str,
     user_content: &str,
-    limit: Duration,
-) -> RoundResult {
+) -> Result<serde_json::Value, String> {
     let request = GeminiRequest {
         system_instruction: Some(GeminiContent {
             role: None,
-            parts: vec![GeminiPart { text: system_prompt.to_string(),
+            parts: vec![GeminiPart {
+                text: system_prompt.to_string(),
             }],
         }),
         contents: vec![GeminiContent {
             role: Some("user".into()),
-            parts: vec![GeminiPart { text: user_content.to_string(),
+            parts: vec![GeminiPart {
+                text: user_content.to_string(),
             }],
         }],
         generation_config: Some(GeminiGenerationConfig {
-            temperature: Some(0.2),
+            temperature: gemini::temperature(&provider.model),
             max_output_tokens: Some(4096),
-            thinking_config: gemini_thinking_config(provider),
+            thinking_config: gemini_thinking_config(provider)?,
         }),
     };
 
@@ -1989,10 +1983,92 @@ async fn run_once_gemini(
     if !provider.extra.is_empty() {
         if let serde_json::Value::Object(ref mut map) = body {
             for (k, v) in &provider.extra {
-                map.insert(k.clone(), toml_to_json(v));
+                if !matches!(
+                    k.as_str(),
+                    "thinking_level" | "thinkingLevel" | "thinking_budget" | "thinkingBudget"
+                ) {
+                    map.insert(k.clone(), toml_to_json(v));
+                }
             }
         }
     }
+
+    validate_gemini_request_body(provider, &body)?;
+    Ok(body)
+}
+
+fn validate_gemini_request_body(
+    provider: &Provider,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    let get = |object: &serde_json::Value,
+               snake: &str,
+               camel: &str|
+     -> Result<Option<serde_json::Value>, String> {
+        if object.get(snake).is_some() && object.get(camel).is_some() {
+            return Err(format!("Specify only one spelling of {snake}"));
+        }
+        Ok(object.get(snake).or_else(|| object.get(camel)).cloned())
+    };
+    let Some(generation) = get(body, "generation_config", "generationConfig")? else {
+        return Ok(());
+    };
+    if !generation.is_object() {
+        return Err("generation_config must be an object".into());
+    }
+    if gemini::temperature(&provider.model).is_none() {
+        for field in ["temperature", "top_p", "topP", "top_k", "topK"] {
+            if generation.get(field).is_some() {
+                return Err(format!(
+                    "Omit {field} for {}; use server sampling defaults",
+                    provider.model
+                ));
+            }
+        }
+    }
+    if let Some(thinking) = get(&generation, "thinking_config", "thinkingConfig")? {
+        if !thinking.is_object() {
+            return Err("thinkingConfig must be an object".into());
+        }
+        let level = get(&thinking, "thinking_level", "thinkingLevel")?
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(normalize_gemini_thinking_level)
+                    .ok_or_else(|| "thinking_level must be a string".to_string())
+            })
+            .transpose()?;
+        let budget = get(&thinking, "thinking_budget", "thinkingBudget")?
+            .map(|value| {
+                value
+                    .as_i64()
+                    .and_then(|n| i32::try_from(n).ok())
+                    .ok_or_else(|| "thinking_budget must be a 32-bit integer".to_string())
+            })
+            .transpose()?;
+        gemini::validate_thinking_config(
+            &provider.model,
+            &GeminiThinkingConfig {
+                thinking_level: level,
+                thinking_budget: budget,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+async fn run_once_gemini(
+    http: &Client,
+    provider: &Provider,
+    system_prompt: &str,
+    user_content: &str,
+    limit: Duration,
+) -> RoundResult {
+    let start = Instant::now();
+    let body = match build_gemini_request_body(provider, system_prompt, user_content) {
+        Ok(body) => body,
+        Err(error) => return failed_round(start, format!("Invalid Gemini configuration: {error}")),
+    };
 
     let url = format!(
         "{}/models/{}:generateContent",
@@ -2000,7 +2076,6 @@ async fn run_once_gemini(
         provider.model
     );
 
-    let start = Instant::now();
     let resp = http
         .post(&url)
         .timeout(limit)
@@ -2189,50 +2264,55 @@ fn merge_provider_extra(body: &mut serde_json::Value, provider: &Provider) {
     }
 }
 
-/// Lowest thinking Gemini accepts for this model. 3.7/3.8 Flash reject MINIMAL;
-/// 2.5 Flash can set thinkingBudget=0; Flash-Lite already thinks off by default.
-fn gemini_thinking_config(provider: &Provider) -> Option<GeminiThinkingConfig> {
-    let extra_level = extra_string(&provider.extra, "thinking_level")
-        .or_else(|| extra_string(&provider.extra, "thinkingLevel"));
-    let extra_budget = extra_i32(&provider.extra, "thinking_budget")
-        .or_else(|| extra_i32(&provider.extra, "thinkingBudget"));
-    if extra_level.is_some() || extra_budget.is_some() {
-        return Some(GeminiThinkingConfig {
-            thinking_level: extra_level,
-            thinking_budget: extra_budget,
-        });
-    }
-    if let Some(level) = configured_reasoning_effort(provider) {
-        return Some(GeminiThinkingConfig {
+/// Explicit controls are validated before any HTTP request. Defaults use the
+/// same model policy as the app, including omission for unknown model IDs.
+fn gemini_thinking_config(provider: &Provider) -> Result<Option<GeminiThinkingConfig>, String> {
+    let get = |snake: &str, camel: &str| -> Result<Option<&toml::Value>, String> {
+        if provider.extra.contains_key(snake) && provider.extra.contains_key(camel) {
+            return Err(format!("Specify only one spelling of {snake}"));
+        }
+        Ok(provider
+            .extra
+            .get(snake)
+            .or_else(|| provider.extra.get(camel)))
+    };
+    let level = get("thinking_level", "thinkingLevel")?
+        .map(|value| {
+            value
+                .as_str()
+                .map(normalize_gemini_thinking_level)
+                .ok_or_else(|| "thinking_level must be a string".to_string())
+        })
+        .transpose()?;
+    let budget = get("thinking_budget", "thinkingBudget")?
+        .map(|value| {
+            value
+                .as_integer()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| "thinking_budget must be a 32-bit integer".to_string())
+        })
+        .transpose()?;
+    let explicit = if level.is_some() || budget.is_some() {
+        Some(GeminiThinkingConfig {
+            thinking_level: level,
+            thinking_budget: budget,
+        })
+    } else {
+        configured_reasoning_effort(provider).map(|level| GeminiThinkingConfig {
             thinking_level: Some(normalize_gemini_thinking_level(&level)),
             thinking_budget: None,
-        });
+        })
+    };
+    if let Some(config) = explicit {
+        gemini::validate_thinking_config(&provider.model, &config)?;
+        Ok(Some(config))
+    } else {
+        Ok(default_gemini_thinking(&provider.model))
     }
-    default_gemini_thinking(&provider.model)
 }
 
 fn default_gemini_thinking(model: &str) -> Option<GeminiThinkingConfig> {
-    let model = model.to_ascii_lowercase();
-    if model.contains("2.5") {
-        if model.contains("pro") {
-            return Some(GeminiThinkingConfig {
-                thinking_level: Some("LOW".into()),
-                thinking_budget: None,
-            });
-        }
-        return Some(GeminiThinkingConfig {
-            thinking_level: None,
-            thinking_budget: Some(0),
-        });
-    }
-    // 3.5 Flash-Lite already defaults to no thinking; sending LOW can be slower.
-    if model.contains("lite") {
-        return None;
-    }
-    Some(GeminiThinkingConfig {
-        thinking_level: Some("LOW".into()),
-        thinking_budget: None,
-    })
+    gemini::lowest_thinking_config(model)
 }
 
 fn normalize_gemini_thinking_level(level: &str) -> String {
@@ -2243,17 +2323,6 @@ fn normalize_gemini_thinking_level(level: &str) -> String {
         "high" => "HIGH".into(),
         other => other.to_ascii_uppercase(),
     }
-}
-
-fn extra_string(
-    extra: &std::collections::HashMap<String, toml::Value>,
-    key: &str,
-) -> Option<String> {
-    extra.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
-}
-
-fn extra_i32(extra: &std::collections::HashMap<String, toml::Value>, key: &str) -> Option<i32> {
-    extra.get(key).and_then(|v| v.as_integer()).and_then(|n| i32::try_from(n).ok())
 }
 
 fn toml_to_json(v: &toml::Value) -> serde_json::Value {
@@ -3238,6 +3307,179 @@ mod tests {
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn gemini_body_matches_app_policy_and_consumes_control_aliases() {
+        let mut provider = bench_provider("gemini", None, &[]);
+        for (model, thinking, temperature) in [
+            (
+                "gemini-3.8-flash",
+                serde_json::json!({"thinkingLevel":"LOW"}),
+                None,
+            ),
+            (
+                "gemini-3.5-flash",
+                serde_json::json!({"thinkingLevel":"MINIMAL"}),
+                None,
+            ),
+            ("gemini-3.5-flash-lite", serde_json::Value::Null, None),
+            ("gemini-4-flash", serde_json::Value::Null, None),
+            (
+                "gemini-2.5-pro",
+                serde_json::json!({"thinkingBudget":128}),
+                Some(0.2),
+            ),
+            (
+                "gemini-2.5-flash",
+                serde_json::json!({"thinkingBudget":0}),
+                Some(0.2),
+            ),
+        ] {
+            provider.model = model.into();
+            let body = build_gemini_request_body(&provider, "s", "u").unwrap();
+            assert_eq!(
+                body["generation_config"]["thinkingConfig"], thinking,
+                "{model}"
+            );
+            assert_eq!(
+                body["generation_config"]["temperature"].as_f64(),
+                temperature,
+                "{model}"
+            );
+            if thinking.is_null() {
+                assert!(body["generation_config"].get("thinkingConfig").is_none(), "{model}");
+            }
+            assert!(body.get("thinkingConfig").is_none());
+        }
+        for key in ["thinking_level", "thinkingLevel"] {
+            provider.model = "gemini-3.8-flash".into();
+            provider.extra = HashMap::from([(key.into(), toml::Value::String("medium".into()))]);
+            let body = build_gemini_request_body(&provider, "s", "u").unwrap();
+            assert_eq!(
+                body["generation_config"]["thinkingConfig"],
+                serde_json::json!({"thinkingLevel":"MEDIUM"})
+            );
+            assert!(body.get(key).is_none());
+        }
+        for key in ["thinking_budget", "thinkingBudget"] {
+            provider.model = "gemini-2.5-pro".into();
+            provider.extra = HashMap::from([(key.into(), toml::Value::Integer(128))]);
+            let body = build_gemini_request_body(&provider, "s", "u").unwrap();
+            assert_eq!(
+                body["generation_config"]["thinkingConfig"],
+                serde_json::json!({"thinkingBudget":128})
+            );
+            assert!(body.get(key).is_none());
+        }
+    }
+
+    #[test]
+    fn gemini_rejects_incompatible_explicit_controls_before_sending() {
+        for (model, fields) in [
+            (
+                "gemini-3.8-flash",
+                vec![("thinking_level", toml::Value::String("minimal".into()))],
+            ),
+            (
+                "gemini-3.8-flash",
+                vec![("thinking_budget", toml::Value::Integer(0))],
+            ),
+            (
+                "gemini-2.5-pro",
+                vec![("thinking_budget", toml::Value::Integer(0))],
+            ),
+            (
+                "gemini-2.5-flash",
+                vec![("thinking_level", toml::Value::String("low".into()))],
+            ),
+            (
+                "gemini-3.8-flash",
+                vec![
+                    ("thinking_level", toml::Value::String("low".into())),
+                    ("thinking_budget", toml::Value::Integer(128)),
+                ],
+            ),
+            (
+                "gemini-3.8-flash",
+                vec![("thinking_level", toml::Value::Integer(1))],
+            ),
+            (
+                "gemini-2.5-flash",
+                vec![("thinking_budget", toml::Value::String("0".into()))],
+            ),
+            (
+                "gemini-2.5-flash",
+                vec![("thinking_budget", toml::Value::Integer(i64::MAX))],
+            ),
+            (
+                "gemini-3.8-flash",
+                vec![
+                    ("thinking_level", toml::Value::String("low".into())),
+                    ("thinkingLevel", toml::Value::String("high".into())),
+                ],
+            ),
+        ] {
+            let mut provider = bench_provider("gemini", None, &fields);
+            provider.model = model.into();
+            assert!(
+                build_gemini_request_body(&provider, "s", "u").is_err(),
+                "{model} {fields:?}"
+            );
+        }
+        let mut provider = bench_provider("gemini", Some("minimal"), &[]);
+        provider.model = "gemini-3.8-flash".into();
+        assert!(build_gemini_request_body(&provider, "s", "u").is_err());
+    }
+
+    #[test]
+    fn gemini_nested_overrides_are_checked_after_merging() {
+        let mut provider = bench_provider("gemini", None, &[]);
+        provider.model = "gemini-3.8-flash".into();
+        for source in [
+            r#"{"thinkingConfig":{"thinkingBudget":0}}"#,
+            r#"{"thinkingConfig":{"thinkingLevel":"MINIMAL"}}"#,
+            r#"{"thinkingConfig":{"thinkingLevel":"LOW","thinkingBudget":128}}"#,
+            r#"{"thinkingConfig":{"thinkingLevel":true}}"#,
+            r#"{"thinkingConfig":{"thinkingBudget":"0"}}"#,
+            r#"{"thinkingConfig":{"thinkingLevel":"LOW","thinking_level":"HIGH"}}"#,
+            r#"{"thinkingConfig":{},"thinking_config":{}}"#,
+            r#"{"temperature":0.2}"#,
+            r#"{"top_p":0.9}"#,
+            r#"{"topK":40}"#,
+            r#"{"thinkingConfig":false}"#,
+        ] {
+            let value: serde_json::Value = serde_json::from_str(source).unwrap();
+            let config = toml::Value::try_from(value).unwrap();
+            provider.extra = HashMap::from([("generation_config".into(), config)]);
+            assert!(
+                build_gemini_request_body(&provider, "s", "u").is_err(),
+                "{source}"
+            );
+        }
+        for field in ["generation_config", "generationConfig"] {
+            provider.extra = HashMap::from([(field.into(), toml::Value::String("invalid".into()))]);
+            assert!(build_gemini_request_body(&provider, "s", "u").is_err());
+        }
+        let value = serde_json::json!({"thinkingConfig":{"thinkingLevel":"MEDIUM"}});
+        provider.extra = HashMap::from([(
+            "generation_config".into(),
+            toml::Value::try_from(value).unwrap(),
+        )]);
+        assert!(build_gemini_request_body(&provider, "s", "u").is_ok());
+        provider.extra = HashMap::from([(
+            "generation_config".into(),
+            toml::Value::Table(toml::map::Map::new()),
+        )]);
+        let body = build_gemini_request_body(&provider, "s", "u").unwrap();
+        assert!(body["generation_config"].get("thinkingConfig").is_none());
+        provider.model = "gemini-2.5-pro".into();
+        let value = serde_json::json!({"temperature":0.2,"thinkingConfig":{"thinkingBudget":128}});
+        provider.extra = HashMap::from([(
+            "generation_config".into(),
+            toml::Value::try_from(value).unwrap(),
+        )]);
+        assert!(build_gemini_request_body(&provider, "s", "u").is_ok());
     }
 
     #[test]

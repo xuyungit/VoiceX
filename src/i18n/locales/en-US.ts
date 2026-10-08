@@ -395,7 +395,7 @@ const enUS = {
     reasoningLowest: 'Auto lowest (default)',
     reasoningServerDefault: 'Not sent (server default)',
     reasoningPreviewSends: 'Will send: ',
-    reasoningPreviewNotNeeded: 'This model does not reason; no reasoning field is needed.',
+    reasoningPreviewNotNeeded: 'No reasoning field is needed for this model; use its default settings.',
     reasoningPreviewNothing: 'No reasoning field is sent; the server default applies.',
     reasoningPreviewUnknown: 'The lowest setting for this endpoint is not known, so no reasoning field is sent. Pick a level, or put the vendor switch into Extra request fields.',
     reasoningPreviewUnknownExtra: 'The lowest setting for this endpoint is not known; Extra request fields decide.',

@@ -120,7 +120,9 @@ Midas
 #     DeepSeek, MiMo: extra thinking = { type = "disabled" }
 #     GLM (bigmodel.cn): "low"; it rejects thinking = disabled
 #   qwen: enable_thinking is forced off unless extra overrides it
-#   gemini: code sends the lowest thinkingLevel / thinkingBudget the model accepts
+#   gemini: shares the app model policy; 2.5 Pro uses budget 128, 2.5 Flash uses 0.
+#     3.x omits sampling parameters; unknown IDs use server-default thinking.
+#     Explicit thinking_level / thinking_budget are validated for the model; never set both.
 #   extra: vendor knobs, e.g. enable_thinking = false, thinking = { type = "disabled" }
 
 [[provider]]
@@ -192,7 +194,7 @@ type = "qwen"
 # api_key = "${GEMINI_API_KEY}"
 # model = "gemini-3.8-flash"
 # type = "gemini"
-# # Gemini 3.x Flash cannot turn thinking fully off (MINIMAL returns 400).
+# # Gemini 3.7/3.8 Flash reject MINIMAL; 3/3.5/3.6 Flash accept it.
 # # LOW is the lowest accepted level and cuts thinking tokens / latency.
 # reasoning_effort = "low"
 

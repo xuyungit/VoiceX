@@ -203,9 +203,10 @@ impl LLMProvider for GeminiProvider {
             }
         }
 
-        let mut generation_config = serde_json::json!({
-            "temperature": 0.2
-        });
+        let mut generation_config = serde_json::json!({});
+        if let Some(temperature) = crate::gemini::temperature(&config.model_name) {
+            generation_config["temperature"] = temperature.into();
+        }
         insert_reasoning_fields(&mut generation_config, config);
 
         let mut req = serde_json::json!({
@@ -292,6 +293,51 @@ mod tests {
         assert_eq!(req["generation_config"]["thinkingConfig"]["thinkingLevel"], "LOW");
         assert!(req.get("thinkingConfig").is_none());
         assert!(req["generation_config"].get("maxOutputTokens").is_none());
+    }
+
+    #[test]
+    fn gemini_request_omits_sampling_and_uses_model_specific_thinking() {
+        let mut config = config_for(LLMProviderType::Gemini, ReasoningChoice::Lowest);
+        for (model, thinking) in [
+            (
+                "gemini-3.8-flash",
+                serde_json::json!({"thinkingLevel":"LOW"}),
+            ),
+            (
+                "gemini-3.7-flash",
+                serde_json::json!({"thinkingLevel":"LOW"}),
+            ),
+            (
+                "gemini-3.5-flash",
+                serde_json::json!({"thinkingLevel":"MINIMAL"}),
+            ),
+            ("gemini-3.5-flash-lite", Value::Null),
+            ("gemini-4-flash", Value::Null),
+        ] {
+            config.model_name = model.into();
+            let request = GeminiProvider.build_chat_request(user_message(), &config);
+            let generation = &request["generation_config"];
+            for field in ["temperature", "topP", "topK", "top_p", "top_k"] {
+                assert!(generation.get(field).is_none(), "{model} {field}");
+            }
+            assert_eq!(generation["thinkingConfig"], thinking, "{model}");
+            if thinking.is_null() {
+                assert!(generation.get("thinkingConfig").is_none(), "{model}");
+            }
+        }
+        for (model, budget) in [("gemini-2.5-pro", 128), ("gemini-2.5-flash", 0)] {
+            config.model_name = model.into();
+            let request = GeminiProvider.build_chat_request(user_message(), &config);
+            assert_eq!(request["generation_config"]["temperature"], 0.2);
+            assert_eq!(
+                request["generation_config"]["thinkingConfig"],
+                serde_json::json!({"thinkingBudget": budget})
+            );
+        }
+        config.model_name = "gemini-2.0-flash".into();
+        let request = GeminiProvider.build_chat_request(user_message(), &config);
+        assert_eq!(request["generation_config"]["temperature"], 0.2);
+        assert!(request["generation_config"].get("thinkingConfig").is_none());
     }
 
     #[test]

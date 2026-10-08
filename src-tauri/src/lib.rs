@@ -6,6 +6,7 @@ pub mod asr;
 pub mod audio;
 pub mod commands;
 pub mod foreground_app;
+mod gemini;
 pub mod hotkey;
 pub mod hud;
 pub mod i18n;
