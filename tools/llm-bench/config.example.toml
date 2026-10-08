@@ -104,7 +104,7 @@ Midas
 # --- Providers ---
 # Each [[provider]] is one model to benchmark.
 # api_key supports ${ENV_VAR} syntax for environment variables.
-# type: "volcengine" | "openai" | "qwen" | "gemini" | "custom"
+# type: "volcengine" | "openai" | "qwen" | "gemini" | "anthropic" | "custom"
 # [provider.extra] can inject arbitrary fields into the request body.
 #
 # Correction / translation should use the lowest thinking the model accepts,
@@ -123,6 +123,16 @@ Midas
 #   gemini: shares the app model policy; 2.5 Pro uses budget 128, 2.5 Flash uses 0.
 #     3.x omits sampling parameters; unknown IDs use server-default thinking.
 #     Explicit thinking_level / thinking_budget are validated for the model; never set both.
+#   anthropic: native Messages API (base_url https://api.anthropic.com/v1), no
+#     sampling parameters, max_tokens 16000. reasoning_effort becomes
+#     output_config.effort; name thinking in extra. Floors (probes in
+#     docs/llm-reasoning-knobs-2026-09-20.md): Haiku 5.5 thinking disabled
+#     (probed; "low" adds nothing, but disabled 400s above "high"). From
+#     Anthropic's docs, not probed: Sonnet 5.5 thinking between_tools + "low"
+#     (it 400s on disabled);
+#     Opus 5.5 / Fable 5.1 "low" only (thinking cannot be turned off);
+#     Haiku 4.5 nothing (no thinking unless asked; effort is a 400).
+#     A refusal or a reply cut at max_tokens counts as a failed call.
 #   extra: vendor knobs, e.g. enable_thinking = false, thinking = { type = "disabled" }
 
 [[provider]]
@@ -178,6 +188,16 @@ type = "qwen"
 # model = "deepseek-v4-flash"
 # type = "openai"
 # reasoning_effort = "none"
+# [provider.extra]
+# thinking = { type = "disabled" }
+
+# [[provider]]
+# name = "Claude-Haiku-5.5"
+# base_url = "https://api.anthropic.com/v1"
+# api_key = "${ANTHROPIC_API_KEY}"
+# model = "claude-haiku-5-5"
+# type = "anthropic"
+# reasoning_effort = "low"
 # [provider.extra]
 # thinking = { type = "disabled" }
 

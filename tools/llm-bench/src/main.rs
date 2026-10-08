@@ -297,6 +297,47 @@ struct GeminiUsageMetadata {
     thoughts_token_count: Option<u32>,
 }
 
+// ── Anthropic Messages API types ────────────────────────────────────────────
+// https://platform.claude.com/docs/en/api/messages/create
+
+/// The Messages API has no "unlimited": `max_tokens` is required, and thinking counts toward it. Every current
+/// Claude model accepts this value (Haiku 4.5 has the lowest ceiling, 64K), and it is far above a correction
+/// reply plus low-effort thinking, so it only stops a runaway reply. `[provider.extra] max_tokens` overrides.
+const ANTHROPIC_MAX_TOKENS: u32 = 16000;
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+#[derive(Deserialize)]
+struct AnthropicResponse {
+    content: Option<Vec<AnthropicContent>>,
+    stop_reason: Option<String>,
+    stop_details: Option<AnthropicStopDetails>,
+    usage: Option<AnthropicUsage>,
+}
+
+/// `thinking` blocks can precede the answer, so blocks are read by type, not by position.
+#[derive(Deserialize)]
+struct AnthropicContent {
+    #[serde(rename = "type")]
+    content_type: String,
+    text: Option<String>,
+}
+
+/// Present only when `stop_reason` is `refusal`.
+#[derive(Deserialize)]
+struct AnthropicStopDetails {
+    category: Option<String>,
+    explanation: Option<String>,
+}
+
+/// `input_tokens` counts only the uncached part of the prompt.
+#[derive(Deserialize)]
+struct AnthropicUsage {
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
+    cache_creation_input_tokens: Option<u32>,
+    cache_read_input_tokens: Option<u32>,
+}
+
 // ── Results ─────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1802,6 +1843,10 @@ async fn run_prompt(
         return run_once_gemini(http, provider, &system_prompt, &user_content, limit).await;
     }
 
+    if provider.provider_type == "anthropic" {
+        return run_once_anthropic(http, provider, &system_prompt, &user_content, limit).await;
+    }
+
     if provider.api_mode == "response" {
         return run_once_response(http, provider, &system_prompt, &user_content, limit).await;
     }
@@ -2138,6 +2183,145 @@ async fn run_once_gemini(
                 error: None,
             }
         }
+    }
+}
+
+// ── Anthropic Messages API call ─────────────────────────────────────────────
+
+/// Native Messages body. No sampling parameters: current Claude models reject non-default values with a 400.
+/// `reasoning_effort` goes to `output_config.effort`; thinking is named per entry in `[provider.extra]`, since
+/// its lowest setting differs by model (see config.example.toml).
+fn build_anthropic_request_body(
+    provider: &Provider,
+    system_prompt: &str,
+    user_content: &str,
+) -> Result<serde_json::Value, String> {
+    let mut body = serde_json::json!({
+        "model": provider.model,
+        "max_tokens": ANTHROPIC_MAX_TOKENS,
+        "system": system_prompt,
+        "messages": [{ "role": "user", "content": user_content }],
+    });
+    if let Some(effort) = configured_reasoning_effort(provider) {
+        if provider.extra.contains_key("output_config") {
+            return Err("set effort either as reasoning_effort or in [provider.extra] output_config, not both".into());
+        }
+        body["output_config"] = serde_json::json!({ "effort": effort });
+    }
+    merge_provider_extra(&mut body, provider);
+    Ok(body)
+}
+
+/// A refusal or a reply cut off at `max_tokens` is a failed call, not a correction: the app would have
+/// nothing usable to paste.
+fn anthropic_round(parsed: AnthropicResponse, duration_ms: u128) -> RoundResult {
+    let tokens = parsed.usage.map(|u| {
+        [
+            u.input_tokens,
+            u.cache_creation_input_tokens,
+            u.cache_read_input_tokens,
+            u.output_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .sum()
+    });
+    let error = match parsed.stop_reason.as_deref() {
+        Some("refusal") => {
+            let details = parsed.stop_details;
+            let category = details
+                .as_ref()
+                .and_then(|d| d.category.as_deref())
+                .unwrap_or("uncategorized");
+            let explanation = details
+                .as_ref()
+                .and_then(|d| d.explanation.as_deref())
+                .unwrap_or("");
+            Some(format!("refused ({category}): {}", truncate(explanation, 200)))
+        }
+        Some("max_tokens") => Some("stopped at max_tokens before the reply finished".into()),
+        _ => None,
+    };
+    if error.is_some() {
+        return RoundResult {
+            duration_ms,
+            output: String::new(),
+            tokens,
+            error,
+        };
+    }
+    let output = parsed
+        .content
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|block| block.content_type == "text")
+        .filter_map(|block| block.text)
+        .collect::<Vec<_>>()
+        .join("")
+        .trim()
+        .to_string();
+    RoundResult {
+        duration_ms,
+        output,
+        tokens,
+        error: None,
+    }
+}
+
+async fn run_once_anthropic(
+    http: &Client,
+    provider: &Provider,
+    system_prompt: &str,
+    user_content: &str,
+    limit: Duration,
+) -> RoundResult {
+    let start = Instant::now();
+    let body = match build_anthropic_request_body(provider, system_prompt, user_content) {
+        Ok(body) => body,
+        Err(error) => return failed_round(start, format!("Invalid Anthropic configuration: {error}")),
+    };
+
+    let url = format!("{}/messages", provider.base_url.trim_end_matches('/'));
+
+    let resp = http
+        .post(&url)
+        .timeout(limit)
+        .header("Content-Type", "application/json")
+        .bearer_auth(&provider.api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .json(&body)
+        .send()
+        .await;
+
+    let response = match resp {
+        Err(e) => return failed_round(start, transport_error(&e, limit, start)),
+        Ok(r) => r,
+    };
+
+    let status = response.status();
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(e) => return failed_round(start, transport_error(&e, limit, start)),
+    };
+    let duration_ms = start.elapsed().as_millis();
+
+    if !status.is_success() {
+        return RoundResult {
+            duration_ms,
+            output: String::new(),
+            tokens: None,
+            error: Some(format!("HTTP {}: {}", status, truncate(&body, 200))),
+        };
+    }
+
+    match serde_json::from_str::<AnthropicResponse>(&body) {
+        Err(e) => RoundResult {
+            duration_ms,
+            output: String::new(),
+            tokens: None,
+            error: Some(format!("Parse error: {} body={}", e, truncate(&body, 200))),
+        },
+        Ok(parsed) => anthropic_round(parsed, duration_ms),
     }
 }
 
@@ -3287,6 +3471,70 @@ mod tests {
         );
         assert_eq!(normalize_gemini_thinking_level("low"), "LOW");
         assert_eq!(normalize_gemini_thinking_level("minimal"), "MINIMAL");
+    }
+
+    #[test]
+    fn anthropic_body_is_native_messages_without_sampling() {
+        let plain =
+            build_anthropic_request_body(&bench_provider("anthropic", None, &[]), "s", "u").unwrap();
+        assert_eq!(plain["system"], "s");
+        assert_eq!(plain["messages"], serde_json::json!([{ "role": "user", "content": "u" }]));
+        assert_eq!(plain["max_tokens"], ANTHROPIC_MAX_TOKENS);
+        for field in ["temperature", "top_p", "top_k", "thinking", "output_config", "reasoning_effort"] {
+            assert!(plain.get(field).is_none(), "{field} must not be sent by default");
+        }
+
+        let extra: toml::Value =
+            toml::from_str("thinking = { type = \"disabled\" }\nmax_tokens = 2048").unwrap();
+        let fields: Vec<(&str, toml::Value)> = extra
+            .as_table()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+        let floor = build_anthropic_request_body(
+            &bench_provider("anthropic", Some("low"), &fields),
+            "s",
+            "u",
+        )
+        .unwrap();
+        assert_eq!(floor["output_config"], serde_json::json!({ "effort": "low" }));
+        assert_eq!(floor["thinking"], serde_json::json!({ "type": "disabled" }));
+        assert_eq!(floor["max_tokens"], 2048);
+        assert!(floor.get("reasoning_effort").is_none());
+
+        let both = bench_provider(
+            "anthropic",
+            Some("low"),
+            &[("output_config", toml::Value::Table(toml::map::Map::new()))],
+        );
+        assert!(build_anthropic_request_body(&both, "s", "u").is_err());
+    }
+
+    #[test]
+    fn anthropic_reply_reads_text_blocks_and_fails_refusals() {
+        let round = |body: &str| anthropic_round(serde_json::from_str(body).unwrap(), 1);
+
+        let ok = round(
+            r#"{"content":[{"type":"thinking","thinking":"","signature":"x"},{"type":"text","text":" 整理后 "}],
+                "stop_reason":"end_turn","stop_details":null,
+                "usage":{"input_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":5,"output_tokens":3}}"#,
+        );
+        assert_eq!(ok.output, "整理后");
+        assert_eq!(ok.tokens, Some(18));
+        assert!(ok.error.is_none());
+
+        let refused = round(
+            r#"{"content":[],"stop_reason":"refusal",
+                "stop_details":{"type":"refusal","category":"cyber","explanation":"why"},
+                "usage":{"input_tokens":10,"output_tokens":0}}"#,
+        );
+        assert!(refused.output.is_empty());
+        assert_eq!(refused.error.as_deref(), Some("refused (cyber): why"));
+
+        let cut = round(r#"{"content":[{"type":"text","text":"半"}],"stop_reason":"max_tokens"}"#);
+        assert!(cut.output.is_empty());
+        assert!(cut.error.is_some());
     }
 
     fn bench_provider(

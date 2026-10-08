@@ -57,6 +57,25 @@ and [latest model guide](https://ai.google.dev/gemini-api/docs/latest-model);
 recognized older models retain their previous LLM temperature. Bench overrides
 are validated before sending, including budget ranges and incompatible controls.
 
+Anthropic `claude-haiku-5-5` was probed on 2026-10-08 through the bench's
+native Messages path (`type = "anthropic"`), all six bench cases twice per
+variant, sequentially, through the same network path as the bench. The Models
+API reports `thinking.types.adaptive` and `disabled` supported, `enabled`
+(token budgets) unsupported, effort `low` through `max`. Thinking is read from
+`thinking` content blocks and `usage.output_tokens`.
+
+| Variant | Thinking blocks | Mean output tokens | Median latency |
+|---|---|---|---|
+| no knob (adaptive, effort `medium`) | 4 of 12, on the two longest cases | 324 | 1.8 s; 3.6–5.3 s when it thinks |
+| `output_config.effort: low` | 0 of 12 | 133 | 1.8 s |
+| `thinking: disabled` | 0 of 12 | 128 | 1.7 s |
+| `thinking: disabled` + effort `low` | 0 of 12 | 128 | 1.7 s |
+
+Effort `low` alone happened not to think on these cases, but adaptive thinking
+may still think on a harder one; `disabled` is the switch that guarantees it.
+Adding `low` to `disabled` changed nothing measurable. Per Anthropic's docs,
+`disabled` is a 400 above effort `high` on this model.
+
 ## Rules drawn from the table
 
 - **Volcengine Ark**: `thinking: disabled`. It is the only spelling every Ark
@@ -70,6 +89,11 @@ are validated before sending, including budget ranges and incompatible controls.
 - **Cerebras**: `reasoning_effort: none`, except `gpt-oss`, which stops at
   `low` on any host.
 - **Gemini**: as above, inside `generation_config.thinkingConfig`.
+- **Anthropic**: by model. Haiku 5.5 `thinking: disabled` (probed above);
+  per Anthropic's docs, not probed here: Sonnet 5.5 `thinking: between_tools`
+  (it 400s on `disabled`), Opus 5.5 and Fable 5.1 effort `low` only (thinking
+  cannot be turned off), Haiku 4.5 nothing (no thinking unless asked; effort
+  is a 400).
 
 ## Where the rules live
 
@@ -88,7 +112,8 @@ are validated before sending, including budget ranges and incompatible controls.
   (`reasoning_effort` and `[provider.extra]`). An entry of `type =
   "volcengine"` with no `reasoning_effort` sends `thinking: disabled`, and
   `type = "qwen"` sends `enable_thinking: false`, matching the app. The notes
-  in `config.example.toml` list the floor for the other hosts.
+  in `config.example.toml` list the floor for the other hosts. `type =
+  "anthropic"` has no default knob; the app has no Anthropic provider yet.
 
 ## Adding a model
 
