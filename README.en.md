@@ -178,6 +178,7 @@ VoiceX can optionally pass ASR output through an LLM for correction or translati
 | OpenAI (or compatible) | `gpt-4o-mini` |
 | Qwen (DashScope) | `qwen3.5-flash` |
 | Google Gemini | `gemini-3.5-flash-lite` |
+| Anthropic (Claude, native Messages API; official base URL by default, or any compatible endpoint) | `claude-haiku-5-5` |
 | Custom | Any OpenAI-compatible endpoint |
 
 > **Note:** Each LLM provider requires an API key from the respective platform. Configure your chosen provider in **Settings → LLM**.

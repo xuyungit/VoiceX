@@ -1,6 +1,6 @@
 //! LLM client for text correction
 
-use super::config::{LLMApiMode, LLMConfig};
+use super::config::{LLMApiMode, LLMConfig, LLMProviderType};
 use super::provider::{create_provider, LLMProvider, Message};
 use reqwest::Client;
 use serde::Deserialize;
@@ -10,6 +10,8 @@ use std::time::Instant;
 
 const DICTIONARY_PLACEHOLDER: &str = "{{DICTIONARY}}";
 const INPUT_HISTORY_PLACEHOLDER: &str = "{{INPUT_HISTORY}}";
+/// The Messages API version header every Anthropic request carries.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 #[derive(Debug, Clone, Copy)]
 pub struct PromptBuildOptions {
@@ -77,8 +79,14 @@ impl LLMClient {
     }
 
     async fn dispatch(&self, system_prompt: &str, user_message: &str) -> Result<String, LLMError> {
-        if self.config.provider_type == super::config::LLMProviderType::Gemini {
-            return self.correct_with_gemini(system_prompt, user_message).await;
+        match self.config.provider_type {
+            LLMProviderType::Gemini => {
+                return self.correct_with_gemini(system_prompt, user_message).await;
+            }
+            LLMProviderType::Anthropic => {
+                return self.correct_with_anthropic(system_prompt, user_message).await;
+            }
+            _ => {}
         }
 
         match self.config.api_mode {
@@ -195,6 +203,31 @@ impl LLMClient {
         extract_gemini_response_text(&parsed).ok_or(LLMError::EmptyResponse)
     }
 
+    async fn correct_with_anthropic(
+        &self,
+        system_prompt: &str,
+        user_message: &str,
+    ) -> Result<String, LLMError> {
+        let url = anthropic_messages_url(&self.config.base_url);
+        let messages = vec![
+            Message {
+                role: "system".to_string(),
+                content: system_prompt.to_string(),
+            },
+            Message {
+                role: "user".to_string(),
+                content: user_message.to_string(),
+            },
+        ];
+
+        let mut payload = self.provider.build_chat_request(messages, &self.config);
+        merge_extra_body(&mut payload, self.config.extra_body.as_deref())?;
+        let bytes = self.send_json_request(&url, &payload).await?;
+        let parsed: AnthropicResponse =
+            serde_json::from_slice(&bytes).map_err(|e| LLMError::InvalidResponse(e.to_string()))?;
+        anthropic_reply_text(parsed)
+    }
+
     async fn send_json_request(&self, url: &str, payload: &Value) -> Result<Vec<u8>, LLMError> {
         let request_body =
             serde_json::to_vec(payload).map_err(|e| LLMError::InvalidRequest(e.to_string()))?;
@@ -225,11 +258,13 @@ impl LLMClient {
             .post(url)
             .header("Content-Type", "application/json");
 
-        if self.config.provider_type == super::config::LLMProviderType::Gemini {
-            req_builder = req_builder.header("x-goog-api-key", &self.config.api_key);
-        } else {
-            req_builder = req_builder.bearer_auth(&self.config.api_key);
-        }
+        req_builder = match self.config.provider_type {
+            LLMProviderType::Gemini => req_builder.header("x-goog-api-key", &self.config.api_key),
+            LLMProviderType::Anthropic => req_builder
+                .header("x-api-key", &self.config.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION),
+            _ => req_builder.bearer_auth(&self.config.api_key),
+        };
 
         let response = req_builder.body(request_body).send().await.map_err(|e| {
             log::info!(
@@ -304,6 +339,11 @@ pub enum LLMError {
     /// truncated one aloud would hide that.
     #[error("Reply cut off at the model's output token limit")]
     Truncated,
+
+    /// The model declined to answer (Anthropic's `stop_reason: "refusal"`).
+    /// There is no reply to use, and an empty one would read as "no change".
+    #[error("The model declined the request: {0}")]
+    Refused(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,6 +394,72 @@ struct ResponsesResponse {
 #[derive(Debug, Deserialize)]
 struct ResponsesIncompleteDetails {
     reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicResponse {
+    content: Option<Vec<AnthropicContentBlock>>,
+    stop_reason: Option<String>,
+    stop_details: Option<AnthropicStopDetails>,
+}
+
+/// `thinking` blocks can precede the answer, so blocks are read by type.
+#[derive(Debug, Deserialize)]
+struct AnthropicContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    text: Option<String>,
+}
+
+/// Present only when `stop_reason` is `refusal`.
+#[derive(Debug, Deserialize)]
+struct AnthropicStopDetails {
+    category: Option<String>,
+    explanation: Option<String>,
+}
+
+/// The official base URL is `https://api.anthropic.com` and compatible hosts
+/// publish theirs the same way, without the version; one that already ends
+/// in `/v1`, as llm-bench's config does, is taken as it is.
+fn anthropic_messages_url(base_url: &str) -> String {
+    let base_url = base_url.trim().trim_end_matches('/');
+    if base_url.ends_with("/v1") {
+        format!("{base_url}/messages")
+    } else {
+        format!("{base_url}/v1/messages")
+    }
+}
+
+fn anthropic_reply_text(parsed: AnthropicResponse) -> Result<String, LLMError> {
+    match parsed.stop_reason.as_deref() {
+        Some("refusal") => {
+            let details = parsed.stop_details.as_ref();
+            let category = details
+                .and_then(|d| d.category.as_deref())
+                .unwrap_or("uncategorized");
+            let explanation = details
+                .and_then(|d| d.explanation.as_deref())
+                .unwrap_or("");
+            return Err(LLMError::Refused(
+                format!("{category} {explanation}").trim().to_string(),
+            ));
+        }
+        Some("max_tokens") => return Err(LLMError::Truncated),
+        _ => {}
+    }
+    let text = parsed
+        .content
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|block| block.block_type == "text")
+        .filter_map(|block| block.text)
+        .collect::<Vec<_>>()
+        .join("")
+        .trim()
+        .to_string();
+    let result = (!text.is_empty()).then_some(text);
+    log_response_text(&result);
+    result.ok_or(LLMError::EmptyResponse)
 }
 
 /// Merge the endpoint's extra request fields into `payload`. The text must
@@ -773,6 +879,49 @@ mod tests {
             "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
         );
         assert!(matches!(parse_responses_sse(sse), Err(super::LLMError::Truncated)));
+    }
+
+    #[test]
+    fn anthropic_url_takes_the_base_with_or_without_the_version() {
+        for base_url in [
+            "https://api.anthropic.com",
+            "https://api.anthropic.com/",
+            "https://api.anthropic.com/v1",
+            " https://api.anthropic.com/v1/ ",
+        ] {
+            assert_eq!(
+                super::anthropic_messages_url(base_url),
+                "https://api.anthropic.com/v1/messages",
+                "{base_url:?}"
+            );
+        }
+        assert_eq!(
+            super::anthropic_messages_url("https://relay.example.com/anthropic"),
+            "https://relay.example.com/anthropic/v1/messages"
+        );
+    }
+
+    #[test]
+    fn anthropic_reply_reads_text_blocks_and_fails_refusals_and_cuts() {
+        let reply = |body: &str| super::anthropic_reply_text(serde_json::from_str(body).unwrap());
+
+        let ok = reply(
+            r#"{"content":[{"type":"thinking","thinking":"","signature":"x"},{"type":"text","text":" 整理后 "}],
+                "stop_reason":"end_turn","stop_details":null}"#,
+        );
+        assert_eq!(ok.unwrap(), "整理后");
+
+        let refused = reply(
+            r#"{"content":[],"stop_reason":"refusal",
+                "stop_details":{"type":"refusal","category":"cyber","explanation":"why"}}"#,
+        );
+        assert!(matches!(refused, Err(super::LLMError::Refused(msg)) if msg == "cyber why"));
+
+        let cut = reply(r#"{"content":[{"type":"text","text":"半"}],"stop_reason":"max_tokens"}"#);
+        assert!(matches!(cut, Err(super::LLMError::Truncated)));
+
+        let empty = reply(r#"{"content":[{"type":"text","text":"  "}],"stop_reason":"end_turn"}"#);
+        assert!(matches!(empty, Err(super::LLMError::EmptyResponse)));
     }
 
     #[test]

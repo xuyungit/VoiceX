@@ -11,8 +11,9 @@ pub enum LLMProviderType {
     Volcengine, // 火山引擎 (Doubao)
     Openai, // OpenAI
     Qwen,   // 阿里云千问
-    Gemini, // Google Gemini
-    Custom, // 自定义 OpenAI 兼容
+    Gemini,    // Google Gemini
+    Anthropic, // Anthropic Claude (native Messages API)
+    Custom,    // 自定义 OpenAI 兼容
 }
 
 impl LLMProviderType {
@@ -21,6 +22,7 @@ impl LLMProviderType {
             "openai" => Self::Openai,
             "qwen" => Self::Qwen,
             "gemini" => Self::Gemini,
+            "anthropic" => Self::Anthropic,
             "custom" => Self::Custom,
             _ => Self::Volcengine,
         }
@@ -32,6 +34,7 @@ impl LLMProviderType {
             Self::Openai => "OpenAI",
             Self::Qwen => "Qwen",
             Self::Gemini => "Google Gemini",
+            Self::Anthropic => "Anthropic",
             Self::Custom => "Custom",
         }
     }

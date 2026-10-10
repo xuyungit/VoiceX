@@ -34,6 +34,7 @@ const LLM_DISPLAY_NAMES: Record<string, string> = {
   openai: 'OpenAI',
   qwen: 'Qwen',
   gemini: 'Google Gemini',
+  anthropic: 'Anthropic',
   custom: 'Custom'
 }
 

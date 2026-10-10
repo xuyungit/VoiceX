@@ -17,7 +17,7 @@ export type ProviderSelectOption = ProviderOption<string> | ProviderGroupOption
 
 type Translate = (key: string) => string
 
-export const LLM_PROVIDER_VALUES = ['volcengine', 'openai', 'qwen', 'gemini', 'custom'] as const
+export const LLM_PROVIDER_VALUES = ['volcengine', 'openai', 'qwen', 'gemini', 'anthropic', 'custom'] as const
 export type LlmProviderValue = typeof LLM_PROVIDER_VALUES[number]
 
 export const LLM_API_MODE_VALUES = ['chat_completions', 'responses'] as const
@@ -32,7 +32,8 @@ const BUILTIN_PROVIDER_LABEL_KEYS: Array<{ key: string; value: Exclude<LlmProvid
   { key: 'llm.providerVolcengine', value: 'volcengine' },
   { key: 'llm.providerOpenAI', value: 'openai' },
   { key: 'llm.providerQwen', value: 'qwen' },
-  { key: 'llm.providerGemini', value: 'gemini' }
+  { key: 'llm.providerGemini', value: 'gemini' },
+  { key: 'llm.providerAnthropic', value: 'anthropic' }
 ]
 
 const LLM_API_MODE_LABEL_KEYS: Array<{ key: string; value: LlmApiModeValue }> = [

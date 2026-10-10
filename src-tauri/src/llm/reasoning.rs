@@ -5,7 +5,8 @@
 //! on DashScope). There is no portable "off" — the same value is the floor on
 //! one model, ignored by the next and a 400 on a third. Endpoint floors were
 //! measured from live reasoning-token usage; Gemini follows the official
-//! model-specific policy in `crate::gemini`. Evidence and corrections are in
+//! model-specific policy in `crate::gemini`, and Anthropic its per-model docs
+//! (Haiku 5.5 probed). Evidence and corrections are in
 //! `docs/llm-reasoning-knobs-2026-09-20.md`; the bench shares the Gemini policy.
 
 use super::config::{LLMApiMode, LLMConfig, LLMProviderType};
@@ -75,9 +76,11 @@ pub struct ReasoningPlan {
 
 /// The reasoning fields `config` puts on the wire.
 pub fn plan(config: &LLMConfig) -> ReasoningPlan {
-    // The Qwen and Gemini pages offer no choice.
+    // The Qwen, Gemini and Anthropic pages offer no choice.
     let choice = match config.provider_type {
-        LLMProviderType::Qwen | LLMProviderType::Gemini => &ReasoningChoice::Lowest,
+        LLMProviderType::Qwen | LLMProviderType::Gemini | LLMProviderType::Anthropic => {
+            &ReasoningChoice::Lowest
+        }
         _ => &config.reasoning,
     };
     match choice {
@@ -86,13 +89,13 @@ pub fn plan(config: &LLMConfig) -> ReasoningPlan {
             source: ReasoningSource::Chosen,
         },
         ReasoningChoice::Effort(effort) => ReasoningPlan {
-            fields: effort_fields(effort, &config.api_mode),
+            fields: effort_fields(effort, config),
             source: ReasoningSource::Chosen,
         },
         ReasoningChoice::Lowest => {
             match lowest_knob(&config.provider_type, &config.base_url, &config.model_name) {
                 Some(LowestKnob::Effort(effort)) => ReasoningPlan {
-                    fields: effort_fields(effort, &config.api_mode),
+                    fields: effort_fields(effort, config),
                     source: ReasoningSource::Lowest,
                 },
                 Some(LowestKnob::Fields(fields)) => ReasoningPlan {
@@ -112,9 +115,13 @@ pub fn plan(config: &LLMConfig) -> ReasoningPlan {
     }
 }
 
-fn effort_fields(effort: &str, api_mode: &LLMApiMode) -> Map<String, Value> {
+fn effort_fields(effort: &str, config: &LLMConfig) -> Map<String, Value> {
     let mut fields = Map::new();
-    match api_mode {
+    if config.provider_type == LLMProviderType::Anthropic {
+        fields.insert("output_config".to_string(), json!({ "effort": effort }));
+        return fields;
+    }
+    match config.api_mode {
         LLMApiMode::ChatCompletions => {
             fields.insert("reasoning_effort".to_string(), effort.into());
         }
@@ -137,6 +144,7 @@ pub fn lowest_knob(
         LLMProviderType::Openai => openai_knob(&model),
         LLMProviderType::Qwen => Some(enable_thinking_false()),
         LLMProviderType::Gemini => gemini_knob(&model),
+        LLMProviderType::Anthropic => anthropic_knob(&model),
         LLMProviderType::Custom => custom_knob(&host_of(base_url)?, &model),
     }
 }
@@ -227,6 +235,40 @@ fn gemini_knob(model: &str) -> Option<LowestKnob> {
     let mut fields = Map::new();
     fields.insert("thinkingConfig".to_string(), json!(thinking_config));
     Some(LowestKnob::Fields(fields))
+}
+
+/// Claude's floor is per model, and the same field is the floor on one model
+/// and a 400 on the next: Sonnet 5.5 rejects `thinking: disabled` and takes
+/// `between_tools` (no tools here, so no thinking); Opus 5.5 and the Fable
+/// models always think, so only a low effort remains; Opus 5 accepts
+/// `disabled` but may then leak thinking tags into its reply, so it gets a low
+/// effort too; the 4.x models do not think unless asked. Haiku 5.5 was
+/// probed, the rest follow Anthropic's docs. Unknown IDs use server defaults.
+fn anthropic_knob(model: &str) -> Option<LowestKnob> {
+    match without_date_suffix(model) {
+        "claude-haiku-5-5" | "claude-sonnet-5" => Some(anthropic_thinking("disabled")),
+        "claude-sonnet-5-5" => Some(anthropic_thinking("between_tools")),
+        "claude-opus-5-5" | "claude-opus-5" | "claude-fable-5-1" | "claude-fable-5" => {
+            Some(LowestKnob::Effort("low"))
+        }
+        "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" | "claude-sonnet-4-6"
+        | "claude-haiku-4-5" => Some(LowestKnob::NotNeeded),
+        _ => None,
+    }
+}
+
+fn anthropic_thinking(kind: &str) -> LowestKnob {
+    let mut fields = Map::new();
+    fields.insert("thinking".to_string(), json!({ "type": kind }));
+    LowestKnob::Fields(fields)
+}
+
+/// `claude-haiku-4-5-20251001` is the same model as `claude-haiku-4-5`.
+fn without_date_suffix(model: &str) -> &str {
+    match model.rsplit_once('-') {
+        Some((id, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => id,
+        _ => model,
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +363,44 @@ mod tests {
         assert_eq!(gemini("gemini-3.5-flash-lite"), Some(LowestKnob::NotNeeded));
         assert_eq!(gemini("gemini-2.0-flash"), Some(LowestKnob::NotNeeded));
         assert_eq!(gemini("gemini-4-flash"), None);
+    }
+
+    #[test]
+    fn anthropic_floor_follows_the_model() {
+        let anthropic = |model| lowest_knob(&LLMProviderType::Anthropic, "https://api.anthropic.com", model);
+        assert_eq!(
+            anthropic("claude-haiku-5-5"),
+            Some(fields(json!({ "thinking": { "type": "disabled" } })))
+        );
+        assert_eq!(
+            anthropic("claude-sonnet-5-5"),
+            Some(fields(json!({ "thinking": { "type": "between_tools" } })))
+        );
+        assert_eq!(anthropic("claude-opus-5-5"), Some(LowestKnob::Effort("low")));
+        assert_eq!(anthropic("claude-fable-5-1"), Some(LowestKnob::Effort("low")));
+        assert_eq!(anthropic("claude-opus-5"), Some(LowestKnob::Effort("low")));
+        assert_eq!(anthropic("claude-haiku-4-5-20251001"), Some(LowestKnob::NotNeeded));
+        assert_eq!(anthropic("claude-opus-4-8"), Some(LowestKnob::NotNeeded));
+        assert_eq!(anthropic("claude-sonnet-6"), None);
+        assert_eq!(anthropic("glm-5.3"), None);
+    }
+
+    #[test]
+    fn an_anthropic_effort_goes_into_output_config_whatever_the_page_says() {
+        let mut claude = config(
+            LLMProviderType::Anthropic,
+            "https://api.anthropic.com",
+            ReasoningChoice::Effort("high".to_string()),
+        );
+        claude.model_name = "claude-opus-5-5".to_string();
+        let opus = plan(&claude);
+        assert_eq!(Value::Object(opus.fields), json!({ "output_config": { "effort": "low" } }));
+        assert_eq!(opus.source, ReasoningSource::Lowest);
+
+        claude.model_name = "claude-haiku-4-5".to_string();
+        let quiet = plan(&claude);
+        assert!(quiet.fields.is_empty());
+        assert_eq!(quiet.source, ReasoningSource::NotNeeded);
     }
 
     fn config(provider_type: LLMProviderType, base_url: &str, reasoning: ReasoningChoice) -> LLMConfig {

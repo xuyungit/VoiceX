@@ -129,7 +129,7 @@ pub struct AppSettings {
 
     // LLM settings
     pub enable_llm_correction: bool,
-    pub llm_provider_type: String, // "volcengine" | "openai" | "qwen" | "custom"
+    pub llm_provider_type: String, // "volcengine" | "openai" | "qwen" | "gemini" | "anthropic" | "custom"
     pub llm_prompt_template: String,
     pub translation_prompt_template: String,
     pub enable_llm_history_context: bool,
@@ -164,6 +164,11 @@ pub struct AppSettings {
     pub llm_gemini_base_url: String,
     pub llm_gemini_api_key: String,
     pub llm_gemini_model: String,
+
+    // LLM Provider: Anthropic (native Messages API)
+    pub llm_anthropic_base_url: String,
+    pub llm_anthropic_api_key: String,
+    pub llm_anthropic_model: String,
 
     // LLM Provider: Custom (multiple named OpenAI-compatible endpoints)
     pub llm_custom_endpoints: Vec<CustomLlmEndpoint>,
@@ -527,6 +532,10 @@ impl Default for AppSettings {
             llm_gemini_api_key: String::new(),
             llm_gemini_model: "gemini-3.5-flash-lite".to_string(),
 
+            llm_anthropic_base_url: "https://api.anthropic.com".to_string(),
+            llm_anthropic_api_key: String::new(),
+            llm_anthropic_model: "claude-haiku-5-5".to_string(),
+
             llm_custom_endpoints: Vec::new(),
             llm_active_custom_endpoint_id: String::new(),
 
@@ -714,7 +723,7 @@ pub fn active_custom_endpoint(settings: &AppSettings) -> Option<&CustomLlmEndpoi
 }
 
 /// Apply a provider dropdown selection key (`volcengine` | `openai` | `qwen` |
-/// `custom:<id>`) onto a settings struct. Used by re-transcribe provider overrides.
+/// `gemini` | `anthropic` | `custom:<id>`) onto a settings struct. Used by re-transcribe provider overrides.
 pub fn apply_llm_provider_selection(settings: &mut AppSettings, key: &str) {
     if let Some(id) = key.strip_prefix("custom:") {
         settings.llm_provider_type = "custom".to_string();
@@ -1886,6 +1895,16 @@ mod tests {
 
         apply_llm_provider_selection(&mut settings, "openai");
         assert_eq!(settings.llm_provider_type, "openai");
+    }
+
+    #[test]
+    fn settings_blob_without_anthropic_fields_gets_the_official_endpoint() {
+        let legacy = r#"{"llmProviderType":"gemini","llmGeminiModel":"gemini-3.5-flash-lite"}"#;
+        let settings: AppSettings = serde_json::from_str(legacy).expect("legacy blob must load");
+        assert_eq!(settings.llm_provider_type, "gemini");
+        assert_eq!(settings.llm_anthropic_base_url, "https://api.anthropic.com");
+        assert_eq!(settings.llm_anthropic_api_key, "");
+        assert_eq!(settings.llm_anthropic_model, "claude-haiku-5-5");
     }
 
     #[test]

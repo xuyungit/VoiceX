@@ -91,19 +91,23 @@ Adding `low` to `disabled` changed nothing measurable. Per Anthropic's docs,
 - **Gemini**: as above, inside `generation_config.thinkingConfig`.
 - **Anthropic**: by model. Haiku 5.5 `thinking: disabled` (probed above);
   per Anthropic's docs, not probed here: Sonnet 5.5 `thinking: between_tools`
-  (it 400s on `disabled`), Opus 5.5 and Fable 5.1 effort `low` only (thinking
-  cannot be turned off), Haiku 4.5 nothing (no thinking unless asked; effort
-  is a 400).
+  (it 400s on `disabled`), Sonnet 5 `thinking: disabled`, Opus 5.5, Fable 5
+  and Fable 5.1 `output_config.effort: low` only (thinking cannot be turned
+  off), Opus 5 effort `low` too (it accepts `disabled` but may then leak
+  thinking tags into the reply), Opus 4.6–4.8, Sonnet 4.6 and Haiku 4.5
+  nothing (no thinking unless asked; effort is a 400 on Haiku 4.5).
 
 ## Where the rules live
 
 - App: `src-tauri/src/llm/reasoning.rs`. "Lowest" is the default choice for
   every provider. A blank reasoning setting means Lowest; `server_default`
   sends no reasoning field; any other value is sent as `reasoning_effort`
-  (`reasoning.effort` on the Responses API). Custom endpoints are recognized
-  by API host and model. An unrecognized host gets no reasoning field and the
-  LLM page says so, instead of guessing a value that might be a 400 or be
-  silently ignored. The page shows the exact fields that will be sent
+  (`reasoning.effort` on the Responses API, `output_config.effort` on
+  Anthropic). Qwen, Gemini and Anthropic always ask for Lowest; Anthropic's
+  is resolved from the model ID, a trailing date snapshot ignored. Custom
+  endpoints are recognized by API host and model. An unrecognized host (or
+  Gemini/Anthropic model) gets no reasoning field and the LLM page says so,
+  instead of guessing a value that might be a 400 or be silently ignored. The page shows the exact fields that will be sent
   (`preview_llm_reasoning`).
 - Settings migration: Volcengine's old stored default `minimal` becomes blank
   (Lowest). Efforts a user chose (`low`, `medium`, `high`, or anything on an
@@ -113,7 +117,8 @@ Adding `low` to `disabled` changed nothing measurable. Per Anthropic's docs,
   "volcengine"` with no `reasoning_effort` sends `thinking: disabled`, and
   `type = "qwen"` sends `enable_thinking: false`, matching the app. The notes
   in `config.example.toml` list the floor for the other hosts. `type =
-  "anthropic"` has no default knob; the app has no Anthropic provider yet.
+  "anthropic"` has no default knob: name the model's floor from the list
+  above, as the app does.
 
 ## Adding a model
 

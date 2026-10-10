@@ -154,6 +154,11 @@ export interface AppSettings {
     llmGeminiApiKey: string
     llmGeminiModel: string
 
+    // LLM Provider: Anthropic (native Messages API)
+    llmAnthropicBaseUrl: string
+    llmAnthropicApiKey: string
+    llmAnthropicModel: string
+
     // LLM Provider: Custom (multiple named OpenAI-compatible endpoints)
     llmCustomEndpoints: CustomLlmEndpoint[]
     llmActiveCustomEndpointId: string
@@ -431,6 +436,10 @@ const defaultSettings: AppSettings = {
     llmGeminiBaseUrl: 'https://generativelanguage.googleapis.com',
     llmGeminiApiKey: '',
     llmGeminiModel: 'gemini-3.5-flash-lite',
+
+    llmAnthropicBaseUrl: 'https://api.anthropic.com',
+    llmAnthropicApiKey: '',
+    llmAnthropicModel: 'claude-haiku-5-5',
 
     llmCustomEndpoints: [],
     llmActiveCustomEndpointId: '',

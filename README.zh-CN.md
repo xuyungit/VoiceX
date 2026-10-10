@@ -105,6 +105,7 @@ VoiceX 可选将 ASR 输出交给 LLM 做纠错或翻译。支持的提供商：
 | OpenAI（或兼容接口） | `gpt-4o-mini` |
 | 通义千问（DashScope） | `qwen3.5-flash` |
 | Google Gemini | `gemini-3.5-flash-lite` |
+| Anthropic（Claude，原生 Messages API；Base URL 默认官方，可改为兼容接口） | `claude-haiku-5-5` |
 | 自定义 | 任何 OpenAI 兼容端点 |
 
 > **提示：** 每个 LLM 提供商都需要到对应平台申请 API Key，在 **设置 → LLM** 中配置即可。

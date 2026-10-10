@@ -49,6 +49,7 @@ pub fn create_provider(provider_type: &LLMProviderType) -> Box<dyn LLMProvider> 
         LLMProviderType::Openai => Box::new(OpenAIProvider),
         LLMProviderType::Qwen => Box::new(QwenProvider),
         LLMProviderType::Gemini => Box::new(GeminiProvider),
+        LLMProviderType::Anthropic => Box::new(AnthropicProvider),
         LLMProviderType::Custom => Box::new(CustomProvider),
     }
 }
@@ -225,6 +226,46 @@ impl LLMProvider for GeminiProvider {
 
     fn name(&self) -> &'static str {
         "Gemini"
+    }
+}
+
+// =============================================================================
+// Anthropic Provider (native Messages API)
+// =============================================================================
+
+/// The Messages API has no "no cap": `max_tokens` is required, and thinking
+/// counts toward it. This is what llm-bench sends: far above a correction or
+/// a 5000-character translation, within every current Claude model's limit,
+/// and small enough for a request that is not streamed.
+pub const ANTHROPIC_MAX_TOKENS: u32 = 16000;
+
+pub struct AnthropicProvider;
+
+impl LLMProvider for AnthropicProvider {
+    fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
+        // No sampling parameters: current Claude models answer a non-default
+        // temperature with a 400.
+        let (system, turns): (Vec<Message>, Vec<Message>) =
+            messages.into_iter().partition(|msg| msg.role == "system");
+        let mut req = serde_json::json!({
+            "model": config.model_name,
+            "max_tokens": ANTHROPIC_MAX_TOKENS,
+            "messages": turns
+        });
+        let system = system
+            .into_iter()
+            .map(|msg| msg.content)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if !system.is_empty() {
+            req["system"] = system.into();
+        }
+        insert_reasoning_fields(&mut req, config);
+        req
+    }
+
+    fn name(&self) -> &'static str {
+        "Anthropic"
     }
 }
 
@@ -418,6 +459,36 @@ mod tests {
         config.reasoning = ReasoningChoice::ServerDefault;
         let quiet = CustomProvider.build_responses_request("sys", "hi", &config);
         assert!(quiet.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn anthropic_request_is_native_messages_with_the_models_floor() {
+        let mut config = config_for(LLMProviderType::Anthropic, ReasoningChoice::Lowest);
+        config.model_name = "claude-haiku-5-5".to_string();
+        let messages = vec![
+            Message {
+                role: "system".to_string(),
+                content: "sys".to_string(),
+            },
+            Message {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            },
+        ];
+        let req = AnthropicProvider.build_chat_request(messages, &config);
+        assert_eq!(req["system"], "sys");
+        assert_eq!(req["messages"], serde_json::json!([{ "role": "user", "content": "hi" }]));
+        assert_eq!(req["max_tokens"], ANTHROPIC_MAX_TOKENS);
+        assert_eq!(req["thinking"], serde_json::json!({ "type": "disabled" }));
+        for field in ["temperature", "top_p", "top_k", "reasoning_effort", "output_config"] {
+            assert!(req.get(field).is_none(), "{field}");
+        }
+
+        config.model_name = "claude-opus-5-5".to_string();
+        let opus = AnthropicProvider.build_chat_request(user_message(), &config);
+        assert_eq!(opus["output_config"], serde_json::json!({ "effort": "low" }));
+        assert!(opus.get("thinking").is_none());
+        assert!(opus.get("system").is_none());
     }
 
     #[test]

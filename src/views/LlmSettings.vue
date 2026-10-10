@@ -156,6 +156,20 @@ const llmGeminiModel = computed({
   set: (v: string) => settingsStore.updateSetting('llmGeminiModel', v)
 })
 
+// Anthropic-specific
+const llmAnthropicBaseUrl = computed({
+  get: () => settingsStore.settings.llmAnthropicBaseUrl,
+  set: (v: string) => settingsStore.updateSetting('llmAnthropicBaseUrl', v)
+})
+const llmAnthropicApiKey = computed({
+  get: () => settingsStore.settings.llmAnthropicApiKey,
+  set: (v: string) => settingsStore.updateSetting('llmAnthropicApiKey', v)
+})
+const llmAnthropicModel = computed({
+  get: () => settingsStore.settings.llmAnthropicModel,
+  set: (v: string) => settingsStore.updateSetting('llmAnthropicModel', v)
+})
+
 // Custom-specific: the currently selected named endpoint within llmCustomEndpoints.
 const activeCustomEndpoint = computed<CustomLlmEndpoint | null>(() => {
   const { llmCustomEndpoints, llmActiveCustomEndpointId } = settingsStore.settings
@@ -282,6 +296,7 @@ const isVolcengine = computed(() => llmProviderType.value === 'volcengine')
 const isOpenai = computed(() => llmProviderType.value === 'openai')
 const isQwen = computed(() => llmProviderType.value === 'qwen')
 const isGemini = computed(() => llmProviderType.value === 'gemini')
+const isAnthropic = computed(() => llmProviderType.value === 'anthropic')
 const isCustom = computed(() => llmProviderType.value === 'custom')
 const activePromptTab = ref<'assistant' | 'translation'>('assistant')
 const llmProbeLoading = ref(false)
@@ -304,6 +319,7 @@ watch(
       s.llmOpenaiBaseUrl, s.llmOpenaiModel, s.llmOpenaiReasoningEffort,
       s.llmQwenBaseUrl, s.llmQwenModel,
       s.llmGeminiBaseUrl, s.llmGeminiModel,
+      s.llmAnthropicBaseUrl, s.llmAnthropicModel,
       endpoint?.id, endpoint?.baseUrl, endpoint?.model, endpoint?.apiMode, endpoint?.reasoningEffort
     ]
   },
@@ -329,6 +345,8 @@ const reasoningPreviewText = computed(() => {
   const preview = reasoningPreview.value
   if (!preview) return reasoningPreviewError.value
   if (preview.source === 'unknown') {
+    // Gemini and Anthropic offer neither a level nor extra fields to fill in.
+    if (isGemini.value || isAnthropic.value) return t('llm.reasoningPreviewUnknownModel')
     return t(llmCustomExtraBody.value.trim() ? 'llm.reasoningPreviewUnknownExtra' : 'llm.reasoningPreviewUnknown')
   }
   if (preview.fields) return t('llm.reasoningPreviewSends')
@@ -563,6 +581,45 @@ async function runLlmProviderProbe() {
               <div class="field-label">{{ t('llm.modelName') }}</div>
             </div>
             <NInput v-model:value="llmGeminiModel" class="field-control short" />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
+              <div class="field-sub">{{ t('llm.reasoningEffortFixedSub') }}</div>
+              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+                {{ reasoningPreviewText }}
+                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+              </div>
+            </div>
+            <div class="field-control short reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
+          </div>
+        </template>
+
+        <!-- Anthropic Settings -->
+        <template v-if="isAnthropic">
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.baseUrl') }}</div>
+            </div>
+            <NInput v-model:value="llmAnthropicBaseUrl" class="field-control" />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.apiKey') }}</div>
+            </div>
+            <NInput
+              v-model:value="llmAnthropicApiKey"
+              type="password"
+              show-password-on="click"
+              placeholder="sk-ant-..."
+              class="field-control"
+            />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.modelName') }}</div>
+            </div>
+            <NInput v-model:value="llmAnthropicModel" class="field-control short" />
           </div>
           <div class="field-row">
             <div class="field-text">

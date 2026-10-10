@@ -86,6 +86,15 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             reasoning: ReasoningChoice::Lowest,
             extra_body: None,
         },
+        LLMProviderType::Anthropic => LLMConfig {
+            provider_type: LLMProviderType::Anthropic,
+            base_url: settings.llm_anthropic_base_url.clone(),
+            api_key: settings.llm_anthropic_api_key.clone(),
+            model_name: settings.llm_anthropic_model.clone(),
+            api_mode: LLMApiMode::ChatCompletions,
+            reasoning: ReasoningChoice::Lowest,
+            extra_body: None,
+        },
         LLMProviderType::Custom => {
             let endpoint = crate::commands::settings::active_custom_endpoint(settings);
             LLMConfig {
@@ -295,7 +304,7 @@ mod llm_key_tests {
     #[test]
     fn every_provider_defaults_to_the_lowest_reasoning() {
         let settings = settings_with_two_providers();
-        for key in ["volcengine", "openai", "qwen", "gemini", "custom:ep1"] {
+        for key in ["volcengine", "openai", "qwen", "gemini", "anthropic", "custom:ep1"] {
             assert_eq!(
                 build_llm_config_for_key(&settings, key).reasoning,
                 ReasoningChoice::Lowest,
@@ -341,6 +350,17 @@ mod llm_key_tests {
             settings.llm_provider_type, "volcengine",
             "the LLM page's own selection is not what the reading feature picked"
         );
+    }
+
+    #[test]
+    fn the_anthropic_key_selects_its_own_fields() {
+        let mut settings = settings_with_two_providers();
+        settings.llm_anthropic_api_key = "sk-ant-key".to_string();
+        let config = build_llm_config_for_key(&settings, "anthropic");
+        assert_eq!(config.provider_type, LLMProviderType::Anthropic);
+        assert_eq!(config.base_url, "https://api.anthropic.com");
+        assert_eq!(config.api_key, "sk-ant-key");
+        assert_eq!(config.model_name, "claude-haiku-5-5");
     }
 
     #[test]
