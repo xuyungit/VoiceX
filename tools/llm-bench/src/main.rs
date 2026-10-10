@@ -563,6 +563,9 @@ struct StandingRun {
     /// The model versions the judge reported, e.g. `jev-1.13.0`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     judge_models: Vec<String>,
+    /// [`cases_fingerprint`] of the cases the run was placed on. Absent on runs recorded before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cases: Option<String>,
 }
 
 impl StandingRun {
@@ -571,10 +574,45 @@ impl StandingRun {
     }
 }
 
-/// The runs the season standings are computed from: those placed under the current rules by the same judge. Two
-/// judges give the same outputs different verdicts, and a place won under one says nothing about the other.
-fn season_runs(runs: &[StandingRun], judge: &str) -> Vec<StandingRun> {
-    runs.iter().filter(|run| run.scoring == SCORING_VERSION && run.judge() == judge).cloned().collect()
+/// What a season holds fixed besides the rules: who judged, and on which cases. Two judges give the same outputs
+/// different verdicts; a place won with a case in the set says nothing about a set without it.
+struct Season<'a> {
+    judge: &'a str,
+    cases: &'a str,
+}
+
+impl Season<'_> {
+    fn holds(&self, run: &StandingRun) -> bool {
+        run.scoring == SCORING_VERSION && run.judge() == self.judge && run.cases.as_deref() == Some(self.cases)
+    }
+}
+
+/// The runs the season standings are computed from: those placed under the current rules in the same season.
+fn season_runs(runs: &[StandingRun], season: &Season) -> Vec<StandingRun> {
+    runs.iter().filter(|run| season.holds(run)).cloned().collect()
+}
+
+/// Identifies a case set by what decides its scores: each case's input, reference and pins. Names and order do not
+/// count. FNV-1a, so the value stays the same across Rust releases.
+fn cases_fingerprint(cases: &[TestCase]) -> String {
+    let mut texts: Vec<Vec<String>> = cases
+        .iter()
+        .map(|c| {
+            let mut text = vec![c.input.clone(), c.expected.clone()];
+            text.extend(c.pin.iter().flat_map(|p| [p.heard.clone(), p.written.clone(), p.credit.to_string()]));
+            text
+        })
+        .collect();
+    texts.sort();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for text in texts.iter().flat_map(|case| case.iter().map(String::as_str).chain([""])) {
+        // 0xff never occurs in UTF-8, so it separates the texts unambiguously
+        for byte in text.bytes().chain([0xff]) {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1587,10 +1625,11 @@ async fn main() {
 
     if !skip_standings && !ranked.is_empty() {
         let lens = StandingLens::from_eval(&eval_cfg);
-        let judge_name = judge.as_ref().map(|j| j.backend.name()).unwrap_or("none");
+        let fingerprint = cases_fingerprint(&cases.case);
+        let season = Season { judge: judge.as_ref().map(|j| j.backend.name()).unwrap_or("none"), cases: &fingerprint };
         let judge_models = judge_run.iter().flat_map(|run| run.reported_models.iter().cloned()).collect();
-        match update_standings(&standings_path, lens, &ranked, source_run.clone(), judge_name, judge_models) {
-            Ok(file) => print_standings(&file, name_width, judge_name),
+        match update_standings(&standings_path, lens, &ranked, source_run.clone(), &season, judge_models) {
+            Ok(file) => print_standings(&file, name_width, &season),
             Err(e) => eprintln!("Failed to update {}: {}", standings_path, e),
         }
     }
@@ -1708,6 +1747,7 @@ async fn main() {
                     "source_execution": replay.as_ref().map(|r| &r["run"]["execution"]),
                 },
                 "scoring": SCORING_VERSION,
+                "cases_fingerprint": cases_fingerprint(&cases.case),
                 "assessment_version": assessment::VERSION,
                 "hallucination_check": "severe_confirmed_auto_review",
                 "fidelity_clear_confidence": fidelity::CLEAR_CONFIDENCE,
@@ -3540,15 +3580,13 @@ fn update_standings(
     lens: StandingLens,
     ranked: &[RankedProvider],
     source_run: Option<String>,
-    judge: &str,
+    season: &Season,
     judge_models: Vec<String>,
 ) -> Result<StandingsFile, String> {
     let scheme = StandingScheme::parse(Some(lens.scheme.as_str()));
     let mut file = load_standings(path)?;
     if let Some(source) = &source_run {
-        file.runs.retain(|r| {
-            r.source_run.as_ref() != Some(source) || r.scoring != SCORING_VERSION || r.judge() != judge
-        });
+        file.runs.retain(|r| r.source_run.as_ref() != Some(source) || !season.holds(r));
     }
     file.runs.push(StandingRun {
         at: chrono::Utc::now().to_rfc3339(),
@@ -3556,18 +3594,19 @@ fn update_standings(
         scoring: SCORING_VERSION,
         ranking: award_points(ranked, scheme),
         source_run,
-        judge: Some(judge.to_string()),
+        judge: Some(season.judge.to_string()),
         judge_models,
+        cases: Some(season.cases.to_string()),
     });
     file.version = 1;
     file.scheme = lens.scheme.clone();
     file.lens = lens;
-    file.standings = recompute_standings(&season_runs(&file.runs, judge), &file.lens);
+    file.standings = recompute_standings(&season_runs(&file.runs, season), &file.lens);
     save_standings(path, &file)?;
     Ok(file)
 }
 
-fn print_standings(file: &StandingsFile, name_width: usize, judge: &str) {
+fn print_standings(file: &StandingsFile, name_width: usize, season: &Season) {
     let name_width = file
         .standings
         .iter()
@@ -3588,21 +3627,22 @@ fn print_standings(file: &StandingsFile, name_width: usize, judge: &str) {
     } else {
         file.lens.retire_after.to_string()
     };
-    let season = season_runs(&file.runs, judge).len();
-    let other_judges = file.runs.iter().filter(|r| r.scoring == SCORING_VERSION && r.judge() != judge).count();
-    let earlier = file.runs.len() - season - other_judges;
+    let counted = season_runs(&file.runs, season).len();
+    let elsewhere = file.runs.iter().filter(|r| r.scoring == SCORING_VERSION && !season.holds(r)).count();
+    let earlier = file.runs.len() - counted - elsewhere;
     println!(
         "\x1b[1m══════════════════════════════════════════════════════════\x1b[0m"
     );
     println!(
-        "\x1b[1m  Season standings\x1b[0m  (composite places · scoring v{} · judge {} · form · decay={} · window={} · retire after {} · {} {})",
+        "\x1b[1m  Season standings\x1b[0m  (composite places · scoring v{} · judge {} · cases {} · form · decay={} · window={} · retire after {} · {} {})",
         SCORING_VERSION,
-        judge,
+        season.judge,
+        &season.cases[..8],
         file.lens.decay,
         window_label,
         retire_label,
-        season,
-        if season == 1 { "race" } else { "races" }
+        counted,
+        if counted == 1 { "race" } else { "races" }
     );
     if earlier > 0 {
         println!(
@@ -3611,11 +3651,11 @@ fn print_standings(file: &StandingsFile, name_width: usize, judge: &str) {
             if earlier == 1 { "race" } else { "races" }
         );
     }
-    if other_judges > 0 {
+    if elsewhere > 0 {
         println!(
-            "  \x1b[2m{} {} judged by another judge form their own season and do not count here.\x1b[0m",
-            other_judges,
-            if other_judges == 1 { "race" } else { "races" }
+            "  \x1b[2m{} {} under these rules but by another judge or on another case set form their own seasons and do not count here.\x1b[0m",
+            elsewhere,
+            if elsewhere == 1 { "race" } else { "races" }
         );
     }
     println!(
@@ -4424,25 +4464,6 @@ mod tests {
         let mut tallies = Tallies::default();
         tallies.add(&adjudicate::score(&analysis, &Answers::new()));
         assert_eq!(tallies.dictionary.rate(), Some(1.0));
-
-        // 暂时 was spoken after the question. Joining it to that sentence passes, whichever
-        // slot it lands in; deleting it, or leaving the fragment, does not.
-        let late = cases.case.iter().find(|c| c.name == "Late qualifier").unwrap();
-        let reference = Reference::new(&late.input, &late.expected, &[]);
-        assert_eq!(reference.sites(), vec![site(Tier::Semantic, "都不需要吗？暂时。", "暂时都不需要吗？")]);
-        let credit = |output: &str| {
-            let analysis = reference.analyze(output, &[]);
-            assert!(analysis.asks().is_empty(), "{output}: {:?}", analysis.asks());
-            match &analysis.sites[0].outcome {
-                adjudicate::Outcome::Settled { credit, .. } => *credit,
-                adjudicate::Outcome::Ask(_) => panic!("expected code to settle {output}"),
-            }
-        };
-        assert_eq!(credit(&late.expected), 1.0);
-        assert_eq!(credit("这个分支里暂时任何改动都不需要吗？"), 1.0);
-        assert_eq!(credit("这个分支里暂时不需要任何改动吗？"), 1.0);
-        assert_eq!(credit(&late.input), 0.0);
-        assert_eq!(credit("这个分支里任何改动都不需要吗？"), 0.0);
     }
 
     #[test]
@@ -4567,6 +4588,7 @@ model = "m"
             source_run: None,
             judge: None,
             judge_models: Vec::new(),
+            cases: None,
             ranking: award_points(&[rp("a", 90.0), rp("b", 10.0)], StandingScheme::Borda),
         };
         let run2 = StandingRun {
@@ -4576,6 +4598,7 @@ model = "m"
             source_run: None,
             judge: None,
             judge_models: Vec::new(),
+            cases: None,
             ranking: award_points(&[rp("b", 90.0), rp("a", 10.0)], StandingScheme::Borda),
         };
         let table = recompute_standings(&[run1, run2], &all_history_lens());
@@ -4612,7 +4635,7 @@ model = "m"
         std::fs::write(&path, legacy).unwrap();
 
         let file = update_standings(path.to_str().unwrap(), all_history_lens(), &[rp("b", 90.0), rp("a", 10.0)],
-            None, "typesafe", Vec::new(),
+            None, &Season { judge: "typesafe", cases: "c" }, Vec::new(),
         ).unwrap();
         assert_eq!(file.runs.len(), 3, "the older races are kept");
         assert_eq!(file.runs.iter().map(|r| r.scoring).collect::<Vec<_>>(), vec![0, 0, SCORING_VERSION]);
@@ -4632,7 +4655,7 @@ model = "m"
             all_history_lens(),
             &[rp("a", 90.0)],
             source.clone(),
-            "typesafe",
+            &Season { judge: "typesafe", cases: "c" },
             Vec::new(),
         )
         .unwrap();
@@ -4641,7 +4664,7 @@ model = "m"
             all_history_lens(),
             &[rp("b", 95.0)],
             source,
-            "typesafe",
+            &Season { judge: "typesafe", cases: "c" },
             Vec::new(),
         )
         .unwrap();
@@ -4657,17 +4680,50 @@ model = "m"
         let path = path.to_str().unwrap();
         let source = Some("source/results.json".to_string());
         // recorded before runs carried their judge: TypeSafe, where `a` won
-        std::fs::write(path, r#"{"version":1,"scheme":"borda","runs":[{"at":"1","scheme":"borda","scoring":SCORING,"source_run":"source/results.json","ranking":[{"place":1,"provider":"a","points":2.0,"composite":90.0,"avg_ms":900,"success_rate":1.0},{"place":2,"provider":"b","points":1.0,"composite":50.0,"avg_ms":900,"success_rate":1.0}]}],"standings":[]}"#
+        std::fs::write(path, r#"{"version":1,"scheme":"borda","runs":[{"at":"1","scheme":"borda","scoring":SCORING,"source_run":"source/results.json","cases":"c","ranking":[{"place":1,"provider":"a","points":2.0,"composite":90.0,"avg_ms":900,"success_rate":1.0},{"place":2,"provider":"b","points":1.0,"composite":50.0,"avg_ms":900,"success_rate":1.0}]}],"standings":[]}"#
             .replace("SCORING", &SCORING_VERSION.to_string())).unwrap();
         let other = update_standings(path, all_history_lens(), &[rp("b", 90.0), rp("a", 10.0)], source.clone(),
-            "openai-decisions", vec!["gpt-6-luna".into()]).unwrap();
+            &Season { judge: "openai-decisions", cases: "c" }, vec!["gpt-6-luna".into()]).unwrap();
         assert_eq!(other.runs.len(), 2, "the TypeSafe race of the same source stays");
         assert_eq!((other.standings[0].provider.as_str(), other.standings[0].runs), ("b", 1));
         let typesafe = update_standings(path, all_history_lens(), &[rp("a", 90.0), rp("b", 10.0)], source,
-            "typesafe", vec!["jev-1.13.0".into()]).unwrap();
+            &Season { judge: "typesafe", cases: "c" }, vec!["jev-1.13.0".into()]).unwrap();
         assert_eq!(typesafe.runs.len(), 2, "the TypeSafe race of the source is replaced, the other judge's kept");
         assert_eq!((typesafe.standings[0].provider.as_str(), typesafe.standings[0].runs), ("a", 1));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_changed_case_set_starts_its_own_season_and_unmarked_runs_stay_out_of_it() {
+        let path = std::env::temp_dir().join(format!("llm-bench-case-sets-{}.json", std::process::id()));
+        let path = path.to_str().unwrap();
+        // recorded before runs carried their case set: `a` won
+        std::fs::write(path, r#"{"version":1,"scheme":"borda","runs":[{"at":"1","scheme":"borda","scoring":SCORING,"ranking":[{"place":1,"provider":"a","points":2.0,"composite":90.0,"avg_ms":900,"success_rate":1.0},{"place":2,"provider":"b","points":1.0,"composite":50.0,"avg_ms":900,"success_rate":1.0}]}],"standings":[]}"#
+            .replace("SCORING", &SCORING_VERSION.to_string())).unwrap();
+        let five = update_standings(path, all_history_lens(), &[rp("b", 90.0), rp("a", 10.0)], None,
+            &Season { judge: "typesafe", cases: "five" }, Vec::new()).unwrap();
+        assert_eq!((five.standings[0].provider.as_str(), five.standings[0].runs), ("b", 1));
+        let six = update_standings(path, all_history_lens(), &[rp("a", 90.0), rp("b", 10.0)], None,
+            &Season { judge: "typesafe", cases: "six" }, Vec::new()).unwrap();
+        assert_eq!(six.runs.len(), 3);
+        assert_eq!((six.standings[0].provider.as_str(), six.standings[0].runs), ("a", 1));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_case_set_is_known_by_its_inputs_references_and_pins_not_names_or_order() {
+        let case = |name: &str, input: &str, expected: &str| TestCase {
+            name: name.into(), input: input.into(), expected: expected.into(), all_or_nothing: false, pin: Vec::new(),
+        };
+        let set = [case("a", "下一集", "下一级"), case("b", "cloud md", "CLAUDE.md")];
+        let renamed_and_reordered = [case("y", "cloud md", "CLAUDE.md"), case("x", "下一集", "下一级")];
+        assert_eq!(cases_fingerprint(&set), cases_fingerprint(&renamed_and_reordered));
+        assert_ne!(cases_fingerprint(&set), cases_fingerprint(&set[..1]));
+        let mut pinned = set.clone();
+        pinned[0].pin.push(Pin { heard: "集".into(), written: "极".into(), credit: 0.5 });
+        assert_ne!(cases_fingerprint(&set), cases_fingerprint(&pinned));
+        // texts are separated: moving a character across the input/reference boundary is another set
+        assert_ne!(cases_fingerprint(&[case("a", "ab", "c")]), cases_fingerprint(&[case("a", "a", "bc")]));
     }
 
     fn all_history_lens() -> StandingLens {
@@ -4692,6 +4748,7 @@ model = "m"
             source_run: None,
             judge: None,
             judge_models: Vec::new(),
+            cases: None,
             ranking: award_points(&ranked, StandingScheme::Borda),
         }
     }

@@ -69,16 +69,6 @@ name = "Abaqus and Midas"
 input = "我们需要综合考虑我们的这个 Abacus 的模型，以及我们当前这个项目的，嗯，遇到的问题，呃，和挑战。要考虑就是到底我们遇到的问题是不是用 Abacus 模型能得到更好的结果，或者是，嗯，就是 Abacus 模型能更加去，呃，建模石桥的这个行为。所以我们现在要决策，呃，是不是要把之前基于跟麦达斯对齐的一个内部实现的有限元，然后如何换成 Abacus 这样的一个实现，我们可以讨论一下。"
 expected = "我们需要综合考虑我们的 Abaqus 的模型，以及我们当前这个项目遇到的问题和挑战。要考虑就是到底我们遇到的问题是不是用 Abaqus 模型能得到更好的结果，或者是 Abaqus 模型能更加去建模石桥的行为。所以我们现在要决策，是不是要把之前基于跟Midas对齐的一个内部实现的有限元，然后如何换成 Abaqus 这样的一个实现，我们可以讨论一下。"
 
-# 暂时 was spoken as its own sentence after the question. It belongs inside that
-# sentence. Word order may change, and up to two characters may be added or
-# missing. `expected` is one wording that passes. Dropping 暂时, or leaving it
-# after the question, does not. A larger rewrite goes to the judge.
-
-[[case]]
-name = "Late qualifier"
-input = "这个分支里任何改动都不需要吗？暂时。"
-expected = "这个分支里任何改动暂时都不需要吗？"
-
 # Real VoiceX history, read from history_record.original_text (never the corrected text).
 # Record: 4eea0a10-4eb4-4efb-8c6b-bd7745cf00c6
 # Recorded at: 2026-10-01T12:21:16.719525+00:00 (2026-10-01 20:21:16 Asia/Shanghai)

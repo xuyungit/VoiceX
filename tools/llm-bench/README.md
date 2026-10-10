@@ -122,7 +122,8 @@ rounds: where the model lands if the run is repeated. **Case mix** also redraws
 the cases, the same draw for every model: where it lands on a similar set of
 cases. Overlapping ranges are places the run cannot tell apart. A wide Case mix
 range means the place rests on a few cases: on 2026-10-10 GPT-6-luna was 1–4 on
-a rerun but 1–15 on the case mix, because the late-qualifier case alone lifts it.
+a rerun but 1–15 on the case mix, because the late-qualifier case alone lifted it
+(that case, a disputed sentence most models mishandled, was withdrawn the same day).
 Both are reporting only and are saved as `place_90_rerun` / `place_90_case_mix`.
 The speed timeout matches the app: 10 seconds up to 120 characters, multiplied by
 1.5 per doubling (rounded up), at most 60 seconds. Judge time is excluded.
@@ -281,7 +282,13 @@ Finalization validates the saved rubric and fidelity threshold, writes a new
 artifact and records all models in standings. The original source identity is
 retained across rescoring/finalization, so repeat recording replaces its entry
 instead of awarding twice. Version 6 starts a separate season; old runs remain.
-A season is one scoring version under one judge (`typesafe`, `openai-decisions`).
+A season is one scoring version under one judge (`typesafe`, `openai-decisions`)
+on one case set. The case set is known by a fingerprint of every case's input,
+reference and pins (`run.cases_fingerprint`); names and order do not count.
+Changing the cases starts a new season, as on 2026-10-10 when the disputed
+late-qualifier case was withdrawn. Runs recorded before the fingerprint was kept
+count in no new season. Rescoring a saved run with the current `--cases` file
+records it in the new season without correction calls.
 
 Verify numerical aggregation and preserved evidence offline:
 
