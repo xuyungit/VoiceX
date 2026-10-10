@@ -4,6 +4,63 @@ Copy `config.example.toml` and `test_cases.example.toml` to the local config/cas
 files, then run `cargo run` in this directory. Credentials, run artifacts and
 standings are ignored by Git. Each run saves `report.log` and `results.json`.
 
+## Parallel runs and local feedback
+
+Correction calls now run across independent services, with six provider workers
+by default. Each provider's cases and rounds stay serial, and providers sharing
+the same URL origin take turns. Override a shared quota/routing group with
+`concurrency_group = "service-name"` inside a `[[provider]]` entry. Different
+origins behind one rate limit should use the same group. Queue time is excluded
+from request latency; saved case/provider/round ordering remains unchanged.
+
+```sh
+cargo run -- --concurrency 6
+cargo run -- --concurrency 1 --no-standings
+```
+
+The root `concurrency` config key controls the same limit. `[eval]`
+`typesafe_concurrency` continues to control the initial judge (default 8);
+`reviewer_concurrency` controls deduplicated secondary reviews (default 4).
+Progress prints during all three stages, and `run.execution` saves stage wall
+times and the scheduling policy. Replay preserves recorded request times and
+records its execution mode separately. Parallel wall-time gains are measured
+per run, not guaranteed; endpoints and network conditions can affect latency.
+
+Every saved run also creates **`feedback.html`**, a standalone local page with
+embedded results. Open `runs/<run>/feedback.html`; `src/feedback.html` is the
+source template and contains no cases. The generated page shows
+the raw input and output. Mark **可直接用 / 需要修改 / 明显改错**, optionally add a
+note or preferred wording, and export the feedback JSON (copy text or download;
+embedded previews may not support downloads). Import accepts pasted JSON or a
+local file. Model identity, latency
+and the reference wording are hidden until opened; exports record whether they
+were viewed. Identical outputs for the same case share one decision, retaining
+the identities of every underlying call. Failed calls remain visible.
+
+Drafts are saved in browser local storage; export JSON for durable storage or
+moving between browsers. Import checks the result-set identity before merging
+feedback. No server or network connection is used, and human labels do not alter
+automatic scores or standings. Keep the original HTML/results alongside the
+feedback: exported labels link to those outputs by dataset/item ID, without
+revealing hidden model names or references in the export panel. The page contains
+test transcripts and notes may contain private excerpts; keep private runs local.
+The page includes only selected result fields, never provider credentials, raw
+HTTP error bodies or the configuration.
+
+Build the page from an existing run without any configuration or API calls:
+
+```sh
+cargo run -- --feedback-results runs/<run>/results.json
+# Optional destination for the HTML page:
+cargo run -- --feedback-results runs/<run>/results.json --output /path/to/review.html
+```
+
+This iteration retains scoring version 6, its questions and all three rounds.
+The legacy edit questions remain diagnostic; the gate still affects correction
+credits and must not be removed as an allegedly unused question. Human feedback
+is collected before choosing a new rubric, sample distribution or repair-cost
+model.
+
 ## Scoring version 6
 
 Every case is worth 100 points. Average rounds within a case, then average cases

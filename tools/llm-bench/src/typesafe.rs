@@ -239,7 +239,9 @@ impl Judge {
         let mut seen = HashSet::new();
         let mut pending = asks.into_iter().filter(|ask| seen.insert(ask.key())).collect::<Vec<_>>().into_iter();
         let mut run = JudgeRun { distinct: pending.len(), ..Default::default() };
+        println!("Judge: {} distinct questions · concurrency {}", run.distinct, self.concurrency.max(1));
         let mut running = JoinSet::new();
+        let mut completed = 0;
         loop {
             while running.len() < self.concurrency.max(1) {
                 let Some(ask) = pending.next() else { break };
@@ -258,6 +260,10 @@ impl Judge {
                     run.output_tokens += output_tokens;
                 }
                 Err(error) => run.failures.push((ask.label, error)),
+            }
+            completed += 1;
+            if completed % 25 == 0 || completed == run.distinct {
+                println!("  Judge [{}/{}] · {} failed", completed, run.distinct, run.failures.len());
             }
         }
         run

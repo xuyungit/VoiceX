@@ -6,6 +6,8 @@ mod adjudicate;
 mod assessment;
 mod fidelity;
 mod scoring;
+mod scheduler;
+mod feedback;
 mod typesafe;
 
 #[path = "../../../src-tauri/src/gemini.rs"]
@@ -25,6 +27,8 @@ use typesafe::{Judge, JudgeRun, Questions};
 #[derive(Deserialize)]
 struct Config {
     rounds: Option<usize>,
+    /// Concurrent correction providers; shared service groups remain serial.
+    concurrency: Option<usize>,
     prompt: Option<String>,
     dictionary: Option<String>,
     provider: Vec<Provider>,
@@ -78,6 +82,8 @@ struct EvalConfig {
     typesafe_questions: Option<String>,
     /// Max concurrent judge calls. Default 8.
     typesafe_concurrency: Option<usize>,
+    /// Concurrent independent secondary reviews, after correction timing ends. Default 4.
+    reviewer_concurrency: Option<usize>,
 }
 
 impl EvalConfig {
@@ -119,6 +125,8 @@ struct Provider {
     #[serde(default = "default_api_mode")]
     api_mode: String,
     reasoning_effort: Option<String>,
+    /// Override the default shared-service group (URL origin); never a credential.
+    concurrency_group: Option<String>,
     /// Extra fields merged into the request body (e.g. enable_thinking = false)
     #[serde(default)]
     extra: std::collections::HashMap<String, toml::Value>,
@@ -340,7 +348,7 @@ struct AnthropicUsage {
 
 // ── Results ─────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct RoundResult {
     duration_ms: u128,
     output: String,
@@ -620,6 +628,15 @@ async fn main() {
         return;
     }
 
+    if let Some(source) = get_arg(&args, "--feedback-results") {
+        let destination = get_arg(&args, "--output");
+        match feedback::from_file(Path::new(&source), destination.as_deref().map(Path::new)) {
+            Ok(path) => println!("Feedback page: {}", path.display()),
+            Err(error) => { eprintln!("Feedback export failed: {error}"); std::process::exit(1); }
+        }
+        return;
+    }
+    let run_started = Instant::now();
     let config_path = get_arg(&args, "--config").unwrap_or("config.toml".into());
     let cases_path = get_arg(&args, "--cases").unwrap_or("test_cases.toml".into());
     let rounds_override: Option<usize> = get_arg(&args, "--rounds").and_then(|s| s.parse().ok());
@@ -640,6 +657,12 @@ async fn main() {
     }
 
     let rounds = rounds_override.or(config.rounds).unwrap_or(3);
+    let concurrency = match get_arg(&args, "--concurrency") {
+        Some(value) => value.parse::<usize>().expect("--concurrency must be a positive integer"),
+        None => config.concurrency.unwrap_or(6),
+    };
+    let reviewer_concurrency = eval_cfg.reviewer_concurrency.unwrap_or(4);
+    assert!(rounds > 0 && concurrency > 0 && reviewer_concurrency > 0, "rounds and concurrency limits must be positive");
     let prompt = config.prompt.unwrap_or_else(|| {
         eprintln!("Warning: no root `prompt` in config; using the built-in default");
         default_prompt()
@@ -886,9 +909,14 @@ async fn main() {
     }
     println!();
 
+    let correction_started = Instant::now();
+    let fresh_results = if replay.is_none() {
+        Some(run_corrections(&http, &providers, &cases.case, &prompt, &dictionary, rounds, concurrency).await)
+    } else { None };
+    let correction_wall_ms = correction_started.elapsed().as_millis();
     let mut bench_cases: Vec<CaseRecord> = Vec::new();
 
-    for (case, reference) in cases.case.iter().zip(references) {
+    for (case_index, (case, reference)) in cases.case.iter().zip(references).enumerate() {
         println!("\x1b[1;36m━━━ {} ━━━\x1b[0m", case.name);
         println!("\x1b[2mInput:\x1b[0m    {}", case.input);
         println!("\x1b[2mExpected:\x1b[0m {}", case.expected);
@@ -905,7 +933,7 @@ async fn main() {
 
         let mut case_providers: Vec<ProviderRecord> = Vec::new();
 
-        for provider in &providers {
+        for (provider_index, provider) in providers.iter().enumerate() {
             let mut records: Vec<RoundRecord> = Vec::new();
 
             let limit = correction_timeout_for_text(&case.input);
@@ -914,7 +942,7 @@ async fn main() {
                 let result = match &replay {
                     Some(source) => replay_result(source, case, provider, round_index)
                         .unwrap_or_else(|e| panic!("invalid replay: {e}")),
-                    None => run_once(&http, provider, &prompt, &dictionary, &case.input).await,
+                    None => fresh_results.as_ref().unwrap()[provider_index][case_index][round_index].clone(),
                 };
                 let analysis = result
                     .error
@@ -1091,6 +1119,7 @@ async fn main() {
         }
     }
     let needed = asks.len();
+    let judge_started = Instant::now();
     let judge_run: Option<JudgeRun> = match &judge {
         _ if needed == 0 => {
             println!(
@@ -1136,6 +1165,8 @@ async fn main() {
         }
     };
 
+    let judge_wall_ms = judge_started.elapsed().as_millis();
+
     // ── Score ───────────────────────────────────────────────────────────────
     let mut all_answers = judge_run.as_ref().map(|run| run.answers.clone())
         .unwrap_or_default();
@@ -1166,7 +1197,9 @@ async fn main() {
         }
     }
     let answers = &all_answers;
-    let mut secondary_cache: HashMap<String, fidelity::Verdict> = HashMap::new();
+    let review_started = Instant::now();
+    let secondary_cache = review_pending(&bench_cases, answers, &http, reviewer.as_ref(), reviewer_concurrency).await;
+    let reviewer_wall_ms = review_started.elapsed().as_millis();
     let mut review: Vec<String> = Vec::new();
     let mut unjudged: Vec<String> = Vec::new();
     for record in &mut bench_cases {
@@ -1213,23 +1246,8 @@ async fn main() {
                     )
                 });
                 if verdict.needs_review() {
-                    println!("  Auto-review [{}] {}", record.case.name, p.name);
-                    if let Some(cached) = secondary_cache.get(&ask.key()) {
-                        verdict.credit = cached.credit;
-                        verdict.secondary = cached.secondary.clone();
-                        verdict.evaluation_error = cached.evaluation_error.clone();
-                    } else {
-                        resolve_fidelity(
-                            &http,
-                            reviewer.as_ref(),
-                            &record.case.input,
-                            &record.case.expected,
-                            &r.result.output,
-                            &mut verdict,
-                        )
-                        .await;
-                        secondary_cache.insert(ask.key(), verdict.clone());
-                    }
+                    verdict = secondary_cache.get(&ask.key())
+                        .expect("pending fidelity review was not scheduled").clone();
                 }
                 let balanced = scoring::score(
                     &record.reference,
@@ -1628,6 +1646,18 @@ async fn main() {
                 "source_run": source_run,
                 "cases": cases_path,
                 "rounds": rounds,
+                "execution": {
+                    "mode": if replay.is_some() { "replay" } else { "live" },
+                    "correction_concurrency": concurrency,
+                    "reviewer_concurrency": reviewer_concurrency,
+                    "order": "provider_then_case_then_round",
+                    "shared_service_policy": "one_active_provider_per_group",
+                    "correction_wall_ms": correction_wall_ms,
+                    "judge_wall_ms": judge_wall_ms,
+                    "reviewer_wall_ms": reviewer_wall_ms,
+                    "wall_ms": run_started.elapsed().as_millis(),
+                    "source_execution": replay.as_ref().map(|r| &r["run"]["execution"]),
+                },
                 "scoring": SCORING_VERSION,
                 "assessment_version": assessment::VERSION,
                 "hallucination_check": "severe_confirmed_auto_review",
@@ -1680,6 +1710,8 @@ async fn main() {
             },
         });
         let json = serde_json::to_string_pretty(&payload).unwrap();
+        let feedback_path = run_dir.as_ref().map(|dir| dir.join("feedback.html"))
+            .or_else(|| output_path.as_ref().map(|p| Path::new(p).with_extension("feedback.html")));
         let results = run_dir.iter().map(|dir| dir.join(runlog::RESULTS_FILE)).chain(output_path.map(Into::into));
         for path in results {
             match std::fs::write(&path, &json) {
@@ -1687,10 +1719,100 @@ async fn main() {
                 Err(e) => eprintln!("Failed to write {}: {}", path.display(), e),
             }
         }
+        if let Some(path) = feedback_path {
+            match feedback::write(&path, &payload) {
+                Ok(()) => println!("Feedback page: {}", path.display()),
+                Err(error) => eprintln!("Feedback page failed: {error}"),
+            }
+        }
     }
+    println!("Phase timing: corrections {:.1}s · judge {:.1}s · review {:.1}s · total {:.1}s{}",
+        correction_wall_ms as f64 / 1000.0, judge_wall_ms as f64 / 1000.0,
+        reviewer_wall_ms as f64 / 1000.0, run_started.elapsed().as_secs_f64(),
+        if replay.is_some() { " (replay; saved request times unchanged)" } else { "" });
     if let Some(dir) = &run_dir {
         println!("Run log: {}", dir.join(runlog::REPORT_FILE).display());
     }
+}
+
+fn service_group(provider: &Provider) -> String {
+    if let Some(group) = &provider.concurrency_group {
+        assert!(!group.trim().is_empty(), "concurrency_group must not be empty");
+        return format!("explicit:{}", group.trim());
+    }
+    let url = reqwest::Url::parse(&provider.base_url).expect("provider base_url must be an absolute URL");
+    assert!(matches!(url.scheme(), "http" | "https") && url.host_str().is_some(), "provider base_url must be HTTP(S)");
+    url.origin().ascii_serialization()
+}
+
+async fn run_corrections(
+    http: &Client, providers: &[Provider], cases: &[TestCase], prompt: &str,
+    dictionary: &str, rounds: usize, concurrency: usize,
+) -> Vec<Vec<Vec<RoundResult>>> {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let jobs: Vec<_> = providers.iter().map(|p| (service_group(p), p.clone())).collect();
+    let groups = jobs.iter().map(|(g, _)| g).collect::<std::collections::HashSet<_>>().len();
+    let total = providers.len() * cases.len() * rounds;
+    println!("Corrections: {total} calls · {} independent service groups · concurrency {concurrency}", groups);
+    println!("Each provider runs its cases/rounds serially; queue time is excluded from request latency.");
+    let http = http.clone();
+    let cases = Arc::new(cases.to_vec());
+    let prompt = Arc::new(prompt.to_string());
+    let dictionary = Arc::new(dictionary.to_string());
+    let completed = Arc::new(AtomicUsize::new(0));
+    scheduler::run(jobs, concurrency, move |provider| {
+        let (http, cases, prompt, dictionary, completed) =
+            (http.clone(), cases.clone(), prompt.clone(), dictionary.clone(), completed.clone());
+        async move {
+            let mut outputs = Vec::new();
+            for case in cases.iter() {
+                let mut records = Vec::new();
+                for round in 0..rounds {
+                    let result = run_once(&http, &provider, &prompt, &dictionary, &case.input).await;
+                    let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    println!("  [{done}/{total}] {} · {} · round {}: {} ms{}",
+                        provider.name, case.name, round + 1, result.duration_ms,
+                        if result.error.is_some() { " FAILED" } else { "" });
+                    records.push(result);
+                }
+                outputs.push(records);
+            }
+            outputs
+        }
+    }).await
+}
+
+async fn review_pending(
+    cases: &[CaseRecord], answers: &Answers, http: &Client, reviewer: Option<&Provider>,
+    concurrency: usize,
+) -> HashMap<String, fidelity::Verdict> {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let mut seen = std::collections::HashSet::new();
+    let mut jobs = Vec::new();
+    for c in cases {
+        for r in c.providers.iter().flat_map(|p| &p.rounds).filter(|r| r.result.error.is_none()) {
+            let ask = fidelity::ask_with_reference(&c.case.input, &c.case.expected, &r.result.output);
+            let key = ask.key();
+            let verdict = r.fidelity.clone().unwrap_or_else(||
+                fidelity::check(&c.case.input, &r.result.output, None, answers.get(&key)));
+            if verdict.needs_review() && seen.insert(key.clone()) {
+                jobs.push((key.clone(), (key, c.case.input.clone(), c.case.expected.clone(), r.result.output.clone(), verdict)));
+            }
+        }
+    }
+    let total = jobs.len();
+    println!("Secondary review: {total} distinct outputs · concurrency {concurrency}");
+    let (http, reviewer) = (http.clone(), reviewer.cloned());
+    let completed = Arc::new(AtomicUsize::new(0));
+    scheduler::run(jobs, concurrency, move |(key, input, reference, output, mut verdict)| {
+        let (http, reviewer, completed) = (http.clone(), reviewer.clone(), completed.clone());
+        async move {
+            resolve_fidelity(&http, reviewer.as_ref(), &input, &reference, &output, &mut verdict).await;
+            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            println!("  Review [{done}/{total}] {}", if verdict.evaluation_error.is_some() { "FAILED" } else { "done" });
+            (key, verdict)
+        }
+    }).await.into_iter().collect()
 }
 
 /// The judge settles what code cannot: is this other word the speaker's word, did this unrequested change do harm.
@@ -2734,6 +2856,8 @@ fn print_usage() {
     );
     eprintln!("  --finalize-results <path> Resolve saved pending hallucination checks; retain base scores/timings");
     eprintln!("  --rounds <n>       Override number of rounds per test");
+    eprintln!("  --concurrency <n>  Concurrent providers (default 6); shared URL origins run serially");
+    eprintln!("  --feedback-results <path> Build a local feedback page from saved results; no API calls");
     eprintln!("  --output <path>    Write a copy of the detailed results JSON here as well");
     eprintln!("  --log-dir <path>   Where each run keeps its report.log (the console output) and results.json,");
     eprintln!("                     in a directory named after the start time (default: runs)");
@@ -3474,6 +3598,19 @@ mod tests {
     }
 
     #[test]
+    fn service_groups_share_url_origins_and_allow_explicit_quota_groups() {
+        let make = |url: &str, group: Option<&str>| -> Provider {
+            serde_json::from_value(serde_json::json!({
+                "name": "test", "base_url": url, "api_key": "unused", "model": "test",
+                "concurrency_group": group,
+            })).unwrap()
+        };
+        assert_eq!(service_group(&make("https://example.com/v1", None)), service_group(&make("https://example.com/another/v2", None)));
+        assert_ne!(service_group(&make("https://example.com/v1", None)), service_group(&make("https://other.example/v1", None)));
+        assert_eq!(service_group(&make("https://example.com/v1", Some("shared"))), service_group(&make("https://other.example/v1", Some("shared"))));
+    }
+
+    #[test]
     fn anthropic_body_is_native_messages_without_sampling() {
         let plain =
             build_anthropic_request_body(&bench_provider("anthropic", None, &[]), "s", "u").unwrap();
@@ -3543,6 +3680,7 @@ mod tests {
         extra: &[(&str, toml::Value)],
     ) -> Provider {
         Provider {
+            concurrency_group: None,
             name: "t".into(),
             base_url: "https://example.test/v1".into(),
             api_key: "k".into(),

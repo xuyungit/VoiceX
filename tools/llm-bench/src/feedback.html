@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>听写结果复核 · VoiceX</title>
+<style>
+:root{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:#222d31;background:#f4f5f2;line-height:1.6;color-scheme:light}
+*{box-sizing:border-box}body{margin:0}main{max-width:1120px;margin:40px auto;padding:0 24px 60px}h1{font-size:30px;letter-spacing:-1px;margin:6px 0}h2{font-size:15px;color:#536068;margin:0 0 16px;font-weight:500}p{margin:8px 0}.subtle{color:#647178;font-size:14px}.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:24px 0 12px}button,select{font:inherit;font-size:14px;background:white;border:1px solid #c5cdca;border-radius:7px;padding:8px 13px;color:inherit;cursor:pointer}button:hover{border-color:#1d736b}button:disabled{opacity:.45;cursor:default}button:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #7dbdb4;outline-offset:2px}.primary{background:#155e56;color:white;border-color:#155e56}.progress{height:4px;background:#dce3df;margin:20px 0}.progress span{display:block;height:100%;background:#238276;width:0}#status{min-height:25px}.comparison{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin:24px 0}.panel{background:white;padding:24px;border:1px solid #dde2de;border-radius:9px}.transcript{white-space:pre-wrap;overflow-wrap:anywhere;font-size:17px;line-height:1.9}.choices{display:flex;gap:10px;flex-wrap:wrap}.choices button{padding:11px 18px}.choices button[aria-pressed=true]{background:#d9ede6;border:2px solid #246e59;padding:10px 17px}.choices button[data-value=dangerous][aria-pressed=true]{background:#fbe3df;border-color:#aa4334}.note{display:block;margin-top:20px}textarea{display:block;width:100%;min-height:80px;margin-top:8px;border:1px solid #c5cdca;border-radius:7px;padding:12px;font:inherit;resize:vertical;background:white}details{margin:18px 0}.navigation{display:flex;justify-content:space-between;gap:12px;margin-top:24px}#notice{color:#934b20}#error{color:#a12e23;font-weight:600}.hidden{display:none!important}#identity{white-space:pre-wrap;font-size:14px}.summary{font-size:14px;color:#536068}@media(max-width:720px){main{margin-top:20px;padding:0 16px 40px}.comparison{grid-template-columns:1fr;gap:12px}.panel{padding:18px}h1{font-size:26px}}
+</style>
+<main>
+<p class="subtle">VoiceX · 本地复核</p>
+<h1>这段文字，你会直接使用吗？</h1>
+<p class="subtle">先看原文和输出，再判断是否需要修改。等义、自然的不同写法可以接受；疑问、否定和重要信息需要保留。</p>
+<div class="toolbar" id="review-toolbar">
+<label>用例 <select id="case-filter"><option value="">全部用例</option></select></label>
+<label>范围 <select id="review-filter"><option value="all">全部结果</option><option value="pending">尚未评价</option><option value="reviewed">已经评价</option></select></label>
+<button id="export" class="primary">导出反馈</button><button id="import">导入反馈</button><input class="hidden" id="file" type="file" accept="application/json,.json">
+</div>
+<section id="transfer" class="panel hidden" aria-label="反馈 JSON">
+<p id="transfer-help"></p><label>反馈 JSON<textarea id="transfer-json" spellcheck="false"></textarea></label>
+<div class="toolbar"><button id="select-json">全选文本</button><button id="download-json">下载 JSON 文件</button><button id="load-file" class="hidden">选择 JSON 文件</button><button id="apply-import" class="hidden">确认导入</button><button id="close-transfer">关闭</button></div>
+</section>
+<p id="status" aria-live="polite"></p><div class="progress"><span id="bar"></span></div>
+<p id="summary" class="summary"></p><p id="notice" class="subtle"></p><p id="error" role="alert"></p>
+<section id="review">
+<div class="comparison"><article class="panel"><h2>原始转写</h2><div id="input" class="transcript"></div></article><article class="panel"><h2>整理结果</h2><div id="output" class="transcript"></div></article></div>
+<div id="choices" class="choices" role="group" aria-label="评价结果">
+<button data-value="usable" aria-pressed="false">可直接用</button><button data-value="needs_fix" aria-pressed="false">需要修改</button><button data-value="dangerous" aria-pressed="false">明显改错</button><button id="clear">撤销评价</button>
+</div>
+<p class="subtle">需要修改：还有漏改或表达问题。明显改错：重要信息、实体、否定或意图被改变。拿不准时留空，并写下原因。</p>
+<label class="note">备注或你想采用的写法（选填）<textarea id="note" placeholder="例如：这里仍然是在询问，不能改成确定的决定。"></textarea></label>
+<details id="reference-details"><summary>查看参考写法（不是唯一正确答案）</summary><div id="reference" class="transcript"></div></details>
+<details id="identity-details"><summary>查看模型与耗时（默认隐藏，减少先入为主）</summary><div id="identity"></div></details>
+<div class="navigation"><button id="previous">上一条</button><button id="next">下一条</button></div>
+</section>
+<p class="subtle" style="margin-top:32px">同一用例的相同输出合并评价，反馈仍关联每次原始调用。标签和备注只保存在本机浏览器，并可导出 JSON；不会改变 bench 排名，也不会上传。此文件包含测试原文，分享前请先检查内容。</p>
+</main>
+<script id="bench-data" type="application/json">__BENCH_DATA__</script>
+<script>
+'use strict';
+(()=>{
+const $=id=>document.getElementById(id), labels={usable:'可直接用',needs_fix:'需要修改',dangerous:'明显改错'};
+let data;
+try{
+ const embedded=$('bench-data').textContent.trim();
+ if(embedded==='__BENCH_DATA__')throw Error('这是源码模板，尚未包含用例。请打开本次运行目录 runs/<运行时间>/feedback.html；已有 results.json 时，可用 llm-bench --feedback-results <results.json路径> 生成复核页。');
+ data=JSON.parse(embedded);
+ if(!Array.isArray(data.items)||data.items.length===0||typeof data.dataset_id!=='string')throw Error('页面没有有效的用例数据，请从本次运行的 results.json 重新生成复核页。');
+}catch(e){
+ $('status').textContent='用例未加载';$('error').textContent=e.message;
+ $('review-toolbar').classList.add('hidden');$('review').classList.add('hidden');document.querySelector('.progress').classList.add('hidden');
+ return;
+}
+const storageKey='voicex-bench-feedback-v1:'+data.dataset_id;
+let decisions={},position=0,currentId=null;
+const itemIds=new Set(data.items.map(x=>x.id));
+function validate(entries){
+ if(!entries||typeof entries!=='object'||Array.isArray(entries))throw Error('反馈条目格式不正确');
+ const result={};
+ for(const [id,v] of Object.entries(entries)){
+  if(!itemIds.has(id)||!v||typeof v!=='object'||!(v.label===null||Object.hasOwn(labels,v.label))||typeof v.note!=='string'||typeof v.reference_seen!=='boolean'||typeof v.identity_seen!=='boolean')throw Error('反馈包含未知条目或无效标签');
+  result[id]={label:v.label,note:v.note,reference_seen:v.reference_seen,identity_seen:v.identity_seen};
+ }
+ return result;
+}
+try{const saved=localStorage.getItem(storageKey);if(saved)decisions=validate(JSON.parse(saved));}catch(e){$('notice').textContent='未能读取本地草稿：'+e.message+'。可以使用导入和导出保留反馈。';}
+for(const name of new Set(data.items.map(x=>x.case))){const o=document.createElement('option');o.value=name;o.textContent=name;$('case-filter').append(o);}
+function selection(){return data.items.filter(x=>(!$('case-filter').value||x.case===$('case-filter').value)&&($('review-filter').value==='all'||($('review-filter').value==='reviewed'?!!decisions[x.id]?.label:!decisions[x.id]?.label)));}
+function save(){try{localStorage.setItem(storageKey,JSON.stringify(decisions));}catch(e){$('notice').textContent='浏览器未能保存草稿，请导出反馈文件：'+e.message;}}
+function entry(){return decisions[currentId]??{label:null,note:'',reference_seen:false,identity_seen:false};}
+function summary(){const reviewed=Object.values(decisions).filter(x=>x.label).length;$('bar').style.width=(100*reviewed/data.items.length)+'%';$('summary').textContent=Object.entries(labels).map(([k,v])=>v+' '+Object.values(decisions).filter(x=>x.label===k).length).join(' · ')+' · '+data.call_count+' 次原始调用';return reviewed;}
+function render(){
+ const rows=selection();position=Math.max(0,Math.min(position,rows.length-1));const x=rows[position];const reviewed=summary();
+ $('review').classList.toggle('hidden',!x);$('status').textContent='已评价 '+reviewed+' / '+data.items.length+' 条不同输出'+(x?' · 当前 '+(position+1)+' / '+rows.length+' · '+x.case:' · 当前筛选下没有结果');
+ if(!x){currentId=null;return;}currentId=x.id;
+ $('input').textContent=x.input;$('output').textContent=x.call_failed?'调用失败，没有交付可用结果。':x.output||'（返回了空文本）';
+ $('reference').textContent=x.expected;
+ $('identity').textContent=x.calls.map(c=>c.provider+' · '+c.model+' · 第 '+(c.round_index+1)+' 轮 · '+c.duration_ms+' ms').join('\n');
+ $('note').value=entry().note;
+ document.querySelectorAll('[data-value]').forEach(b=>b.setAttribute('aria-pressed',String(entry().label===b.dataset.value)));
+ $('reference-details').open=false;$('identity-details').open=false;
+ $('previous').disabled=position===0;$('next').disabled=position===rows.length-1;
+}
+document.querySelectorAll('[data-value]').forEach(b=>b.addEventListener('click',()=>{if(!currentId)return;decisions[currentId]={...entry(),label:b.dataset.value};save();render();}));
+$('clear').addEventListener('click',()=>{if(!currentId)return;decisions[currentId]={...entry(),label:null};save();render();});
+$('note').addEventListener('input',()=>{if(!currentId)return;decisions[currentId]={...entry(),note:$('note').value};save();});
+for(const [id,key] of [['reference-details','reference_seen'],['identity-details','identity_seen']])$(id).addEventListener('toggle',()=>{if($(id).open&&currentId){decisions[currentId]={...entry(),[key]:true};save();}});
+for(const id of ['case-filter','review-filter'])$(id).addEventListener('change',()=>{position=0;render();});
+$('previous').addEventListener('click',()=>{position--;render();});$('next').addEventListener('click',()=>{position++;render();});
+function transfer(mode){
+ const exporting=mode==='export';$('transfer').classList.remove('hidden');$('transfer-json').readOnly=exporting;
+ $('download-json').classList.toggle('hidden',!exporting);$('load-file').classList.toggle('hidden',exporting);$('apply-import').classList.toggle('hidden',exporting);
+ $('transfer-help').textContent=exporting?'可全选复制以下 JSON，或下载文件保存。部分内嵌预览器不支持文件下载。':'粘贴之前导出的 JSON，然后确认导入；也可以选择本机文件。';
+}
+$('export').addEventListener('click',()=>{
+ const payload={version:1,dataset_id:data.dataset_id,recorded_at:data.recorded_at,exported_at:new Date().toISOString(),labels,decisions};
+ transfer('export');$('transfer-json').value=JSON.stringify(payload,null,2);
+});
+$('download-json').addEventListener('click',()=>{
+ const blob=new Blob([$('transfer-json').value],{type:'application/json'});const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='feedback-'+data.dataset_id+'.json';a.hidden=true;document.body.append(a);a.click();setTimeout(()=>{a.remove();URL.revokeObjectURL(url);},1000);
+});
+$('select-json').addEventListener('click',()=>$('transfer-json').select());
+$('close-transfer').addEventListener('click',()=>$('transfer').classList.add('hidden'));
+$('import').addEventListener('click',()=>{transfer('import');$('transfer-json').value='';});
+$('load-file').addEventListener('click',()=>$('file').click());
+function importFeedback(text){
+ try{const imported=JSON.parse(text);if(imported.version!==1||imported.dataset_id!==data.dataset_id)throw Error('该反馈属于另一份运行结果');const entries=validate(imported.decisions);decisions={...decisions,...entries};save();$('error').textContent='';$('transfer').classList.add('hidden');render();}catch(e){$('error').textContent='导入失败：'+e.message;}
+}
+$('apply-import').addEventListener('click',()=>importFeedback($('transfer-json').value));
+$('file').addEventListener('change',async()=>{
+ try{const f=$('file').files[0];if(f)importFeedback(await f.text());}catch(e){$('error').textContent='导入失败：'+e.message;}finally{$('file').value='';}
+});
+render();
+})();
+</script>
+</html>

@@ -34,8 +34,7 @@ macro_rules! println {
     ($($arg:tt)*) => {{
         let text = ::std::format!($($arg)*);
         ::std::println!("{}", text);
-        $crate::runlog::record(&text);
-        $crate::runlog::record("\n");
+        $crate::runlog::record(&::std::format!("{}\n", text));
     }};
 }
 
@@ -55,8 +54,7 @@ macro_rules! eprintln {
     ($($arg:tt)*) => {{
         let text = ::std::format!($($arg)*);
         ::std::eprintln!("{}", text);
-        $crate::runlog::record(&text);
-        $crate::runlog::record("\n");
+        $crate::runlog::record(&::std::format!("{}\n", text));
     }};
 }
 
