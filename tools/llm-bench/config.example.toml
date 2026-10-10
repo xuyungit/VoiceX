@@ -8,9 +8,10 @@
 # Global settings
 rounds = 3  # Number of rounds per provider per test case
 concurrency = 6  # Independent correction providers in flight; --concurrency overrides this
-# Providers with the same base URL origin share one lane. Set concurrency_group
-# on individual [[provider]] entries to describe a shared quota across origins,
-# or separate genuinely independent services. Do not use credentials as group names.
+# Providers with the same model at the same base URL origin share one lane; other
+# models of one platform run in parallel (Ark and Gemini limit each model). Set the
+# same concurrency_group on [[provider]] entries that share one quota. Do not use
+# credentials as group names. The slowest provider of the newest saved run starts first.
 
 # System prompt. This is the app's default correction prompt (src/utils/llmPrompts.ts).
 # If you changed the prompt in the app, paste that one here: the bench ranks models

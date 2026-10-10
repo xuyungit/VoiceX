@@ -7,11 +7,20 @@ standings are ignored by Git. Each run saves `report.log` and `results.json`.
 ## Parallel runs and local feedback
 
 Correction calls now run across independent services, with six provider workers
-by default. Each provider's cases and rounds stay serial, and providers sharing
-the same URL origin take turns. Override a shared quota/routing group with
-`concurrency_group = "service-name"` inside a `[[provider]]` entry. Different
-origins behind one rate limit should use the same group. Queue time is excluded
-from request latency; saved case/provider/round ordering remains unchanged.
+by default. Each provider's cases and rounds stay serial, and providers with the
+same model at the same URL origin take turns. Different models of one platform
+run side by side: Ark and Gemini limit requests per account and model, so they do
+not share a quota. Join providers that do share one with
+`concurrency_group = "service-name"` inside their `[[provider]]` entries. Queue
+time is excluded from request latency; saved case/provider/round ordering remains
+unchanged.
+
+The slowest provider of the newest saved run under `--log-dir` starts first, and
+a provider that run did not have starts before it. The stage lasts at least as
+long as its slowest provider, so that one should not start last. On the
+2026-10-10 run this ordering and per-model groups take the simulated correction
+stage from 149 s to about 109 s. `run.execution.start_order` records which run
+the order came from.
 
 ```sh
 cargo run -- --concurrency 6
@@ -106,6 +115,15 @@ weight_latency = 0.10
 Old dictionary/semantic/basic/cloud/quality/success weight keys are rejected with
 migration guidance. This prevents silently reusing the old effective dictionary
 weight of 50%. `Able#` ranks quality alone; `Fast#` ranks successful-call latency.
+
+Two columns show how far a place can be trusted. They report 90% of 2000
+redraws of the run's rounds. **Rerun** keeps the cases and redraws each model's
+rounds: where the model lands if the run is repeated. **Case mix** also redraws
+the cases, the same draw for every model: where it lands on a similar set of
+cases. Overlapping ranges are places the run cannot tell apart. A wide Case mix
+range means the place rests on a few cases: on 2026-10-10 GPT-6-luna was 1–4 on
+a rerun but 1–15 on the case mix, because the late-qualifier case alone lifts it.
+Both are reporting only and are saved as `place_90_rerun` / `place_90_case_mix`.
 The speed timeout matches the app: 10 seconds up to 120 characters, multiplied by
 1.5 per doubling (rounded up), at most 60 seconds. Judge time is excluded.
 
@@ -160,13 +178,18 @@ TypeSafe receives. A question field with no Decisions counterpart stops the run 
 setup instead of being dropped. Answers come back in TypeSafe's shape and pass the
 same completeness checks; a refusal is a judge failure. `typesafe_questions` and
 `typesafe_concurrency` apply to either judge. `results.json` records
-`judge.model` and `judge.backend`.
+`judge.model`, `judge.backend` and `judge.reported_models`: the versions the
+service says answered (`jev-latest` currently answers as `jev-1.13.0`). More
+than one version in a run means it was judged by mixed versions.
 
 To compare judges on identical outputs, keep the saved outputs and let the other
 judge answer everything: `--replay runs/<run>/results.json --no-standings`.
 `--rescore-results` and `--finalize-results` keep the saved run's correction
 credits, so they refuse a judge model other than the one that judged the run.
-Standings record no judge, so keep `--no-standings` while comparing judges.
+Standings record each run's judge, and every judge has its own season: a
+Decisions run never counts in the TypeSafe standings, nor replaces the TypeSafe
+entry of the same source. Runs recorded before this count as TypeSafe, which
+judged all of them.
 
 On 2026-10-10 the current rubric, written and calibrated for JEV, gave these results on the same probes:
 
@@ -258,6 +281,7 @@ Finalization validates the saved rubric and fidelity threshold, writes a new
 artifact and records all models in standings. The original source identity is
 retained across rescoring/finalization, so repeat recording replaces its entry
 instead of awarding twice. Version 6 starts a separate season; old runs remain.
+A season is one scoring version under one judge (`typesafe`, `openai-decisions`).
 
 Verify numerical aggregation and preserved evidence offline:
 

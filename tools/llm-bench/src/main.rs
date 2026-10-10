@@ -10,6 +10,7 @@ mod scheduler;
 mod feedback;
 mod decisions;
 mod typesafe;
+mod uncertainty;
 
 #[path = "../../../src-tauri/src/gemini.rs"]
 mod gemini;
@@ -19,7 +20,7 @@ use adjudicate::{Analysis, Answers, Ask, Pin, Reference, Scored, Tier};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use typesafe::{Backend, Judge, JudgeRun, Questions};
 
@@ -127,7 +128,7 @@ struct Provider {
     #[serde(default = "default_api_mode")]
     api_mode: String,
     reasoning_effort: Option<String>,
-    /// Override the default shared-service group (URL origin); never a credential.
+    /// Override the default shared-service group (URL origin plus model); never a credential.
     concurrency_group: Option<String>,
     /// Extra fields merged into the request body (e.g. enable_thinking = false)
     #[serde(default)]
@@ -555,11 +556,25 @@ struct StandingRun {
     ranking: Vec<RunPlace>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_run: Option<String>,
+    /// Which judge settled the run's verdicts (`Backend::name`, or `none`). Absent on runs recorded before it was
+    /// kept, which were all judged by TypeSafe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    judge: Option<String>,
+    /// The model versions the judge reported, e.g. `jev-1.13.0`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    judge_models: Vec<String>,
 }
 
-/// The runs the season standings are computed from: those placed under the current rules.
-fn season_runs(runs: &[StandingRun]) -> Vec<StandingRun> {
-    runs.iter().filter(|run| run.scoring == SCORING_VERSION).cloned().collect()
+impl StandingRun {
+    fn judge(&self) -> &str {
+        self.judge.as_deref().unwrap_or("typesafe")
+    }
+}
+
+/// The runs the season standings are computed from: those placed under the current rules by the same judge. Two
+/// judges give the same outputs different verdicts, and a place won under one says nothing about the other.
+fn season_runs(runs: &[StandingRun], judge: &str) -> Vec<StandingRun> {
+    runs.iter().filter(|run| run.scoring == SCORING_VERSION && run.judge() == judge).cloned().collect()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -804,7 +819,7 @@ async fn main() {
             );
             rows.push(serde_json::json!({ "probe": p, "verdict": verdict }));
         }
-        let payload = serde_json::json!({ "judge": judge.model, "rubric": &judge.questions,
+        let payload = serde_json::json!({ "judge": judge.model, "reported_models": run.reported_models, "rubric": &judge.questions,
             "results": rows, "failures": run.failures, "distinct_questions": run.distinct });
         if let Some(path) = output_path {
             std::fs::write(&path, serde_json::to_string_pretty(&payload).unwrap())
@@ -834,7 +849,7 @@ async fn main() {
             println!("{}: {} readability={:.3} style={:.3}", p.name, if passed { "PASS" } else { "FAIL" }, grades[0].credit, grades[1].credit);
             serde_json::json!({"probe": p, "readability": grades[0], "style": grades[1], "passed": passed})
         }).collect();
-        let payload = serde_json::json!({"model": judge.model, "rubric": judge.questions, "questions": run.distinct, "failures": run.failures, "rows": rows});
+        let payload = serde_json::json!({"model": judge.model, "reported_models": run.reported_models, "rubric": judge.questions, "questions": run.distinct, "failures": run.failures, "rows": rows});
         if let Some(path) = output_path {
             std::fs::write(&path, serde_json::to_string_pretty(&payload).unwrap())
                 .expect("cannot save quality probes");
@@ -917,9 +932,14 @@ async fn main() {
     }
     println!();
 
+    let previous = if replay.is_none() { previous_call_ms(Path::new(&log_dir), run_dir.as_deref()) } else { None };
+    if let Some((path, _)) = &previous {
+        println!("Start order: slowest first, by call times in {}", path.display());
+    }
     let correction_started = Instant::now();
     let fresh_results = if replay.is_none() {
-        Some(run_corrections(&http, &providers, &cases.case, &prompt, &dictionary, rounds, concurrency).await)
+        Some(run_corrections(&http, &providers, &cases.case, &prompt, &dictionary, rounds, concurrency,
+            previous.as_ref().map(|(_, ms)| ms)).await)
     } else { None };
     let correction_wall_ms = correction_started.elapsed().as_millis();
     let mut bench_cases: Vec<CaseRecord> = Vec::new();
@@ -1158,12 +1178,13 @@ async fn main() {
             );
             let run = j.ask_all(asks).await;
             println!(
-                "  {} verdicts needed the judge · {} distinct questions · {} failed · tokens: {} in / {} out",
+                "  {} verdicts needed the judge · {} distinct questions · {} failed · tokens: {} in / {} out · answered by {}",
                 needed,
                 run.distinct,
                 run.failures.len(),
                 run.input_tokens,
-                run.output_tokens
+                run.output_tokens,
+                if run.reported_models.is_empty() { "(not reported)".to_string() } else { run.reported_models.iter().cloned().collect::<Vec<_>>().join(", ") }
             );
             for (question, error) in &run.failures {
                 println!("  \x1b[31m✗\x1b[0m {} — {}", question, error);
@@ -1457,6 +1478,7 @@ async fn main() {
 
     // ── Ranking ─────────────────────────────────────────────────────────────
     let ranked = rank_balanced_providers(&aggregated, &eval_cfg);
+    let place_ranges = place_ranges(&ranked, &bench_cases, eval_cfg.balanced_weights());
     let assessments: HashMap<_, _> = ranked.iter().map(|r| (r.name.clone(), assessment::for_model(r, &bench_cases, eval_cfg.balanced_weights()))).collect();
 
     println!(
@@ -1473,10 +1495,12 @@ async fn main() {
     }
 
     println!(
-        "  {:>3}  {:<width$}  {:>10}  {:>8}  {:>5}  {:>5}  {:>10}  {:>8}  {:>6}  {:>8}  {:>19}",
+        "  {:>3}  {:<width$}  {:>10}  {:>9}  {:>12}  {:>8}  {:>5}  {:>5}  {:>10}  {:>8}  {:>6}  {:>8}  {:>19}",
         "#",
         "Provider",
         "Composite",
+        "Rerun 90%",
+        "Case mix 90%",
         "Ability",
         "Able#",
         "Fast#",
@@ -1488,10 +1512,12 @@ async fn main() {
         width = name_width
     );
     println!(
-        "  {:>3}  {:<width$}  {:>10}  {:>8}  {:>5}  {:>5}  {:>10}  {:>8}  {:>6}  {:>8}  {:>19}",
+        "  {:>3}  {:<width$}  {:>10}  {:>9}  {:>12}  {:>8}  {:>5}  {:>5}  {:>10}  {:>8}  {:>6}  {:>8}  {:>19}",
         "─".repeat(3),
         "─".repeat(name_width),
         "──────────",
+        "─────────",
+        "────────────",
         "────────",
         "─────",
         "─────",
@@ -1505,10 +1531,12 @@ async fn main() {
 
     for (i, r) in ranked.iter().enumerate() {
         println!(
-            "  {:>3}  {:<width$}  {:>10}  {:>8.1}  {:>5}  {:>5}  {:>10}  {:>8}  {:>6}  {:>8}  {:>19}",
+            "  {:>3}  {:<width$}  {:>10}  {:>9}  {:>12}  {:>8.1}  {:>5}  {:>5}  {:>10}  {:>8}  {:>6}  {:>8}  {:>19}",
             i + 1,
             r.name,
             format!("{:.1}{}", r.composite, if r.unjudged > 0 { "*" } else { " " }),
+            place_ranges.as_ref().map_or("-".to_string(), |[rerun, _]| format_places(rerun[i])),
+            place_ranges.as_ref().map_or("-".to_string(), |[_, mix]| format_places(mix[i])),
             r.ability,
             r.ability_rank,
             r.speed_rank.map(|n| n.to_string()).unwrap_or_else(|| "-".into()),
@@ -1518,6 +1546,12 @@ async fn main() {
             r.avg_ms,
             format!("{}/{} H{} E{}", r.hallucination.clear + r.hallucination.severe + r.hallucination.evaluation_failed, r.hallucination.clear + r.hallucination.severe + r.hallucination.evaluation_failed + r.hallucination.pending, r.hallucination.severe, r.evaluation_failures),
             width = name_width
+        );
+    }
+    if place_ranges.is_some() {
+        println!(
+            "  Places in {:.0}% of {} redraws. Rerun: the same {} cases, rounds redrawn. Case mix: the cases redrawn too. Overlapping ranges are places this run cannot tell apart.",
+            uncertainty::COVERAGE * 100.0, uncertainty::RESAMPLES, bench_cases.len()
         );
     }
     println!();
@@ -1553,8 +1587,10 @@ async fn main() {
 
     if !skip_standings && !ranked.is_empty() {
         let lens = StandingLens::from_eval(&eval_cfg);
-        match update_standings(&standings_path, lens, &ranked, source_run.clone()) {
-            Ok(file) => print_standings(&file, name_width),
+        let judge_name = judge.as_ref().map(|j| j.backend.name()).unwrap_or("none");
+        let judge_models = judge_run.iter().flat_map(|run| run.reported_models.iter().cloned()).collect();
+        match update_standings(&standings_path, lens, &ranked, source_run.clone(), judge_name, judge_models) {
+            Ok(file) => print_standings(&file, name_width, judge_name),
             Err(e) => eprintln!("Failed to update {}: {}", standings_path, e),
         }
     }
@@ -1617,6 +1653,8 @@ async fn main() {
                     "assessment": assessments[&r.name].sentence,
                     "assessment_evidence": assessments[&r.name].evidence,
                     "composite": r.composite,
+                    "place_90_rerun": place_ranges.as_ref().map(|[rerun, _]| [rerun[i].0, rerun[i].1]),
+                    "place_90_case_mix": place_ranges.as_ref().map(|[_, mix]| [mix[i].0, mix[i].1]),
                     "ability": r.ability,
                     "ability_rank": r.ability_rank,
                     "speed_rank": r.speed_rank,
@@ -1660,6 +1698,9 @@ async fn main() {
                     "reviewer_concurrency": reviewer_concurrency,
                     "order": "provider_then_case_then_round",
                     "shared_service_policy": "one_active_provider_per_group",
+                    "default_service_group": "url_origin_and_model",
+                    "start_order": if previous.is_some() { "slowest_previous_first" } else { "configured" },
+                    "start_order_source": previous.as_ref().map(|(path, _)| path.display().to_string()),
                     "correction_wall_ms": correction_wall_ms,
                     "judge_wall_ms": judge_wall_ms,
                     "reviewer_wall_ms": reviewer_wall_ms,
@@ -1704,6 +1745,7 @@ async fn main() {
             "judge": {
                 "model": judge.as_ref().map(|j| j.model.as_str()),
                 "backend": judge.as_ref().map(|j| j.backend.name()),
+                "reported_models": judge_run.as_ref().map(|run| &run.reported_models),
                 "rubric": judge.as_ref().map(|j| &j.questions),
                 "ran": judge_run.is_some(),
                 "verdicts_needed": needed,
@@ -1744,6 +1786,9 @@ async fn main() {
     }
 }
 
+/// Providers in one group take turns. By default a group is one model at one URL origin: Ark, Gemini and OpenAI
+/// limit requests per model, so two models of one platform do not compete for a quota. `concurrency_group` joins
+/// providers that do share one.
 fn service_group(provider: &Provider) -> String {
     if let Some(group) = &provider.concurrency_group {
         assert!(!group.trim().is_empty(), "concurrency_group must not be empty");
@@ -1751,15 +1796,57 @@ fn service_group(provider: &Provider) -> String {
     }
     let url = reqwest::Url::parse(&provider.base_url).expect("provider base_url must be an absolute URL");
     assert!(matches!(url.scheme(), "http" | "https") && url.host_str().is_some(), "provider base_url must be HTTP(S)");
-    url.origin().ascii_serialization()
+    format!("{}#{}", url.origin().ascii_serialization(), provider.model)
+}
+
+/// Total call time per provider in the newest saved run under `log_dir`, other than `current`. The stage lasts at
+/// least as long as its slowest provider, so that one should not start last.
+fn previous_call_ms(log_dir: &Path, current: Option<&Path>) -> Option<(PathBuf, HashMap<String, u128>)> {
+    let mut saved: Vec<PathBuf> = std::fs::read_dir(log_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|dir| Some(dir.as_path()) != current)
+        .map(|dir| dir.join(runlog::RESULTS_FILE))
+        .filter(|path| path.is_file())
+        .collect();
+    saved.sort(); // run directories are named by their start time
+    let path = saved.pop()?;
+    let results = std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).map_err(|e| e.to_string()));
+    let results = match results {
+        Ok(results) => results,
+        Err(e) => {
+            println!("Start order: configured ({} is unreadable: {})", path.display(), e);
+            return None;
+        }
+    };
+    let mut totals = HashMap::new();
+    for case in results["cases"].as_array().into_iter().flatten() {
+        if let (Some(name), Some(rounds)) = (case["provider"].as_str(), case["rounds"].as_array()) {
+            let ms: u64 = rounds.iter().filter_map(|r| r["duration_ms"].as_u64()).sum();
+            *totals.entry(name.to_string()).or_insert(0) += ms as u128;
+        }
+    }
+    (!totals.is_empty()).then_some((path, totals))
+}
+
+/// Provider indexes, slowest in `previous` first; a provider it does not know goes first, otherwise config order.
+fn start_order(providers: &[Provider], previous: Option<&HashMap<String, u128>>) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..providers.len()).collect();
+    if let Some(previous) = previous {
+        order.sort_by_key(|&i| std::cmp::Reverse(previous.get(&providers[i].name).copied().unwrap_or(u128::MAX)));
+    }
+    order
 }
 
 async fn run_corrections(
     http: &Client, providers: &[Provider], cases: &[TestCase], prompt: &str,
-    dictionary: &str, rounds: usize, concurrency: usize,
+    dictionary: &str, rounds: usize, concurrency: usize, previous: Option<&HashMap<String, u128>>,
 ) -> Vec<Vec<Vec<RoundResult>>> {
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-    let jobs: Vec<_> = providers.iter().map(|p| (service_group(p), p.clone())).collect();
+    let order = start_order(providers, previous);
+    let jobs: Vec<_> = order.iter().map(|&i| (service_group(&providers[i]), providers[i].clone())).collect();
     let groups = jobs.iter().map(|(g, _)| g).collect::<std::collections::HashSet<_>>().len();
     let total = providers.len() * cases.len() * rounds;
     println!("Corrections: {total} calls · {} independent service groups · concurrency {concurrency}", groups);
@@ -1769,7 +1856,7 @@ async fn run_corrections(
     let prompt = Arc::new(prompt.to_string());
     let dictionary = Arc::new(dictionary.to_string());
     let completed = Arc::new(AtomicUsize::new(0));
-    scheduler::run(jobs, concurrency, move |provider| {
+    let outputs = scheduler::run(jobs, concurrency, move |provider| {
         let (http, cases, prompt, dictionary, completed) =
             (http.clone(), cases.clone(), prompt.clone(), dictionary.clone(), completed.clone());
         async move {
@@ -1788,7 +1875,12 @@ async fn run_corrections(
             }
             outputs
         }
-    }).await
+    }).await;
+    let mut by_provider: Vec<Option<Vec<Vec<RoundResult>>>> = (0..providers.len()).map(|_| None).collect();
+    for (i, output) in order.into_iter().zip(outputs) {
+        by_provider[i] = Some(output);
+    }
+    by_provider.into_iter().map(|output| output.expect("a provider was not scheduled")).collect()
 }
 
 async fn review_pending(
@@ -2871,7 +2963,7 @@ fn print_usage() {
     );
     eprintln!("  --finalize-results <path> Resolve saved pending hallucination checks; retain base scores/timings");
     eprintln!("  --rounds <n>       Override number of rounds per test");
-    eprintln!("  --concurrency <n>  Concurrent providers (default 6); shared URL origins run serially");
+    eprintln!("  --concurrency <n>  Concurrent providers (default 6); one model at one URL origin runs serially");
     eprintln!("  --feedback-results <path> Build a local feedback page from saved results; no API calls");
     eprintln!("  --output <path>    Write a copy of the detailed results JSON here as well");
     eprintln!("  --log-dir <path>   Where each run keeps its report.log (the console output) and results.json,");
@@ -2961,6 +3053,39 @@ fn speed_credit(ms: u128, limit: Duration) -> f64 {
         return 0.0;
     }
     1.0 - (t / SPEED_FULL_MS).ln() / (zero / SPEED_FULL_MS).ln()
+}
+
+/// Each ranked model's place intervals ([`uncertainty`]) on a rerun and on a similar case mix, in `ranked` order.
+/// `None`, with the reason printed, when the per-round composites do not add up to the ranked composites: the
+/// intervals would describe a different ranking.
+fn place_ranges(ranked: &[RankedProvider], cases: &[CaseRecord], weights: scoring::Weights) -> Option<[Vec<(usize, usize)>; 2]> {
+    if cases.is_empty() || ranked.is_empty() {
+        return None;
+    }
+    let rounds: Vec<Vec<Vec<f64>>> = ranked
+        .iter()
+        .map(|r| {
+            cases
+                .iter()
+                .map(|c| {
+                    let provider = c.providers.iter().find(|p| p.name == r.name).expect("a ranked provider is missing from a case");
+                    provider.rounds.iter().map(|round| weights.composite(round.balanced.as_ref().expect("missing planned round score").final_metrics)).collect()
+                })
+                .collect()
+        })
+        .collect();
+    for (r, model) in ranked.iter().zip(&rounds) {
+        let composite = model.iter().map(|case| case.iter().sum::<f64>() / case.len() as f64).sum::<f64>() / model.len() as f64;
+        if (composite - r.composite).abs() > 1e-6 {
+            eprintln!("Place intervals skipped: {} rounds average {:.6}, ranked composite {:.6}", r.name, composite, r.composite);
+            return None;
+        }
+    }
+    Some([uncertainty::place_intervals(&rounds, false), uncertainty::place_intervals(&rounds, true)])
+}
+
+fn format_places((lo, hi): (usize, usize)) -> String {
+    if lo == hi { lo.to_string() } else { format!("{lo}–{hi}") }
 }
 
 fn print_balanced_legend(eval: &EvalConfig) {
@@ -3415,12 +3540,15 @@ fn update_standings(
     lens: StandingLens,
     ranked: &[RankedProvider],
     source_run: Option<String>,
+    judge: &str,
+    judge_models: Vec<String>,
 ) -> Result<StandingsFile, String> {
     let scheme = StandingScheme::parse(Some(lens.scheme.as_str()));
     let mut file = load_standings(path)?;
     if let Some(source) = &source_run {
-        file.runs
-            .retain(|r| r.source_run.as_ref() != Some(source) || r.scoring != SCORING_VERSION);
+        file.runs.retain(|r| {
+            r.source_run.as_ref() != Some(source) || r.scoring != SCORING_VERSION || r.judge() != judge
+        });
     }
     file.runs.push(StandingRun {
         at: chrono::Utc::now().to_rfc3339(),
@@ -3428,16 +3556,18 @@ fn update_standings(
         scoring: SCORING_VERSION,
         ranking: award_points(ranked, scheme),
         source_run,
+        judge: Some(judge.to_string()),
+        judge_models,
     });
     file.version = 1;
     file.scheme = lens.scheme.clone();
     file.lens = lens;
-    file.standings = recompute_standings(&season_runs(&file.runs), &file.lens);
+    file.standings = recompute_standings(&season_runs(&file.runs, judge), &file.lens);
     save_standings(path, &file)?;
     Ok(file)
 }
 
-fn print_standings(file: &StandingsFile, name_width: usize) {
+fn print_standings(file: &StandingsFile, name_width: usize, judge: &str) {
     let name_width = file
         .standings
         .iter()
@@ -3458,14 +3588,16 @@ fn print_standings(file: &StandingsFile, name_width: usize) {
     } else {
         file.lens.retire_after.to_string()
     };
-    let season = season_runs(&file.runs).len();
-    let earlier = file.runs.len() - season;
+    let season = season_runs(&file.runs, judge).len();
+    let other_judges = file.runs.iter().filter(|r| r.scoring == SCORING_VERSION && r.judge() != judge).count();
+    let earlier = file.runs.len() - season - other_judges;
     println!(
         "\x1b[1m══════════════════════════════════════════════════════════\x1b[0m"
     );
     println!(
-        "\x1b[1m  Season standings\x1b[0m  (composite places · scoring v{} · form · decay={} · window={} · retire after {} · {} {})",
+        "\x1b[1m  Season standings\x1b[0m  (composite places · scoring v{} · judge {} · form · decay={} · window={} · retire after {} · {} {})",
         SCORING_VERSION,
+        judge,
         file.lens.decay,
         window_label,
         retire_label,
@@ -3477,6 +3609,13 @@ fn print_standings(file: &StandingsFile, name_width: usize) {
             "  \x1b[2m{} earlier {} placed under older scoring rules stay in the file and do not count.\x1b[0m",
             earlier,
             if earlier == 1 { "race" } else { "races" }
+        );
+    }
+    if other_judges > 0 {
+        println!(
+            "  \x1b[2m{} {} judged by another judge form their own season and do not count here.\x1b[0m",
+            other_judges,
+            if other_judges == 1 { "race" } else { "races" }
         );
     }
     println!(
@@ -3613,16 +3752,50 @@ mod tests {
     }
 
     #[test]
-    fn service_groups_share_url_origins_and_allow_explicit_quota_groups() {
-        let make = |url: &str, group: Option<&str>| -> Provider {
+    fn service_groups_are_one_model_at_one_origin_unless_a_quota_group_joins_them() {
+        let make = |url: &str, model: &str, group: Option<&str>| -> Provider {
             serde_json::from_value(serde_json::json!({
-                "name": "test", "base_url": url, "api_key": "unused", "model": "test",
+                "name": model, "base_url": url, "api_key": "unused", "model": model,
                 "concurrency_group": group,
             })).unwrap()
         };
-        assert_eq!(service_group(&make("https://example.com/v1", None)), service_group(&make("https://example.com/another/v2", None)));
-        assert_ne!(service_group(&make("https://example.com/v1", None)), service_group(&make("https://other.example/v1", None)));
-        assert_eq!(service_group(&make("https://example.com/v1", Some("shared"))), service_group(&make("https://other.example/v1", Some("shared"))));
+        let group = |url, model, quota| service_group(&make(url, model, quota));
+        assert_eq!(group("https://example.com/v1", "a", None), group("https://example.com/another/v2", "a", None));
+        assert_ne!(group("https://example.com/v1", "a", None), group("https://example.com/v1", "b", None));
+        assert_ne!(group("https://example.com/v1", "a", None), group("https://other.example/v1", "a", None));
+        assert_eq!(group("https://example.com/v1", "a", Some("shared")), group("https://other.example/v1", "b", Some("shared")));
+    }
+
+    #[test]
+    fn call_times_come_from_the_newest_saved_run_other_than_this_one() {
+        let dir = std::env::temp_dir().join(format!("llm-bench-previous-{}", std::process::id()));
+        let save = |run: &str, ms: u64| {
+            std::fs::create_dir_all(dir.join(run)).unwrap();
+            let results = serde_json::json!({ "cases": [
+                { "provider": "a", "rounds": [{ "duration_ms": ms }, { "duration_ms": ms }] },
+                { "provider": "a", "rounds": [{ "duration_ms": 1 }] },
+            ] });
+            std::fs::write(dir.join(run).join(runlog::RESULTS_FILE), results.to_string()).unwrap();
+        };
+        save("2026-10-01_08-00-00", 100);
+        save("2026-10-02_08-00-00", 200);
+        std::fs::create_dir_all(dir.join("2026-10-03_08-00-00")).unwrap(); // this run: no results yet
+        let (path, totals) = previous_call_ms(&dir, Some(&dir.join("2026-10-03_08-00-00"))).unwrap();
+        assert!(path.starts_with(dir.join("2026-10-02_08-00-00")));
+        assert_eq!(totals["a"], 401);
+        assert_eq!(previous_call_ms(&dir, Some(&dir.join("2026-10-02_08-00-00"))).unwrap().1["a"], 201);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(previous_call_ms(&dir, None).is_none());
+    }
+
+    #[test]
+    fn the_slowest_provider_of_the_previous_run_starts_first_and_an_unknown_one_before_it() {
+        let providers: Vec<Provider> = ["fast", "new", "slow", "mid"].iter().map(|name| serde_json::from_value(serde_json::json!({
+            "name": name, "base_url": "https://example.com", "api_key": "unused", "model": name,
+        })).unwrap()).collect();
+        let previous = HashMap::from([("fast".to_string(), 10), ("slow".to_string(), 90), ("mid".to_string(), 40)]);
+        assert_eq!(start_order(&providers, Some(&previous)), vec![1, 2, 3, 0]);
+        assert_eq!(start_order(&providers, None), vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -4392,6 +4565,8 @@ model = "m"
             scheme: "borda".into(),
             scoring: SCORING_VERSION,
             source_run: None,
+            judge: None,
+            judge_models: Vec::new(),
             ranking: award_points(&[rp("a", 90.0), rp("b", 10.0)], StandingScheme::Borda),
         };
         let run2 = StandingRun {
@@ -4399,6 +4574,8 @@ model = "m"
             scheme: "borda".into(),
             scoring: SCORING_VERSION,
             source_run: None,
+            judge: None,
+            judge_models: Vec::new(),
             ranking: award_points(&[rp("b", 90.0), rp("a", 10.0)], StandingScheme::Borda),
         };
         let table = recompute_standings(&[run1, run2], &all_history_lens());
@@ -4435,7 +4612,7 @@ model = "m"
         std::fs::write(&path, legacy).unwrap();
 
         let file = update_standings(path.to_str().unwrap(), all_history_lens(), &[rp("b", 90.0), rp("a", 10.0)],
-            None,
+            None, "typesafe", Vec::new(),
         ).unwrap();
         assert_eq!(file.runs.len(), 3, "the older races are kept");
         assert_eq!(file.runs.iter().map(|r| r.scoring).collect::<Vec<_>>(), vec![0, 0, SCORING_VERSION]);
@@ -4455,6 +4632,8 @@ model = "m"
             all_history_lens(),
             &[rp("a", 90.0)],
             source.clone(),
+            "typesafe",
+            Vec::new(),
         )
         .unwrap();
         let file = update_standings(
@@ -4462,11 +4641,32 @@ model = "m"
             all_history_lens(),
             &[rp("b", 95.0)],
             source,
+            "typesafe",
+            Vec::new(),
         )
         .unwrap();
         assert_eq!(file.runs.len(), 1);
         assert_eq!(file.standings[0].provider, "b");
         assert_eq!(file.standings[0].runs, 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_run_judged_by_another_judge_keeps_its_own_season_and_replaces_nothing() {
+        let path = std::env::temp_dir().join(format!("llm-bench-judges-{}.json", std::process::id()));
+        let path = path.to_str().unwrap();
+        let source = Some("source/results.json".to_string());
+        // recorded before runs carried their judge: TypeSafe, where `a` won
+        std::fs::write(path, r#"{"version":1,"scheme":"borda","runs":[{"at":"1","scheme":"borda","scoring":SCORING,"source_run":"source/results.json","ranking":[{"place":1,"provider":"a","points":2.0,"composite":90.0,"avg_ms":900,"success_rate":1.0},{"place":2,"provider":"b","points":1.0,"composite":50.0,"avg_ms":900,"success_rate":1.0}]}],"standings":[]}"#
+            .replace("SCORING", &SCORING_VERSION.to_string())).unwrap();
+        let other = update_standings(path, all_history_lens(), &[rp("b", 90.0), rp("a", 10.0)], source.clone(),
+            "openai-decisions", vec!["gpt-6-luna".into()]).unwrap();
+        assert_eq!(other.runs.len(), 2, "the TypeSafe race of the same source stays");
+        assert_eq!((other.standings[0].provider.as_str(), other.standings[0].runs), ("b", 1));
+        let typesafe = update_standings(path, all_history_lens(), &[rp("a", 90.0), rp("b", 10.0)], source,
+            "typesafe", vec!["jev-1.13.0".into()]).unwrap();
+        assert_eq!(typesafe.runs.len(), 2, "the TypeSafe race of the source is replaced, the other judge's kept");
+        assert_eq!((typesafe.standings[0].provider.as_str(), typesafe.standings[0].runs), ("a", 1));
         std::fs::remove_file(path).unwrap();
     }
 
@@ -4490,6 +4690,8 @@ model = "m"
             scheme: "borda".into(),
             scoring: SCORING_VERSION,
             source_run: None,
+            judge: None,
+            judge_models: Vec::new(),
             ranking: award_points(&ranked, StandingScheme::Borda),
         }
     }

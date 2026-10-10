@@ -6,7 +6,7 @@
 //! `read_answer` holds them to the same standard. A question part with no Decisions counterpart is an error, never
 //! dropped: the judge would otherwise answer a different rubric than the one the run records.
 
-use crate::typesafe::{RawAnswer, Usage};
+use crate::typesafe::{RawAnswer, Reply, Usage};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -124,6 +124,7 @@ fn criterion(value: &Value) -> Result<String, String> {
 struct Response {
     answers: Vec<DecisionAnswer>,
     usage: Option<Usage>,
+    model: Option<String>,
 }
 
 /// The bench asks no `predicate`; one in the response fails to parse like any other answer it did not ask for.
@@ -149,7 +150,7 @@ struct LevelProbability {
 
 /// The answer to the question named `name`, as TypeSafe would have given it: options by value, levels by index.
 /// A refusal is a failure of the judge, like any other answer it does not give.
-pub fn read(text: &str, name: &str) -> Result<(RawAnswer, Option<Usage>), String> {
+pub fn read(text: &str, name: &str) -> Result<Reply, String> {
     let response: Response = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let answer = response
         .answers
@@ -173,7 +174,7 @@ pub fn read(text: &str, name: &str) -> Result<(RawAnswer, Option<Usage>), String
             confidence: Some(confidence),
         },
     };
-    Ok((raw, response.usage))
+    Ok(Reply { raw, usage: response.usage, model: response.model })
 }
 
 fn distribution(pairs: impl Iterator<Item = (String, f64)>) -> Result<BTreeMap<String, f64>, String> {
@@ -224,20 +225,22 @@ mod tests {
 
     #[test]
     fn answers_read_like_typesafe_answers_and_a_refusal_is_a_failure() {
-        let text = r#"{"answers": [
+        let text = r#"{"model": "gpt-6-luna", "answers": [
             {"type": "choice", "name": "q", "choice": "a", "confidence": 0.9,
              "probabilities": [{"value": "a", "probability": 0.8}, {"value": "b", "probability": 0.2}]}],
             "usage": {"input_tokens": 12, "output_tokens": 0, "total_tokens": 12}}"#;
-        let (raw, usage) = read(text, "q").unwrap();
-        assert_eq!(raw.choice.as_deref(), Some("a"));
-        assert_eq!(raw.probabilities.unwrap(), BTreeMap::from([("a".into(), 0.8), ("b".into(), 0.2)]));
-        assert_eq!(usage.unwrap().input_tokens, 12);
+        let reply = read(text, "q").unwrap();
+        assert_eq!(reply.raw.choice.as_deref(), Some("a"));
+        assert_eq!(reply.raw.probabilities.unwrap(), BTreeMap::from([("a".into(), 0.8), ("b".into(), 0.2)]));
+        assert_eq!(reply.usage.unwrap().input_tokens, 12);
+        assert_eq!(reply.model.as_deref(), Some("gpt-6-luna"));
 
         let score = r#"{"answers": [{"type": "score", "name": "q", "score": 1.1, "confidence": 0.5, "probabilities": [
             {"value": 0, "label": "0", "probability": 0.1}, {"value": 1, "label": "1", "probability": 0.7},
             {"value": 2, "label": "2", "probability": 0.2}]}]}"#;
-        let (raw, _) = read(score, "q").unwrap();
-        assert_eq!(raw.probabilities.unwrap()["1"], 0.7);
+        let reply = read(score, "q").unwrap();
+        assert_eq!(reply.raw.probabilities.unwrap()["1"], 0.7);
+        assert_eq!(reply.model, None);
 
         assert!(read(r#"{"answers": [{"type": "refusal", "name": "q"}]}"#, "q").unwrap_err().contains("refused"));
         assert!(read(r#"{"answers": [{"type": "refusal", "name": "other"}]}"#, "q").unwrap_err().contains("no answer"));

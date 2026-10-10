@@ -9,7 +9,7 @@ use crate::decisions;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
@@ -163,12 +163,12 @@ impl Backend {
         }
     }
 
-    fn read(self, text: &str) -> Result<(RawAnswer, Option<Usage>), String> {
+    fn read(self, text: &str) -> Result<Reply, String> {
         match self {
             Backend::TypeSafe => {
                 let mut response: Response = serde_json::from_str(text).map_err(|e| e.to_string())?;
                 let raw = response.answers.remove(QUESTION).ok_or("no answer in response")?;
-                Ok((raw, response.usage))
+                Ok(Reply { raw, usage: response.usage, model: response.model })
             }
             Backend::Decisions => decisions::read(text, QUESTION),
         }
@@ -187,6 +187,16 @@ impl Backend {
 struct Response {
     answers: HashMap<String, RawAnswer>,
     usage: Option<Usage>,
+    model: Option<String>,
+}
+
+/// One answer as read from a response, with what the service says about the call.
+#[derive(Debug)]
+pub(crate) struct Reply {
+    pub(crate) raw: RawAnswer,
+    pub(crate) usage: Option<Usage>,
+    /// The model the service says answered: `jev-latest` comes back as the version it resolved to.
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,7 +257,7 @@ fn short(text: &str) -> String {
 }
 
 async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: AskKind, backend: Backend,
-) -> Result<(Answer, u64, u64), String> {
+) -> Result<(Answer, Usage, Option<String>), String> {
     let mut attempt = 0;
     let text = loop {
         attempt += 1;
@@ -272,11 +282,11 @@ async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: 
         }
         tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
     };
-    let (raw, usage) = backend.read(&text).map_err(|e| format!("{}: {}", e, short(&text)))?;
-    let answer = read_answer(kind, raw).map_err(|e| format!("{}: {}", e, short(&text)))?;
-    let usage = usage.unwrap_or(Usage { input_tokens: 0, output_tokens: 0,
+    let reply = backend.read(&text).map_err(|e| format!("{}: {}", e, short(&text)))?;
+    let answer = read_answer(kind, reply.raw).map_err(|e| format!("{}: {}", e, short(&text)))?;
+    let usage = reply.usage.unwrap_or(Usage { input_tokens: 0, output_tokens: 0,
     });
-    Ok((answer, usage.input_tokens, usage.output_tokens))
+    Ok((answer, usage, reply.model))
 }
 
 pub struct Judge {
@@ -298,6 +308,8 @@ pub struct JudgeRun {
     pub distinct: usize,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Every model the service said answered. More than one means the run was judged by mixed versions.
+    pub reported_models: BTreeSet<String>,
 }
 
 impl Judge {
@@ -337,10 +349,11 @@ impl Judge {
             };
             let (ask, result) = joined.expect("a judge call panicked");
             match result {
-                Ok((answer, input_tokens, output_tokens)) => {
+                Ok((answer, usage, model)) => {
                     run.answers.insert(ask.key(), answer);
-                    run.input_tokens += input_tokens;
-                    run.output_tokens += output_tokens;
+                    run.input_tokens += usage.input_tokens;
+                    run.output_tokens += usage.output_tokens;
+                    run.reported_models.extend(model);
                 }
                 Err(error) => run.failures.push((ask.label, error)),
             }
