@@ -62,21 +62,34 @@ Midas
 # by automatic second review, zeros only that output's quality; speed remains.
 # Failed correction calls score zero everywhere. Evaluator failures remain visible,
 # score zero in the affected component, and never wait for a human to rank models.
-# JEV judges contextual repairs and whole-text fidelity/readability/style outside timing.
-# Equal questions are deduplicated. All severe/uncertain/missing JEV fidelity verdicts
+# The judge settles contextual repairs and whole-text fidelity/readability/style outside timing.
+# Equal questions are deduplicated. All severe/uncertain/missing judge fidelity verdicts
 # go to [hallucination_reviewer]; malformed reviews get one retry before zero quality.
 #
 # Keep [judge] / [eval] below prompt and dictionary — a TOML table owns
 # every following key until the next table header.
 # api_key accepts a literal, ${ENV_VAR}, or file:<path>.
+# The judge is one of two decision models; keep exactly one [judge] table.
+# Both ask the same questions (typesafe_questions / quality_questions / rubric).
+# TypeSafe JEV is the default; the OpenAI Decisions judge is experimental until
+# it matches JEV on the probes (README "Choosing the judge").
 # [judge]
 # name = "TypeSafe-Judge"
 # base_url = "https://api.typesafe.ai/v1/systemone"   # https://docs.typesafe.ai
 # api_key = "file:.jev_key"
 # model = "jev-1.13.0"     # pin a version: `jev-latest` changes verdicts between runs
 # type = "typesafe"
+#
+# OpenAI Decisions API (public beta; gpt-6-luna is its only model). The questions
+# are translated to Decisions choice/score questions; see README "Choosing the judge".
+# [judge]
+# name = "OpenAI-Decisions"
+# base_url = "https://api.openai.com/v1"   # POST {base_url}/decisions
+# api_key = "${OPENAI_API_KEY}"
+# model = "gpt-6-luna"
+# type = "openai"
 
-# Independent final reviewer, used for severe/ambiguous/missing JEV hallucination answers.
+# Independent final reviewer, used for severe/ambiguous/missing judge hallucination answers.
 # Uses the same Provider schema/API modes as correction models. Reasoning is outside latency.
 # Configure a model verified against the severe-hallucination probes before use.
 # [hallucination_reviewer]

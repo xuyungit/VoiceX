@@ -71,8 +71,8 @@ with equal weight; failed calls remain in both denominators.
 | Correction | 30 | Average fixed repair tasks derived from input/reference. Dictionary and contextual repairs use the same task budget. Repeated occurrences of the same repair share one task; occurrence credits average within it. |
 | Fidelity | 40 | Preserve substantive entities, numbers, versions, facts and central intent. Keeping an ASR mistake introduces no hallucination, but earns no correction credit. |
 | Filler/stutter removal | 10 | Average removal credit at reference-derived cleanup sites. |
-| Readability | 5 | One whole-text JEV question about punctuation, grammar and sentence boundaries. |
-| Conversational style | 5 | One whole-text JEV question about voice and organization. Mild edits are assessed together. |
+| Readability | 5 | One whole-text judge question about punctuation, grammar and sentence boundaries. |
+| Conversational style | 5 | One whole-text judge question about voice and organization. Mild edits are assessed together. |
 | Speed | 10 | Absolute per-call score: full at 500 ms, zero at the application's text-dependent timeout, log-linear between. |
 
 A repair miss affects only its correction task. For example, in the current six
@@ -127,7 +127,7 @@ substituted names/files/versions. It also checks substantial candidate omissions
 reversed core requirements and invented validation/decisions. Turning a central
 question into a firm assertion is severe; slight hedging changes are not.
 
-JEV's `changed`, `uncertain`, missing judgments and `faithful` judgments below
+The judge's `changed`, `uncertain`, missing judgments and `faithful` judgments below
 **0.7 confidence** go to `[hallucination_reviewer]` for an independent binary
 answer with a reason. All severe penalties require that review. Equivalent
 questions share results within a run. Malformed/failed reviewer requests get one
@@ -141,6 +141,47 @@ supplies readability/style. A custom questions file can override `fidelity`,
 `readability` and `style`. Configure reviewer reasoning explicitly and validate the
 reviewer against the probes. `--skip-judge` still finalizes fidelity through the
 reviewer, but missing correction/readability/style answers score zero.
+
+### Choosing the judge
+
+`[judge] type` selects who answers these questions. TypeSafe JEV is the default;
+the Decisions judge is experimental until it matches JEV on the probes below.
+
+| `type` | Service | Endpoint from `base_url` |
+|---|---|---|
+| `"typesafe"` | TypeSafe System One (JEV), e.g. `jev-1.13.0` | `…/v1/systemone` |
+| `"openai"` | OpenAI Decisions API, `gpt-6-luna` | `…/v1/decisions` |
+
+Both ask the same questions files. For Decisions, each TypeSafe question is
+translated: `{task, question}` becomes the instructions, a `score` criterion
+becomes a level labelled by its index, a `choice` criterion becomes a choice, and
+`examples`/`not_for` stay in the description. The state goes in as the same JSON
+TypeSafe receives. A question field with no Decisions counterpart stops the run at
+setup instead of being dropped. Answers come back in TypeSafe's shape and pass the
+same completeness checks; a refusal is a judge failure. `typesafe_questions` and
+`typesafe_concurrency` apply to either judge. `results.json` records
+`judge.model` and `judge.backend`.
+
+To compare judges on identical outputs, keep the saved outputs and let the other
+judge answer everything: `--replay runs/<run>/results.json --no-standings`.
+`--rescore-results` and `--finalize-results` keep the saved run's correction
+credits, so they refuse a judge model other than the one that judged the run.
+Standings record no judge, so keep `--no-standings` while comparing judges.
+
+On 2026-10-10 the current rubric, written and calibrated for JEV, gave these results on the same probes:
+
+| Probe set | JEV (`jev-latest`) | Decisions (`gpt-6-luna`) |
+|---|---|---|
+| 34 severe pairs, judge alone | 33 correct | 29 correct |
+| 34 severe pairs, after secondary review | 34 correct, 16 reviewed | 32 correct, 19 reviewed |
+| 6 readability/style anchors | 6 pass | 4 pass |
+
+Decisions passed a document-identity swap (confidence 0.73) and a question
+turned into an assertion (0.80) as `faithful`, above the 0.7 review threshold. It
+also rated the formal-rewrite anchor's readability 0.435, although the rubric
+says formal register is not a readability defect. Its 12 quality questions
+finished in 1.4 s. Results are in `runs/severe-probe-decisions.json` and
+`runs/quality-probe-decisions.json`.
 
 The original Luna/Deepseek/GLM/GPT 6.1/Sora dictation is in `fidelity_cases.toml`
 with its history provenance, and in the default/example cases. The historical
@@ -185,8 +226,8 @@ Probe labels/score ranges stay outside requests. The severe set contains 34 pair
 including two real outputs retaining formatted file errors. The six quality
 anchors check dimension independence, formal rewriting and multiple mild edits.
 
-`--probe-review-all` bypasses JEV and validates the secondary reviewer directly on
-every fidelity pair. `--fidelity-rubric` replaces the probe's JEV question only;
+`--probe-review-all` bypasses the judge and validates the secondary reviewer directly on
+every fidelity pair. `--fidelity-rubric` replaces the probe's judge question only;
 it does not change normal bench scoring or the secondary review rubric.
 
 Reuse outputs/timing and make fresh local correction judgments:

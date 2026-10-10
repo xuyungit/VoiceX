@@ -8,6 +8,7 @@ mod fidelity;
 mod scoring;
 mod scheduler;
 mod feedback;
+mod decisions;
 mod typesafe;
 
 #[path = "../../../src-tauri/src/gemini.rs"]
@@ -20,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use typesafe::{Judge, JudgeRun, Questions};
+use typesafe::{Backend, Judge, JudgeRun, Questions};
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -33,7 +34,8 @@ struct Config {
     dictionary: Option<String>,
     provider: Vec<Provider>,
     /// Optional: settles the verdicts code cannot (is this other word the speaker's word, did this unrequested
-    /// change do harm). Must be `type = "typesafe"`. Runs after all provider tests finish, outside their timing.
+    /// change do harm). `type = "typesafe"` (TypeSafe JEV) or `type = "openai"` (OpenAI Decisions API). Runs after all
+    /// provider tests finish, outside their timing.
     judge: Option<Provider>,
     /// Independent binary reviewer for unresolved severe-hallucination checks.
     hallucination_reviewer: Option<Provider>,
@@ -78,7 +80,7 @@ struct EvalConfig {
     standing_window: Option<usize>,
     /// Consecutive absences before a model is retired from the active table. 0 = never. Default 3.
     standing_retire_after: Option<usize>,
-    /// Override the judge's questions; defaults to the embedded typesafe_questions.json.
+    /// Override the judge's questions; defaults to the embedded typesafe_questions.json. Either judge asks them.
     typesafe_questions: Option<String>,
     /// Max concurrent judge calls. Default 8.
     typesafe_concurrency: Option<usize>,
@@ -678,6 +680,11 @@ async fn main() {
         assert_eq!(source["run"]["prompt"].as_str(), Some(prompt.as_str()), "replay prompt differs");
         assert_eq!(source["run"]["dictionary"].as_str(), Some(dictionary.as_str()), "replay dictionary differs");
         if finalize.is_some() { assert_eq!(source["run"]["scoring"].as_u64(), Some(SCORING_VERSION as u64), "finalization requires current scoring; use --rescore-results to migrate an earlier run"); }
+        // Rescoring and finalizing keep the saved correction credits, which the saved judge settled.
+        if let (true, Some(saved_judge)) = (saved_scores.is_some(), source["judge"]["model"].as_str()) {
+            let configured = config.judge.as_ref().map(|j| j.model.as_str());
+            assert_eq!(configured, Some(saved_judge), "the saved run was judged by {saved_judge}; use --replay to rejudge every verdict with the configured judge");
+        }
         source
     });
     if dictionary.trim().is_empty() {
@@ -747,6 +754,7 @@ async fn main() {
                 .questions
                 .replace_fidelity(question)
                 .expect("invalid fidelity rubric choices");
+            judge.check().expect("the judge cannot ask this fidelity rubric");
         }
         let probes: Vec<FidelityProbe> = serde_json::from_str(
             &std::fs::read_to_string(&probe_path).expect("cannot read fidelity probes"),
@@ -791,7 +799,7 @@ async fn main() {
             )
             .await;
             println!(
-                "{}: expected={} JEV={:?} confidence={:?} credit={:?}",
+                "{}: expected={} judge={:?} confidence={:?} credit={:?}",
                 p.name, p.expected, verdict.judge_choice, verdict.confidence, verdict.credit
             );
             rows.push(serde_json::json!({ "probe": p, "verdict": verdict }));
@@ -1125,7 +1133,7 @@ async fn main() {
             println!(
                 "{}\n",
                 if finalize.is_some() {
-                    "Using saved base scores and initial JEV verdicts; no repeat JEV requests."
+                    "Using saved base scores and initial judge verdicts; no repeat judge requests."
                 } else {
                     "Code settled every verdict; the judge was not needed."
                 }
@@ -1695,6 +1703,7 @@ async fn main() {
             "ranking": ranking_json,
             "judge": {
                 "model": judge.as_ref().map(|j| j.model.as_str()),
+                "backend": judge.as_ref().map(|j| j.backend.name()),
                 "rubric": judge.as_ref().map(|j| &j.questions),
                 "ran": judge_run.is_some(),
                 "verdicts_needed": needed,
@@ -1818,26 +1827,32 @@ async fn review_pending(
 /// The judge settles what code cannot: is this other word the speaker's word, did this unrequested change do harm.
 /// It answers fixed questions with a probability per answer, which a chat model does not give.
 fn build_judge(http: &Client, provider: Provider, eval: &EvalConfig) -> Judge {
-    if provider.provider_type != "typesafe" {
+    let Some(backend) = Backend::from_type(&provider.provider_type) else {
         eprintln!(
-            "[judge] `{}` has type \"{}\"; the judge must be `type = \"typesafe\"` (see config.example.toml)",
+            "[judge] `{}` has type \"{}\"; the judge must be `type = \"typesafe\"` (TypeSafe JEV) or `type = \"openai\"` (OpenAI Decisions API), see config.example.toml",
             provider.name, provider.provider_type
         );
         std::process::exit(1);
-    }
+    };
     let questions = Questions::load(eval.typesafe_questions.as_deref()).unwrap_or_else(|e| {
         eprintln!("Judge questions: {}", e);
         std::process::exit(1);
     });
-    Judge {
+    let judge = Judge {
         name: provider.name,
+        backend,
         http: http.clone(),
-        url: typesafe::endpoint(&provider.base_url),
+        url: backend.endpoint(&provider.base_url),
         api_key: provider.api_key,
         model: provider.model,
         questions,
         concurrency: eval.typesafe_concurrency.unwrap_or(8),
+    };
+    if let Err(e) = judge.check() {
+        eprintln!("[judge] `{}` cannot ask its questions: {}", judge.name, e);
+        std::process::exit(1);
     }
+    judge
 }
 
 // ── App timeout ─────────────────────────────────────────────────────────────
@@ -1879,7 +1894,7 @@ async fn resolve_fidelity(
         fidelity::finalize(
             verdict,
             "unconfigured",
-            Err("[hallucination_reviewer] is required for unresolved JEV results".into()),
+            Err("[hallucination_reviewer] is required for unresolved judge results".into()),
             0,
         );
         return;
@@ -2848,7 +2863,7 @@ fn print_usage() {
     eprintln!("  --replay <path>    Rejudge saved results; reuse outputs/timing, make no correction calls");
     eprintln!("  --probe-quality <path>  Validate whole-text readability/style on labeled anchors");
     eprintln!(
-        "  --probe-fidelity <path>  Test JEV plus automatic review on labeled before/after pairs"
+        "  --probe-fidelity <path>  Test the judge plus automatic review on labeled before/after pairs"
     );
     eprintln!("  --probe-review-all      Validate the secondary reviewer on every labeled probe");
     eprintln!(

@@ -164,7 +164,7 @@ pub fn check(input: &str, output: &str, error: Option<&str>, answer: Option<&Ans
                     verdict.credit = Some(0.0);
                     verdict
                         .reasons
-                        .push(format!("JEV whole transcript: {choice}"));
+                        .push(format!("judge whole transcript: {choice}"));
                 }
                 _ => {}
             }

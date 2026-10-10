@@ -1,9 +1,11 @@
-//! The judge: TypeSafe System One. Four fixed questions, each distinct state asked once.
+//! The judge. Fixed questions in TypeSafe's format, each distinct state asked once, answered by TypeSafe System One
+//! (JEV) or by OpenAI's Decisions API ([`Backend`]).
 //!
 //! An answer is used only when it is complete: every level or option with its probability, and a confidence. Anything
 //! else is a failure of the judge, reported as one, and leaves the items that waited for it unjudged.
 
 use crate::adjudicate::{Answer, Answers, Ask, AskKind, EDIT_CREDIT, GATE_KINDS, SITE_CREDIT};
+use crate::decisions;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -26,8 +28,10 @@ fn default_style() -> Value {
     default_quality_question("style")
 }
 const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
-/// 429 (rate limit), 529 (overloaded) and transport errors are retried after 1, 2 and 4 seconds.
+/// Transport errors and the statuses [`Backend::retryable`] names are retried after 1, 2 and 4 seconds.
 const ATTEMPTS: u32 = 4;
+/// Every request asks one question, under this name.
+const QUESTION: &str = "q";
 
 /// Accepts the endpoint itself, its `/v1` base, or nothing.
 pub fn endpoint(base_url: &str) -> String {
@@ -117,23 +121,86 @@ impl Questions {
     }
 }
 
+/// Which service answers the questions. Both get the same rubric and both answers pass [`read_answer`], so two runs
+/// on the same outputs differ only in who judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// TypeSafe System One (JEV): `[judge] type = "typesafe"`.
+    TypeSafe,
+    /// OpenAI's Decisions API: `[judge] type = "openai"`.
+    Decisions,
+}
+
+impl Backend {
+    /// The `[judge] type` that selects it.
+    pub fn from_type(provider_type: &str) -> Option<Self> {
+        match provider_type {
+            "typesafe" => Some(Backend::TypeSafe),
+            "openai" => Some(Backend::Decisions),
+            _ => None,
+        }
+    }
+
+    /// What a results file calls it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Backend::TypeSafe => "typesafe",
+            Backend::Decisions => "openai-decisions",
+        }
+    }
+
+    pub fn endpoint(self, base_url: &str) -> String {
+        match self {
+            Backend::TypeSafe => endpoint(base_url),
+            Backend::Decisions => decisions::endpoint(base_url),
+        }
+    }
+
+    fn body(self, model: &str, state: &Value, question: &Value) -> Result<Value, String> {
+        match self {
+            Backend::TypeSafe => Ok(json!({ "state": state, "model": model, "questions": { QUESTION: question } })),
+            Backend::Decisions => decisions::body(model, state, QUESTION, question),
+        }
+    }
+
+    fn read(self, text: &str) -> Result<(RawAnswer, Option<Usage>), String> {
+        match self {
+            Backend::TypeSafe => {
+                let mut response: Response = serde_json::from_str(text).map_err(|e| e.to_string())?;
+                let raw = response.answers.remove(QUESTION).ok_or("no answer in response")?;
+                Ok((raw, response.usage))
+            }
+            Backend::Decisions => decisions::read(text, QUESTION),
+        }
+    }
+
+    /// Rate limits and overload, which pass; a rejected request fails the same way again.
+    fn retryable(self, status: u16) -> bool {
+        match self {
+            Backend::TypeSafe => matches!(status, 429 | 529),
+            Backend::Decisions => matches!(status, 429 | 500 | 502 | 503),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct Response {
     answers: HashMap<String, RawAnswer>,
     usage: Option<Usage>,
 }
 
-#[derive(Deserialize)]
-struct Usage {
-    input_tokens: u64,
-    output_tokens: u64,
+#[derive(Debug, Deserialize)]
+pub(crate) struct Usage {
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
 }
 
-#[derive(Deserialize)]
-struct RawAnswer {
-    choice: Option<String>,
-    probabilities: Option<BTreeMap<String, f64>>,
-    confidence: Option<f64>,
+/// An answer as TypeSafe gives it: options by name, levels by index. [`decisions`] reads its answers into this too.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawAnswer {
+    pub(crate) choice: Option<String>,
+    pub(crate) probabilities: Option<BTreeMap<String, f64>>,
+    pub(crate) confidence: Option<f64>,
 }
 
 fn read_answer(kind: AskKind, raw: RawAnswer) -> Result<Answer, String> {
@@ -179,7 +246,7 @@ fn short(text: &str) -> String {
     }
 }
 
-async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: AskKind,
+async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: AskKind, backend: Backend,
 ) -> Result<(Answer, u64, u64), String> {
     let mut attempt = 0;
     let text = loop {
@@ -194,7 +261,7 @@ async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: 
                     break text;
                 }
                 let failure = format!("HTTP {}: {}", status, short(&text));
-                if !matches!(status.as_u16(), 429 | 529) {
+                if !backend.retryable(status.as_u16()) {
                     return Err(failure);
                 }
                 failure
@@ -205,16 +272,16 @@ async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: 
         }
         tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
     };
-    let mut response: Response = serde_json::from_str(&text).map_err(|e| format!("{}: {}", e, short(&text)))?;
-    let raw = response.answers.remove("q").ok_or_else(|| format!("no answer in response: {}", short(&text)))?;
+    let (raw, usage) = backend.read(&text).map_err(|e| format!("{}: {}", e, short(&text)))?;
     let answer = read_answer(kind, raw).map_err(|e| format!("{}: {}", e, short(&text)))?;
-    let usage = response.usage.unwrap_or(Usage { input_tokens: 0, output_tokens: 0,
+    let usage = usage.unwrap_or(Usage { input_tokens: 0, output_tokens: 0,
     });
     Ok((answer, usage.input_tokens, usage.output_tokens))
 }
 
 pub struct Judge {
     pub name: String,
+    pub backend: Backend,
     pub http: Client,
     pub url: String,
     pub api_key: String,
@@ -234,6 +301,17 @@ pub struct JudgeRun {
 }
 
 impl Judge {
+    /// Every question as its service will receive it: a rubric the service cannot take is a setup error, found before
+    /// any provider is called.
+    pub fn check(&self) -> Result<(), String> {
+        for kind in [AskKind::Site, AskKind::Edit, AskKind::Gate, AskKind::Fidelity, AskKind::Readability, AskKind::Style] {
+            self.backend
+                .body(&self.model, &Value::Null, self.questions.of(kind))
+                .map_err(|e| format!("`{}` question: {}", kind.name(), e))?;
+        }
+        Ok(())
+    }
+
     /// Asks every distinct question once, `concurrency` at a time.
     pub async fn ask_all(&self, asks: Vec<Ask>) -> JudgeRun {
         let mut seen = HashSet::new();
@@ -245,10 +323,15 @@ impl Judge {
         loop {
             while running.len() < self.concurrency.max(1) {
                 let Some(ask) = pending.next() else { break };
-                let body = json!({ "state": ask.state, "model": self.model, "questions": { "q": self.questions.of(ask.kind) } });
-                let call = ask_one(self.http.clone(), self.url.clone(), self.api_key.clone(), body, ask.kind,
-                );
-                running.spawn(async move { (ask, call.await) });
+                let body = self.backend.body(&self.model, &ask.state, self.questions.of(ask.kind));
+                let (http, url, api_key, backend) = (self.http.clone(), self.url.clone(), self.api_key.clone(), self.backend);
+                running.spawn(async move {
+                    let result = match body {
+                        Ok(body) => ask_one(http, url, api_key, body, ask.kind, backend).await,
+                        Err(e) => Err(e),
+                    };
+                    (ask, result)
+                });
             }
             let Some(joined) = running.join_next().await else { break;
             };
@@ -303,6 +386,25 @@ mod tests {
             .replace_fidelity(json!({"type": "choice", "criteria": {"ok": "ok"}}))
             .is_err());
         assert_eq!(serde_json::to_value(&questions).unwrap(), valid);
+    }
+
+    #[test]
+    fn either_backend_can_ask_every_built_in_question() {
+        for backend in [Backend::TypeSafe, Backend::Decisions] {
+            let judge = Judge {
+                name: "judge".into(),
+                backend,
+                http: Client::new(),
+                url: backend.endpoint(""),
+                api_key: String::new(),
+                model: "model".into(),
+                questions: Questions::parse(BUILT_IN_QUESTIONS).unwrap(),
+                concurrency: 1,
+            };
+            judge.check().unwrap();
+        }
+        assert_eq!(Backend::from_type("openai"), Some(Backend::Decisions));
+        assert_eq!(Backend::from_type("custom"), None);
     }
 
     fn raw(json: &str) -> RawAnswer {
