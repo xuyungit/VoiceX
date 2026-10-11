@@ -53,18 +53,5 @@
         "what": "`after` contains text that is not part of the speech: a greeting, an explanation, a label, quotation marks or a code fence around it."
       }
     }
-  },
-  "gate": {
-    "type": "choice",
-    "instructions": {
-      "task": "`reference` is the correct transcript of a dictated speech. `output` was produced by a transcript-correction system.",
-      "question": "What kind of text is `output`?"
-    },
-    "criteria": {
-      "transcript": "Every sentence of the speech, in order, in the speaker's own words. Some words may be wrong, misspelled or punctuated differently.",
-      "incomplete": "A transcript that stops early or leaves out whole sentences of the speech.",
-      "extended": "A transcript that also contains sentences the speaker never said, before, inside or after the speech.",
-      "not_transcript": "A reply to the speaker, a summary, a rewrite in different words, or a translation."
-    }
   }
 }

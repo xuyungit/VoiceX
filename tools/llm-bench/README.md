@@ -4,6 +4,30 @@ Copy `config.example.toml` and `test_cases.example.toml` to the local config/cas
 files, then run `cargo run` in this directory. Credentials, run artifacts and
 standings are ignored by Git. Each run saves `report.log` and `results.json`.
 
+## The app's prompt and dictionary
+
+`prompt_source = "app"` (a root key in `config.toml`) sends the correction prompt
+and hotword dictionary the installed app is using, read from its database
+(`VOICEX_DB`, or `voicex.db` in the app data directory), and builds the system
+prompt exactly as the app does for a dictation with history context off: one
+term per line, duplicates dropped, `（空）` for an empty dictionary,
+`{{INPUT_HISTORY}}` as `（已关闭）`. The config's `prompt` and `dictionary` are then
+not used. Dictionary sites in the cases follow the same dictionary, so cases
+written for the app's dictionary need this setting. `results.json` keeps the
+prompt, the dictionary and `run.prompt_source`; a replay refuses a run whose
+prompt or dictionary has since changed in the app.
+
+Check what a case file will be scored on before spending calls:
+
+```sh
+cargo run -- --check-cases
+```
+
+It prints every case's correction tasks (dictionary or semantic, repeats shared)
+and cleanup sites under the dictionary in use, then stops. A removal meant as
+cleanup that appears as a semantic task is a word the filler list and the stutter
+rule do not cover; leave it as heard in `expected` if it should not be scored.
+
 ## Parallel runs and local feedback
 
 Correction calls now run across independent services, with six provider workers
@@ -64,13 +88,34 @@ cargo run -- --feedback-results runs/<run>/results.json
 cargo run -- --feedback-results runs/<run>/results.json --output /path/to/review.html
 ```
 
-This iteration retains scoring version 6, its questions and all three rounds.
-The legacy edit questions remain diagnostic; the gate still affects correction
-credits and must not be removed as an allegedly unused question. Human feedback
-is collected before choosing a new rubric, sample distribution or repair-cost
-model.
+The legacy edit questions remain diagnostic. Human feedback is collected
+before choosing a new rubric, sample distribution or repair-cost model.
 
-## Scoring version 6
+## Scoring version 9
+
+Version 9 stops scoring a contextual repair site as missed only because the
+misheard word is gone. A model may rephrase around it: for 「项目的进度已经严重之后了」
+(之后 → 滞后), 「项目的进度已经严重落后了」 means what the speaker meant without the
+word. Such a site now goes to the judge with the whole sentences as written,
+like any other rewritten site; a deletion that loses the meaning still earns
+nothing. On the 2026-10-11 real-dictation cases this decided 2–5 sites a run.
+
+Version 8 changes version 6 twice. A confirmed severe hallucination now costs
+three rounds of quality instead of one (`SEVERE_EXTRA_ROUNDS` in
+`src/scoring.rs`). On the 2026-10-11 cases, Gemini 3.8 Flash turned the
+correctly heard GPT 6.1 and Luna into GPT-4o and Llama in every round, as it had
+in real use. It still placed first, because one zeroed round cost about as much
+as a somewhat weaker repair rate. A silent change of meaning costs the user far
+more than a missed repair, so it weighs three times as much.
+
+Version 7, which version 8 includes, removed the transcript gate. That judge question
+(`transcript` / `incomplete` / `extended` / `not_transcript`) voided a round's
+correction and filler credits when it answered `not_transcript`. On the
+2026-10-11 real-dictation cases, where the app's prompt asks for polished text,
+it gave that answer to ordinary paraphrases at about even odds: 44 of 90 outputs
+for one model, 34 of 89 for another. Models answering the speaker instead of
+correcting were never seen in real use. An output that changes, adds or drops
+substance is still caught by the severe-hallucination check below.
 
 Every case is worth 100 points. Average rounds within a case, then average cases
 with equal weight; failed calls remain in both denominators.
@@ -96,7 +141,10 @@ A fluent refusal can be readable while failing fidelity. The severe-hallucinatio
 gate prevents readable wrong answers from retaining quality points.
 
 A confirmed severe hallucination zeros **that output round's quality** (90 points
-at default weights); its measured speed stays independent. Failed correction
+at default weights) and costs two more rounds of quality on top, so the round
+scores 10 × speed − 180; its measured speed stays independent. The Correction,
+Fidelity and Cleanup columns stay shares; only Composite and Ability carry the
+extra cost. Failed correction
 calls score zero everywhere. Slight wording/nuance changes are outside the
 severe check. Terminal evaluator failures are visible and score zero in affected
 components; failed whole-text fidelity evaluation zeros that round's quality.
@@ -267,15 +315,16 @@ credits; judge the new whole-text components:
 cargo run -- --rescore-results runs/<original>/results.json --no-standings
 ```
 
-On version-6 sources, unchanged whole-text questions/thresholds retain their saved
-judgments; changed questions are rejudged. Prompt, dictionary, inputs, references,
+On current-version sources, unchanged whole-text questions/thresholds retain their
+saved judgments; changed questions are rejudged. A source with credits the transcript
+gate voided (scoring 6 and earlier) is refused: replay it instead. Prompt, dictionary, inputs, references,
 models and available rounds must match. A reduced case set needs a matching
 `--cases` file. Original runs stay unchanged.
 
 Record a reviewed current-version result without repeating completed questions:
 
 ```sh
-cargo run -- --finalize-results runs/<version-6-run>/results.json
+cargo run -- --finalize-results runs/<current-version-run>/results.json
 ```
 
 Finalization validates the saved rubric and fidelity threshold, writes a new

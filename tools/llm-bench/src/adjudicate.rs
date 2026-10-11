@@ -13,7 +13,7 @@
 //!                     [`LATE_WORD_SLACK`] added or missing. Order is not part of the requirement. A larger rewrite of a
 //!                     sentence that did take the words in goes to the judge.
 //!   clean             what the model changed outside the sites. Spacing, sentence punctuation and casing are neutral
-//!                     by code; any other change becomes a question, and only then is the output as a whole gated.
+//!                     by code; any other change becomes a question.
 //!
 //! `Reference::analyze` finds all of this and returns the questions still open. `score` turns an analysis plus whatever
 //! answers exist into credits. A question without an answer leaves its item *unjudged*: reported, never scored as 0.
@@ -39,8 +39,6 @@ pub const EDIT_CREDIT: [(&str, f64); 5] = [
     ("damages", 0.0),
     ("commentary", 0.0),
 ];
-/// What the gate can call an output. Only `transcript` keeps its clean credit; `not_transcript` also voids the sites.
-pub const GATE_KINDS: [&str; 4] = ["transcript", "incomplete", "extended", "not_transcript"];
 /// Punctuation that separates clauses and sentences. Changing it (outside a number) does not change a word.
 const SENTENCE_PUNCT: [char; 14] = ['，', '。', '、', '；', '：', '？', '！', ',', '.', ';', ':', '?', '!', '-',
 ];
@@ -423,7 +421,6 @@ fn sentences(a: &[char]) -> Vec<(usize, usize)> {
 pub enum AskKind {
     Site,
     Edit,
-    Gate,
     Fidelity,
     Readability,
     Style,
@@ -434,7 +431,6 @@ impl AskKind {
         match self {
             AskKind::Site => "site",
             AskKind::Edit => "edit",
-            AskKind::Gate => "gate",
             AskKind::Fidelity => "fidelity",
             AskKind::Readability => "readability",
             AskKind::Style => "style",
@@ -929,7 +925,6 @@ impl Reference {
             }
 
             let late = spec.late_word.as_ref().map(|lw| late_verdict(&string(inp), lw, &string(&out)));
-            let mut depends_on_gate = false;
             let mut late_display = false;
             let outcome = if let Some(credit) = pinned(pins, &h, &w) {
                 Outcome::settled("pin", credit)
@@ -973,7 +968,6 @@ impl Reference {
                         }
                     };
                     let credit = spec.terms.iter().filter(|t| stands(t)).count() as f64 / spec.terms.len() as f64;
-                    depends_on_gate = !local && credit > 0.0;
                     Outcome::settled(if credit > 0.0 { "code:term" } else { "code:term-missing" }, credit,
                     )
                 }
@@ -1006,35 +1000,42 @@ impl Reference {
                 );
                 let filler = folded(&words_only(&string(&inp[s..e])));
                 let gone = ww == iw || ww.matches(filler.as_str()).count() < hw.matches(filler.as_str()).count();
-                depends_on_gate = gone;
                 Outcome::settled(if gone { "code:removed" } else { "code:kept" }, if gone { 1.0 } else { 0.0 },
                 )
-            } else if local && !entangled {
-                let (ch, ci, cw) = (core(&h), core(&i), core(&w));
-                let casing_is_content = folded(ci) == folded(ch);
-                if cw == ci {
-                    Outcome::settled("code:exact", 1.0)
-                } else if cw == ch {
-                    Outcome::settled("code:unchanged", 0.0)
-                } else if !casing_is_content && folded(cw) == folded(ci) {
-                    Outcome::settled("code:case", 1.0)
-                } else if !casing_is_content && folded(cw) == folded(ch) {
-                    Outcome::settled("code:misheard-kept", 0.0)
-                } else if cw.is_empty() {
-                    Outcome::settled("code:dropped", 0.0)
-                } else {
-                    Outcome::Ask(Ask { kind: AskKind::Site, state: self.isolated(spec, (lo, hi), [&h, &i, &w]), label: format!("site  {:?} → {:?}", h, w),
-                    })
-                }
             } else {
-                let [heard, intended, written] = self.rewritten((lo, hi), &act);
-                if written == intended {
-                    Outcome::settled("code:exact", 1.0)
+                // The whole sentences as the model wrote them, for a site it rewrote or wrote away: whether the sentence
+                // still means what the speaker meant is the judge's call.
+                let in_sentence = || {
+                    let [heard, intended, written] = self.rewritten((lo, hi), &act);
+                    if written == intended {
+                        Outcome::settled("code:exact", 1.0)
+                    } else {
+                        let phrase = json!({ "heard": string(&inp[s..e]), "intended": spec.intended });
+                        let state = json!({ "heard": heard, "intended": intended, "written": written, "phrase": phrase });
+                        Outcome::Ask(Ask { kind: AskKind::Site, state, label: format!("site  {:?} → (rewritten)", string(&inp[s..e])),
+                        })
+                    }
+                };
+                if local && !entangled {
+                    let (ch, ci, cw) = (core(&h), core(&i), core(&w));
+                    let casing_is_content = folded(ci) == folded(ch);
+                    if cw == ci {
+                        Outcome::settled("code:exact", 1.0)
+                    } else if cw == ch {
+                        Outcome::settled("code:unchanged", 0.0)
+                    } else if !casing_is_content && folded(cw) == folded(ci) {
+                        Outcome::settled("code:case", 1.0)
+                    } else if !casing_is_content && folded(cw) == folded(ch) {
+                        Outcome::settled("code:misheard-kept", 0.0)
+                    } else if cw.is_empty() {
+                        // the word is gone, but the sentence may have been rephrased around it with the meaning intact
+                        in_sentence()
+                    } else {
+                        Outcome::Ask(Ask { kind: AskKind::Site, state: self.isolated(spec, (lo, hi), [&h, &i, &w]), label: format!("site  {:?} → {:?}", h, w),
+                        })
+                    }
                 } else {
-                    let phrase = json!({ "heard": string(&inp[s..e]), "intended": spec.intended });
-                    let state = json!({ "heard": heard, "intended": intended, "written": written, "phrase": phrase });
-                    Outcome::Ask(Ask { kind: AskKind::Site, state, label: format!("site  {:?} → (rewritten)", string(&inp[s..e])),
-                    })
+                    in_sentence()
                 }
             };
 
@@ -1057,7 +1058,7 @@ impl Reference {
                 w,
                 string(&inp[hi..(hi + 6).min(inp.len())])
             );
-            sites.push(SiteFinding { tier: spec.tier, heard: h, intended: i, written: w, context, outcome, half_fix, depends_on_gate,
+            sites.push(SiteFinding { tier: spec.tier, heard: h, intended: i, written: w, context, outcome, half_fix,
             });
         }
 
@@ -1121,12 +1122,7 @@ impl Reference {
             })
             .collect();
 
-        let open = groups.iter().any(|g| matches!(g.outcome, Outcome::Ask(_))) || sites.iter().any(|s| s.depends_on_gate);
-        let state = json!({ "reference": self.expected, "output": string(&out) });
-        let gate = open.then(|| Ask { kind: AskKind::Gate, state, label: "gate  is this output a transcript at all?".to_string(),
-        });
-        Analysis { sites, groups, gate, neutral,
-        }
+        Analysis { sites, groups, neutral }
     }
 
     /// A dictionary term stood in `old` exactly as the dictionary spells it, and `new` no longer has it.
@@ -1163,8 +1159,6 @@ pub struct SiteFinding {
     pub outcome: Outcome,
     /// Every character is either the misheard or the intended one, and both occur: judges are unreliable on these.
     pub half_fix: bool,
-    /// Found inside a rewrite, not at its place: it only counts if the output is a transcript at all.
-    pub depends_on_gate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1177,7 +1171,6 @@ pub struct GroupFinding {
 pub struct Analysis {
     pub sites: Vec<SiteFinding>,
     pub groups: Vec<GroupFinding>,
-    pub gate: Option<Ask>,
     /// Unrequested changes that code settled as spacing, sentence punctuation or casing.
     pub neutral: usize,
 }
@@ -1190,7 +1183,6 @@ impl Analysis {
                 Outcome::Ask(ask) => Some(ask),
                 Outcome::Settled { .. } => None,
             })
-            .chain(self.gate.as_ref())
             .collect()
     }
 }
@@ -1219,17 +1211,9 @@ pub struct EditScore {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GateScore {
-    pub kind: Option<String>,
-    pub confidence: Option<f64>,
-    pub probabilities: Option<BTreeMap<String, f64>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scored {
     pub sites: Vec<SiteScore>,
     pub edits: Vec<EditScore>,
-    pub gate: Option<GateScore>,
     /// 1.0 when the model touched nothing but the sites. `None`: unjudged.
     pub clean: Option<f64>,
     /// Changes outside the sites that were only spacing, sentence punctuation or casing. They cost nothing.
@@ -1274,25 +1258,6 @@ fn changes_label(changes: &[[String; 2]]) -> String {
 pub fn score(analysis: &Analysis, answers: &Answers) -> Scored {
     let (mut review, mut unjudged) = (Vec::new(), Vec::new());
 
-    let gate = analysis.gate.as_ref().map(|ask| match answers.get(&ask.key()) {
-        Some(Answer::Choice { choice, p, confidence,
-            }) => {
-            if *confidence < REVIEW_BELOW {
-                review.push(format!("gate  output called `{}` (conf {:.2})", choice, confidence));
-            }
-            GateScore { kind: Some(choice.clone()), confidence: Some(*confidence), probabilities: Some(p.clone()),
-                }
-        }
-        _ => {
-            unjudged.push("gate  is this output a transcript at all?".to_string());
-            GateScore { kind: None, confidence: None, probabilities: None,
-                }
-        }
-    });
-    let kind = gate.as_ref().and_then(|g| g.kind.as_deref());
-    let gate_open = gate.is_some() && kind.is_none();
-    let rejected = kind == Some("not_transcript");
-
     let mut sites = Vec::new();
     for f in &analysis.sites {
         let label = format!("{:?} → {:?} (wanted {:?})  in {}", f.heard, f.written, f.intended, f.context);
@@ -1310,9 +1275,7 @@ pub fn score(analysis: &Analysis, answers: &Answers) -> Scored {
         match &f.outcome {
             Outcome::Settled { how, credit } => {
                 s.how = how.to_string();
-                if !(f.depends_on_gate && gate_open) {
-                    s.credit = Some(*credit);
-                }
+                s.credit = Some(*credit);
             }
             Outcome::Ask(ask) => {
                 if let Some(Answer::Levels { p, confidence }) = answers.get(&ask.key()) {
@@ -1327,10 +1290,7 @@ pub fn score(analysis: &Analysis, answers: &Answers) -> Scored {
                 }
             }
         }
-        if rejected {
-            s.credit = Some(0.0);
-            s.how = format!("{} gate:not_transcript", s.how).trim().to_string();
-        } else if s.credit.is_none() {
+        if s.credit.is_none() {
             s.how = "unjudged".to_string();
             unjudged.push(format!("site  {}", label));
         }
@@ -1366,9 +1326,7 @@ pub fn score(analysis: &Analysis, answers: &Answers) -> Scored {
 
     // the fillers: all gone leaves `clean` whole, all still there halves it, in between pro rata
     let cleanup: Vec<Option<f64>> = sites.iter().filter(|s| s.tier == Tier::Cleanup).map(|s| s.credit).collect();
-    let clean = if matches!(kind, Some(k) if k != "transcript") {
-        Some(0.0)
-    } else if gate_open || edits.iter().any(|e| e.credit.is_none()) || cleanup.contains(&None) {
+    let clean = if edits.iter().any(|e| e.credit.is_none()) || cleanup.contains(&None) {
         None
     } else {
         let tidy = match cleanup.len() {
@@ -1381,7 +1339,7 @@ pub fn score(analysis: &Analysis, answers: &Answers) -> Scored {
     };
     Scored {
         evaluation_errors: Vec::new(),
-        sites, edits, gate, clean, neutral_edits: analysis.neutral, review, unjudged,
+        sites, edits, clean, neutral_edits: analysis.neutral, review, unjudged,
     }
 }
 
@@ -1473,7 +1431,9 @@ mod tests {
         assert_eq!(settled(readme("read me")), Some(("code:unchanged", 0.0)));
         assert_eq!(settled(readme("Readme")), Some(("code:case", 1.0)));
         assert_eq!(settled(readme("Read Me")), Some(("code:misheard-kept", 0.0)));
-        assert_eq!(settled(readme("")), Some(("code:dropped", 0.0)));
+        // a word written away goes to the judge with the sentences as written: a rephrase may keep the meaning
+        let Outcome::Ask(dropped) = readme("") else { panic!("a dropped word takes judgment") };
+        assert_eq!(dropped.state["written"], "然后我们的 CLAUDE.md 里边就去指向 。");
         let Outcome::Ask(ask) = readme("README.md") else { panic!("an extension takes judgment") };
         // the judge sees the sentence with every other correction made, differing only at the site
         assert_eq!(ask.state["intended"], "然后我们的 CLAUDE.md 里边就去指向 README。");
@@ -1495,7 +1455,7 @@ mod tests {
         assert_eq!(score(&tidy, &Answers::new()).clean, Some(1.0));
         // a wrapper is not neutral, and one question covers all changes to a sentence
         let quoted = r.analyze(&format!("“{}”", SAID), &[]);
-        assert_eq!(quoted.asks().iter().map(|a| a.kind).collect::<Vec<_>>(), vec![AskKind::Edit, AskKind::Edit, AskKind::Gate]);
+        assert_eq!(quoted.asks().iter().map(|a| a.kind).collect::<Vec<_>>(), vec![AskKind::Edit, AskKind::Edit]);
         // a long insertion where a short one was required is not the answer to that site
         let tail = reference("今天开会讨论预算", "今天开会讨论了预算", &[]);
         assert_eq!(tail.analyze("今天开会讨论了预算", &[]).groups.len(), 0);
@@ -1542,52 +1502,40 @@ mod tests {
         let r = reference(HEARD, SAID, &["Claude"]);
         let edit_kinds: Vec<&str> = EDIT_CREDIT.iter().map(|(k, _)| *k).collect();
         let edit = |chosen, p, confidence| Some(choice(&edit_kinds, chosen, p, "neutral", confidence));
-        let gate = |chosen, confidence| Some(choice(&GATE_KINDS, chosen, 0.9, "transcript", confidence));
-        // output, the judge's site / edit / gate verdict, expected [dictionary, semantic, clean]
-        let outputs: Vec<(&str, String, [Option<Answer>; 3], [f64; 3])> = vec![
-            ("perfect", SAID.to_string(), [None, None, None], [1.0, 2.0, 1.0],
+        // output, the judge's site / edit verdict, expected [dictionary, semantic, clean]. Answers and summaries in
+        // place of the transcript are the fidelity check's to catch, not these credits'.
+        let outputs: Vec<(&str, String, [Option<Answer>; 2], [f64; 3])> = vec![
+            ("perfect", SAID.to_string(), [None, None], [1.0, 2.0, 1.0],
             ),
-            ("untouched", HEARD.to_string(), [None, None, None], [0.0, 0.0, 1.0],
+            ("untouched", HEARD.to_string(), [None, None], [0.0, 0.0, 1.0],
             ),
-            ("synonym", SAID.replace("下一级", "下一层"), [Some(levels([0.40, 0.04, 0.56], 0.0)), None, None], [1.0, 1.58, 1.0],
+            ("synonym", SAID.replace("下一级", "下一层"), [Some(levels([0.40, 0.04, 0.56], 0.0)), None], [1.0, 1.58, 1.0],
             ),
-            ("extension", SAID.replace("README", "README.md"), [Some(levels([0.05, 0.20, 0.75], 0.6)), None, None], [1.0, 1.85, 1.0],
+            ("extension", SAID.replace("README", "README.md"), [Some(levels([0.05, 0.20, 0.75], 0.6)), None], [1.0, 1.85, 1.0],
             ),
-            ("misheard term reformatted", SAID.replace("CLAUDE.md", "Cloud.md"), [None, None, None], [0.0, 2.0, 1.0],
+            ("misheard term reformatted", SAID.replace("CLAUDE.md", "Cloud.md"), [None, None], [0.0, 2.0, 1.0],
             ),
             (
                 "term only mentioned",
                 SAID.replace("CLAUDE.md", "Cloud.md") + "（注：Claude 相关）",
-                [None, edit("commentary", 1.0, 0.9), gate("transcript", 0.32)],
+                [None, edit("commentary", 1.0, 0.9)],
                 [0.0, 2.0, 0.0],
             ),
-            ("negation flipped", SAID.replace("不要记录细节", "要记录细节"), [None, edit("damages", 0.97, 0.9), gate("transcript", 0.9)], [1.0, 2.0, 0.03],
+            ("negation flipped", SAID.replace("不要记录细节", "要记录细节"), [None, edit("damages", 0.97, 0.9)], [1.0, 2.0, 0.03],
             ),
             (
                 "hallucinated tail",
                 SAID.to_string() + "此外，建议你使用 Git 进行版本管理，并定期归档旧文档到 archive 目录。",
-                [None, edit("damages", 0.9, 0.8), gate("extended", 0.9)],
-                [1.0, 2.0, 0.0],
+                [None, edit("damages", 0.9, 0.8)],
+                [1.0, 2.0, 0.1],
             ),
-            ("preamble", format!("好的，以下是纠正后的文本：\n\n{}", SAID), [None, edit("commentary", 1.0, 0.9), gate("extended", 0.9)], [1.0, 2.0, 0.0],
-            ),
-            (
-                "answered instead of correcting",
-                "你说得对，CLAUDE.md 应该只做高层导航，指向 README，并且清理过时文档。".to_string(),
-                [None, None, gate("not_transcript", 0.9)],
-                [0.0, 0.0, 0.0],
-            ),
-            (
-                "summarized",
-                "记录进行中的事项并指向下一级导航；CLAUDE.md 指向 README；清理过时文档。".to_string(),
-                [None, None, gate("not_transcript", 0.9)],
-                [0.0, 0.0, 0.0],
+            ("preamble", format!("好的，以下是纠正后的文本：\n\n{}", SAID), [None, edit("commentary", 1.0, 0.9)], [1.0, 2.0, 0.0],
             ),
             (
                 "restyled",
                 SAID.replace("然后把一些过时的文档做一下清理。", "然后清理一些过时的文档。",
                 ),
-                [None, edit("rephrases", 1.0, 0.9), gate("transcript", 0.9)],
+                [None, edit("rephrases", 1.0, 0.9)],
                 [1.0, 2.0, 0.7],
             ),
         ];
@@ -1611,7 +1559,7 @@ mod tests {
             }
             assert!(*name == "perfect" || got.iter().sum::<f64>() < 4.0, "{} scores like the perfect output", name);
             // a verdict the judge was unsure of is put before a human
-            let unsure = ["synonym", "term only mentioned"].contains(name);
+            let unsure = *name == "synonym";
             assert_eq!(!scored.review.is_empty(), unsure, "{}: review {:?}", name, scored.review);
         }
     }
@@ -1707,9 +1655,7 @@ mod tests {
         let r = reference(HEARD, SAID, &["Claude"]);
         for output in ["", "。", "cloud md", "README", &SAID.repeat(2), &SAID.chars().rev().collect::<String>(),
         ] {
-            let analysis = r.analyze(output, &[]);
-            assert!(analysis.gate.is_some(), "{:?}", output);
-            score(&analysis, &Answers::new());
+            score(&r.analyze(output, &[]), &Answers::new());
         }
         let empty = reference("", "", &["Claude"]);
         assert!(empty.analyze("", &[]).asks().is_empty());

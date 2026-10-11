@@ -3,6 +3,7 @@
 mod runlog;
 
 mod adjudicate;
+mod app_settings;
 mod assessment;
 mod fidelity;
 mod scoring;
@@ -33,6 +34,9 @@ struct Config {
     concurrency: Option<usize>,
     prompt: Option<String>,
     dictionary: Option<String>,
+    /// `"app"`: send the correction prompt and hotword dictionary the installed app uses, read from its database
+    /// (`VOICEX_DB` or the app data directory), instead of `prompt` / `dictionary`. Default `"config"`.
+    prompt_source: Option<String>,
     provider: Vec<Provider>,
     /// Optional: settles the verdicts code cannot (is this other word the speaker's word, did this unrequested
     /// change do harm). `type = "typesafe"` (TypeSafe JEV) or `type = "openai"` (OpenAI Decisions API). Runs after all
@@ -544,7 +548,10 @@ struct StandingsFile {
 /// - 4: default severe hallucination gate on every output, preserving base correction scores.
 /// - 5: automatic binary secondary review; terminal evaluator errors score zero visibly.
 /// - 6: case-balanced 30/40/20/10; fixed repair tasks and separate tidy/readability/style.
-const SCORING_VERSION: u32 = 6;
+/// - 7: no transcript gate: an output called `not_transcript` no longer loses its correction and filler credits.
+/// - 8: a confirmed severe hallucination costs three rounds of quality (`scoring::SEVERE_EXTRA_ROUNDS`), not one.
+/// - 9: a semantic site whose word was written away goes to the judge with the sentences as written, not to 0.
+const SCORING_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct StandingRun {
@@ -718,11 +725,34 @@ async fn main() {
     };
     let reviewer_concurrency = eval_cfg.reviewer_concurrency.unwrap_or(4);
     assert!(rounds > 0 && concurrency > 0 && reviewer_concurrency > 0, "rounds and concurrency limits must be positive");
-    let prompt = config.prompt.unwrap_or_else(|| {
-        eprintln!("Warning: no root `prompt` in config; using the built-in default");
-        default_prompt()
-    });
-    let dictionary = config.dictionary.unwrap_or_default();
+    let prompt_source = config.prompt_source.clone().unwrap_or_else(|| "config".into());
+    let (prompt, dictionary, app_db) = match prompt_source.as_str() {
+        "config" => {
+            let prompt = config.prompt.unwrap_or_else(|| {
+                eprintln!("Warning: no root `prompt` in config; using the built-in default");
+                default_prompt()
+            });
+            (prompt, config.dictionary.unwrap_or_default(), None)
+        }
+        "app" => {
+            let app = app_settings::load().unwrap_or_else(|e| {
+                eprintln!("prompt_source = \"app\": {e}");
+                std::process::exit(1);
+            });
+            println!("Prompt and dictionary: the app's, from {}", app.db.display());
+            if config.prompt.is_some() || config.dictionary.is_some() {
+                println!("  (the config's `prompt` / `dictionary` are not used)");
+            }
+            if app.history_context {
+                eprintln!("Warning: the app adds recent dictations to its prompt; the bench sends none");
+            }
+            (app.prompt, app.dictionary, Some(app.db.display().to_string()))
+        }
+        other => {
+            eprintln!("{config_path}: prompt_source must be \"config\" or \"app\", not {other:?}");
+            std::process::exit(1);
+        }
+    };
     let finalize = get_arg(&args, "--finalize-results");
     let rescore = get_arg(&args, "--rescore-results");
     let saved_scores = rescore.clone().or_else(|| finalize.clone());
@@ -738,6 +768,9 @@ async fn main() {
             let configured = config.judge.as_ref().map(|j| j.model.as_str());
             assert_eq!(configured, Some(saved_judge), "the saved run was judged by {saved_judge}; use --replay to rejudge every verdict with the configured judge");
         }
+        // Credits the transcript gate voided (scoring 6 and earlier) would be kept as zeros.
+        assert!(saved_scores.is_none() || !text.contains("gate:not_transcript"),
+            "the saved run has credits voided by the transcript gate, which scoring 7 removed; use --replay");
         source
     });
     if dictionary.trim().is_empty() {
@@ -903,6 +936,10 @@ async fn main() {
         .iter()
         .map(|c| Reference::new(&c.input, &c.expected, &terms))
         .collect();
+    if args.iter().any(|a| a == "--check-cases") {
+        print_case_plans(&cases.case, &references);
+        return;
+    }
 
     // Every run keeps its console output and its results on disk, so a score can be looked at again later
     // without copying it out of the terminal. Opened only now: a run that stops during setup leaves no
@@ -1756,6 +1793,8 @@ async fn main() {
                 "git": runlog::git_state(),
                 "prompt": prompt,
                 "dictionary": dictionary,
+                "prompt_source": prompt_source,
+                "app_db": app_db,
                 "weights": {
                     "correction": weights.correction,
                     "fidelity": weights.fidelity,
@@ -2069,11 +2108,7 @@ async fn run_once(
     dictionary: &str,
     input: &str,
 ) -> RoundResult {
-    let system_prompt = if prompt.contains("{{DICTIONARY}}") {
-        prompt.replace("{{DICTIONARY}}", dictionary.trim())
-    } else {
-        format!("{}\n\n用户热词词典：\n{}", prompt, dictionary.trim())
-    };
+    let system_prompt = app_settings::system_prompt(prompt, dictionary);
     let user_content = format!("原文：\n{}", input);
     let limit = correction_timeout_for_text(input);
     run_prompt(http, provider, system_prompt, user_content, limit).await
@@ -2985,12 +3020,36 @@ fn default_prompt() -> String {
         .into()
 }
 
+/// What each case will be scored on, from its input and reference under the dictionary in use: the correction tasks
+/// (repeated repairs share one) and the cleanup sites. For writing references: a removal meant as cleanup that shows
+/// up here as a semantic task is a word the filler list and the stutter rule do not cover.
+fn print_case_plans(cases: &[TestCase], references: &[Reference]) {
+    for (case, reference) in cases.iter().zip(references) {
+        let tasks = reference.correction_tasks();
+        let cleanup: Vec<String> = reference
+            .sites()
+            .into_iter()
+            .filter(|(tier, _, _)| *tier == Tier::Cleanup)
+            .map(|(_, heard, _)| heard)
+            .collect();
+        println!("━━━ {} ({} chars, {} tasks, {} cleanup) ━━━", case.name, case.input.trim().chars().count(), tasks.len(), cleanup.len());
+        for task in &tasks {
+            let times = if task.site_indices.len() > 1 { format!("  ×{}", task.site_indices.len()) } else { String::new() };
+            println!("  {:<10} {} → {}{}", task.tier.name(), task.heard, task.intended, times);
+        }
+        if !cleanup.is_empty() {
+            println!("  cleanup    {}", cleanup.join(" | "));
+        }
+    }
+}
+
 fn print_usage() {
     eprintln!("Usage: llm-bench [OPTIONS]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --config <path>    Provider config file (default: config.toml)");
     eprintln!("  --cases <path>     Test cases file (default: test_cases.toml)");
+    eprintln!("  --check-cases      Print every case's correction tasks and cleanup sites, then stop; no API calls");
     eprintln!("  --rescore-results <path> Reuse saved correction credits/outputs/timings; judge new quality rules");
     eprintln!("  --replay <path>    Rejudge saved results; reuse outputs/timing, make no correction calls");
     eprintln!("  --probe-quality <path>  Validate whole-text readability/style on labeled anchors");

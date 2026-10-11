@@ -24,6 +24,10 @@ impl Default for Weights {
     }
 }
 
+/// A confirmed severe hallucination costs this many rounds of quality beyond its own, which is zeroed: three in all.
+/// A silent change of meaning costs the user far more than a missed repair, which only loses its task.
+pub const SEVERE_EXTRA_ROUNDS: f64 = 2.0;
+
 impl Weights {
     pub fn validate(self) -> Result<(), String> {
         let values = [self.correction, self.fidelity, self.cleanup, self.latency];
@@ -43,14 +47,16 @@ impl Weights {
             * (self.correction * m.correction
                 + self.fidelity * m.fidelity
                 + self.cleanup * m.cleanup
-                + self.latency * m.latency)
+                + self.latency * m.latency
+                - (1.0 - self.latency) * SEVERE_EXTRA_ROUNDS * m.severe)
     }
     pub fn ability(self, m: Metrics) -> f64 {
         100.0
-            * (self.correction * m.correction
+            * ((self.correction * m.correction
                 + self.fidelity * m.fidelity
                 + self.cleanup * m.cleanup)
-            / (1.0 - self.latency)
+                / (1.0 - self.latency)
+                - SEVERE_EXTRA_ROUNDS * m.severe)
     }
 }
 
@@ -64,6 +70,10 @@ pub struct Metrics {
     /// Half tidy, one quarter readability, one quarter style: 10/5/5 at default weights.
     pub cleanup: f64,
     pub latency: f64,
+    /// 1 for a round with a confirmed severe hallucination; averaged, the share of such rounds. It costs
+    /// [`SEVERE_EXTRA_ROUNDS`] more rounds of quality in the composite and ability.
+    #[serde(default)]
+    pub severe: f64,
 }
 
 pub fn mean(items: impl IntoIterator<Item = Metrics>) -> Metrics {
@@ -78,6 +88,7 @@ pub fn mean(items: impl IntoIterator<Item = Metrics>) -> Metrics {
         sum.style += m.style;
         sum.cleanup += m.cleanup;
         sum.latency += m.latency;
+        sum.severe += m.severe;
     }
     if count > 0 {
         let n = count as f64;
@@ -88,6 +99,7 @@ pub fn mean(items: impl IntoIterator<Item = Metrics>) -> Metrics {
         sum.style /= n;
         sum.cleanup /= n;
         sum.latency /= n;
+        sum.severe /= n;
     }
     sum
 }
@@ -227,13 +239,17 @@ pub fn score(
         style: style_judgment.credit,
         cleanup: 0.0,
         latency,
+        severe: 0.0,
     };
     base_metrics.cleanup = 0.5 * tidy + 0.25 * base_metrics.readability + 0.25 * base_metrics.style;
     let final_metrics = if call_failed {
         Metrics::default()
     } else if quality_zeroed {
+        // a failed evaluation zeroes quality too, but only a confirmed severe hallucination costs more
+        let severe = verdict.credit == Some(0.0) && verdict.evaluation_error.is_none();
         Metrics {
             latency,
+            severe: if severe { 1.0 } else { 0.0 },
             ..Metrics::default()
         }
     } else {
@@ -395,7 +411,7 @@ mod tests {
         Weights::default().validate().unwrap();
     }
     #[test]
-    fn severe_hallucination_only_zeros_this_round_quality() {
+    fn severe_hallucination_costs_three_rounds_of_quality_and_a_failed_review_one() {
         let reference = Reference::new("保留 GPT 6.1", "保留 GPT 6.1", &[]);
         let mut verdict = fidelity::check("保留 GPT 6.1", "保留 GPT 4", None, None);
         fidelity::finalize(
@@ -419,6 +435,14 @@ mod tests {
         assert_eq!(result.final_metrics.correction, 0.0);
         assert_eq!(result.final_metrics.fidelity, 0.0);
         assert_eq!(result.final_metrics.cleanup, 0.0);
+        // its own 90 points of quality zeroed, two more rounds' worth taken from the 8 speed points
+        assert!((Weights::default().composite(result.final_metrics) - (8.0 - 180.0)).abs() < 1e-9);
+        assert!((Weights::default().ability(result.final_metrics) + 200.0).abs() < 1e-9);
+        // a review that failed is an evaluator error, not a hallucination: quality zeroed, nothing more
+        let mut failed = fidelity::check("保留 GPT 6.1", "保留 GPT 4", None, None);
+        fidelity::finalize(&mut failed, "reviewer", Err("timeout".into()), 2);
+        let result = score(&reference, "保留 GPT 4", None, &failed, &Answers::new(), 0.8, false);
+        assert_eq!(result.final_metrics.severe, 0.0);
         assert!((Weights::default().composite(result.final_metrics) - 8.0).abs() < 1e-9);
     }
 }

@@ -13,10 +13,16 @@ concurrency = 6  # Independent correction providers in flight; --concurrency ove
 # same concurrency_group on [[provider]] entries that share one quota. Do not use
 # credentials as group names. The slowest provider of the newest saved run starts first.
 
+# Where the correction prompt and hotword dictionary come from. "app" reads the ones the
+# installed app is using from its database (VOICEX_DB, or voicex.db in the app data
+# directory) and builds the system prompt as the app does; `prompt` and `dictionary`
+# below are then not used. "config" (the default) sends `prompt` and `dictionary`.
+# prompt_source = "app"
+
 # System prompt. This is the app's default correction prompt (src/utils/llmPrompts.ts).
-# If you changed the prompt in the app, paste that one here: the bench ranks models
-# on whatever task this prompt sets, so it must be the task the app actually runs.
-# {{DICTIONARY}} is replaced with the dictionary below, exactly as the app does it.
+# If you changed the prompt in the app, paste that one here (or use prompt_source = "app"):
+# the bench ranks models on whatever task this prompt sets, so it must be the task the
+# app actually runs. {{DICTIONARY}} is replaced with the dictionary below, as the app does it.
 prompt = """你是一个语音转写文本整理助手。
 
 你的任务：

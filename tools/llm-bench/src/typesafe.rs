@@ -4,7 +4,7 @@
 //! An answer is used only when it is complete: every level or option with its probability, and a confidence. Anything
 //! else is a failure of the judge, reported as one, and leaves the items that waited for it unjudged.
 
-use crate::adjudicate::{Answer, Answers, Ask, AskKind, EDIT_CREDIT, GATE_KINDS, SITE_CREDIT};
+use crate::adjudicate::{Answer, Answers, Ask, AskKind, EDIT_CREDIT, SITE_CREDIT};
 use crate::decisions;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -50,7 +50,6 @@ pub fn endpoint(base_url: &str) -> String {
 pub struct Questions {
     site: Value,
     edit: Value,
-    gate: Value,
     #[serde(default = "default_fidelity_question")]
     fidelity: Value,
     #[serde(default = "default_readability")]
@@ -94,7 +93,7 @@ impl Questions {
             }
         }
         let edit_kinds: Vec<&str> = EDIT_CREDIT.iter().map(|(k, _)| *k).collect();
-        for (name, question, options) in [("edit", &questions.edit, &edit_kinds[..]), ("gate", &questions.gate, &GATE_KINDS[..]),
+        for (name, question, options) in [("edit", &questions.edit, &edit_kinds[..]),
             (
                 "fidelity",
                 &questions.fidelity,
@@ -113,7 +112,6 @@ impl Questions {
         match kind {
             AskKind::Site => &self.site,
             AskKind::Edit => &self.edit,
-            AskKind::Gate => &self.gate,
             AskKind::Fidelity => &self.fidelity,
             AskKind::Readability => &self.readability,
             AskKind::Style => &self.style,
@@ -233,8 +231,7 @@ fn read_answer(kind: AskKind, raw: RawAnswer) -> Result<Answer, String> {
     }
     let options: Vec<&str> = match kind {
         AskKind::Edit => EDIT_CREDIT.iter().map(|(k, _)| *k).collect(),
-        AskKind::Fidelity => vec!["faithful", "changed", "uncertain"],
-        _ => GATE_KINDS.to_vec(),
+        _ => vec!["faithful", "changed", "uncertain"],
     };
     let choice = raw.choice.ok_or("answer without `choice`")?;
     if !options.contains(&choice.as_str()) {
@@ -316,7 +313,7 @@ impl Judge {
     /// Every question as its service will receive it: a rubric the service cannot take is a setup error, found before
     /// any provider is called.
     pub fn check(&self) -> Result<(), String> {
-        for kind in [AskKind::Site, AskKind::Edit, AskKind::Gate, AskKind::Fidelity, AskKind::Readability, AskKind::Style] {
+        for kind in [AskKind::Site, AskKind::Edit, AskKind::Fidelity, AskKind::Readability, AskKind::Style] {
             self.backend
                 .body(&self.model, &Value::Null, self.questions.of(kind))
                 .map_err(|e| format!("`{}` question: {}", kind.name(), e))?;
@@ -437,6 +434,6 @@ mod tests {
         let no_confidence = raw(r#"{"probabilities": {"0": 0.1, "1": 0.4, "2": 0.5}}"#);
         assert!(read_answer(AskKind::Site, no_confidence).unwrap_err().contains("confidence"));
         let unknown = raw(r#"{"choice": "fine", "probabilities": {"fine": 1.0}, "confidence": 0.9}"#);
-        assert!(read_answer(AskKind::Gate, unknown).unwrap_err().contains("does not offer"));
+        assert!(read_answer(AskKind::Edit, unknown).unwrap_err().contains("does not offer"));
     }
 }
