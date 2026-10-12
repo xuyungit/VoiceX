@@ -36,6 +36,9 @@ use captions::{Boundary, CaptionFeed};
 
 const CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const EDGE_VERSION: &str = "143.0.3650.75";
+/// Keep this a complete Edge user agent: the current host answers a truncated
+/// browser one (Chrome-only, or a bare `Edg/…`) with 403. Its version need not
+/// match `EDGE_VERSION`.
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
 const BASE_URL: &str = "api.msedgeservices.com/tts/cognitiveservices";
 const SYNTHESIS_PATH: &str = "websocket/v1";
@@ -899,7 +902,7 @@ mod tests {
     /// synthesis WebSocket with 403 from October 2026; the current host takes
     /// the same token under the subscription-key name.
     #[test]
-    fn requests_use_the_current_host_and_its_subscription_key() {
+    fn auth_query_uses_the_subscription_key_and_a_v1_token() {
         let query = auth_query(&EdgeClock::default());
         let rest = query
             .strip_prefix(&format!("Ocp-Apim-Subscription-Key={CLIENT_TOKEN}&Sec-MS-GEC="))
@@ -911,9 +914,6 @@ mod tests {
         assert!(gec.chars().all(|c| c.is_ascii_hexdigit() && !c.is_lowercase()));
         assert_eq!(version, format!("1-{EDGE_VERSION}"));
         assert!(!query.contains("TrustedClientToken"));
-        assert_eq!(BASE_URL, "api.msedgeservices.com/tts/cognitiveservices");
-        assert_eq!(SYNTHESIS_PATH, "websocket/v1");
-        assert_eq!(VOICE_LIST_PATH, "voices/list");
     }
     /// The current voice list carries `DisplayName`, not the `FriendlyName` of
     /// the legacy host, and it must not fall back to the SSML `Name`.
