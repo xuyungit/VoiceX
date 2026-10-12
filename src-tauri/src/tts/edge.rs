@@ -1,6 +1,14 @@
 //! Microsoft Edge online Read Aloud, using its consumer WebSocket protocol.
 //! No user credentials are required. Protocol identifiers are versioned here;
 //! upstream changes fail visibly rather than switching to another provider.
+//!
+//! Since October 2026 `speech.platform.bing.com` answers the synthesis
+//! WebSocket with HTTP 403 in most regions while its voice list keeps working.
+//! The host Edge itself uses, `api.msedgeservices.com/tts/cognitiveservices`,
+//! still accepts the same `Sec-MS-GEC` token; only the query parameter name
+//! becomes `Ocp-Apim-Subscription-Key`. `Sec-MS-GEC-Version` must keep the `1-`
+//! prefix: the service refuses `2-…`, the version Edge 155 sends, unless the
+//! request carries the v2 token, whose algorithm is not public.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -29,7 +37,9 @@ use captions::{Boundary, CaptionFeed};
 const CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const EDGE_VERSION: &str = "143.0.3650.75";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
-const BASE_URL: &str = "speech.platform.bing.com/consumer/speech/synthesize/readaloud";
+const BASE_URL: &str = "api.msedgeservices.com/tts/cognitiveservices";
+const SYNTHESIS_PATH: &str = "websocket/v1";
+const VOICE_LIST_PATH: &str = "voices/list";
 const STREAM_RATE: u32 = 24_000;
 const OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
 const MAX_MESSAGE_BYTES: usize = 4096;
@@ -64,8 +74,10 @@ fn gec_at(unix_seconds: i64) -> String {
     hex::encode_upper(Sha256::digest(format!("{ticks}{CLIENT_TOKEN}").as_bytes()))
 }
 fn auth_query(clock: &EdgeClock) -> String {
+    // The `1-` prefix is part of the token family, not of the Edge version: the
+    // service rejects `2-…` unless the request carries a v2 token.
     format!(
-        "TrustedClientToken={CLIENT_TOKEN}&Sec-MS-GEC={}&Sec-MS-GEC-Version=1-{EDGE_VERSION}",
+        "Ocp-Apim-Subscription-Key={CLIENT_TOKEN}&Sec-MS-GEC={}&Sec-MS-GEC-Version=1-{EDGE_VERSION}",
         gec_at(clock.now())
     )
 }
@@ -158,7 +170,9 @@ fn split_requests(text: &str, voice: &str, rate: f32, pitch: i32) -> Result<Vec<
 struct VoiceRecord {
     #[serde(rename = "ShortName")]
     id: String,
-    #[serde(rename = "FriendlyName")]
+    /// The current host names the display name `DisplayName`; the legacy host
+    /// it replaces used `FriendlyName`, which this list does not carry.
+    #[serde(rename = "DisplayName")]
     name: String,
     #[serde(rename = "Locale")]
     language: String,
@@ -168,7 +182,7 @@ async fn fetch_voices(clock: &EdgeClock) -> Result<Vec<TtsVoice>, String> {
         let response = cloud_http_client()
             .map_err(|e| e.to_string())?
             .get(format!(
-                "https://{BASE_URL}/voices/list?{}",
+                "https://{BASE_URL}/{VOICE_LIST_PATH}?{}",
                 auth_query(clock)
             ))
             .header("User-Agent", USER_AGENT)
@@ -579,7 +593,7 @@ async fn stream_audio(
 ) -> Result<bool, CloudStreamError> {
     let id = request_id();
     let url = format!(
-        "wss://{BASE_URL}/edge/v1?{}&ConnectionId={id}",
+        "wss://{BASE_URL}/{SYNTHESIS_PATH}?{}&ConnectionId={id}",
         auth_query(clock)
     );
     let mut request = url
@@ -880,6 +894,44 @@ mod tests {
         assert_eq!(gec_at(1_700_000_100), gec_at(1_700_000_101));
         assert_ne!(gec_at(1_700_000_100), gec_at(1_700_000_400));
         assert_eq!(gec_at(1_700_000_100).len(), 64);
+    }
+    /// The legacy host and its `TrustedClientToken` parameter answered every
+    /// synthesis WebSocket with 403 from October 2026; the current host takes
+    /// the same token under the subscription-key name.
+    #[test]
+    fn requests_use_the_current_host_and_its_subscription_key() {
+        let query = auth_query(&EdgeClock::default());
+        let rest = query
+            .strip_prefix(&format!("Ocp-Apim-Subscription-Key={CLIENT_TOKEN}&Sec-MS-GEC="))
+            .expect("the subscription key comes first");
+        let (gec, version) = rest
+            .split_once("&Sec-MS-GEC-Version=")
+            .expect("the version comes last");
+        assert_eq!(gec.len(), 64);
+        assert!(gec.chars().all(|c| c.is_ascii_hexdigit() && !c.is_lowercase()));
+        assert_eq!(version, format!("1-{EDGE_VERSION}"));
+        assert!(!query.contains("TrustedClientToken"));
+        assert_eq!(BASE_URL, "api.msedgeservices.com/tts/cognitiveservices");
+        assert_eq!(SYNTHESIS_PATH, "websocket/v1");
+        assert_eq!(VOICE_LIST_PATH, "voices/list");
+    }
+    /// The current voice list carries `DisplayName`, not the `FriendlyName` of
+    /// the legacy host, and it must not fall back to the SSML `Name`.
+    #[test]
+    fn voice_records_read_the_display_name_of_the_current_host() {
+        let records: Vec<VoiceRecord> = serde_json::from_str(
+            r#"[{"Name":"Microsoft Server Speech Text to Speech Voice (zh-CN, XiaoxiaoNeural)",
+                 "DisplayName":"Xiaoxiao","LocalName":"晓晓",
+                 "ShortName":"zh-CN-XiaoxiaoNeural","Locale":"zh-CN"}]"#,
+        )
+        .unwrap();
+        assert_eq!(records[0].id, "zh-CN-XiaoxiaoNeural");
+        assert_eq!(records[0].name, "Xiaoxiao");
+        assert_eq!(records[0].language, "zh-CN");
+        assert!(serde_json::from_str::<Vec<VoiceRecord>>(
+            r#"[{"ShortName":"zh-CN-XiaoxiaoNeural","FriendlyName":"Microsoft Xiaoxiao Online (Natural) - Chinese (Mainland)","Locale":"zh-CN"}]"#
+        )
+        .is_err());
     }
     #[test]
     fn binary_frames_use_the_two_byte_header_length() {
