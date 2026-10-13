@@ -1,5 +1,6 @@
 //! ASR WebSocket client (Volcengine bigmodel_async).
 
+use crate::logging::preview;
 use crate::network::connect_async;
 use std::io::{Read, Write};
 use std::time::Duration;
@@ -243,16 +244,21 @@ impl AsrClient {
                             payload_slice
                         };
 
-                        let _preview: String =
-                            String::from_utf8_lossy(payload).chars().take(240).collect();
                         match msg_type {
                             0b1001 => {
                                 if let Some(mut evt) = decode_server_response(payload) {
-                                    // Log two-pass diagnostics: compare streaming vs nostream results
+                                    // Two-pass diagnostics: compare streaming vs
+                                    // nostream results. Both info lines are
+                                    // prefixes; the recognized text itself is on
+                                    // the debug lines.
                                     if evt.prefetch {
                                         log::info!(
                                             "ASR 1st-pass (prefetch): \"{}\"",
-                                            evt.text.chars().take(80).collect::<String>()
+                                            preview(&evt.text)
+                                        );
+                                        log::debug!(
+                                            "ASR 1st-pass (prefetch, full): \"{}\"",
+                                            evt.text
                                         );
                                     }
                                     // Treat protocol is_last flag as final, even if payload omitted definite/prefetch.
@@ -266,7 +272,11 @@ impl AsrClient {
                                     if evt.definite {
                                         log::info!(
                                             "ASR 2nd-pass (definite): \"{}\"",
-                                            evt.text.chars().take(80).collect::<String>()
+                                            preview(&evt.text)
+                                        );
+                                        log::debug!(
+                                            "ASR 2nd-pass (definite, full): \"{}\"",
+                                            evt.text
                                         );
                                     }
                                     on_event_reader(evt);

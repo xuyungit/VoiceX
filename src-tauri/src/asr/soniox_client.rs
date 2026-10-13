@@ -8,6 +8,7 @@
 //! - Send empty string `""` to signal end-of-audio
 //! - Session ends when response contains `"finished": true`
 
+use crate::logging::preview;
 use crate::network::connect_async;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -186,7 +187,11 @@ impl SonioxClient {
                     match msg {
                         Ok(Message::Text(text)) => {
                             if diagnostics_enabled {
-                                log::info!("SONIOX_DIAG inbound {}", text);
+                                // The frame carries the recognized tokens: a
+                                // prefix says which frame it is, the full one is
+                                // on the debug line only.
+                                log::info!("SONIOX_DIAG inbound {}", preview(&text));
+                                log::debug!("SONIOX_DIAG inbound (full) {}", text);
                             }
 
                             let payload: Value = serde_json::from_str(&text).map_err(|e| {

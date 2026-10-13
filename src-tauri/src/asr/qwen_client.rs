@@ -1,5 +1,6 @@
 //! Qwen realtime ASR WebSocket client.
 
+use crate::logging::preview;
 use crate::network::connect_async;
 use std::sync::Arc;
 use std::time::Duration;
@@ -106,7 +107,11 @@ impl QwenRealtimeClient {
                 match msg {
                     Ok(Message::Text(text)) => {
                         if diagnostics_reader {
-                            log::info!("QWEN_DIAG inbound_raw {}", text);
+                            // The frame carries the recognized text: a prefix
+                            // says which frame it is, the full one is on the
+                            // debug line only.
+                            log::info!("QWEN_DIAG inbound_raw {}", preview(&text));
+                            log::debug!("QWEN_DIAG inbound_raw (full) {}", text);
                         }
                         let payload: Value = serde_json::from_str(&text).map_err(|e| {
                             AsrError::ProtocolError(format!("Invalid Qwen JSON event: {e}"))

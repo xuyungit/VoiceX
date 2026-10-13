@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::super::SessionController;
-use crate::session::utils::preview;
+use crate::logging::preview;
 use crate::session::SessionMessage;
 
 impl SessionController {
@@ -61,13 +61,19 @@ impl SessionController {
             // on_asr_stream_finished_state is called via AsrStreamFinished message.
             self.cancel_asr_final_timeout();
             self.mark_asr_replay_checkpoint();
-            log::info!(
-                "ASR final received (len={}, definite={}, prefetch={})",
+            // A debug trace, not an event: one final per sentence is the normal
+            // rhythm of a read, and the length that matters is logged once, at
+            // stream end. `definite` is always true on this branch — every
+            // backend sets it together with `is_final`, and the two-pass path
+            // forces it when the last packet arrives — so it is kept only for
+            // the case that invariant ever breaks.
+            log::debug!(
+                "ASR final (len={}, definite={}, prefetch={}): {}",
                 merged_text.chars().count(),
                 evt.definite,
-                evt.prefetch
+                evt.prefetch,
+                preview(&merged_text)
             );
-            log::debug!("ASR final preview: {}", preview(&merged_text));
 
             // Treat ASR final as the end of recognition and proceed to injection.
             self.maybe_inject_final_state(state);
@@ -289,21 +295,27 @@ impl SessionController {
         true
     }
 
+    /// The "Inject skip/defer" lines below are a decision trace: every one of
+    /// them is the ordinary "not yet" branch, hit once per final for the whole
+    /// duration of a hands-free read. They stay at debug; what the user or a
+    /// bug report needs is the outcome, and each outcome (closing the HUD,
+    /// discarding audio, injecting or failing) is logged at info where it
+    /// happens.
     pub fn maybe_inject_final_state(&self, state: &mut AppState) {
         if state.final_injected {
-            log::info!("Inject skip: already injected");
+            log::debug!("Inject skip: already injected");
             return;
         }
         if state.injection_in_progress {
-            log::info!("Inject skip: injection already in progress");
+            log::debug!("Inject skip: injection already in progress");
             return;
         }
         if state.asr_refinement_in_progress {
-            log::info!("Inject skip: ASR refinement still in progress");
+            log::debug!("Inject skip: ASR refinement still in progress");
             return;
         }
         if self.should_defer_injection_until_asr_finished(state) {
-            log::info!(
+            log::debug!(
                 "Inject defer: waiting for ASR stream to finish before post-recording refinement"
             );
             return;
@@ -333,7 +345,7 @@ impl SessionController {
             }
         }
         if !state.has_final_result {
-            log::info!("Inject skip: no final result yet");
+            log::debug!("Inject skip: no final result yet");
             if state.asr_stream_finished
                 && (state.session_state == HotkeySessionState::Finalizing
                     || state.session_state == HotkeySessionState::HandsFree)
@@ -346,11 +358,11 @@ impl SessionController {
             return;
         }
         if state.is_recording {
-            log::info!("Inject skip: recording still running");
+            log::debug!("Inject skip: recording still running");
             return;
         }
         if state.session_final_text.is_empty() {
-            log::info!("Inject skip: final text empty");
+            log::debug!("Inject skip: final text empty");
             if state.asr_stream_finished
                 && (state.session_state == HotkeySessionState::Finalizing
                     || state.session_state == HotkeySessionState::HandsFree)

@@ -1,5 +1,7 @@
 //! LLM client for text correction
 
+use crate::logging::preview;
+
 use super::config::{LLMApiMode, LLMConfig, LLMProviderType};
 use super::provider::{create_provider, LLMProvider, Message};
 use reqwest::Client;
@@ -241,16 +243,16 @@ impl LLMClient {
             self.config.api_mode,
             url
         );
+        // The request carries the recognized text, so an info line shows only a
+        // prefix of it; the whole body stays available on the debug line below,
+        // which is written whether or not the diagnostics switch is on.
+        let auth = mask_api_key(&self.config.api_key);
         if llm_diag {
-            log::info!(
-                "LLM diag request auth={}",
-                mask_api_key(&self.config.api_key)
-            );
-            log::info!("LLM diag request body: {}", body_preview);
-        } else {
-            log::debug!("LLM request auth={}", mask_api_key(&self.config.api_key));
-            log::debug!("LLM request body: {}", body_preview);
+            log::info!("LLM diag request auth={auth}");
+            log::info!("LLM diag request body: {}", preview(&body_preview));
         }
+        log::debug!("LLM request auth={auth}");
+        log::debug!("LLM request body: {}", body_preview);
 
         let started_at = Instant::now();
         let mut req_builder = self
@@ -297,10 +299,9 @@ impl LLMClient {
             bytes.len()
         );
         if llm_diag {
-            log::info!("LLM diag response body: {}", body_text);
-        } else {
-            log::debug!("LLM response body: {}", body_text);
+            log::info!("LLM diag response body: {}", preview(&body_text));
         }
+        log::debug!("LLM response body: {}", body_text);
 
         if !status.is_success() {
             return Err(LLMError::HttpStatus {
@@ -703,10 +704,9 @@ fn log_response_text(text: &Option<String>) {
     };
 
     if llm_diag_enabled() {
-        log::info!("LLM diag response text: {}", text);
-    } else {
-        log::debug!("LLM response text: {}", text);
+        log::info!("LLM diag response text: {}", preview(text));
     }
+    log::debug!("LLM response text: {}", text);
 }
 
 fn build_system_prompt(

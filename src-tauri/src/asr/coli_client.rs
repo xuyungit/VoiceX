@@ -1,5 +1,6 @@
 //! Local ASR client backed by the external `coli` CLI.
 
+use crate::logging::preview;
 use std::{
     collections::VecDeque,
     env,
@@ -318,11 +319,13 @@ impl ColiAsrClient {
                         }
                     }
                     Err(_) => {
+                        // Unparsed CLI output may still be a recognized line, so
+                        // an info line shows only a prefix; the whole line stays
+                        // on the debug one, switch or no switch.
                         if diagnostics_enabled {
-                            log::info!("COLI_DIAG stdout {}", trimmed);
-                        } else {
-                            log::debug!("coli stdout: {}", trimmed);
+                            log::info!("COLI_DIAG stdout {}", preview(trimmed));
                         }
+                        log::debug!("coli stdout: {}", trimmed);
                     }
                 }
             }
@@ -351,10 +354,9 @@ impl ColiAsrClient {
 
                 push_tail_line(&stderr_tail_reader, trimmed);
                 if diagnostics_enabled {
-                    log::info!("COLI_DIAG stderr {}", trimmed);
-                } else {
-                    log::debug!("coli stderr: {}", trimmed);
+                    log::info!("COLI_DIAG stderr {}", preview(trimmed));
                 }
+                log::debug!("coli stderr: {}", trimmed);
             }
 
             Ok::<(), std::io::Error>(())

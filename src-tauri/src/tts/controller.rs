@@ -447,19 +447,11 @@ impl TtsController {
                     }
                     // The same poll carries the caption: the backend says
                     // which piece is being heard, and only a change is worth
-                    // an event.
+                    // putting on the HUD. Nothing is logged here: one line per
+                    // sentence is the read's normal rhythm, not an event, and
+                    // the HUD payload already carries the same index and total.
                     if captions {
                         if let Some(next) = next_caption(caption.as_ref(), backend.progress()) {
-                            log_event(
-                                "caption",
-                                &[
-                                    ("index", next.index.to_string()),
-                                    (
-                                        "total",
-                                        next.total.map(|total| total.to_string()).unwrap_or_default(),
-                                    ),
-                                ],
-                            );
                             hud.emit_caption(Some(&next));
                             caption = Some(next);
                         }

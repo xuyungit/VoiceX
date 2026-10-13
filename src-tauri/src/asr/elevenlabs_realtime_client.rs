@@ -1,3 +1,4 @@
+use crate::logging::preview;
 use crate::network::connect_async;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -192,7 +193,14 @@ impl ElevenLabsRealtimeClient {
                                 continue;
                             };
                             if diagnostics_enabled {
-                                log::info!("ELEVENLABS_DIAG runtime inbound {}", payload);
+                                // The frame carries the recognized text: a
+                                // prefix says which frame it is, the full one is
+                                // on the debug line only.
+                                log::info!(
+                                    "ELEVENLABS_DIAG runtime inbound {}",
+                                    preview(&payload.to_string())
+                                );
+                                log::debug!("ELEVENLABS_DIAG runtime inbound (full) {}", payload);
                             }
 
                             if let Some(reason) = extract_server_error(&payload) {

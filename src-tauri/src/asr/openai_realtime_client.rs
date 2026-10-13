@@ -1,3 +1,4 @@
+use crate::logging::preview;
 use crate::network::connect_async;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -515,7 +516,18 @@ fn handle_runtime_payload(
                 })?;
             let delta = payload.get("delta").and_then(Value::as_str).unwrap_or("");
             if diagnostics_enabled {
-                log::info!("OpenAI Realtime delta item_id={} text={}", item_id, delta);
+                // A prefix is enough to see which sentence the delta belongs to;
+                // the whole text stays on the diagnostic debug line.
+                log::info!(
+                    "OpenAI Realtime delta item_id={} text={}",
+                    item_id,
+                    preview(delta)
+                );
+                log::debug!(
+                    "OpenAI Realtime delta item_id={} text (full)={}",
+                    item_id,
+                    delta
+                );
             }
             if let Some(text) = transcript.push_delta(item_id.to_string(), delta) {
                 on_event(AsrEvent {

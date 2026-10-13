@@ -10,6 +10,7 @@
 //!     which is far worse for an input method than a few wrong characters.
 //!   - `--prompt`: the model's only hotword channel; measurably effective.
 
+use crate::logging::preview;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -117,7 +118,10 @@ impl QwenLocalAsrClient {
         }
 
         if self.config.enable_diagnostics && !stderr.is_empty() {
-            log::info!("QWEN_LOCAL_DIAG stderr: {stderr}");
+            // The child's own output can quote the recognized line, so an info
+            // line shows only a prefix; the whole text stays on the debug one.
+            log::info!("QWEN_LOCAL_DIAG stderr: {}", preview(&stderr));
+            log::debug!("QWEN_LOCAL_DIAG stderr (full): {stderr}");
         }
 
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();

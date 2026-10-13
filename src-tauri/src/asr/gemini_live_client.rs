@@ -1,5 +1,6 @@
 //! Gemini Live API WebSocket client.
 
+use crate::logging::preview;
 use crate::network::connect_async;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -373,7 +374,11 @@ fn handle_runtime_payload(
     {
         saw_input_transcription.store(true, Ordering::SeqCst);
         if diagnostics_enabled {
-            log::info!("Gemini Live inputTranscription: {}", input_text);
+            // The recognized sentence in full lives in the app's own history and
+            // HUD; an ordinary log line only says which one this is, and the
+            // whole sentence stays on the diagnostic debug line.
+            log::info!("Gemini Live inputTranscription: {}", preview(input_text));
+            log::debug!("Gemini Live inputTranscription (full): {}", input_text);
         }
         if let Some(combined) = transcript.push_partial(input_text) {
             on_event(AsrEvent {
@@ -393,7 +398,8 @@ fn handle_runtime_payload(
         .and_then(Value::as_str)
     {
         if diagnostics_enabled {
-            log::info!("Gemini Live outputTranscription: {}", output_text);
+            log::info!("Gemini Live outputTranscription: {}", preview(output_text));
+            log::debug!("Gemini Live outputTranscription (full): {}", output_text);
         }
     }
 

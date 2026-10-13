@@ -12,6 +12,7 @@ pub mod hud;
 pub mod i18n;
 pub mod injector;
 pub mod llm;
+mod logging;
 mod network;
 pub mod selection;
 pub mod services;

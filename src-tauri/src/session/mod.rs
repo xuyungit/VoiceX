@@ -2,7 +2,6 @@
 //! and timers for push-to-talk / hands-free modes.
 mod handlers;
 mod message;
-mod utils;
 
 pub use message::{CancelReason, SessionMessage};
 
