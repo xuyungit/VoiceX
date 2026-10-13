@@ -1,5 +1,6 @@
-//! The judge. Fixed questions in TypeSafe's format, each distinct state asked once, answered by TypeSafe System One
-//! (JEV) or by OpenAI's Decisions API ([`Backend`]).
+//! The judge. Fixed questions in TypeSafe's format, answered by TypeSafe System One (JEV) or by OpenAI's Decisions API
+//! ([`Backend`]). Every distinct question is asked once, and the questions about one state go in one request, as both
+//! services recommend: they are answered in parallel and the state is sent once.
 //!
 //! An answer is used only when it is complete: every level or option with its probability, and a confidence. Anything
 //! else is a failure of the judge, reported as one, and leaves the items that waited for it unjudged.
@@ -30,8 +31,6 @@ fn default_style() -> Value {
 const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 /// Transport errors and the statuses [`Backend::retryable`] names are retried after 1, 2 and 4 seconds.
 const ATTEMPTS: u32 = 4;
-/// Every request asks one question, under this name.
-const QUESTION: &str = "q";
 
 /// Accepts the endpoint itself, its `/v1` base, or nothing.
 pub fn endpoint(base_url: &str) -> String {
@@ -154,21 +153,26 @@ impl Backend {
         }
     }
 
-    fn body(self, model: &str, state: &Value, question: &Value) -> Result<Value, String> {
+    /// The questions about one state, each under its id: an ask's kind names its question.
+    fn body(self, model: &str, state: &Value, questions: &[(&str, &Value)]) -> Result<Value, String> {
         match self {
-            Backend::TypeSafe => Ok(json!({ "state": state, "model": model, "questions": { QUESTION: question } })),
-            Backend::Decisions => decisions::body(model, state, QUESTION, question),
+            Backend::TypeSafe => {
+                let questions: serde_json::Map<String, Value> =
+                    questions.iter().map(|(id, q)| (id.to_string(), (*q).clone())).collect();
+                Ok(json!({ "state": state, "model": model, "questions": questions }))
+            }
+            Backend::Decisions => decisions::body(model, state, questions),
         }
     }
 
     fn read(self, text: &str) -> Result<Reply, String> {
         match self {
             Backend::TypeSafe => {
-                let mut response: Response = serde_json::from_str(text).map_err(|e| e.to_string())?;
-                let raw = response.answers.remove(QUESTION).ok_or("no answer in response")?;
-                Ok(Reply { raw, usage: response.usage, model: response.model })
+                let response: Response = serde_json::from_str(text).map_err(|e| e.to_string())?;
+                let answers = response.answers.into_iter().map(|(id, raw)| (id, Ok(raw))).collect();
+                Ok(Reply { answers, usage: response.usage, model: response.model })
             }
-            Backend::Decisions => decisions::read(text, QUESTION),
+            Backend::Decisions => decisions::read(text),
         }
     }
 
@@ -188,10 +192,10 @@ struct Response {
     model: Option<String>,
 }
 
-/// One answer as read from a response, with what the service says about the call.
+/// The answers in a response by question id (a refused question is an error), with what the service says about the call.
 #[derive(Debug)]
 pub(crate) struct Reply {
-    pub(crate) raw: RawAnswer,
+    pub(crate) answers: HashMap<String, Result<RawAnswer, String>>,
     pub(crate) usage: Option<Usage>,
     /// The model the service says answered: `jev-latest` comes back as the version it resolved to.
     pub(crate) model: Option<String>,
@@ -253,8 +257,9 @@ fn short(text: &str) -> String {
     }
 }
 
-async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: AskKind, backend: Backend,
-) -> Result<(Answer, Usage, Option<String>), String> {
+/// One request for the questions about one state; for each kind asked, its answer or why it has none.
+async fn ask_group(http: Client, url: String, api_key: String, body: Value, kinds: Vec<AskKind>, backend: Backend,
+) -> Result<(Vec<Result<Answer, String>>, Usage, Option<String>), String> {
     let mut attempt = 0;
     let text = loop {
         attempt += 1;
@@ -279,11 +284,17 @@ async fn ask_one(http: Client, url: String, api_key: String, body: Value, kind: 
         }
         tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
     };
-    let reply = backend.read(&text).map_err(|e| format!("{}: {}", e, short(&text)))?;
-    let answer = read_answer(kind, reply.raw).map_err(|e| format!("{}: {}", e, short(&text)))?;
+    let mut reply = backend.read(&text).map_err(|e| format!("{}: {}", e, short(&text)))?;
+    let answers = kinds
+        .iter()
+        .map(|&kind| {
+            let raw = reply.answers.remove(kind.name()).ok_or(format!("no answer to `{}`", kind.name()));
+            raw.and_then(|raw| read_answer(kind, raw?)).map_err(|e| format!("{}: {}", e, short(&text)))
+        })
+        .collect();
     let usage = reply.usage.unwrap_or(Usage { input_tokens: 0, output_tokens: 0,
     });
-    Ok((answer, usage, reply.model))
+    Ok((answers, usage, reply.model))
 }
 
 pub struct Judge {
@@ -315,47 +326,68 @@ impl Judge {
     pub fn check(&self) -> Result<(), String> {
         for kind in [AskKind::Site, AskKind::Edit, AskKind::Fidelity, AskKind::Readability, AskKind::Style] {
             self.backend
-                .body(&self.model, &Value::Null, self.questions.of(kind))
+                .body(&self.model, &Value::Null, &[(kind.name(), self.questions.of(kind))])
                 .map_err(|e| format!("`{}` question: {}", kind.name(), e))?;
         }
         Ok(())
     }
 
-    /// Asks every distinct question once, `concurrency` at a time.
+    /// Asks every distinct question once, `concurrency` requests at a time; the questions about one state share a request.
     pub async fn ask_all(&self, asks: Vec<Ask>) -> JudgeRun {
         let mut seen = HashSet::new();
-        let mut pending = asks.into_iter().filter(|ask| seen.insert(ask.key())).collect::<Vec<_>>().into_iter();
-        let mut run = JudgeRun { distinct: pending.len(), ..Default::default() };
-        println!("Judge: {} distinct questions · concurrency {}", run.distinct, self.concurrency.max(1));
+        let unique: Vec<Ask> = asks.into_iter().filter(|ask| seen.insert(ask.key())).collect();
+        let mut run = JudgeRun { distinct: unique.len(), ..Default::default() };
+        // an ask is its kind and its state, so the kinds within one state's group are distinct
+        let mut groups: Vec<Vec<Ask>> = Vec::new();
+        let mut by_state: HashMap<String, usize> = HashMap::new();
+        for ask in unique {
+            let at = *by_state.entry(ask.state.to_string()).or_insert(groups.len());
+            if at == groups.len() {
+                groups.push(Vec::new());
+            }
+            groups[at].push(ask);
+        }
+        println!("Judge: {} distinct questions in {} requests · concurrency {}", run.distinct, groups.len(), self.concurrency.max(1));
+        let mut pending = groups.into_iter();
         let mut running = JoinSet::new();
         let mut completed = 0;
         loop {
             while running.len() < self.concurrency.max(1) {
-                let Some(ask) = pending.next() else { break };
-                let body = self.backend.body(&self.model, &ask.state, self.questions.of(ask.kind));
+                let Some(group) = pending.next() else { break };
+                let kinds: Vec<AskKind> = group.iter().map(|ask| ask.kind).collect();
+                let questions: Vec<(&str, &Value)> = kinds.iter().map(|&k| (k.name(), self.questions.of(k))).collect();
+                let body = self.backend.body(&self.model, &group[0].state, &questions);
                 let (http, url, api_key, backend) = (self.http.clone(), self.url.clone(), self.api_key.clone(), self.backend);
                 running.spawn(async move {
                     let result = match body {
-                        Ok(body) => ask_one(http, url, api_key, body, ask.kind, backend).await,
+                        Ok(body) => ask_group(http, url, api_key, body, kinds, backend).await,
                         Err(e) => Err(e),
                     };
-                    (ask, result)
+                    (group, result)
                 });
             }
             let Some(joined) = running.join_next().await else { break;
             };
-            let (ask, result) = joined.expect("a judge call panicked");
+            let (group, result) = joined.expect("a judge call panicked");
+            let before = completed;
+            completed += group.len();
             match result {
-                Ok((answer, usage, model)) => {
-                    run.answers.insert(ask.key(), answer);
+                Ok((answers, usage, model)) => {
                     run.input_tokens += usage.input_tokens;
                     run.output_tokens += usage.output_tokens;
                     run.reported_models.extend(model);
+                    for (ask, answer) in group.into_iter().zip(answers) {
+                        match answer {
+                            Ok(answer) => {
+                                run.answers.insert(ask.key(), answer);
+                            }
+                            Err(error) => run.failures.push((ask.label, error)),
+                        }
+                    }
                 }
-                Err(error) => run.failures.push((ask.label, error)),
+                Err(error) => run.failures.extend(group.into_iter().map(|ask| (ask.label, error.clone()))),
             }
-            completed += 1;
-            if completed % 25 == 0 || completed == run.distinct {
+            if completed / 25 > before / 25 || completed == run.distinct {
                 println!("  Judge [{}/{}] · {} failed", completed, run.distinct, run.failures.len());
             }
         }

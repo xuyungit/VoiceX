@@ -9,7 +9,7 @@
 use crate::typesafe::{RawAnswer, Reply, Usage};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 const ENDPOINT: &str = "https://api.openai.com/v1/decisions";
 
@@ -25,11 +25,12 @@ pub fn endpoint(base_url: &str) -> String {
     }
 }
 
-/// One question about one state. The state goes in as the JSON TypeSafe receives, so the field names the
-/// instructions refer to (`before`, `after`, `heard`, …) reach the model verbatim.
-pub fn body(model: &str, state: &Value, name: &str, question: &Value) -> Result<Value, String> {
+/// The questions about one state, each under its id. The state goes in as the JSON TypeSafe receives, so the field
+/// names the instructions refer to (`before`, `after`, `heard`, …) reach the model verbatim.
+pub fn body(model: &str, state: &Value, questions: &[(&str, &Value)]) -> Result<Value, String> {
     let input = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
-    Ok(json!({ "model": model, "input": input, "questions": [translate(name, question)?] }))
+    let questions = questions.iter().map(|(name, question)| translate(name, question)).collect::<Result<Vec<_>, _>>()?;
+    Ok(json!({ "model": model, "input": input, "questions": questions }))
 }
 
 /// A TypeSafe `score` becomes levels in the same order, labelled by index; a `choice` becomes one choice per option.
@@ -148,33 +149,31 @@ struct LevelProbability {
     probability: f64,
 }
 
-/// The answer to the question named `name`, as TypeSafe would have given it: options by value, levels by index.
-/// A refusal is a failure of the judge, like any other answer it does not give.
-pub fn read(text: &str, name: &str) -> Result<Reply, String> {
+/// Every answer by question id, as TypeSafe would have given it: options by value, levels by index. A refusal is a
+/// failure of the judge on that question, like any answer it does not give.
+pub fn read(text: &str) -> Result<Reply, String> {
     let response: Response = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    let answer = response
-        .answers
-        .into_iter()
-        .find(|answer| {
-            let (DecisionAnswer::Choice { name: n, .. } | DecisionAnswer::Score { name: n, .. } | DecisionAnswer::Refusal { name: n }) =
-                answer;
-            n.as_deref() == Some(name)
-        })
-        .ok_or("no answer in response")?;
-    let raw = match answer {
-        DecisionAnswer::Refusal { .. } => return Err("the judge refused to answer".into()),
-        DecisionAnswer::Choice { choice, probabilities, confidence, .. } => RawAnswer {
-            choice: Some(choice),
-            probabilities: Some(distribution(probabilities.into_iter().map(|p| (p.value, p.probability)))?),
-            confidence: Some(confidence),
-        },
-        DecisionAnswer::Score { probabilities, confidence, .. } => RawAnswer {
-            choice: None,
-            probabilities: Some(distribution(probabilities.into_iter().map(|p| (p.value.to_string(), p.probability)))?),
-            confidence: Some(confidence),
-        },
-    };
-    Ok(Reply { raw, usage: response.usage, model: response.model })
+    let mut answers = HashMap::new();
+    for answer in response.answers {
+        let (name, raw) = match answer {
+            DecisionAnswer::Refusal { name } => (name, Err("the judge refused to answer".to_string())),
+            DecisionAnswer::Choice { name, choice, probabilities, confidence } => (
+                name,
+                distribution(probabilities.into_iter().map(|p| (p.value, p.probability)))
+                    .map(|p| RawAnswer { choice: Some(choice), probabilities: Some(p), confidence: Some(confidence) }),
+            ),
+            DecisionAnswer::Score { name, probabilities, confidence } => (
+                name,
+                distribution(probabilities.into_iter().map(|p| (p.value.to_string(), p.probability)))
+                    .map(|p| RawAnswer { choice: None, probabilities: Some(p), confidence: Some(confidence) }),
+            ),
+        };
+        let name = name.ok_or("an answer without a question name")?;
+        if answers.insert(name.clone(), raw).is_some() {
+            return Err(format!("two answers to `{name}`"));
+        }
+    }
+    Ok(Reply { answers, usage: response.usage, model: response.model })
 }
 
 fn distribution(pairs: impl Iterator<Item = (String, f64)>) -> Result<BTreeMap<String, f64>, String> {
@@ -205,8 +204,11 @@ mod tests {
             "instructions": { "task": "T", "question": "Q?" },
             "criteria": [{ "what": "low", "examples": ["a", "b"] }, "mid", { "what": "high", "not_for": "c" }]
         });
-        let body = body("gpt-6-luna", &json!({ "after": "x" }), "q", &score).unwrap();
+        let style = json!({ "type": "score", "instructions": "S?", "criteria": ["a", "b"] });
+        let body = body("gpt-6-luna", &json!({ "after": "x" }), &[("q", &score), ("style", &style)]).unwrap();
         assert_eq!(body["input"], "{\n  \"after\": \"x\"\n}");
+        // the questions about one state go in one request
+        assert_eq!(body["questions"][1]["name"], "style");
         let q = &body["questions"][0];
         assert_eq!(q["instructions"], "T\n\nQ?");
         assert_eq!(q["levels"][0], json!({ "label": "0", "description": "low\nExamples:\n- a\n- b" }));
@@ -227,23 +229,28 @@ mod tests {
     fn answers_read_like_typesafe_answers_and_a_refusal_is_a_failure() {
         let text = r#"{"model": "gpt-6-luna", "answers": [
             {"type": "choice", "name": "q", "choice": "a", "confidence": 0.9,
-             "probabilities": [{"value": "a", "probability": 0.8}, {"value": "b", "probability": 0.2}]}],
+             "probabilities": [{"value": "a", "probability": 0.8}, {"value": "b", "probability": 0.2}]},
+            {"type": "refusal", "name": "r"}],
             "usage": {"input_tokens": 12, "output_tokens": 0, "total_tokens": 12}}"#;
-        let reply = read(text, "q").unwrap();
-        assert_eq!(reply.raw.choice.as_deref(), Some("a"));
-        assert_eq!(reply.raw.probabilities.unwrap(), BTreeMap::from([("a".into(), 0.8), ("b".into(), 0.2)]));
+        let mut reply = read(text).unwrap();
+        let choice = reply.answers.remove("q").unwrap().unwrap();
+        assert_eq!(choice.choice.as_deref(), Some("a"));
+        assert_eq!(choice.probabilities.unwrap(), BTreeMap::from([("a".into(), 0.8), ("b".into(), 0.2)]));
+        // a refusal fails only the question it refuses
+        assert!(reply.answers.remove("r").unwrap().unwrap_err().contains("refused"));
         assert_eq!(reply.usage.unwrap().input_tokens, 12);
         assert_eq!(reply.model.as_deref(), Some("gpt-6-luna"));
 
         let score = r#"{"answers": [{"type": "score", "name": "q", "score": 1.1, "confidence": 0.5, "probabilities": [
             {"value": 0, "label": "0", "probability": 0.1}, {"value": 1, "label": "1", "probability": 0.7},
             {"value": 2, "label": "2", "probability": 0.2}]}]}"#;
-        let reply = read(score, "q").unwrap();
-        assert_eq!(reply.raw.probabilities.unwrap()["1"], 0.7);
+        let reply = read(score).unwrap();
+        assert_eq!(reply.answers["q"].as_ref().unwrap().probabilities.as_ref().unwrap()["1"], 0.7);
         assert_eq!(reply.model, None);
 
-        assert!(read(r#"{"answers": [{"type": "refusal", "name": "q"}]}"#, "q").unwrap_err().contains("refused"));
-        assert!(read(r#"{"answers": [{"type": "refusal", "name": "other"}]}"#, "q").unwrap_err().contains("no answer"));
-        assert!(read(r#"{"answers": [{"type": "predicate", "name": "q", "probability": 0.5}]}"#, "q").is_err());
+        assert!(read(r#"{"answers": [{"type": "predicate", "name": "q", "probability": 0.5}]}"#).is_err());
+        assert!(read(r#"{"answers": [{"type": "refusal"}]}"#).unwrap_err().contains("name"));
+        assert!(read(r#"{"answers": [{"type": "refusal", "name": "q"}, {"type": "refusal", "name": "q"}]}"#)
+            .unwrap_err().contains("two answers"));
     }
 }

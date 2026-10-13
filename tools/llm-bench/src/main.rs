@@ -551,7 +551,9 @@ struct StandingsFile {
 /// - 7: no transcript gate: an output called `not_transcript` no longer loses its correction and filler credits.
 /// - 8: a confirmed severe hallucination costs three rounds of quality (`scoring::SEVERE_EXTRA_ROUNDS`), not one.
 /// - 9: a semantic site whose word was written away goes to the judge with the sentences as written, not to 0.
-const SCORING_VERSION: u32 = 9;
+/// - 10: the whole-transcript questions about one output (severe, readability, style) share one state and one request;
+///   readability and style now see the identifier hints the severe question always had.
+const SCORING_VERSION: u32 = 10;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct StandingRun {

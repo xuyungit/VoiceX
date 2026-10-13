@@ -91,6 +91,23 @@ cargo run -- --feedback-results runs/<run>/results.json --output /path/to/review
 The legacy edit questions remain diagnostic. Human feedback is collected
 before choosing a new rubric, sample distribution or repair-cost model.
 
+## Scoring version 10
+
+The whole-transcript questions about one output (severe hallucination,
+readability, style) now share one state, identifier hints included, and go to
+the judge in one request, as TypeSafe recommends for questions over the same
+state; the Decisions judge gets them in one request too. Judging the
+2026-10-11 outputs twice, this cut judge input tokens from 3.72M to 2.58M and
+judge time from 127 s to 83 s; severe verdicts stayed the same within the usual
+rejudging noise (16 flips between the two, 17 before). Readability and style now
+also see the identifier hints, so their answers can differ slightly from version 9.
+
+Splitting the severe check into one yes/no question per kind of change, the
+other half of that guidance, was tried on the same outputs and not adopted: it
+sent more outputs to the reviewer, whose verdicts on borderline outputs are the
+least stable part, and doubled the verdicts that flip when the same outputs are
+judged twice (17 → 36).
+
 ## Scoring version 9
 
 Version 9 stops scoring a contextual repair site as missed only because the

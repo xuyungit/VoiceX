@@ -3,7 +3,6 @@
 use crate::adjudicate::{Answer, Answers, Ask, AskKind, CorrectionTask, Reference, Scored, Tier};
 use crate::fidelity::Verdict;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct Weights {
@@ -149,7 +148,7 @@ pub fn quality_ask(kind: AskKind, input: &str, reference: &str, output: &str) ->
     assert!(matches!(kind, AskKind::Readability | AskKind::Style));
     Ask {
         kind,
-        state: json!({"before": input.trim(), "reference": reference.trim(), "after": output}),
+        state: crate::fidelity::whole_text_state(input, reference, output),
         label: format!("{}: whole transcript", kind.name()),
     }
 }

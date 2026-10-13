@@ -111,12 +111,17 @@ fn identifiers(text: &str) -> Vec<String> {
     tokens
 }
 
+/// What the judge sees for every whole-transcript question: severe hallucination, readability and style. One state, so
+/// the judge answers all three in one request. Identifier changes are evidence, not a verdict.
+pub fn whole_text_state(input: &str, reference: &str, output: &str) -> serde_json::Value {
+    json!({ "before": input.trim(), "reference": reference.trim(), "after": output,
+        "identifier_hints": { "before": identifiers(input), "after": identifiers(output) } })
+}
+
 pub fn ask_with_reference(input: &str, reference: &str, output: &str) -> Ask {
-    // Judge the whole utterance; identifier changes are evidence, not a verdict.
     Ask {
         kind: AskKind::Fidelity,
-        state: json!({ "before": input, "reference": reference, "after": output,
-        "identifier_hints": { "before": identifiers(input), "after": identifiers(output) } }),
+        state: whole_text_state(input, reference, output),
         label: "severe hallucination: whole transcript".into(),
     }
 }
@@ -278,10 +283,14 @@ mod tests {
 
     #[test]
     fn a_probe_supplies_the_raw_text_and_correction_reference_separately() {
-        let ask = ask_with_reference("用 Abacus", "用 Abaqus", "使用 Abaqus");
+        let ask = ask_with_reference(" 用 Abacus", "用 Abaqus\n", "使用 Abaqus");
         assert_eq!(ask.state["before"], "用 Abacus");
         assert_eq!(ask.state["reference"], "用 Abaqus");
         assert_eq!(ask.state["after"], "使用 Abaqus");
+        // the same state as readability and style, so the judge asks all three in one request
+        for kind in [AskKind::Readability, AskKind::Style] {
+            assert_eq!(crate::scoring::quality_ask(kind, " 用 Abacus", "用 Abaqus\n", "使用 Abaqus").state, ask.state);
+        }
     }
 
     #[test]
