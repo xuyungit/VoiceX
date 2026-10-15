@@ -11,7 +11,7 @@
     "cohere": "cohere-transcribe-03-2026",
     "elevenlabsRealtime": "scribe_v2_realtime",
     "elevenlabsBatch": "scribe_v2",
-    "stepaudio": "stepaudio-2.5-asr",
+    "stepaudio": "stepaudio-3-asr-max",
     "mimo": "mimo-v2.5-asr"
   },
   "models": [
@@ -146,6 +146,13 @@
         "batch"
       ],
       "note": "modelArabic"
+    },
+    {
+      "provider": "stepaudio",
+      "id": "stepaudio-3-asr-max",
+      "modes": [
+        "batch"
+      ]
     },
     {
       "provider": "stepaudio",

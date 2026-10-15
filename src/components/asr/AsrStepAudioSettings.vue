@@ -4,6 +4,7 @@ import AsrModelSelect from './AsrModelSelect.vue'
 import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import { ASR_MODEL_DEFAULTS } from '../../utils/asrModels'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -59,7 +60,7 @@ const stepaudioLanguageOptions = computed(() => [
       <div class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.model') }}</div>
-          <div class="field-note">{{ t('asr.stepaudioModelNote') }}</div>
+          <div class="field-note">{{ t('asr.stepaudioModelNote', { model: ASR_MODEL_DEFAULTS.stepaudio }) }}</div>
         </div>
         <AsrModelSelect v-model:value="stepaudioModel" provider="stepaudio" mode="batch" class="field-control" />
       </div>

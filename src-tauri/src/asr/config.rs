@@ -223,7 +223,7 @@ pub struct AsrConfig {
     pub soniox_language: String,
     pub soniox_max_endpoint_delay_ms: Option<u32>,
 
-    // StepAudio 2.5 ASR settings
+    // StepAudio ASR settings (HTTP + SSE batch transcription)
     pub stepaudio_api_key: String,
     pub stepaudio_model: String,
     pub stepaudio_base_url: String,

@@ -47,6 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "soniox" => settings.soniox_model = args[4].clone(),
+        "stepaudio" => settings.stepaudio_model = args[4].clone(),
         "qwen-local" => settings.qwen_local_model_dir = args[4].clone(),
         _ => return Err("Unsupported probe provider".into()),
     }
@@ -77,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &settings.qwen_asr_api_key,
                 &settings.openai_asr_api_key,
                 &settings.soniox_api_key,
+                &settings.stepaudio_api_key,
             ] {
                 if !secret.is_empty() {
                     safe = safe.replace(secret, "[redacted]");

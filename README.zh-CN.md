@@ -48,7 +48,7 @@ VoiceX 通过一个可配置的全局热键映射三种不同意图：
 | Gemini Live Realtime | 云端流式 (WebSocket) | 默认 `gemini-3.1-flash-live-preview`，也可选 `gemini-3.5-transcribe-live`；基于输入音频转写的实时识别，可附带语言提示 |
 | Cohere Audio Transcription | 云端批量文件识别 | `cohere-transcribe-03-2026`；整段音频上传识别，需显式指定 ISO-639-1 语言码 |
 | Soniox Realtime | 云端流式 (WebSocket) | 默认 `stt-rt-v5`（`stt-rt-v4` 仍可选）；基于 token 的流式识别，支持热词和语言提示 |
-| StepAudio 2.5 ASR | 云端批量文件识别 (HTTP + SSE) | 阶跃星辰；`stepaudio-2.5-asr`；录音结束后上传整段音频，支持最长 30 分钟与 SSE 增量返回 |
+| StepAudio | 云端批量文件识别 (HTTP + SSE) | 阶跃星辰；默认 `stepaudio-3-asr-max`，保留 `stepaudio-2.5-asr`；录音结束后上传整段音频，VoiceX 录音上限 30 分钟，文本通过 SSE 增量返回 |
 | 小米 MiMo ASR | 云端批量文件识别 (HTTP + JSON) | 小米；`mimo-v2.5-asr`；OpenAI 兼容的 chat/completions 接口；录音结束后上传整段音频，压缩为 MP3（macOS/Linux）或 WAV（Windows）以满足 10 MB 输入上限 |
 | OpenAI ASR | 云端批量 / 流式 (WebSocket) | `gpt-transcribe` / `gpt-live-transcribe`；双模式——批量文件上传或实时 WebSocket 流式识别；词典走原生 `keywords` 参数，支持多语种 `languages` 与 Realtime 延迟档位 |
 | ElevenLabs Speech-to-Text | 云端流式 / 批量文件识别 | `scribe_v2_realtime` / `scribe_v2`；支持实时识别、整段批量转录，以及录音结束后的 batch refine |

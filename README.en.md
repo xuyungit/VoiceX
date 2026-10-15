@@ -121,7 +121,7 @@ working in places we cannot reach such as the login window.
 | Gemini Live Realtime | Cloud streaming (WebSocket) | Default `gemini-3.1-flash-live-preview`, also `gemini-3.5-transcribe-live`; realtime input-audio transcription with language hints |
 | Cohere Audio Transcription | Cloud batch file upload | `cohere-transcribe-03-2026`; whole-file transcription with explicit ISO-639-1 language hint |
 | Soniox Realtime | Cloud streaming (WebSocket) | Default `stt-rt-v5` (`stt-rt-v4` remains selectable); token-based streaming with hotword support and language hints |
-| StepAudio 2.5 ASR | Cloud batch file upload (HTTP + SSE) | StepFun; `stepaudio-2.5-asr`; uploads the full recording after capture stops, supports up to 30 minutes, and returns incremental SSE events |
+| StepAudio | Cloud batch file upload (HTTP + SSE) | StepFun; defaults to `stepaudio-3-asr-max`, with `stepaudio-2.5-asr` retained; uploads the full recording after capture stops, with a 30-minute VoiceX recording limit and incremental text over SSE |
 | Xiaomi MiMo ASR | Cloud batch file upload (HTTP + JSON) | Xiaomi; `mimo-v2.5-asr`; OpenAI-compatible chat/completions endpoint; uploads the full recording after capture stops, compressed to MP3 (macOS/Linux) or WAV (Windows) to fit the 10 MB input limit |
 | OpenAI ASR | Cloud batch / streaming (WebSocket) | `gpt-transcribe` / `gpt-live-transcribe`; dual-mode — batch file upload or realtime WebSocket streaming. The dictionary is sent through the native `keywords` parameter, with multi-language `languages` and a Realtime latency tier |
 | ElevenLabs Speech-to-Text | Cloud streaming / batch file upload | `scribe_v2_realtime` / `scribe_v2`; supports realtime transcription, whole-file batch uploads, and optional post-recording batch refine |

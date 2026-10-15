@@ -661,7 +661,7 @@ fn probe_provider_name(provider: &crate::asr::AsrProviderType) -> &'static str {
         crate::asr::AsrProviderType::OpenAI => "OpenAI Audio Transcription",
         crate::asr::AsrProviderType::ElevenLabs => "ElevenLabs Speech to Text",
         crate::asr::AsrProviderType::Soniox => "Soniox Real-Time STT",
-        crate::asr::AsrProviderType::StepAudio => "StepAudio 2.5 ASR",
+        crate::asr::AsrProviderType::StepAudio => provider.display_name(),
         crate::asr::AsrProviderType::Mimo => "Xiaomi MiMo ASR",
         crate::asr::AsrProviderType::Coli => "Local Offline ASR (coli)",
         crate::asr::AsrProviderType::QwenLocal => "Local Offline ASR (Qwen3-ASR)",
