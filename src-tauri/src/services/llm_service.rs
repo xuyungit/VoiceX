@@ -274,6 +274,33 @@ mod llm_key_tests {
     use super::*;
     use crate::commands::settings::CustomLlmEndpoint;
 
+    #[test]
+    fn correction_translation_and_reading_share_the_volcengine_model() {
+        let mut raw = serde_json::json!({"llmVolcengineModel":"doubao-seed-2-0-mini-260215"});
+        assert!(crate::commands::settings::migrate_retired_volcengine_default(&mut raw));
+        let settings: AppSettings = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            build_llm_config_from_settings(&settings).model_name,
+            crate::llm::default_volcengine_model()
+        );
+        for key in ["", LLM_PROVIDER_FOLLOW, "volcengine"] {
+            assert_eq!(
+                build_llm_config_for_key(&settings, key).model_name,
+                crate::llm::default_volcengine_model()
+            );
+        }
+        for model in ["ep-custom-deployment", "", "  "] {
+            let mut selected = settings.clone();
+            selected.llm_volcengine_model = model.into();
+            let config = build_llm_config_from_settings(&selected);
+            assert_eq!(config.model_name, model);
+            assert_eq!(
+                config.missing_request_fields().contains(&"model name"),
+                model.trim().is_empty()
+            );
+        }
+    }
+
     fn settings_with_two_providers() -> AppSettings {
         let mut settings = AppSettings::default();
         settings.llm_provider_type = "volcengine".to_string();

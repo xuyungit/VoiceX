@@ -4,17 +4,39 @@ use serde::Deserialize;
 use std::{collections::HashMap, sync::OnceLock};
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Catalog {
     defaults: HashMap<String, String>,
     models: Vec<Model>,
+    retired: Vec<RetiredModel>,
+    default_migrations: Vec<DefaultMigration>,
 }
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetiredModel {
+    provider: String,
+    id: String,
+    shutdown_date: String,
+    replacement: String,
+    #[serde(default)]
+    settings_fields: Vec<String>,
+}
+#[derive(Deserialize)]
+struct DefaultMigration {
+    field: String,
+    previous: String,
+    replacement: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Model {
     provider: String,
     id: String,
     modes: Vec<String>,
     #[serde(default)]
     delay: bool,
+    #[serde(default)]
+    max_recording_minutes: Option<u32>,
 }
 fn catalog() -> &'static Catalog {
     static CATALOG: OnceLock<Catalog> = OnceLock::new();
@@ -30,15 +52,81 @@ pub fn default_model(key: &str) -> String {
         .expect("ASR default must exist in catalog")
         .clone()
 }
+
+/// Migrate only exact IDs in their designated built-in settings fields. The
+/// catalog intentionally omits migrations that would require a provider switch.
+pub fn migrate_known_model_settings(value: &mut serde_json::Value) -> bool {
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    let mut replace = |field: &str, previous: &str, replacement: &str| {
+        if object.get(field).and_then(serde_json::Value::as_str) == Some(previous) {
+            object.insert(field.to_string(), replacement.into());
+            changed = true;
+        }
+    };
+    for model in &catalog().retired {
+        for field in &model.settings_fields {
+            replace(field, &model.id, &model.replacement);
+        }
+    }
+    changed
+}
+
+pub fn migrate_default_model_settings(value: &mut serde_json::Value) -> bool {
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for migration in &catalog().default_migrations {
+        if object
+            .get(&migration.field)
+            .and_then(serde_json::Value::as_str)
+            == Some(&migration.previous)
+        {
+            object.insert(
+                migration.field.clone(),
+                migration.replacement.clone().into(),
+            );
+            changed = true;
+        }
+    }
+    changed
+}
+
 pub fn supports_delay(provider: &str, id: &str) -> bool {
     catalog().models.iter().filter(|m| m.provider == provider &&
         (m.id == id.trim() || id.trim().starts_with(&format!("{}-", m.id))))
         .max_by_key(|m| m.id.len()).is_some_and(|m| m.delay)
 }
 
+pub fn max_recording_minutes(provider: &str, id: &str) -> Option<u32> {
+    catalog()
+        .models
+        .iter()
+        .filter(|model| {
+            model.provider == provider
+                && (model.id == id.trim() || id.trim().starts_with(&format!("{}-", model.id)))
+        })
+        .max_by_key(|model| model.id.len())
+        .and_then(|model| model.max_recording_minutes)
+}
+
 pub fn validate_model(provider: &str, id: &str, mode: &str) -> Result<(), String> {
     if id.trim().is_empty() {
         return Err(format!("{provider}: 请选择识别模型 / Select a model"));
+    }
+    if let Some(model) = catalog().retired.iter().find(|model| {
+        (model.provider == provider
+            || (provider.starts_with("gemini") && model.provider.starts_with("gemini")))
+            && model.id == id.trim()
+    }) {
+        return Err(format!(
+            "{provider}: 模型 {} 已于 {} 停止服务。请选择 {} 或其他可用模型；原配置已保留。 / Model {} was shut down on {}. Select {} or another available model; your saved value is preserved.",
+            model.id, model.shutdown_date, model.replacement,
+            model.id, model.shutdown_date, model.replacement
+        ));
     }
     if let Some(model) = catalog()
         .models
@@ -109,6 +197,68 @@ impl AsrConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn known_model_settings_migrate_exact_ids_to_supported_same_provider_models_once() {
+        let modes = [
+            ("qwenAsrModel", "realtime"),
+            ("qwenAsrBatchModel", "batch"),
+            ("funasrModel", "realtime"),
+        ];
+        for model in &catalog().retired {
+            for field in &model.settings_fields {
+                let mode = modes.iter().find(|(key, _)| *key == field).unwrap().1;
+                assert!(validate_model(&model.provider, &model.id, mode).is_err());
+                assert!(validate_model(&model.provider, &model.replacement, mode).is_ok());
+                let mut raw = serde_json::json!({
+                    "asrProviderType": model.provider,
+                    "qwenAsrRecognitionMode": "realtime_refine",
+                    "qwenAsrWsUrl": "wss://custom.example/realtime",
+                    "llmCustomEndpoints": [{"model": model.id}]
+                });
+                raw[field] = model.id.clone().into();
+                let mut expected = raw.clone();
+                expected[field] = model.replacement.clone().into();
+                assert!(migrate_known_model_settings(&mut raw));
+                assert_eq!(raw, expected);
+                assert!(!migrate_known_model_settings(&mut raw));
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_live_default_migration_preserves_custom_models_and_other_fields() {
+        let mut raw = serde_json::json!({"geminiLiveModel":"gemini-3.1-flash-live-preview", "geminiModel":"gemini-3.1-flash-live-preview"});
+        assert!(migrate_default_model_settings(&mut raw));
+        assert_eq!(raw["geminiLiveModel"], "gemini-3.5-transcribe-live");
+        assert_eq!(raw["geminiModel"], "gemini-3.1-flash-live-preview");
+        assert!(!migrate_default_model_settings(&mut raw));
+        for id in [
+            "my-deployment",
+            "gemini-3.1-flash-live-preview-custom",
+            "",
+            "  ",
+        ] {
+            let mut raw = serde_json::json!({"geminiLiveModel":id,"qwenAsrModel":id,"qwenAsrBatchModel":id,"funasrModel":id});
+            let original = raw.clone();
+            assert!(!migrate_known_model_settings(&mut raw));
+            assert!(!migrate_default_model_settings(&mut raw));
+            assert_eq!(raw, original);
+        }
+    }
+
+    #[test]
+    fn asynchronous_filetrans_snapshot_is_blocked_without_a_cross_protocol_migration() {
+        let id = "qwen3-asr-flash-filetrans-2025-11-17";
+        let mut raw = serde_json::json!({"qwenAsrBatchModel":id});
+        let original = raw.clone();
+        assert!(!migrate_known_model_settings(&mut raw));
+        assert_eq!(raw, original);
+        let error = validate_model("qwen", id, "batch").unwrap_err();
+        assert!(error.contains("2026-10-10"));
+        assert!(error.contains("your saved value is preserved"));
+        assert!(validate_model("custom", id, "batch").is_ok());
+    }
+
     #[test]
     fn modes_reject_known_mismatches_but_keep_custom_ids() {
         assert!(validate_model("openai", "gpt-live-transcribe", "batch").is_err());

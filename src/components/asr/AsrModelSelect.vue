@@ -2,12 +2,13 @@
 import { computed } from 'vue'
 import { NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import { buildModelOptions, findAsrModel, modelSelectionError, type ModelMode } from '../../utils/asrModels'
+import { buildModelOptions, findAsrModel, findRetiredAsrModel, modelSelectionError, type ModelMode } from '../../utils/asrModels'
 
 const props = defineProps<{ value: string; provider: string; mode: ModelMode }>()
 const emit = defineEmits<{ 'update:value': [value: string] }>()
 const { t } = useI18n()
 const options = computed(() => buildModelOptions(props.provider, props.mode, props.value, t))
+const retired = computed(() => findRetiredAsrModel(props.provider, props.value))
 const invalid = computed(() => modelSelectionError(props.provider, props.value, props.mode))
 const custom = computed(() => props.value && !findAsrModel(props.provider, props.value))
 function updateValue(value: string) {
@@ -21,7 +22,12 @@ function updateValue(value: string) {
       :status="invalid ? 'error' : undefined"
       :placeholder="t('asr.modelSelectPlaceholder')"
       @update:value="updateValue" />
-    <div v-if="invalid" class="model-warning" role="alert">{{ t('asr.modelModeMismatch') }}</div>
+    <div v-if="retired" class="model-warning" role="alert">{{ t('asr.modelRetiredWarning', {
+      model: retired.id, date: retired.shutdownDate, replacement: retired.replacement
+    }) }}
+      <div v-if="retired.note">{{ t('asr.' + retired.note) }}</div>
+    </div>
+    <div v-else-if="invalid" class="model-warning" role="alert">{{ t('asr.modelModeMismatch') }}</div>
     <div v-else-if="custom" class="model-note">{{ t('asr.modelCustomNote') }}</div>
   </div>
 </template>

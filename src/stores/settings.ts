@@ -1,5 +1,6 @@
 import type { TtsProviderValue } from '../utils/ttsOptions'
 import { ASR_MODEL_DEFAULTS } from '../utils/asrModels'
+import llmModels from '../shared/llmModels.json'
 import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
@@ -26,6 +27,7 @@ export interface CustomLlmEndpoint {
 
 export interface AppSettings {
     uiLanguage: UiLanguage
+    modelDefaultsVersion: number
 
     // ASR
     asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'mimo' | 'coli' | 'qwen-local'
@@ -328,6 +330,7 @@ export interface HotwordSyncDiagnostics {
 
 const defaultSettings: AppSettings = {
     uiLanguage: 'system',
+    modelDefaultsVersion: 1,
     asrProviderType: 'volcengine',
     asrAppKey: '',
     asrAccessKey: '',
@@ -421,12 +424,12 @@ const defaultSettings: AppSettings = {
 
     llmVolcengineBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
     llmVolcengineApiKey: '',
-    llmVolcengineModel: 'doubao-seed-2-0-mini-260215',
+    llmVolcengineModel: llmModels.volcengineDefaultModel,
     llmVolcengineReasoningEffort: null,
 
     llmOpenaiBaseUrl: 'https://api.openai.com/v1',
     llmOpenaiApiKey: '',
-    llmOpenaiModel: 'gpt-4o-mini',
+    llmOpenaiModel: llmModels.openaiDefaultModel,
     llmOpenaiReasoningEffort: null,
 
     llmQwenBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',

@@ -3,7 +3,7 @@
     "openai": "gpt-transcribe",
     "openaiRefine": "gpt-transcribe",
     "gemini": "gemini-3.5-flash-lite",
-    "geminiLive": "gemini-3.1-flash-live-preview",
+    "geminiLive": "gemini-3.5-transcribe-live",
     "soniox": "stt-rt-v5",
     "qwen": "qwen3-asr-flash-realtime",
     "qwenBatch": "qwen3-asr-flash",
@@ -108,7 +108,8 @@
       "id": "gemini-3.5-transcribe-live",
       "modes": [
         "realtime"
-      ]
+      ],
+      "maxRecordingMinutes": 10
     },
     {
       "provider": "soniox",
@@ -205,20 +206,6 @@
     },
     {
       "provider": "qwen",
-      "id": "qwen3-asr-flash-realtime-2026-02-10",
-      "modes": [
-        "realtime"
-      ]
-    },
-    {
-      "provider": "qwen",
-      "id": "qwen3-asr-flash-realtime-2025-10-27",
-      "modes": [
-        "realtime"
-      ]
-    },
-    {
-      "provider": "qwen",
       "id": "qwen-audio-3.1-asr-flash",
       "modes": [
         "batch"
@@ -234,20 +221,6 @@
     {
       "provider": "qwen",
       "id": "qwen3-asr-flash",
-      "modes": [
-        "batch"
-      ]
-    },
-    {
-      "provider": "qwen",
-      "id": "qwen3-asr-flash-2026-02-10",
-      "modes": [
-        "batch"
-      ]
-    },
-    {
-      "provider": "qwen",
-      "id": "qwen3-asr-flash-2025-09-08",
       "modes": [
         "batch"
       ]
@@ -290,15 +263,6 @@
     },
     {
       "provider": "funasr",
-      "id": "fun-asr-realtime-2025-11-07",
-      "modes": [
-        "realtime"
-      ],
-      "supportsContext": true,
-      "supportsHotword": true
-    },
-    {
-      "provider": "funasr",
       "id": "fun-asr-flash-8k-realtime",
       "modes": [
         "realtime"
@@ -326,6 +290,73 @@
       "id": "fun-asr-flash-2026-06-15",
       "modes": [],
       "status": "unavailable"
+    }
+  ],
+  "retired": [
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-realtime-2025-10-27",
+      "shutdownDate": "2026-10-10",
+      "replacement": "qwen3-asr-flash-realtime",
+      "settingsFields": [
+        "qwenAsrModel"
+      ],
+      "source": "https://platform.qianwenai.com/docs/changelog/model-deprecations/old-models"
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-realtime-2026-02-10",
+      "shutdownDate": "2026-10-10",
+      "replacement": "qwen3-asr-flash-realtime",
+      "settingsFields": [
+        "qwenAsrModel"
+      ],
+      "source": "https://platform.qianwenai.com/docs/changelog/model-deprecations/old-models"
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-2025-09-08",
+      "shutdownDate": "2026-10-10",
+      "replacement": "qwen3-asr-flash",
+      "settingsFields": [
+        "qwenAsrBatchModel"
+      ],
+      "source": "https://platform.qianwenai.com/docs/changelog/model-deprecations/old-models"
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-2026-02-10",
+      "shutdownDate": "2026-10-10",
+      "replacement": "qwen3-asr-flash",
+      "settingsFields": [
+        "qwenAsrBatchModel"
+      ],
+      "source": "https://platform.qianwenai.com/docs/changelog/model-deprecations/old-models"
+    },
+    {
+      "provider": "qwen",
+      "id": "qwen3-asr-flash-filetrans-2025-11-17",
+      "shutdownDate": "2026-10-10",
+      "replacement": "qwen3-asr-flash",
+      "source": "https://platform.qianwenai.com/docs/changelog/model-deprecations/old-models",
+      "note": "modelRetiredFiletransNote"
+    },
+    {
+      "provider": "funasr",
+      "id": "fun-asr-realtime-2025-11-07",
+      "shutdownDate": "2026-10-10",
+      "replacement": "fun-asr-realtime",
+      "settingsFields": [
+        "funasrModel"
+      ],
+      "source": "https://platform.qianwenai.com/docs/changelog/model-deprecations/old-models"
+    }
+  ],
+  "defaultMigrations": [
+    {
+      "field": "geminiLiveModel",
+      "previous": "gemini-3.1-flash-live-preview",
+      "replacement": "gemini-3.5-transcribe-live"
     }
   ]
 }

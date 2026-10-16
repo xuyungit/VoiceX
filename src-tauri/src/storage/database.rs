@@ -245,6 +245,11 @@ fn migrate_settings_blob(conn: &Connection) {
     let migrated_hotkeys = crate::commands::settings::migrate_hotkey_digit_key_codes(&mut value);
     let migrated_reasoning =
         crate::commands::settings::migrate_volcengine_minimal_effort(&mut value);
+    let migrated_volcengine_model =
+        crate::commands::settings::migrate_retired_volcengine_default(&mut value);
+    let migrated_model_defaults =
+        crate::commands::settings::migrate_scheduled_model_defaults(&mut value);
+    let migrated_asr_models = crate::asr::models::migrate_known_model_settings(&mut value);
     let migrated_tts_provider =
         crate::commands::settings::migrate_tts_provider_without_system_voice(&mut value);
     if !migrated_endpoints
@@ -252,6 +257,9 @@ fn migrate_settings_blob(conn: &Connection) {
         && !migrated_asr
         && !migrated_hotkeys
         && !migrated_reasoning
+        && !migrated_volcengine_model
+        && !migrated_model_defaults
+        && !migrated_asr_models
         && !migrated_tts_provider
     {
         return;
@@ -281,11 +289,15 @@ fn migrate_settings_blob(conn: &Connection) {
     ) {
         Ok(_) => log::info!(
             "Migrated persisted settings (custom LLM endpoints: {}, override restore flag: {}, \
-             hotkey digit key codes: {}, Volcengine reasoning: {})",
+             hotkey digit key codes: {}, Volcengine reasoning: {}, Volcengine model: {}, \
+             scheduled model defaults: {}, ASR models: {})",
             migrated_endpoints,
             migrated_restore,
             migrated_hotkeys,
-            migrated_reasoning
+            migrated_reasoning,
+            migrated_volcengine_model,
+            migrated_model_defaults,
+            migrated_asr_models
         ),
         Err(e) => log::warn!("Settings migration write-back failed: {}", e),
     }
@@ -1095,6 +1107,9 @@ pub fn get_settings() -> Result<AppSettings, StorageError> {
                     );
                     crate::commands::settings::migrate_hotkey_digit_key_codes(&mut raw);
                     crate::commands::settings::migrate_volcengine_minimal_effort(&mut raw);
+                    crate::commands::settings::migrate_retired_volcengine_default(&mut raw);
+                    crate::commands::settings::migrate_scheduled_model_defaults(&mut raw);
+                    crate::asr::models::migrate_known_model_settings(&mut raw);
                     crate::commands::settings::migrate_tts_provider_without_system_voice(
                         &mut raw,
                     );
@@ -1597,6 +1612,65 @@ mod tests {
             Some("assistant_raw")
         );
         assert_eq!(history_record_mode_in(&conn, "missing").unwrap(), None);
+    }
+
+    #[test]
+    fn migrate_settings_blob_upgrades_model_settings_without_changing_custom_endpoints() {
+        let conn = setup_conn();
+        let mut raw = serde_json::to_value(AppSettings::default()).unwrap();
+        raw["modelDefaultsVersion"] = 0.into();
+        raw["llmOpenaiModel"] = "gpt-4o-mini".into();
+        raw["geminiLiveModel"] = "gemini-3.1-flash-live-preview".into();
+        raw["qwenAsrModel"] = "qwen3-asr-flash-realtime-2025-10-27".into();
+        raw["qwenAsrBatchModel"] = "qwen3-asr-flash-2026-02-10".into();
+        raw["funasrModel"] = "fun-asr-realtime-2025-11-07".into();
+        let mut expected = raw.clone();
+        expected["modelDefaultsVersion"] = 1.into();
+        expected["llmOpenaiModel"] = crate::llm::default_openai_model().into();
+        expected["geminiLiveModel"] = crate::asr::models::default_model("geminiLive").into();
+        expected["qwenAsrModel"] = crate::asr::models::default_model("qwen").into();
+        expected["qwenAsrBatchModel"] = crate::asr::models::default_model("qwenBatch").into();
+        expected["funasrModel"] = crate::asr::models::default_model("funasr").into();
+        conn.execute(
+            "INSERT INTO user_config (key,value) VALUES ('app_settings',?1)",
+            params![raw.to_string()],
+        )
+        .unwrap();
+        migrate_settings_blob(&conn);
+        assert_eq!(read_settings_blob(&conn), expected);
+        migrate_settings_blob(&conn);
+        assert_eq!(read_settings_blob(&conn), expected);
+    }
+
+    #[test]
+    fn migrate_settings_blob_updates_only_the_retired_volcengine_default_and_is_idempotent() {
+        let conn = setup_conn();
+        let mut settings = AppSettings::default();
+        settings.llm_volcengine_model = "doubao-seed-2-0-mini-260215".into();
+        settings
+            .llm_custom_endpoints
+            .push(crate::commands::settings::CustomLlmEndpoint {
+                id: "mine".into(),
+                name: "Custom".into(),
+                base_url: "https://custom.example/v1".into(),
+                api_key: "fake-key".into(),
+                model: settings.llm_volcengine_model.clone(),
+                api_mode: "chat_completions".into(),
+                reasoning_effort: String::new(),
+                extra_body: String::new(),
+            });
+        settings.llm_active_custom_endpoint_id = "mine".into();
+        let mut expected = serde_json::to_value(&settings).unwrap();
+        conn.execute(
+            "INSERT INTO user_config (key, value) VALUES ('app_settings', ?1)",
+            params![serde_json::to_string(&settings).unwrap()],
+        )
+        .unwrap();
+        migrate_settings_blob(&conn);
+        expected["llmVolcengineModel"] = serde_json::json!(crate::llm::default_volcengine_model());
+        assert_eq!(read_settings_blob(&conn), expected);
+        migrate_settings_blob(&conn);
+        assert_eq!(read_settings_blob(&conn), expected);
     }
 
     #[test]

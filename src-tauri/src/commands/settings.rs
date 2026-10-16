@@ -24,6 +24,7 @@ use crate::session::SessionController;
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub ui_language: String, // "system" | "zh-CN" | "en-US"
+    pub model_defaults_version: u32,
 
     // ASR settings
     pub asr_provider_type: String, // "volcengine" | "google" | "funasr" | "qwen" | "gemini" | "gemini-live" | "cohere" | "openai" | "elevenlabs" | "soniox" | "stepaudio" | "mimo" | "coli"
@@ -424,6 +425,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             ui_language: crate::ui_locale::UI_LANGUAGE_SYSTEM.to_string(),
+            model_defaults_version: 1,
             asr_provider_type: "volcengine".to_string(),
             asr_app_key: String::new(),
             asr_access_key: String::new(),
@@ -516,12 +518,12 @@ impl Default for AppSettings {
 
             llm_volcengine_base_url: "https://ark.cn-beijing.volces.com/api/v3".to_string(),
             llm_volcengine_api_key: String::new(),
-            llm_volcengine_model: "doubao-seed-2-0-mini-260215".to_string(),
+            llm_volcengine_model: crate::llm::default_volcengine_model().to_string(),
             llm_volcengine_reasoning_effort: None,
 
             llm_openai_base_url: "https://api.openai.com/v1".to_string(),
             llm_openai_api_key: String::new(),
-            llm_openai_model: "gpt-4o-mini".to_string(),
+            llm_openai_model: crate::llm::default_openai_model().to_string(),
             llm_openai_reasoning_effort: None,
 
             llm_qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
@@ -783,6 +785,65 @@ pub fn migrate_volcengine_minimal_effort(value: &mut serde_json::Value) -> bool 
         return false;
     }
     object.insert(key.into(), serde_json::Value::Null);
+    true
+}
+
+/// Ark's 2026-09-22 notice names this replacement (including system replacement
+/// at EOS). Restrict migration to the built-in field's exact old default; do not
+/// rewrite custom endpoint entries, deployment IDs, URLs, or historical records.
+pub fn migrate_retired_volcengine_default(value: &mut serde_json::Value) -> bool {
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    let key = "llmVolcengineModel";
+    let replacement = object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::llm::replacement_for_retired_volcengine_default);
+    let Some(replacement) = replacement else {
+        return false;
+    };
+    object.insert(key.into(), replacement.into());
+    true
+}
+
+/// Future-shutdown defaults migrate once. Later deliberate selections of a
+/// still-served legacy model must survive ordinary settings reads.
+pub fn migrate_scheduled_model_defaults(value: &mut serde_json::Value) -> bool {
+    match value.get("modelDefaultsVersion") {
+        None => {}
+        Some(serde_json::Value::Number(version)) if version.as_u64() == Some(0) => {}
+        _ => return false,
+    }
+    if !value.is_object() {
+        return false;
+    }
+    migrate_openai_default_model(value);
+    crate::asr::models::migrate_default_model_settings(value);
+    value["modelDefaultsVersion"] = 1.into();
+    true
+}
+
+/// Only upgrade the built-in OpenAI default on the official endpoint. Compatible
+/// servers may not offer the replacement, so keep their saved model untouched.
+pub fn migrate_openai_default_model(value: &mut serde_json::Value) -> bool {
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    match object.get("llmOpenaiBaseUrl") {
+        None => {} // Missing fields use AppSettings' official endpoint default.
+        Some(serde_json::Value::String(url))
+            if url.trim_end_matches('/') == "https://api.openai.com/v1" => {}
+        _ => return false,
+    }
+    let replacement = object
+        .get("llmOpenaiModel")
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::llm::replacement_for_previous_openai_default);
+    let Some(replacement) = replacement else {
+        return false;
+    };
+    object.insert("llmOpenaiModel".into(), replacement.into());
     true
 }
 
@@ -1414,6 +1475,138 @@ mod tests {
     use crate::services::llm_service::build_llm_config_from_settings;
 
     #[test]
+    fn openai_and_gemini_live_defaults_are_shared_and_legacy_fields_still_load() {
+        let legacy: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.llm_openai_model, crate::llm::default_openai_model());
+        assert_eq!(legacy.llm_openai_model, "gpt-6-luna");
+        assert_eq!(legacy.gemini_live_model, "gemini-3.5-transcribe-live");
+        assert_eq!(
+            crate::asr::AsrConfig::default().gemini_live_model,
+            legacy.gemini_live_model
+        );
+        let config = build_llm_config_from_settings(&AppSettings {
+            llm_provider_type: "openai".into(),
+            ..legacy
+        });
+        assert_eq!(config.model_name, "gpt-6-luna");
+        let request = crate::llm::create_provider(&config.provider_type)
+            .build_chat_request(Vec::new(), &config);
+        assert_eq!(request["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn openai_default_migration_only_changes_known_models_on_the_official_endpoint() {
+        for id in ["gpt-4o-mini", "gpt-4o-mini-2024-07-18"] {
+            for url in [
+                None,
+                Some("https://api.openai.com/v1"),
+                Some("https://api.openai.com/v1/"),
+            ] {
+                let mut raw = serde_json::json!({"llmOpenaiModel":id,"llmCustomModel":id});
+                if let Some(url) = url {
+                    raw["llmOpenaiBaseUrl"] = url.into();
+                }
+                let mut expected = raw.clone();
+                expected["llmOpenaiModel"] = crate::llm::default_openai_model().into();
+                assert!(super::migrate_openai_default_model(&mut raw));
+                assert_eq!(raw, expected);
+                assert!(!super::migrate_openai_default_model(&mut raw));
+            }
+        }
+        for (url, model) in [
+            ("https://compatible.example/v1", "gpt-4o-mini"),
+            ("https://api.openai.com/v1", "my-deployment"),
+            ("https://api.openai.com/v1", "gpt-4o-mini-custom"),
+            ("https://api.openai.com/v1", ""),
+        ] {
+            let mut raw = serde_json::json!({"llmOpenaiBaseUrl":url,"llmOpenaiModel":model});
+            let original = raw.clone();
+            assert!(!super::migrate_openai_default_model(&mut raw));
+            assert_eq!(raw, original);
+        }
+    }
+
+    #[test]
+    fn scheduled_default_migration_runs_once_and_preserves_later_explicit_choices() {
+        let mut raw = serde_json::json!({"llmOpenaiModel":"gpt-4o-mini","geminiLiveModel":"gemini-3.1-flash-live-preview"});
+        assert!(super::migrate_scheduled_model_defaults(&mut raw));
+        assert_eq!(raw["llmOpenaiModel"], "gpt-6-luna");
+        assert_eq!(raw["geminiLiveModel"], "gemini-3.5-transcribe-live");
+        assert_eq!(raw["modelDefaultsVersion"], 1);
+        raw["llmOpenaiModel"] = "gpt-4o-mini".into();
+        raw["geminiLiveModel"] = "gemini-3.1-flash-live-preview".into();
+        let selected = raw.clone();
+        assert!(!super::migrate_scheduled_model_defaults(&mut raw));
+        assert_eq!(raw, selected);
+        let restored: AppSettings = serde_json::from_value(raw).unwrap();
+        assert_eq!(restored.model_defaults_version, 1);
+        assert_eq!(restored.gemini_live_model, "gemini-3.1-flash-live-preview");
+        for version in [
+            serde_json::json!(-1),
+            serde_json::json!(2),
+            serde_json::json!(null),
+            serde_json::json!("0"),
+        ] {
+            let mut raw =
+                serde_json::json!({"modelDefaultsVersion":version,"llmOpenaiModel":"gpt-4o-mini"});
+            let original = raw.clone();
+            assert!(!super::migrate_scheduled_model_defaults(&mut raw));
+            assert_eq!(raw, original);
+        }
+    }
+
+    #[test]
+    fn volcengine_defaults_agree_for_fresh_and_legacy_settings() {
+        let expected = "doubao-seed-2-0-mini-260428";
+        assert_eq!(crate::llm::default_volcengine_model(), expected);
+        assert_eq!(AppSettings::default().llm_volcengine_model, expected);
+        assert_eq!(crate::llm::LLMConfig::default().model_name, expected);
+        let legacy: AppSettings =
+            serde_json::from_str(r#"{"llmProviderType":"volcengine"}"#).unwrap();
+        assert_eq!(legacy.llm_volcengine_model, expected);
+    }
+
+    #[test]
+    fn volcengine_default_migration_only_replaces_the_exact_builtin_value_once() {
+        let old = "doubao-seed-2-0-mini-260215";
+        let mut stored = serde_json::json!({
+            "llmVolcengineModel": old,
+            "llmVolcengineBaseUrl": "https://proxy.example/api/v3",
+            "llmCustomModel": old,
+            "llmCustomEndpoints": [{"id":"mine", "model":old}]
+        });
+        let mut expected = stored.clone();
+        expected["llmVolcengineModel"] = serde_json::json!(crate::llm::default_volcengine_model());
+        assert!(super::migrate_retired_volcengine_default(&mut stored));
+        assert_eq!(stored, expected);
+        assert!(!super::migrate_retired_volcengine_default(&mut stored));
+    }
+
+    #[test]
+    fn volcengine_default_migration_preserves_custom_blank_and_unrecognized_values() {
+        for model in [
+            serde_json::json!("ep-custom-deployment"),
+            serde_json::json!("doubao-seed-2-0-mini-260215-custom"),
+            serde_json::json!(" doubao-seed-2-0-mini-260215 "),
+            serde_json::json!(crate::llm::default_volcengine_model()),
+            serde_json::json!(""),
+            serde_json::json!("  "),
+            serde_json::Value::Null,
+            serde_json::json!(42),
+        ] {
+            let mut stored = serde_json::json!({"llmVolcengineModel": model});
+            let original = stored.clone();
+            assert!(!super::migrate_retired_volcengine_default(&mut stored));
+            assert_eq!(stored, original);
+        }
+        for mut stored in [serde_json::json!({}), serde_json::json!([])] {
+            let original = stored.clone();
+            assert!(!super::migrate_retired_volcengine_default(&mut stored));
+            assert_eq!(stored, original);
+        }
+    }
+
+    #[test]
     fn a_fresh_install_reads_with_the_system_voice_only_where_there_is_one() {
         let expected = if cfg!(target_os = "macos") { "system" } else { "edge" };
         assert_eq!(default_tts_provider_type(), expected);
@@ -1842,6 +2035,10 @@ mod tests {
         assert_eq!(volc.source, crate::llm::reasoning::ReasoningSource::Lowest);
 
         settings.llm_provider_type = "openai".to_string();
+        let current = preview_llm_reasoning(settings.clone());
+        assert_eq!(current.fields, r#"{"reasoning_effort":"none"}"#);
+        assert_eq!(current.source, crate::llm::reasoning::ReasoningSource::Lowest);
+        settings.llm_openai_model = "gpt-4o-mini".to_string();
         let plain = preview_llm_reasoning(settings);
         assert_eq!(plain.fields, "");
         assert_eq!(plain.source, crate::llm::reasoning::ReasoningSource::NotNeeded);

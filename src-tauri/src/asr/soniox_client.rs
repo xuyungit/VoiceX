@@ -2,6 +2,7 @@
 //!
 //! Protocol: <https://soniox.com/docs/stt/rt/real-time-transcription>
 //! - Connect to `wss://stt-rt.soniox.com/transcribe-websocket`
+//! - Authenticate the upgrade with `Authorization: Bearer <api_key>`
 //! - Send JSON config as first text message
 //! - Stream raw PCM audio as binary frames
 //! - Receive JSON responses with `tokens` array (each token has `text` and `is_final`)
@@ -16,7 +17,12 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Receiver;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest,
+    handshake::client::Request,
+    http::{header::AUTHORIZATION, HeaderValue},
+    Message,
+};
 
 use super::audio_utils::resample_to_16k;
 use super::config::AsrConfig;
@@ -82,9 +88,10 @@ impl SonioxClient {
             .in_phase(AsrPhase::Connect));
         }
 
+        let request = build_soniox_ws_request(&ws_url, &self.config.soniox_api_key)?;
         let (ws_stream, _) = tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            result = connect_async(&ws_url) => result,
+            result = connect_async(request) => result,
         }
         .map_err(|e| {
             AsrError::ConnectionFailed(format!("Soniox WebSocket connect: {e}"))
@@ -130,10 +137,7 @@ impl SonioxClient {
         }
 
         if diagnostics_enabled {
-            // Redact api_key for logging
-            let mut log_msg = config_msg.clone();
-            log_msg["api_key"] = json!("***");
-            log::info!("SONIOX_DIAG config {}", log_msg);
+            log::info!("SONIOX_DIAG config {}", config_msg);
         }
 
         ws_write
@@ -544,9 +548,31 @@ fn resolve_soniox_ws_url() -> String {
         .unwrap_or_else(|| SONIOX_DEFAULT_WS_URL.to_string())
 }
 
+fn build_soniox_ws_request(ws_url: &str, api_key: &str) -> Result<Request, AsrError> {
+    // Do not trim or silently repair credentials. HeaderValue accepts tabs and
+    // non-ASCII bytes, which are not safe token characters for this header.
+    let invalid_key = || {
+        AsrError::ConnectionFailed(
+            "Invalid API key format for Soniox: expected visible ASCII without whitespace".into(),
+        )
+        .in_phase(AsrPhase::Connect)
+    };
+    if api_key.is_empty() || !api_key.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(invalid_key());
+    }
+    let mut authorization =
+        HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|_| invalid_key())?;
+    authorization.set_sensitive(true);
+    let mut request = ws_url.into_client_request().map_err(|_| {
+        AsrError::ConnectionFailed("Invalid Soniox WebSocket URL".into())
+            .in_phase(AsrPhase::Connect)
+    })?;
+    request.headers_mut().insert(AUTHORIZATION, authorization);
+    Ok(request)
+}
+
 fn build_soniox_config_message(config: &AsrConfig, stream_rate: u32) -> Value {
     let mut config_msg = json!({
-        "api_key": config.soniox_api_key,
         "model": config.soniox_model,
         "enable_endpoint_detection": true,
         "audio_format": "s16le",
@@ -563,8 +589,149 @@ fn build_soniox_config_message(config: &AsrConfig, stream_rate: u32) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_soniox_config_message, soniox_completion_wait_ms, SonioxFaultMode};
+    use super::*;
     use crate::asr::config::AsrConfig;
+    use crate::asr::protocol::{AsrFailure, AsrFailureKind};
+    use crate::asr::AsrProviderType;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_hdr_async, tungstenite::handshake::server::Response};
+
+    #[test]
+    fn soniox_request_authenticates_the_upgrade_and_redacts_debug_output() {
+        for key in ["fake-key", "snx_temp_fake-key", "temp:fake-key"] {
+            let request = build_soniox_ws_request(SONIOX_DEFAULT_WS_URL, key).unwrap();
+            let header = &request.headers()[AUTHORIZATION];
+            assert_eq!(header.to_str().unwrap(), format!("Bearer {key}"));
+            assert!(header.is_sensitive());
+            assert!(!format!("{request:?}").contains(key));
+            assert!(request.headers().contains_key("sec-websocket-key"));
+            assert_eq!(request.uri().to_string(), SONIOX_DEFAULT_WS_URL);
+        }
+    }
+
+    #[test]
+    fn soniox_config_contains_no_credential() {
+        let mut config = AsrConfig::default();
+        config.soniox_api_key = "fake-key-never-in-json".into();
+        let payload = build_soniox_config_message(&config, 16_000);
+        assert!(payload.get("api_key").is_none());
+        assert!(!payload.to_string().contains(&config.soniox_api_key));
+        assert_eq!(payload["model"], config.soniox_model);
+        assert_eq!(payload["audio_format"], "s16le");
+        assert_eq!(payload["sample_rate"], 16_000);
+        assert_eq!(payload["num_channels"], 1);
+        assert_eq!(payload["enable_endpoint_detection"], true);
+    }
+
+    #[test]
+    fn soniox_request_rejects_unsafe_keys_without_exposing_them_or_retrying() {
+        for key in [
+            "",
+            " ",
+            "fake key",
+            "fake\r\nInjected: value",
+            "fake\tkey",
+            "fake\0key",
+            "fake\u{7f}key",
+            "非ASCII",
+            " fake",
+            "fake ",
+        ] {
+            let error = build_soniox_ws_request(SONIOX_DEFAULT_WS_URL, key).unwrap_err();
+            assert_eq!(error.phase(), Some(AsrPhase::Connect));
+            let failure = AsrFailure::from_error(AsrProviderType::Soniox, &error);
+            assert_eq!(failure.kind, AsrFailureKind::Auth);
+            assert!(!failure.retryable);
+            if !key.is_empty() && !key.trim().is_empty() {
+                assert!(!error.to_string().contains(key));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn soniox_local_mock_receives_fresh_auth_on_each_connection_and_no_key_in_start_frame() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!(
+                "ws://{}/transcribe-websocket",
+                listener.local_addr().unwrap()
+            );
+            let server = tokio::spawn(async move {
+                for key in ["fake-first-key", "fake-retry-key"] {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut ws =
+                        accept_hdr_async(socket, move |request: &Request, response: Response| {
+                            assert_eq!(
+                                request.headers()[AUTHORIZATION].to_str().unwrap(),
+                                format!("Bearer {key}")
+                            );
+                            Ok(response)
+                        })
+                        .await
+                        .unwrap();
+                    let start = ws.next().await.unwrap().unwrap().into_text().unwrap();
+                    let payload: Value = serde_json::from_str(&start).unwrap();
+                    assert!(payload.get("api_key").is_none());
+                    assert!(!start.contains(key));
+                    ws.send(Message::Text(json!({"finished":true}).to_string()))
+                        .await
+                        .unwrap();
+                }
+            });
+            for key in ["fake-first-key", "fake-retry-key"] {
+                let mut config = AsrConfig::default();
+                config.soniox_api_key = key.into();
+                let request = build_soniox_ws_request(&url, &config.soniox_api_key).unwrap();
+                let (mut ws, _) = connect_async(request).await.unwrap();
+                ws.send(Message::Text(
+                    build_soniox_config_message(&config, 16_000).to_string(),
+                ))
+                .await
+                .unwrap();
+                let finished: Value =
+                    serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                        .unwrap();
+                assert_eq!(finished["finished"], true);
+            }
+            server.await.unwrap();
+        })
+        .await
+        .expect("local Soniox mock timed out");
+    }
+
+    #[tokio::test]
+    async fn soniox_http_401_remains_a_non_retryable_connect_auth_failure() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!(
+                "ws://{}/transcribe-websocket",
+                listener.local_addr().unwrap()
+            );
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let result = accept_hdr_async(socket, |_: &Request, _: Response| {
+                    Err(tokio_tungstenite::tungstenite::http::Response::builder()
+                        .status(401)
+                        .body(None)
+                        .unwrap())
+                })
+                .await;
+                assert!(result.is_err());
+            });
+            let request = build_soniox_ws_request(&url, "fake-rejected-key").unwrap();
+            let error = connect_async(request).await.err().unwrap();
+            let error = AsrError::ConnectionFailed(format!("Soniox WebSocket connect: {error}"))
+                .in_phase(AsrPhase::Connect);
+            let failure = AsrFailure::from_error(AsrProviderType::Soniox, &error);
+            assert_eq!(failure.phase, AsrPhase::Connect);
+            assert_eq!(failure.kind, AsrFailureKind::Auth);
+            assert!(!failure.retryable);
+            assert!(!failure.technical_message.contains("fake-rejected-key"));
+            server.await.unwrap();
+        })
+        .await
+        .expect("local Soniox 401 mock timed out");
+    }
 
     #[test]
     fn parses_fault_aliases() {

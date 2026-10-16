@@ -118,7 +118,7 @@ working in places we cannot reach such as the login window.
 | Fun-ASR Realtime | Cloud streaming (WebSocket) | DashScope; `fun-asr-realtime` / `fun-asr-flash-8k-realtime`; tuned for low-latency live dictation; selected models accept the dictionary as recognition context |
 | Qwen (DashScope ASR) | Cloud streaming / batch file upload | Alibaba Cloud; both model generations — the new `qwen-audio-3.1/3.0-asr-flash(-streaming)` (3.1 is billed per token, roughly 60–90% cheaper than 3.0) and the existing Qwen3-ASR; supports `Realtime`, `Batch`, and `Realtime + Batch Refine`; the new generation adds inline hotwords with a weight, precompiled vocabularies, context, and semantic endpointing; batch paths currently inherit a 5-minute short-audio API cap |
 | Gemini Audio Transcription | Cloud batch file upload | Default `gemini-3.5-flash-lite`; also `gemini-3.5-transcribe` and preview `gemini-3.1-flash-lite-preview`; starts after recording stops; supports auto / zh / en / zh+en hints |
-| Gemini Live Realtime | Cloud streaming (WebSocket) | Default `gemini-3.1-flash-live-preview`, also `gemini-3.5-transcribe-live`; realtime input-audio transcription with language hints |
+| Gemini Live Realtime | Cloud streaming (WebSocket) | Default `gemini-3.5-transcribe-live`; the older `gemini-3.1-flash-live-preview` remains selectable before its shutdown; realtime input-audio transcription with language hints; transcription sessions are limited to 10 minutes |
 | Cohere Audio Transcription | Cloud batch file upload | `cohere-transcribe-03-2026`; whole-file transcription with explicit ISO-639-1 language hint |
 | Soniox Realtime | Cloud streaming (WebSocket) | Default `stt-rt-v5` (`stt-rt-v4` remains selectable); token-based streaming with hotword support and language hints |
 | StepAudio | Cloud batch file upload (HTTP + SSE) | StepFun; defaults to `stepaudio-3-asr-max`, with `stepaudio-2.5-asr` retained; uploads the full recording after capture stops, with a 30-minute VoiceX recording limit and incremental text over SSE |
@@ -129,6 +129,8 @@ working in places we cannot reach such as the login window.
 | Qwen3-ASR (Local) | Local offline batch | Alibaba's open-weight model (Apache-2.0), fully offline; driven through the external `qwen-asr` CLI. Text appears after you release the hotkey — no incremental output yet |
 
 At the moment, Doubao, Qwen, ElevenLabs, Soniox, and Coli are the recommended options. Still, results vary from person to person: pronunciation, wording, and domain-specific vocabulary all affect the final experience.
+
+Qwen/Fun-ASR snapshots retired on 2026-10-10 are removed from presets. Exact saved realtime and short-audio snapshot IDs migrate to the corresponding same-provider main model; provider, endpoint, and recognition mode stay unchanged. The retired asynchronous filetrans snapshot stays saved and disabled with an explanation, since migrating to the short-audio API would change its limits. On the first upgrade, the former Gemini Live default migrates to `gemini-3.5-transcribe-live`.
 
 > **Note:** Cloud ASR services require API keys from their respective providers. Coli must be [installed separately](https://www.npmjs.com/package/@marswave/coli) (`npm i -g @marswave/coli`) before use. Streaming recognition (including Qwen-Audio 3.0) follows the system proxy: WinHTTP (with PAC/WPAD) on Windows, System Configuration plus PAC on macOS.
 
@@ -174,12 +176,14 @@ VoiceX can optionally pass ASR output through an LLM for correction or translati
 
 | Provider | Default Model |
 |---|---|
-| Volcengine (Doubao) | `doubao-seed-2-0-mini-260215` |
-| OpenAI (or compatible) | `gpt-4o-mini` |
+| Volcengine (Doubao) | `doubao-seed-2-0-mini-260428` |
+| OpenAI (or compatible) | `gpt-6-luna` |
 | Qwen (DashScope) | `qwen3.5-flash` |
 | Google Gemini | `gemini-3.5-flash-lite` |
 | Anthropic (Claude, native Messages API; official base URL by default, or any compatible endpoint) | `claude-haiku-5-5` |
 | Custom | Any OpenAI-compatible endpoint |
+
+Exact saved Doubao default IDs migrate to the new default. On the first upgrade, saved `gpt-4o-mini` / `gpt-4o-mini-2024-07-18` values migrate to `gpt-6-luna` only on the official OpenAI endpoint; compatible endpoints and custom model IDs are preserved.
 
 > **Note:** Each LLM provider requires an API key from the respective platform. Configure your chosen provider in **Settings → LLM**.
 

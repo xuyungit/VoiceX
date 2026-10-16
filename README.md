@@ -92,7 +92,7 @@ macOS 自带一个同类功能（系统设置 → 辅助功能 → 朗读内容�
 | Fun-ASR Realtime | 云端流式 (WebSocket) | DashScope；`fun-asr-realtime` / `fun-asr-flash-8k-realtime`；适合低延迟实时出字；部分模型支持以词典作为上下文增强 |
 | 通义千问（DashScope ASR） | 云端流式 / 批量文件识别 | 阿里云；新一代 `qwen-audio-3.1/3.0-asr-flash(-streaming)` 与既有 Qwen3-ASR 两代模型（3.1 按 token 计费，比 3.0 便宜约六成到九成）；支持 `Realtime`、`Batch` 和 `Realtime + 录后 Batch 精修`；新一代模型支持实时热词与权重、预编译热词表、上下文、语义断句；batch 路径当前受 5 分钟短音频接口限制 |
 | Gemini Audio Transcription | 云端批量文件识别 | 默认 `gemini-3.5-flash-lite`；也可选 `gemini-3.5-transcribe` 与 preview `gemini-3.1-flash-lite-preview`；录音结束后上传整段音频；支持自动 / 中文 / English / 中英混合提示 |
-| Gemini Live Realtime | 云端流式 (WebSocket) | 默认 `gemini-3.1-flash-live-preview`，也可选 `gemini-3.5-transcribe-live`；基于输入音频转写的实时识别，可附带语言提示 |
+| Gemini Live Realtime | 云端流式 (WebSocket) | 默认 `gemini-3.5-transcribe-live`；原 `gemini-3.1-flash-live-preview` 在停服前仍可选；基于输入音频转写的实时识别，可附带语言提示；转写模型单次录音最长 10 分钟 |
 | Cohere Audio Transcription | 云端批量文件识别 | `cohere-transcribe-03-2026`；整段音频上传识别，需显式指定 ISO-639-1 语言码 |
 | Soniox Realtime | 云端流式 (WebSocket) | 默认 `stt-rt-v5`（`stt-rt-v4` 仍可选）；基于 token 的流式识别，支持热词和语言提示 |
 | StepAudio | 云端批量文件识别 (HTTP + SSE) | 阶跃星辰；默认 `stepaudio-3-asr-max`，保留 `stepaudio-2.5-asr`；录音结束后上传整段音频，VoiceX 录音上限 30 分钟，文本通过 SSE 增量返回 |
@@ -103,6 +103,8 @@ macOS 自带一个同类功能（系统设置 → 辅助功能 → 朗读内容�
 | Qwen3-ASR（本地） | 本地离线批量识别 | 阿里通义开源模型（Apache-2.0），完全离线；通过外部 `qwen-asr` CLI 调用；松开热键后整段出字，暂不支持边说边出字 |
 
 目前推荐豆包、通义千问、ElevenLabs、Soniox 和 Coli，但每个人的体验可能会有差异，发音习惯、用词和使用领域都会影响最终效果。
+
+2026-10-10 下线的 Qwen/Fun-ASR 快照已从预设移除。精确匹配的已有实时、短音频快照配置会迁移至同提供商对应主线模型，提供商、接入地址和识别模式保持不变。已停服的异步 filetrans 快照因与短音频接口的能力限制不同，保留原值、禁用并提示手动选择；不自动跨协议替换。首次升级时，原 Gemini Live 默认配置迁移至 `gemini-3.5-transcribe-live`。
 
 > **提示：** 云端 ASR 服务需要到对应平台申请 API Key。Coli 需要事先通过 npm 全局安装（`npm i -g @marswave/coli`），详见 [Coli 文档](https://www.npmjs.com/package/@marswave/coli)。流式识别（含 Qwen-Audio 3.0 streaming）会走系统代理：Windows 读 WinHTTP（含 PAC/WPAD），macOS 读系统代理与 PAC。
 
@@ -148,12 +150,14 @@ VoiceX 可选将 ASR 输出交给 LLM 做纠错或翻译。支持的提供商：
 
 | 提供商 | 默认模型 |
 |---|---|
-| 火山引擎（豆包） | `doubao-seed-2-0-mini-260215` |
-| OpenAI（或兼容接口） | `gpt-4o-mini` |
+| 火山引擎（豆包） | `doubao-seed-2-0-mini-260428` |
+| OpenAI（或兼容接口） | `gpt-6-luna` |
 | 通义千问（DashScope） | `qwen3.5-flash` |
 | Google Gemini | `gemini-3.5-flash-lite` |
 | Anthropic（Claude，原生 Messages API；Base URL 默认官方，可改为兼容接口） | `claude-haiku-5-5` |
 | 自定义 | 任何 OpenAI 兼容端点 |
+
+已有豆包旧默认 ID 会精确迁移至新默认。首次升级时，OpenAI 的 `gpt-4o-mini` / `gpt-4o-mini-2024-07-18` 仅在使用官方地址时迁移至 `gpt-6-luna`；兼容接口地址及自定义模型配置保持不变。
 
 > **提示：** 每个 LLM 提供商都需要到对应平台申请 API Key，在 **设置 → LLM** 中配置即可。
 

@@ -676,6 +676,9 @@ impl AsrConfig {
             (AsrProviderType::Qwen, AsrPipelineMode::Batch)
             | (AsrProviderType::Qwen, AsrPipelineMode::RealtimeWithFinalPass) => Some(5),
             (AsrProviderType::StepAudio, AsrPipelineMode::Batch) => Some(30),
+            (AsrProviderType::GeminiLive, _) => {
+                super::models::max_recording_minutes("gemini-live", &self.gemini_live_model)
+            }
             _ => None,
         }
     }
@@ -865,6 +868,17 @@ mod tests {
         config.qwen_recognition_mode = QwenRecognitionMode::Batch;
 
         assert_eq!(config.max_recording_minutes_limit(), Some(5));
+    }
+
+    #[test]
+    fn gemini_transcribe_live_uses_its_documented_ten_minute_cap() {
+        let mut config = AsrConfig::default();
+        config.provider_type = AsrProviderType::GeminiLive;
+        assert_eq!(config.max_recording_minutes_limit(), Some(10));
+        config.gemini_live_model = "gemini-3.1-flash-live-preview".into();
+        assert_eq!(config.max_recording_minutes_limit(), None);
+        config.gemini_live_model = "my-custom-model".into();
+        assert_eq!(config.max_recording_minutes_limit(), None);
     }
 
     #[test]

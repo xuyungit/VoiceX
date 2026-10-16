@@ -2,6 +2,45 @@
 
 use super::reasoning::ReasoningChoice;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelDefaults {
+    volcengine_default_model: String,
+    volcengine_retired_default_model: String,
+    openai_default_model: String,
+    openai_previous_default_models: Vec<String>,
+}
+
+fn model_defaults() -> &'static ModelDefaults {
+    static DEFAULTS: OnceLock<ModelDefaults> = OnceLock::new();
+    DEFAULTS.get_or_init(|| {
+        serde_json::from_str(include_str!("../../../src/shared/llmModels.json"))
+            .expect("bundled LLM model defaults must be valid")
+    })
+}
+
+pub fn default_volcengine_model() -> &'static str {
+    &model_defaults().volcengine_default_model
+}
+
+/// Only the exact former bundled default is eligible; deployment IDs stay intact.
+pub fn replacement_for_retired_volcengine_default(model: &str) -> Option<&'static str> {
+    (model == model_defaults().volcengine_retired_default_model).then(default_volcengine_model)
+}
+
+pub fn default_openai_model() -> &'static str {
+    &model_defaults().openai_default_model
+}
+
+pub fn replacement_for_previous_openai_default(model: &str) -> Option<&'static str> {
+    model_defaults()
+        .openai_previous_default_models
+        .iter()
+        .any(|previous| previous == model)
+        .then(default_openai_model)
+}
 
 /// LLM provider type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -83,7 +122,7 @@ impl Default for LLMConfig {
             provider_type: LLMProviderType::default(),
             base_url: "https://ark.cn-beijing.volces.com/api/v3".to_string(),
             api_key: String::new(),
-            model_name: "doubao-seed-2-0-mini-260215".to_string(),
+            model_name: default_volcengine_model().to_string(),
             api_mode: LLMApiMode::default(),
             reasoning: ReasoningChoice::default(),
             extra_body: None,

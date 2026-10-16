@@ -747,8 +747,8 @@ mod tests {
     }
     #[test]
     fn dedicated_setup_and_failures_are_explicit() {
-        let mut config = AsrConfig::default();
-        config.gemini_live_model = "gemini-3.5-transcribe-live".into();
+        let config = AsrConfig::default();
+        assert_eq!(config.gemini_live_model, "gemini-3.5-transcribe-live");
         let setup = build_setup_message(&config);
         assert_eq!(
             setup["setup"]["generationConfig"]["responseModalities"],
@@ -779,5 +779,17 @@ mod tests {
             true
         )
         .is_err());
+    }
+
+    #[test]
+    fn previously_selected_live_preview_keeps_its_native_audio_protocol() {
+        let mut config = AsrConfig::default();
+        config.gemini_live_model = "gemini-3.1-flash-live-preview".into();
+        let setup = build_setup_message(&config);
+        assert_eq!(
+            setup["setup"]["generationConfig"]["responseModalities"],
+            json!(["AUDIO"])
+        );
+        assert!(setup["setup"].get("systemInstruction").is_some());
     }
 }
