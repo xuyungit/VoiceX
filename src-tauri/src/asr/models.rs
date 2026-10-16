@@ -260,6 +260,61 @@ mod tests {
     }
 
     #[test]
+    fn retired_model_rejects_saved_config_without_replacing_it() {
+        let mut config = AsrConfig::default();
+        config.provider_type = AsrProviderType::Gemini;
+        config.gemini_model = "gemini-3.1-flash-lite-preview".into();
+        let error = config.validate_model_selection().unwrap_err();
+        assert!(error.contains("2026-05-25"));
+        assert!(error.contains("gemini-3.1-flash-lite"));
+        assert!(error.contains("your saved value is preserved"));
+        assert_eq!(config.gemini_model, "gemini-3.1-flash-lite-preview");
+        assert!(validate_model("gemini", " gemini-3.1-flash-lite-preview ", "batch").is_err());
+        assert!(validate_model("gemini-live", &config.gemini_model, "realtime").is_err());
+    }
+
+    #[tokio::test]
+    async fn retired_model_fails_before_audio_access_or_client_creation() {
+        let mut config = AsrConfig::default();
+        config.provider_type = AsrProviderType::Gemini;
+        config.gemini_model = "gemini-3.1-flash-lite-preview".into();
+        let path = std::path::PathBuf::from("unused-retired-model-test.ogg");
+        let error = crate::asr::transcribe_audio_path_detailed(
+            &path,
+            &mut config,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("was shut down on 2026-05-25"));
+        assert_eq!(config.gemini_model, "gemini-3.1-flash-lite-preview");
+    }
+
+    #[test]
+    fn scheduled_retirements_and_routing_aliases_stay_available() {
+        assert!(validate_model("gemini-live", "gemini-3.1-flash-live-preview", "realtime").is_ok());
+        for id in ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"] {
+            assert!(validate_model("openai", id, "batch").is_ok());
+        }
+        assert!(validate_model("soniox", "stt-rt-v4", "realtime").is_ok());
+        assert!(validate_model("gemini", "gemini-3.1-flash-lite", "batch").is_ok());
+    }
+
+    #[test]
+    fn retirement_does_not_claim_unknown_ids_or_other_providers() {
+        assert!(validate_model("custom", "gemini-3.1-flash-lite-preview", "batch").is_ok());
+        assert!(validate_model("gemini", "gemini-3.1-flash-lite-preview-my-deployment", "batch").is_ok());
+    }
+
+    #[test]
+    fn retired_ids_are_not_presets_or_defaults() {
+        for retired in &catalog().retired {
+            assert!(!catalog().models.iter().any(|model|
+                model.provider == retired.provider && model.id == retired.id));
+            assert!(!catalog().defaults.values().any(|id| id == &retired.id));
+        }
+    }
+    #[test]
     fn modes_reject_known_mismatches_but_keep_custom_ids() {
         assert!(validate_model("openai", "gpt-live-transcribe", "batch").is_err());
         assert!(validate_model("openai", "gpt-transcribe", "realtime").is_ok());

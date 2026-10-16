@@ -117,7 +117,7 @@ working in places we cannot reach such as the login window.
 | Google Cloud Speech-to-Text V2 | Cloud streaming (gRPC) | Multi-language, phrase boost, configurable endpointing |
 | Fun-ASR Realtime | Cloud streaming (WebSocket) | DashScope; `fun-asr-realtime` / `fun-asr-flash-8k-realtime`; tuned for low-latency live dictation; selected models accept the dictionary as recognition context |
 | Qwen (DashScope ASR) | Cloud streaming / batch file upload | Alibaba Cloud; both model generations — the new `qwen-audio-3.1/3.0-asr-flash(-streaming)` (3.1 is billed per token, roughly 60–90% cheaper than 3.0) and the existing Qwen3-ASR; supports `Realtime`, `Batch`, and `Realtime + Batch Refine`; the new generation adds inline hotwords with a weight, precompiled vocabularies, context, and semantic endpointing; batch paths currently inherit a 5-minute short-audio API cap |
-| Gemini Audio Transcription | Cloud batch file upload | Default `gemini-3.5-flash-lite`; also `gemini-3.5-transcribe` and preview `gemini-3.1-flash-lite-preview`; starts after recording stops; supports auto / zh / en / zh+en hints |
+| Gemini Audio Transcription | Cloud batch file upload | Default `gemini-3.5-flash-lite`; also `gemini-3.5-transcribe` and `gemini-3.1-flash-lite`; starts after recording stops; supports auto / zh / en / zh+en hints |
 | Gemini Live Realtime | Cloud streaming (WebSocket) | Default `gemini-3.5-transcribe-live`; the older `gemini-3.1-flash-live-preview` remains selectable before its shutdown; realtime input-audio transcription with language hints; transcription sessions are limited to 10 minutes |
 | Cohere Audio Transcription | Cloud batch file upload | `cohere-transcribe-03-2026`; whole-file transcription with explicit ISO-639-1 language hint |
 | Soniox Realtime | Cloud streaming (WebSocket) | Default `stt-rt-v5` (`stt-rt-v4` remains selectable); token-based streaming with hotword support and language hints |
@@ -129,6 +129,8 @@ working in places we cannot reach such as the login window.
 | Qwen3-ASR (Local) | Local offline batch | Alibaba's open-weight model (Apache-2.0), fully offline; driven through the external `qwen-asr` CLI. Text appears after you release the hotkey — no incremental output yet |
 
 At the moment, Doubao, Qwen, ElevenLabs, Soniox, and Coli are the recommended options. Still, results vary from person to person: pronunciation, wording, and domain-specific vocabulary all affect the final experience.
+
+`gemini-3.1-flash-lite-preview` was [shut down](https://ai.google.dev/gemini-api/docs/changelog#may-25-2026) on May 25, 2026 and has been removed from the presets. Saved values remain visible with a warning and are rejected before recognition requests. Select `gemini-3.1-flash-lite` or another available model in ASR settings.
 
 Qwen/Fun-ASR snapshots retired on 2026-10-10 are removed from presets. Exact saved realtime and short-audio snapshot IDs migrate to the corresponding same-provider main model; provider, endpoint, and recognition mode stay unchanged. The retired asynchronous filetrans snapshot stays saved and disabled with an explanation, since migrating to the short-audio API would change its limits. On the first upgrade, the former Gemini Live default migrates to `gemini-3.5-transcribe-live`.
 

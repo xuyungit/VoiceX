@@ -88,14 +88,6 @@
       ]
     },
     {
-      "provider": "gemini",
-      "id": "gemini-3.1-flash-lite-preview",
-      "modes": [
-        "batch"
-      ],
-      "status": "preview"
-    },
-    {
       "provider": "gemini-live",
       "id": "gemini-3.1-flash-live-preview",
       "modes": [
@@ -293,6 +285,13 @@
     }
   ],
   "retired": [
+    {
+      "provider": "gemini",
+      "id": "gemini-3.1-flash-lite-preview",
+      "shutdownDate": "2026-05-25",
+      "replacement": "gemini-3.1-flash-lite",
+      "source": "https://ai.google.dev/gemini-api/docs/changelog#may-25-2026"
+    },
     {
       "provider": "qwen",
       "id": "qwen3-asr-flash-realtime-2025-10-27",
