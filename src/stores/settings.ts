@@ -151,6 +151,11 @@ export interface AppSettings {
     llmQwenApiKey: string
     llmQwenModel: string
 
+    // LLM Provider: DeepSeek (official OpenAI-compatible API)
+    llmDeepseekBaseUrl: string
+    llmDeepseekApiKey: string
+    llmDeepseekModel: string
+
     // LLM Provider: Gemini (Google Generative AI)
     llmGeminiBaseUrl: string
     llmGeminiApiKey: string
@@ -435,6 +440,10 @@ const defaultSettings: AppSettings = {
     llmQwenBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     llmQwenApiKey: '',
     llmQwenModel: 'qwen3.5-flash',
+
+    llmDeepseekBaseUrl: llmModels.deepseekBaseUrl,
+    llmDeepseekApiKey: '',
+    llmDeepseekModel: llmModels.deepseekDefaultModel,
 
     llmGeminiBaseUrl: 'https://generativelanguage.googleapis.com',
     llmGeminiApiKey: '',

@@ -142,6 +142,20 @@ const llmQwenModel = computed({
   set: (v: string) => settingsStore.updateSetting('llmQwenModel', v)
 })
 
+// DeepSeek-specific
+const llmDeepseekBaseUrl = computed({
+  get: () => settingsStore.settings.llmDeepseekBaseUrl,
+  set: (v: string) => settingsStore.updateSetting('llmDeepseekBaseUrl', v)
+})
+const llmDeepseekApiKey = computed({
+  get: () => settingsStore.settings.llmDeepseekApiKey,
+  set: (v: string) => settingsStore.updateSetting('llmDeepseekApiKey', v)
+})
+const llmDeepseekModel = computed({
+  get: () => settingsStore.settings.llmDeepseekModel,
+  set: (v: string) => settingsStore.updateSetting('llmDeepseekModel', v)
+})
+
 // Gemini-specific
 const llmGeminiBaseUrl = computed({
   get: () => settingsStore.settings.llmGeminiBaseUrl,
@@ -295,6 +309,7 @@ function deleteActiveCustomEndpoint() {
 const isVolcengine = computed(() => llmProviderType.value === 'volcengine')
 const isOpenai = computed(() => llmProviderType.value === 'openai')
 const isQwen = computed(() => llmProviderType.value === 'qwen')
+const isDeepseek = computed(() => llmProviderType.value === 'deepseek')
 const isGemini = computed(() => llmProviderType.value === 'gemini')
 const isAnthropic = computed(() => llmProviderType.value === 'anthropic')
 const isCustom = computed(() => llmProviderType.value === 'custom')
@@ -318,6 +333,7 @@ watch(
       s.llmVolcengineBaseUrl, s.llmVolcengineModel, s.llmVolcengineReasoningEffort,
       s.llmOpenaiBaseUrl, s.llmOpenaiModel, s.llmOpenaiReasoningEffort,
       s.llmQwenBaseUrl, s.llmQwenModel,
+      s.llmDeepseekBaseUrl, s.llmDeepseekModel,
       s.llmGeminiBaseUrl, s.llmGeminiModel,
       s.llmAnthropicBaseUrl, s.llmAnthropicModel,
       endpoint?.id, endpoint?.baseUrl, endpoint?.model, endpoint?.apiMode, endpoint?.reasoningEffort
@@ -542,6 +558,45 @@ async function runLlmProviderProbe() {
               <div class="field-label">{{ t('llm.modelName') }}</div>
             </div>
             <NInput v-model:value="llmQwenModel" class="field-control short" />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
+              <div class="field-sub">{{ t('llm.reasoningEffortFixedSub') }}</div>
+              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+                {{ reasoningPreviewText }}
+                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+              </div>
+            </div>
+            <div class="field-control short reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
+          </div>
+        </template>
+
+        <!-- DeepSeek Settings -->
+        <template v-if="isDeepseek">
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.baseUrl') }}</div>
+            </div>
+            <NInput v-model:value="llmDeepseekBaseUrl" class="field-control" />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.apiKey') }}</div>
+            </div>
+            <NInput
+              v-model:value="llmDeepseekApiKey"
+              type="password"
+              show-password-on="click"
+              placeholder="sk-..."
+              class="field-control"
+            />
+          </div>
+          <div class="field-row">
+            <div class="field-text">
+              <div class="field-label">{{ t('llm.modelName') }}</div>
+            </div>
+            <NInput v-model:value="llmDeepseekModel" class="field-control short" />
           </div>
           <div class="field-row">
             <div class="field-text">

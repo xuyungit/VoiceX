@@ -2,6 +2,8 @@
   "volcengineDefaultModel": "doubao-seed-2-0-mini-260428",
   "volcengineRetiredDefaultModel": "doubao-seed-2-0-mini-260215",
   "openaiDefaultModel": "gpt-6-luna",
+  "deepseekBaseUrl": "https://api.deepseek.com",
+  "deepseekDefaultModel": "deepseek-flash",
   "openaiPreviousDefaultModels": [
     "gpt-4o-mini",
     "gpt-4o-mini-2024-07-18"

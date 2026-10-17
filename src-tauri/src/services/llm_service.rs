@@ -77,6 +77,15 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             reasoning: ReasoningChoice::Lowest,
             extra_body: None,
         },
+        LLMProviderType::Deepseek => LLMConfig {
+            provider_type: LLMProviderType::Deepseek,
+            base_url: settings.llm_deepseek_base_url.clone(),
+            api_key: settings.llm_deepseek_api_key.clone(),
+            model_name: settings.llm_deepseek_model.clone(),
+            api_mode: LLMApiMode::ChatCompletions,
+            reasoning: ReasoningChoice::Lowest,
+            extra_body: None,
+        },
         LLMProviderType::Gemini => LLMConfig {
             provider_type: LLMProviderType::Gemini,
             base_url: settings.llm_gemini_base_url.clone(),
@@ -331,7 +340,9 @@ mod llm_key_tests {
     #[test]
     fn every_provider_defaults_to_the_lowest_reasoning() {
         let settings = settings_with_two_providers();
-        for key in ["volcengine", "openai", "qwen", "gemini", "anthropic", "custom:ep1"] {
+        for key in [
+            "volcengine", "openai", "qwen", "deepseek", "gemini", "anthropic", "custom:ep1",
+        ] {
             assert_eq!(
                 build_llm_config_for_key(&settings, key).reasoning,
                 ReasoningChoice::Lowest,
@@ -376,6 +387,36 @@ mod llm_key_tests {
         assert_eq!(
             settings.llm_provider_type, "volcengine",
             "the LLM page's own selection is not what the reading feature picked"
+        );
+    }
+
+    #[test]
+    fn deepseek_uses_its_own_credentials_request_policy_and_history_label() {
+        let mut settings = settings_with_two_providers();
+        settings.llm_deepseek_api_key = "deepseek-key".to_string();
+        let config = build_llm_config_for_key(&settings, "deepseek");
+        assert_eq!(config.provider_type, LLMProviderType::Deepseek);
+        assert_eq!(config.base_url, "https://api.deepseek.com");
+        assert_eq!(config.api_key, "deepseek-key");
+        assert_eq!(config.model_name, "deepseek-flash");
+        assert_eq!(config.api_mode, LLMApiMode::ChatCompletions);
+        let provider = crate::llm::create_provider(&config.provider_type);
+        assert_eq!(provider.name(), "DeepSeek");
+        let request = provider.build_chat_request(vec![], &config);
+        assert_eq!(request["model"], "deepseek-flash");
+        assert_eq!(request["thinking"]["type"], "disabled");
+        assert!(request.get("reasoning_effort").is_none());
+        assert!(request.get("max_tokens").is_none());
+        assert_eq!(
+            HistoryService::resolve_llm_model_name(&settings_for_llm_key(&settings, "deepseek"))
+                .as_deref(),
+            Some("DeepSeek / deepseek-flash")
+        );
+        assert_eq!(settings.llm_provider_type, "volcengine");
+        settings.llm_provider_type = "deepseek".to_string();
+        assert_eq!(
+            build_llm_config_for_key(&settings, "follow").api_key,
+            "deepseek-key"
         );
     }
 

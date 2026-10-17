@@ -445,6 +445,7 @@ impl HistoryService {
         let snapshot = match settings.llm_provider_type.as_str() {
             "openai" => Self::format_provider_model("OpenAI", &settings.llm_openai_model),
             "qwen" => Self::format_provider_model("Qwen", &settings.llm_qwen_model),
+            "deepseek" => Self::format_provider_model("DeepSeek", &settings.llm_deepseek_model),
             "gemini" => Self::format_provider_model("Gemini", &settings.llm_gemini_model),
             "anthropic" => Self::format_provider_model("Anthropic", &settings.llm_anthropic_model),
             "custom" => {

@@ -76,11 +76,12 @@ pub struct ReasoningPlan {
 
 /// The reasoning fields `config` puts on the wire.
 pub fn plan(config: &LLMConfig) -> ReasoningPlan {
-    // The Qwen, Gemini and Anthropic pages offer no choice.
+    // These provider pages always ask for the lowest reasoning.
     let choice = match config.provider_type {
-        LLMProviderType::Qwen | LLMProviderType::Gemini | LLMProviderType::Anthropic => {
-            &ReasoningChoice::Lowest
-        }
+        LLMProviderType::Qwen
+        | LLMProviderType::Deepseek
+        | LLMProviderType::Gemini
+        | LLMProviderType::Anthropic => &ReasoningChoice::Lowest,
         _ => &config.reasoning,
     };
     match choice {
@@ -143,6 +144,7 @@ pub fn lowest_knob(
         LLMProviderType::Volcengine => Some(thinking_disabled()),
         LLMProviderType::Openai => openai_knob(&model),
         LLMProviderType::Qwen => Some(enable_thinking_false()),
+        LLMProviderType::Deepseek => Some(thinking_disabled()),
         LLMProviderType::Gemini => gemini_knob(&model),
         LLMProviderType::Anthropic => anthropic_knob(&model),
         LLMProviderType::Custom => custom_knob(&host_of(base_url)?, &model),

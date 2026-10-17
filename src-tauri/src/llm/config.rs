@@ -10,6 +10,8 @@ struct ModelDefaults {
     volcengine_default_model: String,
     volcengine_retired_default_model: String,
     openai_default_model: String,
+    deepseek_base_url: String,
+    deepseek_default_model: String,
     openai_previous_default_models: Vec<String>,
 }
 
@@ -34,6 +36,14 @@ pub fn default_openai_model() -> &'static str {
     &model_defaults().openai_default_model
 }
 
+pub fn default_deepseek_base_url() -> &'static str {
+    &model_defaults().deepseek_base_url
+}
+
+pub fn default_deepseek_model() -> &'static str {
+    &model_defaults().deepseek_default_model
+}
+
 pub fn replacement_for_previous_openai_default(model: &str) -> Option<&'static str> {
     model_defaults()
         .openai_previous_default_models
@@ -50,6 +60,7 @@ pub enum LLMProviderType {
     Volcengine, // 火山引擎 (Doubao)
     Openai, // OpenAI
     Qwen,   // 阿里云千问
+    Deepseek, // DeepSeek official API
     Gemini,    // Google Gemini
     Anthropic, // Anthropic Claude (native Messages API)
     Custom,    // 自定义 OpenAI 兼容
@@ -60,6 +71,7 @@ impl LLMProviderType {
         match s {
             "openai" => Self::Openai,
             "qwen" => Self::Qwen,
+            "deepseek" => Self::Deepseek,
             "gemini" => Self::Gemini,
             "anthropic" => Self::Anthropic,
             "custom" => Self::Custom,
@@ -72,6 +84,7 @@ impl LLMProviderType {
             Self::Volcengine => "Volcengine Doubao",
             Self::Openai => "OpenAI",
             Self::Qwen => "Qwen",
+            Self::Deepseek => "DeepSeek",
             Self::Gemini => "Google Gemini",
             Self::Anthropic => "Anthropic",
             Self::Custom => "Custom",

@@ -130,7 +130,7 @@ pub struct AppSettings {
 
     // LLM settings
     pub enable_llm_correction: bool,
-    pub llm_provider_type: String, // "volcengine" | "openai" | "qwen" | "gemini" | "anthropic" | "custom"
+    pub llm_provider_type: String, // "volcengine" | "openai" | "qwen" | "deepseek" | "gemini" | "anthropic" | "custom"
     pub llm_prompt_template: String,
     pub translation_prompt_template: String,
     pub enable_llm_history_context: bool,
@@ -160,6 +160,11 @@ pub struct AppSettings {
     pub llm_qwen_base_url: String,
     pub llm_qwen_api_key: String,
     pub llm_qwen_model: String,
+
+    // LLM Provider: DeepSeek (official OpenAI-compatible API)
+    pub llm_deepseek_base_url: String,
+    pub llm_deepseek_api_key: String,
+    pub llm_deepseek_model: String,
 
     // LLM Provider: Gemini (Google Generative AI)
     pub llm_gemini_base_url: String,
@@ -530,6 +535,10 @@ impl Default for AppSettings {
             llm_qwen_api_key: String::new(),
             llm_qwen_model: "qwen3.5-flash".to_string(),
 
+            llm_deepseek_base_url: crate::llm::default_deepseek_base_url().to_string(),
+            llm_deepseek_api_key: String::new(),
+            llm_deepseek_model: crate::llm::default_deepseek_model().to_string(),
+
             llm_gemini_base_url: "https://generativelanguage.googleapis.com".to_string(),
             llm_gemini_api_key: String::new(),
             llm_gemini_model: "gemini-3.5-flash-lite".to_string(),
@@ -725,7 +734,7 @@ pub fn active_custom_endpoint(settings: &AppSettings) -> Option<&CustomLlmEndpoi
 }
 
 /// Apply a provider dropdown selection key (`volcengine` | `openai` | `qwen` |
-/// `gemini` | `anthropic` | `custom:<id>`) onto a settings struct. Used by re-transcribe provider overrides.
+/// `deepseek` | `gemini` | `anthropic` | `custom:<id>`) onto a settings struct. Used by re-transcribe provider overrides.
 pub fn apply_llm_provider_selection(settings: &mut AppSettings, key: &str) {
     if let Some(id) = key.strip_prefix("custom:") {
         settings.llm_provider_type = "custom".to_string();
@@ -2092,6 +2101,25 @@ mod tests {
 
         apply_llm_provider_selection(&mut settings, "openai");
         assert_eq!(settings.llm_provider_type, "openai");
+    }
+
+    #[test]
+    fn settings_without_deepseek_fields_load_and_roundtrip_independent_credentials() {
+        let mut settings: AppSettings = serde_json::from_str(
+            r#"{"llmProviderType":"custom","llmCustomEndpoints":[{"id":"old","name":"Mine","baseUrl":"https://example.test","apiKey":"custom-key","model":"m","apiMode":"chat_completions"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.llm_provider_type, "custom");
+        assert_eq!(settings.llm_deepseek_base_url, "https://api.deepseek.com");
+        assert_eq!(settings.llm_deepseek_model, "deepseek-flash");
+        assert!(settings.llm_deepseek_api_key.is_empty());
+        settings.llm_deepseek_api_key = "deepseek-key".to_string();
+        apply_llm_provider_selection(&mut settings, "deepseek");
+        let saved = serde_json::to_string(&settings).unwrap();
+        let loaded: AppSettings = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded.llm_provider_type, "deepseek");
+        assert_eq!(loaded.llm_deepseek_api_key, "deepseek-key");
+        assert_eq!(loaded.llm_custom_endpoints[0].api_key, "custom-key");
     }
 
     #[test]

@@ -430,6 +430,7 @@ const enUS = {
     providerQwen: 'Qwen',
     providerGemini: 'Google Gemini',
     providerAnthropic: 'Anthropic (Claude)',
+    providerDeepSeek: 'DeepSeek',
     providerCustom: 'Custom (OpenAI-compatible)',
     apiModeChatCompletions: 'Chat Completions',
     apiModeResponses: 'Responses',

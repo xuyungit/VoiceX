@@ -430,6 +430,7 @@ const zhCN = {
     providerQwen: '千问 (Qwen)',
     providerGemini: 'Google Gemini',
     providerAnthropic: 'Anthropic (Claude)',
+    providerDeepSeek: 'DeepSeek',
     providerCustom: '自定义 (OpenAI 兼容)',
     apiModeChatCompletions: 'Chat Completions',
     apiModeResponses: 'Responses',

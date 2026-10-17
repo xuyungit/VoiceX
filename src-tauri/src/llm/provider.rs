@@ -48,6 +48,7 @@ pub fn create_provider(provider_type: &LLMProviderType) -> Box<dyn LLMProvider> 
         LLMProviderType::Volcengine => Box::new(VolcengineProvider),
         LLMProviderType::Openai => Box::new(OpenAIProvider),
         LLMProviderType::Qwen => Box::new(QwenProvider),
+        LLMProviderType::Deepseek => Box::new(DeepSeekProvider),
         LLMProviderType::Gemini => Box::new(GeminiProvider),
         LLMProviderType::Anthropic => Box::new(AnthropicProvider),
         LLMProviderType::Custom => Box::new(CustomProvider),
@@ -128,23 +129,37 @@ impl LLMProvider for QwenProvider {
 }
 
 // =============================================================================
-// Custom Provider (OpenAI-compatible)
+// DeepSeek and Custom Providers (OpenAI-compatible)
 // =============================================================================
+
+fn openai_compatible_chat_request(messages: Vec<Message>, config: &LLMConfig) -> Value {
+    // No output cap: thinking and long translations need the model's own budget.
+    let mut req = serde_json::json!({
+        "model": config.model_name,
+        "messages": messages,
+        "temperature": 0.2
+    });
+    insert_reasoning_fields(&mut req, config);
+    req
+}
+
+pub struct DeepSeekProvider;
+
+impl LLMProvider for DeepSeekProvider {
+    fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
+        openai_compatible_chat_request(messages, config)
+    }
+
+    fn name(&self) -> &'static str {
+        "DeepSeek"
+    }
+}
 
 pub struct CustomProvider;
 
 impl LLMProvider for CustomProvider {
     fn build_chat_request(&self, messages: Vec<Message>, config: &LLMConfig) -> Value {
-        // Generic OpenAI-compatible format. No output cap: a fixed
-        // `max_tokens` is what a reasoning model spends on thinking before it
-        // gets to answer, and a long translation needs the whole budget.
-        let mut req = serde_json::json!({
-            "model": config.model_name,
-            "messages": messages,
-            "temperature": 0.2
-        });
-        insert_reasoning_fields(&mut req, config);
-        req
+        openai_compatible_chat_request(messages, config)
     }
 
     fn build_responses_request(
