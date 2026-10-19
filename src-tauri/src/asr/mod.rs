@@ -49,7 +49,9 @@ pub use google_client::GoogleSttClient;
 pub use mimo_client::MimoTranscriptionClient;
 pub use openai_client::OpenAITranscriptionClient;
 pub use openai_realtime_client::OpenAIRealtimeClient;
-pub use protocol::{AsrError, AsrEvent, AsrFailure, AsrFailureKind, AsrPhase};
+pub use protocol::{
+    is_empty_asr_result_message, AsrError, AsrEvent, AsrFailure, AsrFailureKind, AsrPhase,
+};
 pub use qwen_client::QwenRealtimeClient;
 pub use qwen_local_client::QwenLocalAsrClient;
 pub use qwen_transcription_client::QwenTranscriptionClient;

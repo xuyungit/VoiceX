@@ -334,6 +334,21 @@ body.error .text-area {
     color: rgba(254, 202, 202, 0.96);
 }
 
+body.batch-error-mode .hud-container {
+    padding: 8px 12px;
+    gap: 4px;
+}
+
+body.batch-error-mode .status-area {
+    height: 18px;
+    min-height: 18px;
+}
+
+body.batch-error-mode .status-icon {
+    width: 18px;
+    height: 18px;
+}
+
 /* Light theme support (for future) */
 @media (prefers-color-scheme: light) {
     body.light-theme .hud-container {

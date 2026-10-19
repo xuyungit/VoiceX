@@ -904,18 +904,25 @@ impl SessionController {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Batch ASR skipped, failed to load settings: {}", e);
-                self.fail_batch_asr_state(state, format!("批量识别失败：无法加载设置 ({})", e));
+                self.fail_batch_asr_state(state, "无法加载设置，请稍后重试。".to_string());
                 return;
             }
         };
         let mut config = AsrConfig::from(&settings);
         if !config.is_valid() {
             log::warn!("Batch ASR config invalid, skipping");
-            self.fail_batch_asr_state(state, "批量识别失败：当前 ASR 服务配置不完整".to_string());
+            self.fail_batch_asr_state(
+                state,
+                build_batch_asr_hud_message(Some(config.provider_type), "Invalid ASR configuration"),
+            );
             return;
         }
         if let Err(message) = config.validate_model_selection() {
-            self.fail_batch_asr_state(state, message);
+            log::warn!("Batch ASR model validation failed: {}", message);
+            self.fail_batch_asr_state(
+                state,
+                build_batch_asr_hud_message(Some(config.provider_type), &message),
+            );
             return;
         }
         state.session_asr_model_name =
@@ -925,10 +932,27 @@ impl SessionController {
             Some(path) => path,
             None => {
                 log::warn!("Batch ASR skipped: no usable audio path available");
-                self.fail_batch_asr_state(state, "批量识别失败：录音文件缺失".to_string());
+                self.fail_batch_asr_state(state, "录音文件缺失，请重试。".to_string());
                 return;
             }
         };
+
+        if recording_looks_like_no_speech(
+            state,
+            &[
+                state.session_refinement_audio_path.as_deref(),
+                state.session_audio_path.as_deref(),
+            ],
+        ) {
+            log::info!(
+                "Skipping batch ASR upload for probable no-speech session (provider={})",
+                config.provider_type.display_name()
+            );
+            self.discard_session_audio_file(state, "skip_batch_asr_probable_no_speech");
+            self.discard_session_refinement_audio_file(state, "skip_batch_asr_probable_no_speech");
+            self.hide_hud_and_reset_state(state);
+            return;
+        }
 
         // Show recognizing state in HUD.
         if let Some(hud) = self.hud_service() {
@@ -991,7 +1015,13 @@ impl SessionController {
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() {
             log::info!("Batch ASR returned empty result; surfacing visible failure");
-            self.fail_batch_asr_state(state, "批量识别失败：服务返回空结果".to_string());
+            let provider = crate::storage::get_settings()
+                .ok()
+                .map(|settings| AsrConfig::from(&settings).provider_type);
+            self.fail_batch_asr_state(
+                state,
+                build_batch_asr_hud_message(provider, "Batch ASR returned empty result"),
+            );
             return;
         }
 
@@ -1028,7 +1058,10 @@ impl SessionController {
             return;
         }
 
-        self.fail_batch_asr_state(state, format_batch_asr_failure_message(reason.as_str()));
+        let provider = crate::storage::get_settings()
+            .ok()
+            .map(|settings| AsrConfig::from(&settings).provider_type);
+        self.fail_batch_asr_state(state, build_batch_asr_hud_message(provider, reason.as_str()));
     }
 
     fn fail_batch_asr_state(&self, state: &mut AppState, message: String) {
@@ -1347,11 +1380,8 @@ fn has_stream_fallback_result(state: &AppState) -> bool {
 
 fn should_silent_exit_before_post_recording_refinement(
     state: &AppState,
-    provider: PostRecordingRefineProvider,
+    _provider: PostRecordingRefineProvider,
 ) -> bool {
-    if provider != PostRecordingRefineProvider::Qwen {
-        return false;
-    }
     if has_stream_fallback_result(state) || !state.transcript_text.trim().is_empty() {
         return false;
     }
@@ -1370,10 +1400,13 @@ fn should_silent_exit_after_empty_refine_failure(
     provider: Option<AsrProviderType>,
     reason: &str,
 ) -> bool {
-    if provider != Some(AsrProviderType::Qwen) {
+    let Some(refine_provider) = provider.and_then(PostRecordingRefineProvider::from_asr_provider)
+    else {
         return false;
-    }
-    if reason.trim() != "Qwen batch refine returned empty result" {
+    };
+    if reason.trim() != refine_provider.empty_result_message()
+        && !is_empty_batch_transcription_reason(reason)
+    {
         return false;
     }
     if has_stream_fallback_result(state) || !state.transcript_text.trim().is_empty() {
@@ -1389,8 +1422,12 @@ fn should_silent_exit_after_empty_refine_failure(
     )
 }
 
+fn is_empty_batch_transcription_reason(reason: &str) -> bool {
+    crate::asr::is_empty_asr_result_message(reason)
+}
+
 fn should_silent_exit_after_empty_batch_failure(state: &AppState, reason: &str) -> bool {
-    if reason.trim() != "Batch ASR returned empty result" {
+    if !is_empty_batch_transcription_reason(reason) {
         return false;
     }
 
@@ -1398,7 +1435,7 @@ fn should_silent_exit_after_empty_batch_failure(state: &AppState, reason: &str) 
         return false;
     };
     let config = AsrConfig::from(&settings);
-    if config.provider_type != AsrProviderType::Qwen || !config.is_batch() {
+    if !config.is_batch() {
         return false;
     }
 
@@ -1415,13 +1452,12 @@ fn should_surface_terminal_batch_post_refine_failure(state: &AppState) -> bool {
     !has_stream_fallback_result(state)
 }
 
-fn format_batch_asr_failure_message(reason: &str) -> String {
-    let trimmed = reason.trim();
-    if trimmed.is_empty() {
-        "批量识别失败".to_string()
-    } else {
-        format!("批量识别失败：{}", trimmed)
-    }
+fn build_batch_asr_hud_message(provider: Option<AsrProviderType>, reason: &str) -> String {
+    let Some(provider_type) = provider else {
+        return "识别失败，请稍后重试。".to_string();
+    };
+    AsrFailure::from_raw_reason(provider_type, crate::asr::AsrPhase::Finalizing, reason)
+        .display_message
 }
 
 fn recording_looks_like_no_speech(state: &AppState, candidate_paths: &[Option<&Path>]) -> bool {
@@ -1434,12 +1470,16 @@ fn recording_looks_like_no_speech(state: &AppState, candidate_paths: &[Option<&P
         match analyze_audio_path(path) {
             Ok(analysis) => {
                 log::info!(
-                    "No-speech analysis path={} frames={} voiced_ratio={:.3} p95_rms={:.5} peak_rms={:.5} probable_no_speech={}",
+                    "No-speech analysis path={} frames={} voiced_frames={} voiced_ms={} max_run={} voiced_ratio={:.3} p95_rms={:.5} peak_rms={:.5} hp_p95_rms={:.5} probable_no_speech={}",
                     path.display(),
                     analysis.frame_count,
+                    analysis.voiced_frames,
+                    analysis.voiced_duration_ms,
+                    analysis.max_voiced_run,
                     analysis.voiced_ratio,
                     analysis.p95_rms,
                     analysis.peak_rms,
+                    analysis.hp_p95_rms,
                     analysis.probable_no_speech
                 );
                 return analysis.probable_no_speech;
@@ -1461,9 +1501,13 @@ fn recording_looks_like_no_speech(state: &AppState, candidate_paths: &[Option<&P
 struct NoSpeechAnalysis {
     probable_no_speech: bool,
     frame_count: usize,
+    voiced_frames: usize,
+    voiced_duration_ms: u32,
+    max_voiced_run: usize,
     voiced_ratio: f32,
     p95_rms: f32,
     peak_rms: f32,
+    hp_p95_rms: f32,
 }
 
 fn analyze_audio_path(path: &Path) -> Result<NoSpeechAnalysis, String> {
@@ -1473,18 +1517,19 @@ fn analyze_audio_path(path: &Path) -> Result<NoSpeechAnalysis, String> {
         .unwrap_or_default()
         .to_ascii_lowercase();
 
-    let samples = match extension.as_str() {
+    let (samples, sample_rate) = match extension.as_str() {
         "wav" => load_wav_i16_samples(path)?,
-        "ogg" | "opus" => {
-            bytes_to_i16_samples(&crate::asr::ogg_decoder::decode_ogg_opus_to_pcm16k(path)?)
-        }
+        "ogg" | "opus" => (
+            bytes_to_i16_samples(&crate::asr::ogg_decoder::decode_ogg_opus_to_pcm16k(path)?),
+            16_000,
+        ),
         _ => return Err(format!("Unsupported audio format: {}", extension)),
     };
 
-    Ok(analyze_pcm_i16(&samples))
+    Ok(analyze_pcm_i16_at_rate(&samples, sample_rate))
 }
 
-fn load_wav_i16_samples(path: &Path) -> Result<Vec<i16>, String> {
+fn load_wav_i16_samples(path: &Path) -> Result<(Vec<i16>, u32), String> {
     let bytes = std::fs::read(path)
         .map_err(|err| format!("Failed to read wav file {}: {}", path.display(), err))?;
     if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
@@ -1493,6 +1538,7 @@ fn load_wav_i16_samples(path: &Path) -> Result<Vec<i16>, String> {
 
     let mut cursor = 12usize;
     let mut channels = 1u16;
+    let mut sample_rate = 16_000u32;
     let mut bits_per_sample = 16u16;
     let mut pcm_data: Option<&[u8]> = None;
 
@@ -1517,6 +1563,12 @@ fn load_wav_i16_samples(path: &Path) -> Result<Vec<i16>, String> {
                 }
                 let audio_format = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
                 channels = u16::from_le_bytes([bytes[cursor + 2], bytes[cursor + 3]]);
+                sample_rate = u32::from_le_bytes([
+                    bytes[cursor + 4],
+                    bytes[cursor + 5],
+                    bytes[cursor + 6],
+                    bytes[cursor + 7],
+                ]);
                 bits_per_sample = u16::from_le_bytes([bytes[cursor + 14], bytes[cursor + 15]]);
                 if audio_format != 1 {
                     return Err(format!("Unsupported WAV audio format: {}", audio_format));
@@ -1551,7 +1603,7 @@ fn load_wav_i16_samples(path: &Path) -> Result<Vec<i16>, String> {
             .collect();
     }
 
-    Ok(samples)
+    Ok((samples, sample_rate.max(1)))
 }
 
 fn bytes_to_i16_samples(bytes: &[u8]) -> Vec<i16> {
@@ -1561,83 +1613,165 @@ fn bytes_to_i16_samples(bytes: &[u8]) -> Vec<i16> {
         .collect()
 }
 
+#[cfg(test)]
 fn analyze_pcm_i16(samples: &[i16]) -> NoSpeechAnalysis {
-    const FRAME_SAMPLES: usize = 320;
-    const VOICED_RMS_THRESHOLD: f32 = 0.006;
-    const P95_SILENCE_THRESHOLD: f32 = 0.004;
-    const PEAK_SILENCE_THRESHOLD: f32 = 0.008;
-    const MAX_VOICED_RATIO_FOR_SILENCE: f32 = 0.12;
+    analyze_pcm_i16_at_rate(samples, 16_000)
+}
+
+fn percentile_sorted(sorted: &[f32], quantile: f32) -> f32 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len().saturating_sub(1)) as f32 * quantile.clamp(0.0, 1.0)).round() as usize;
+    sorted[idx.min(sorted.len().saturating_sub(1))]
+}
+
+fn analyze_pcm_i16_at_rate(samples: &[i16], sample_rate: u32) -> NoSpeechAnalysis {
+    const FRAME_DURATION_MS: u32 = 20;
+    const VOICED_RAW_RMS_FLOOR: f32 = 0.004;
+    const VOICED_HP_RMS_FLOOR: f32 = 0.0032;
+    const MAX_RAW_NOISE_FLOOR: f32 = 0.015;
+    const MAX_HP_NOISE_FLOOR: f32 = 0.0035;
+    const RAW_SNR_MULTIPLIER: f32 = 2.5;
+    const HP_SNR_MULTIPLIER: f32 = 2.2;
+    const EDGE_TRIM_START_FRAMES: usize = 4; // 80 ms hotkey press click
+    const EDGE_TRIM_END_FRAMES: usize = 5; // 100 ms hotkey release click
+    const MIN_FRAMES_FOR_EDGE_TRIM: usize = 25; // 500 ms
+    const MIN_SPEECH_FRAMES: usize = 8; // 160 ms
+    const MIN_SPEECH_RUN_FRAMES: usize = 3; // 60 ms contiguous speech
+
+    let safe_rate = sample_rate.max(1) as usize;
+    let frame_samples = (safe_rate * (FRAME_DURATION_MS as usize) / 1000).max(1);
+    // Keep pre-emphasis time constant (~62.5 us, equivalent to 1 sample at 16 kHz)
+    // invariant across 16 kHz, 24 kHz, and 48 kHz capture rates.
+    let hp_step = (safe_rate / 16_000).max(1);
 
     if samples.is_empty() {
         return NoSpeechAnalysis {
             probable_no_speech: true,
             frame_count: 0,
+            voiced_frames: 0,
+            voiced_duration_ms: 0,
+            max_voiced_run: 0,
             voiced_ratio: 0.0,
             p95_rms: 0.0,
             peak_rms: 0.0,
+            hp_p95_rms: 0.0,
         };
     }
 
     let mut frame_rms = Vec::new();
-    for frame in samples.chunks(FRAME_SAMPLES) {
+    let mut frame_hp_rms = Vec::new();
+    for (frame_idx, frame) in samples.chunks(frame_samples).enumerate() {
         if frame.is_empty() {
             continue;
         }
-        let energy = frame
-            .iter()
-            .map(|sample| {
-                let normalized = *sample as f32 / i16::MAX as f32;
-                normalized * normalized
-            })
-            .sum::<f32>()
-            / frame.len() as f32;
-        frame_rms.push(energy.sqrt());
+        let base_offset = frame_idx * frame_samples;
+        let mut raw_energy = 0.0f32;
+        let mut hp_energy = 0.0f32;
+
+        for (i, sample) in frame.iter().enumerate() {
+            let x = *sample as f32 / i16::MAX as f32;
+            raw_energy += x * x;
+
+            let global_idx = base_offset + i;
+            let prev = if global_idx >= hp_step {
+                samples[global_idx - hp_step] as f32 / i16::MAX as f32
+            } else {
+                x
+            };
+            let hp = x - 0.97 * prev;
+            hp_energy += hp * hp;
+        }
+
+        let inv_len = 1.0 / (frame.len() as f32);
+        frame_rms.push((raw_energy * inv_len).sqrt());
+        frame_hp_rms.push((hp_energy * inv_len).sqrt());
     }
 
     if frame_rms.is_empty() {
         return NoSpeechAnalysis {
             probable_no_speech: true,
             frame_count: 0,
+            voiced_frames: 0,
+            voiced_duration_ms: 0,
+            max_voiced_run: 0,
             voiced_ratio: 0.0,
             p95_rms: 0.0,
             peak_rms: 0.0,
+            hp_p95_rms: 0.0,
         };
     }
 
-    let peak_rms = frame_rms
-        .iter()
-        .copied()
-        .fold(0.0f32, |max_value, value| max_value.max(value));
-    let voiced_frames = frame_rms
-        .iter()
-        .filter(|value| **value >= VOICED_RMS_THRESHOLD)
-        .count();
-    let voiced_ratio = voiced_frames as f32 / frame_rms.len() as f32;
+    let total_frames = frame_rms.len();
+    let (analysis_raw, analysis_hp) = if total_frames > MIN_FRAMES_FOR_EDGE_TRIM {
+        let end = total_frames.saturating_sub(EDGE_TRIM_END_FRAMES);
+        (
+            &frame_rms[EDGE_TRIM_START_FRAMES..end],
+            &frame_hp_rms[EDGE_TRIM_START_FRAMES..end],
+        )
+    } else {
+        (frame_rms.as_slice(), frame_hp_rms.as_slice())
+    };
 
-    let mut sorted = frame_rms.clone();
-    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let p95_index = ((sorted.len().saturating_sub(1)) as f32 * 0.95).round() as usize;
-    let p95_rms = sorted[p95_index.min(sorted.len().saturating_sub(1))];
+    let mut sorted_raw = analysis_raw.to_vec();
+    sorted_raw.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let mut sorted_hp = analysis_hp.to_vec();
+    sorted_hp.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
 
-    let probable_no_speech = peak_rms < PEAK_SILENCE_THRESHOLD
-        && p95_rms < P95_SILENCE_THRESHOLD
-        && voiced_ratio <= MAX_VOICED_RATIO_FOR_SILENCE;
+    let raw_p20 = percentile_sorted(&sorted_raw, 0.20).min(MAX_RAW_NOISE_FLOOR);
+    let hp_p20 = percentile_sorted(&sorted_hp, 0.20).min(MAX_HP_NOISE_FLOOR);
+    let p95_rms = percentile_sorted(&sorted_raw, 0.95);
+    let peak_rms = sorted_raw.last().copied().unwrap_or(0.0);
+    let hp_p95_rms = percentile_sorted(&sorted_hp, 0.95);
+
+    let raw_voiced_threshold = VOICED_RAW_RMS_FLOOR.max(raw_p20 * RAW_SNR_MULTIPLIER);
+    let hp_voiced_threshold = VOICED_HP_RMS_FLOOR.max(hp_p20 * HP_SNR_MULTIPLIER);
+
+    let mut voiced_frames = 0usize;
+    let mut current_run = 0usize;
+    let mut max_voiced_run = 0usize;
+
+    for (&raw_val, &hp_val) in analysis_raw.iter().zip(analysis_hp.iter()) {
+        let is_voiced = hp_val >= hp_voiced_threshold || raw_val >= raw_voiced_threshold;
+        if is_voiced {
+            voiced_frames += 1;
+            current_run += 1;
+            if current_run > max_voiced_run {
+                max_voiced_run = current_run;
+            }
+        } else {
+            current_run = 0;
+        }
+    }
+
+    let voiced_duration_ms = (voiced_frames as u32).saturating_mul(FRAME_DURATION_MS);
+    let voiced_ratio = voiced_frames as f32 / (analysis_raw.len().max(1) as f32);
+    let probable_no_speech =
+        voiced_frames < MIN_SPEECH_FRAMES || max_voiced_run < MIN_SPEECH_RUN_FRAMES;
 
     NoSpeechAnalysis {
         probable_no_speech,
-        frame_count: frame_rms.len(),
+        frame_count: total_frames,
+        voiced_frames,
+        voiced_duration_ms,
+        max_voiced_run,
         voiced_ratio,
         p95_rms,
         peak_rms,
+        hp_p95_rms,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_pcm_i16, format_batch_asr_failure_message,
+        analyze_pcm_i16, analyze_pcm_i16_at_rate, build_batch_asr_hud_message,
+        is_empty_batch_transcription_reason, should_silent_exit_after_empty_refine_failure,
+        should_silent_exit_before_post_recording_refinement,
         should_surface_terminal_batch_post_refine_failure, PostRecordingRefineProvider,
     };
+    use crate::asr::AsrProviderType;
     use crate::state::AppState;
 
     #[test]
@@ -1698,16 +1832,44 @@ mod tests {
     }
 
     #[test]
-    fn batch_failure_message_formats_reason() {
+    fn batch_hud_message_hides_raw_provider_errors() {
         assert_eq!(
-            format_batch_asr_failure_message("quota exceeded"),
-            "批量识别失败：quota exceeded"
+            build_batch_asr_hud_message(
+                Some(AsrProviderType::StepAudio),
+                "StepAudio ASR 失败: Protocol error: StepAudio returned an empty transcription",
+            ),
+            "StepAudio 未识别到有效语音"
+        );
+        assert_eq!(
+            build_batch_asr_hud_message(
+                Some(AsrProviderType::Qwen),
+                r#"Qwen ASR 失败: Server error: Qwen HTTP 401: {"code":"InvalidApiKey"}"#,
+            ),
+            "Qwen ASR 认证失败，请检查 API Key 和相关配置。"
+        );
+        assert_eq!(
+            build_batch_asr_hud_message(
+                Some(AsrProviderType::OpenAI),
+                "OpenAI ASR 失败: Server error: OpenAI HTTP 429: quota exceeded",
+            ),
+            "OpenAI 当前请求过多，请稍后再试。"
         );
     }
 
     #[test]
-    fn batch_failure_message_handles_empty_reason() {
-        assert_eq!(format_batch_asr_failure_message("  "), "批量识别失败");
+    fn empty_batch_transcription_reason_matches_provider_variants() {
+        assert!(is_empty_batch_transcription_reason(
+            "Batch ASR returned empty result"
+        ));
+        assert!(is_empty_batch_transcription_reason(
+            "StepAudio ASR 失败: Protocol error: StepAudio returned an empty transcription"
+        ));
+        assert!(is_empty_batch_transcription_reason(
+            "MiMo ASR 失败: Server error: MiMo returned an empty transcript"
+        ));
+        assert!(is_empty_batch_transcription_reason(
+            "ElevenLabs ASR 失败: Server error: ElevenLabs returned an empty transcription result"
+        ));
     }
 
     #[test]
@@ -1718,6 +1880,31 @@ mod tests {
         assert!(analysis.probable_no_speech);
         assert_eq!(analysis.frame_count, 20);
         assert_eq!(analysis.peak_rms, 0.0);
+    }
+
+    #[test]
+    fn silence_analysis_marks_low_freq_rumble_and_edge_clicks_as_no_speech() {
+        // Simulate 2 seconds (100 frames) at 16 kHz with steady 100 Hz room rumble
+        // (~0.011 RMS, above the old 0.008 threshold) plus a loud hotkey click on the
+        // first and last 2 frames. Must be classified as probable_no_speech.
+        let frame_samples = 320;
+        let total_samples = frame_samples * 100;
+        let mut samples = (0..total_samples)
+            .map(|idx| {
+                let t = idx as f32 / 16_000.0;
+                let rumble = (std::f32::consts::TAU * 100.0 * t).sin() * 500.0;
+                rumble as i16
+            })
+            .collect::<Vec<_>>();
+        for idx in 0..(frame_samples * 2) {
+            samples[idx] = 4000;
+        }
+        for idx in (total_samples - frame_samples * 2)..total_samples {
+            samples[idx] = 4000;
+        }
+
+        let analysis = analyze_pcm_i16(&samples);
+        assert!(analysis.probable_no_speech);
     }
 
     #[test]
@@ -1732,5 +1919,47 @@ mod tests {
 
         assert!(!analysis.probable_no_speech);
         assert!(analysis.peak_rms > 0.008);
+    }
+
+    #[test]
+    fn silence_analysis_preserves_short_quiet_word_in_long_recording() {
+        // 10 seconds at 48 kHz (500 frames of 20 ms), with a 240 ms quiet utterance
+        // (12 frames at ~200 amplitude, RMS ~0.0043 < 0.008). Must NOT be classified as no-speech.
+        let frame_samples = 960; // 20 ms at 48 kHz
+        let mut samples = vec![0i16; frame_samples * 500];
+        for frame_idx in 100..112 {
+            for i in 0..frame_samples {
+                let phase = (i as f32 / 24.0).sin();
+                samples[frame_idx * frame_samples + i] = (phase * 200.0) as i16;
+            }
+        }
+        let analysis = analyze_pcm_i16_at_rate(&samples, 48_000);
+
+        assert_eq!(analysis.frame_count, 500);
+        assert_eq!(analysis.voiced_frames, 12);
+        assert_eq!(analysis.voiced_duration_ms, 240);
+        assert!(!analysis.probable_no_speech);
+    }
+
+    #[test]
+    fn post_recording_refine_silent_exit_applies_to_all_refine_providers() {
+        let mut state = AppState::new();
+        state.session_duration_ms = Some(500);
+
+        for provider in [
+            PostRecordingRefineProvider::Coli,
+            PostRecordingRefineProvider::ElevenLabs,
+            PostRecordingRefineProvider::OpenAI,
+            PostRecordingRefineProvider::Qwen,
+        ] {
+            assert!(should_silent_exit_before_post_recording_refinement(
+                &state, provider
+            ));
+            assert!(should_silent_exit_after_empty_refine_failure(
+                &state,
+                Some(provider.as_asr_provider_type()),
+                &provider.empty_result_message(),
+            ));
+        }
     }
 }

@@ -34,15 +34,24 @@ impl AsrManager {
         };
         let config = AsrConfig::from(&settings);
         if !config.is_valid() {
-            log::warn!("ASR config invalid, skipping streaming");
+            log::warn!("ASR config invalid, failing streaming start");
+            let failure = AsrFailure::from_error(
+                config.provider_type,
+                &crate::asr::AsrError::ConnectionFailed("Invalid ASR configuration".to_string())
+                    .in_phase(crate::asr::AsrPhase::Connect),
+            );
+            cancel.cancel();
+            on_finished(Some(failure));
             return;
         }
 
         if let Err(message) = config.validate_model_selection() {
-            let mut failure = AsrFailure::from_error(config.provider_type,
-                &crate::asr::AsrError::ProtocolError(message.clone()));
-            failure.display_message = message;
-            failure.retryable = false;
+            log::warn!("ASR model validation failed: {}", message);
+            let failure = AsrFailure::from_error(
+                config.provider_type,
+                &crate::asr::AsrError::ProtocolError(message)
+                    .in_phase(crate::asr::AsrPhase::Connect),
+            );
             cancel.cancel();
             on_finished(Some(failure));
             return;

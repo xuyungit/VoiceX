@@ -301,14 +301,36 @@ async fn run_transcription_pipeline(
         return Err("所选 ASR 服务配置不完整，请先在设置页面填写相关凭证".into());
     }
 
-    let outcome = transcribe_audio_path_detailed(path, &mut config, cancel.clone()).await?;
+    let outcome = transcribe_audio_path_detailed(path, &mut config, cancel.clone())
+        .await
+        .map_err(|err| {
+            if cancel.is_cancelled() {
+                return "操作已取消".to_string();
+            }
+            log::warn!(
+                "Re-transcribe ASR failed (provider={}): {}",
+                config.provider_type.display_name(),
+                err
+            );
+            crate::asr::AsrFailure::from_raw_reason(
+                config.provider_type,
+                crate::asr::AsrPhase::Finalizing,
+                &err,
+            )
+            .display_message
+        })?;
     if cancel.is_cancelled() {
         return Err("操作已取消".to_string());
     }
 
     let asr_text = outcome.text;
     if asr_text.trim().is_empty() {
-        return Err("ASR 未能识别出任何文本，请检查录音质量或尝试其他模型".into());
+        return Err(crate::asr::AsrFailure::from_raw_reason(
+            config.provider_type,
+            crate::asr::AsrPhase::Finalizing,
+            "Batch ASR returned empty result",
+        )
+        .display_message);
     }
 
     let (llm_text, llm_model_name) =

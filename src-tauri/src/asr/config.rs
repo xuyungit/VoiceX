@@ -37,7 +37,7 @@ impl AsrProviderType {
             Self::Gemini => "Gemini",
             Self::GeminiLive => "Gemini Live",
             Self::Cohere => "Cohere",
-            Self::OpenAI => "OpenAI Realtime",
+            Self::OpenAI => "OpenAI",
             Self::ElevenLabs => "ElevenLabs",
             Self::Soniox => "Soniox",
             Self::StepAudio => "StepAudio",

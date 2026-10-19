@@ -69,6 +69,8 @@ pub enum AsrFailureKind {
     Auth,
     Config,
     RateLimited,
+    AudioLimitExceeded,
+    EmptyResult,
     ProviderUnavailable,
     NetworkTransient,
     Protocol,
@@ -82,6 +84,8 @@ impl AsrFailureKind {
             Self::Auth => "auth",
             Self::Config => "config",
             Self::RateLimited => "rate_limited",
+            Self::AudioLimitExceeded => "audio_limit_exceeded",
+            Self::EmptyResult => "empty_result",
             Self::ProviderUnavailable => "provider_unavailable",
             Self::NetworkTransient => "network_transient",
             Self::Protocol => "protocol",
@@ -143,17 +147,24 @@ impl AsrFailure {
         let lower = technical_message.to_lowercase();
 
         let (kind, retryable, retry_after_ms) = classify_failure(error.root_cause(), &lower);
-        let display_message = if lower.contains("proxy") || lower.contains("macos pac") {
-            if lower.contains("407") || lower.contains("authentication") {
-                "系统代理要求认证，请检查代理账号配置后重试。".to_string()
-            } else if kind == AsrFailureKind::Config {
-                "系统代理配置无法使用，请检查代理地址或自动代理设置。".to_string()
-            } else {
-                "系统代理连接失败，请检查代理服务后重试。".to_string()
-            }
-        } else {
-            build_display_message(provider, phase, kind)
-        };
+        let display_message = format_display_message(provider, phase, kind, &lower);
+
+        Self {
+            provider,
+            phase,
+            kind,
+            technical_message,
+            display_message,
+            retryable,
+            retry_after_ms,
+        }
+    }
+
+    pub fn from_raw_reason(provider: AsrProviderType, phase: AsrPhase, reason: &str) -> Self {
+        let technical_message = reason.trim().to_string();
+        let lower = technical_message.to_lowercase();
+        let (kind, retryable, retry_after_ms) = classify_message(&lower, false);
+        let display_message = format_display_message(provider, phase, kind, &lower);
 
         Self {
             provider,
@@ -167,11 +178,61 @@ impl AsrFailure {
     }
 }
 
+pub fn is_empty_asr_result_message(reason: &str) -> bool {
+    let lower = reason.trim().to_lowercase();
+    is_empty_result_lower(&lower)
+}
+
+fn is_empty_result_lower(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "empty result",
+            "empty transcription",
+            "empty transcript",
+            "returned no text",
+            "produced no transcript",
+            "asr_response_have_no_words",
+            "audio has no words",
+            "only the bias vocabulary",
+            "insufficient_audio_activity",
+            "返回空结果",
+            "未返回任何结果",
+            "音频文件解码后为空",
+        ],
+    )
+}
+
+fn format_display_message(
+    provider: AsrProviderType,
+    phase: AsrPhase,
+    kind: AsrFailureKind,
+    lower: &str,
+) -> String {
+    if lower.contains("proxy") || lower.contains("macos pac") {
+        if lower.contains("407") || lower.contains("authentication") {
+            "系统代理要求认证，请检查代理账号配置后重试。".to_string()
+        } else if kind == AsrFailureKind::Config {
+            "系统代理配置无法使用，请检查代理地址或自动代理设置。".to_string()
+        } else {
+            "系统代理连接失败，请检查代理服务后重试。".to_string()
+        }
+    } else {
+        build_display_message(provider, phase, kind)
+    }
+}
+
 fn classify_failure(error: &AsrError, lower: &str) -> (AsrFailureKind, bool, Option<u64>) {
     match error {
         AsrError::NotConnected => (AsrFailureKind::NetworkTransient, true, None),
-        AsrError::CompressionFailed(_) | AsrError::ProtocolError(_) => {
-            (AsrFailureKind::Protocol, false, None)
+        AsrError::CompressionFailed(_) => (AsrFailureKind::Protocol, false, None),
+        AsrError::ProtocolError(_) => {
+            let (kind, retryable, retry_after_ms) = classify_message(lower, false);
+            if kind == AsrFailureKind::Unknown {
+                (AsrFailureKind::Protocol, false, None)
+            } else {
+                (kind, retryable, retry_after_ms)
+            }
         }
         AsrError::ConnectionFailed(_) => classify_message(lower, true),
         AsrError::ServerError(_) => classify_message(lower, false),
@@ -200,6 +261,29 @@ fn classify_message(
     {
         return (AsrFailureKind::Config, false, None);
     }
+
+    if is_empty_result_lower(lower) {
+        return (AsrFailureKind::EmptyResult, false, None);
+    }
+
+    if contains_any(
+        lower,
+        &[
+            "413",
+            "payload too large",
+            "request entity too large",
+            "accepts up to 10 mb",
+            "chunk_size_exceeded",
+            "session_time_limit_exceeded",
+            "output ceiling",
+            "audio is too long",
+            "duration limit",
+            "exceeds maximum",
+        ],
+    ) {
+        return (AsrFailureKind::AudioLimitExceeded, false, None);
+    }
+
     if contains_any(
         lower,
         &[
@@ -207,12 +291,17 @@ fn classify_message(
             "403",
             "unauthorized",
             "forbidden",
+            "unauthenticated",
+            "permission_denied",
+            "permission denied",
             "invalid api key",
             "invalid_api_key",
+            "api_key_invalid",
             "missing_api_key",
             "auth_error",
             "authentication",
             "auth failed",
+            "invalid access token",
         ],
     ) {
         return (AsrFailureKind::Auth, false, None);
@@ -229,9 +318,17 @@ fn classify_message(
             "api key is required",
             "invalid service account json",
             "input_error",
-            "chunk_size_exceeded",
-            "insufficient_audio_activity",
-            "session_time_limit_exceeded",
+            "not configured",
+            "does not exist",
+            "was not found",
+            "model_not_found",
+            "invalid_argument",
+            "invalid model",
+            "请选择识别模型",
+            "select a model",
+            "停止服务",
+            "was shut down on",
+            "不支持当前",
         ],
     ) {
         return (AsrFailureKind::Config, false, None);
@@ -240,6 +337,7 @@ fn classify_message(
     if contains_any(
         lower,
         &[
+            "402",
             "429",
             "rate limit",
             "rate_limit_exceeded",
@@ -253,9 +351,12 @@ fn classify_message(
             "resource_exhausted",
             "insufficient credits",
             "insufficient_credits",
+            "insufficient_quota",
             "payment required",
             "payment_required",
             "system_busy",
+            "throttling",
+            "arrearage",
         ],
     ) {
         return (AsrFailureKind::RateLimited, true, None);
@@ -264,13 +365,19 @@ fn classify_message(
     if contains_any(
         lower,
         &[
+            "500",
             "502",
             "503",
             "504",
+            "internal server error",
+            "internal_error",
+            "server_error",
             "service unavailable",
             "service_unavailable",
             "bad gateway",
             "gateway timeout",
+            "overloaded",
+            "stayed in processing for too long",
         ],
     ) {
         return (AsrFailureKind::ProviderUnavailable, true, None);
@@ -291,15 +398,27 @@ fn classify_message(
             "read failed",
             "send failed",
             "closed by server",
+            "closed before",
+            "ended before",
             "connect:",
             "connect ",
+            "request failed",
+            "error sending request",
         ],
     ) || assume_network_for_connection_errors
     {
         return (AsrFailureKind::NetworkTransient, true, None);
     }
 
-    if contains_any(lower, &["not supported", "unsupported"]) {
+    if contains_any(
+        lower,
+        &[
+            "not supported",
+            "unsupported",
+            "only supports",
+            "not available on windows",
+        ],
+    ) {
         return (AsrFailureKind::Unsupported, false, None);
     }
 
@@ -317,6 +436,10 @@ fn build_display_message(
         AsrFailureKind::Auth => format!("{provider_name} 认证失败，请检查 API Key 和相关配置。"),
         AsrFailureKind::Config => format!("{provider_name} 配置无效，请检查设置后重试。"),
         AsrFailureKind::RateLimited => format!("{provider_name} 当前请求过多，请稍后再试。"),
+        AsrFailureKind::AudioLimitExceeded => {
+            format!("{provider_name} 录音体积或时长超出限制。")
+        }
+        AsrFailureKind::EmptyResult => format!("{provider_name} 未识别到有效语音"),
         AsrFailureKind::ProviderUnavailable => match phase {
             AsrPhase::Connect | AsrPhase::Handshake => {
                 format!("{provider_name} 当前服务不可用，无法启动识别。")
@@ -661,5 +784,94 @@ mod tests {
         assert!(!failure.retryable);
         assert!(failure.display_message.contains("系统代理"));
         assert!(!failure.display_message.contains("API Key"));
+    }
+
+    #[test]
+    fn unified_error_classification_covers_all_providers_with_same_principles() {
+        let cases = [
+            (
+                AsrProviderType::StepAudio,
+                AsrPhase::Finalizing,
+                "StepAudio ASR 失败: Protocol error: StepAudio returned an empty transcription",
+                AsrFailureKind::EmptyResult,
+                "StepAudio 未识别到有效语音",
+            ),
+            (
+                AsrProviderType::Mimo,
+                AsrPhase::Finalizing,
+                "MiMo ASR 失败: Server error: MiMo returned an empty transcript",
+                AsrFailureKind::EmptyResult,
+                "MiMo 未识别到有效语音",
+            ),
+            (
+                AsrProviderType::ElevenLabs,
+                AsrPhase::Finalizing,
+                "ElevenLabs ASR 失败: Server error: ElevenLabs returned an empty transcription result",
+                AsrFailureKind::EmptyResult,
+                "ElevenLabs 未识别到有效语音",
+            ),
+            (
+                AsrProviderType::Gemini,
+                AsrPhase::Finalizing,
+                r#"Gemini ASR 失败: Server error: Gemini transcription HTTP 403: {"error":{"status":"PERMISSION_DENIED","message":"API_KEY_INVALID"}}"#,
+                AsrFailureKind::Auth,
+                "Gemini 认证失败，请检查 API Key 和相关配置。",
+            ),
+            (
+                AsrProviderType::Google,
+                AsrPhase::Connect,
+                "Server error: status: Unauthenticated, message: \"Invalid access token\"",
+                AsrFailureKind::Auth,
+                "Google STT 认证失败，请检查 API Key 和相关配置。",
+            ),
+            (
+                AsrProviderType::FunAsr,
+                AsrPhase::Streaming,
+                "Server error: Arrearage: Access denied, please make sure your account is in good standing",
+                AsrFailureKind::RateLimited,
+                "Fun-ASR 当前请求过多，请稍后再试。",
+            ),
+            (
+                AsrProviderType::Qwen,
+                AsrPhase::Finalizing,
+                "Qwen ASR 失败: Server error: Qwen batch mode accepts up to 10 MB of input_audio.data",
+                AsrFailureKind::AudioLimitExceeded,
+                "Qwen ASR 录音体积或时长超出限制。",
+            ),
+            (
+                AsrProviderType::Cohere,
+                AsrPhase::Finalizing,
+                "Cohere ASR 失败: Server error: Cohere HTTP 503: Service Unavailable",
+                AsrFailureKind::ProviderUnavailable,
+                "Cohere 当前服务异常，识别已中断。",
+            ),
+            (
+                AsrProviderType::Volcengine,
+                AsrPhase::Connect,
+                "Connection failed: WebSocket connect timed out",
+                AsrFailureKind::NetworkTransient,
+                "Volcengine 连接失败，无法启动识别。",
+            ),
+            (
+                AsrProviderType::QwenLocal,
+                AsrPhase::Finalizing,
+                "Qwen 本地 ASR 失败: Connection failed: Qwen local ASR: model directory does not exist: /tmp/missing",
+                AsrFailureKind::Config,
+                "Qwen3-ASR (local) 配置无效，请检查设置后重试。",
+            ),
+            (
+                AsrProviderType::Coli,
+                AsrPhase::Finalizing,
+                "Coli ASR 失败: Connection failed: Local `coli` was not found",
+                AsrFailureKind::Config,
+                "coli 配置无效，请检查设置后重试。",
+            ),
+        ];
+
+        for (provider, phase, raw, expected_kind, expected_display) in cases {
+            let failure = AsrFailure::from_raw_reason(provider, phase, raw);
+            assert_eq!(failure.kind, expected_kind, "raw={raw}");
+            assert_eq!(failure.display_message, expected_display, "raw={raw}");
+        }
     }
 }

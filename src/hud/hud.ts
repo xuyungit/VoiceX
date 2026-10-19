@@ -207,17 +207,24 @@ function fitText(text: string): string {
 
   if (fits(text)) return text;
 
+  const keepPrefix = currentMode === "error";
   let lo = 0;
   let hi = text.length;
   while (lo < hi) {
     const mid = (lo + hi + 1) >> 1;
-    if (fits(`${ELLIPSIS}${text.slice(-mid)}`)) {
+    const candidate = keepPrefix
+      ? `${text.slice(0, mid).trimEnd()}${ELLIPSIS}`
+      : `${ELLIPSIS}${text.slice(-mid)}`;
+    if (fits(candidate)) {
       lo = mid;
     } else {
       hi = mid - 1;
     }
   }
-  return lo > 0 ? ELLIPSIS + text.slice(-lo) : ELLIPSIS;
+  if (lo <= 0) return ELLIPSIS;
+  return keepPrefix
+    ? `${text.slice(0, lo).trimEnd()}${ELLIPSIS}`
+    : `${ELLIPSIS}${text.slice(-lo)}`;
 }
 
 window.addEventListener("resize", () => {
@@ -339,19 +346,26 @@ function applyWaveformVisibility(compactBatchMode: boolean) {
 }
 
 function setBatchLayoutMode(batchWaveMode: boolean, compactBatchMode: boolean) {
+  const batchErrorMode = isCompactBatchMode() && currentMode === "error";
+  const wasBatchErrorMode = document.body.classList.contains("batch-error-mode");
   document.body.classList.toggle("batch-wave-mode", batchWaveMode);
   document.body.classList.toggle("compact-batch-mode", compactBatchMode);
+  document.body.classList.toggle("batch-error-mode", batchErrorMode);
   const wasCaptionMode = document.body.classList.contains("caption-mode");
   document.body.classList.toggle("caption-mode", isCaptionMode());
 
+  const wasTextAreaHidden = textArea ? textArea.hidden : false;
   if (textArea) {
     textArea.hidden = compactBatchMode;
   }
-  if (wasCaptionMode !== isCaptionMode()) {
-    // The caption font is larger than the transcript's, and text is fitted
-    // against a measure element styled like the text area: refresh it with
-    // the class, not at the next window resize, or the first caption is
-    // fitted at the small font and clipped instead of ellipsized.
+  if (
+    wasCaptionMode !== isCaptionMode() ||
+    wasBatchErrorMode !== batchErrorMode ||
+    (wasTextAreaHidden && !compactBatchMode)
+  ) {
+    // Refresh measurement width/font whenever textArea becomes visible or
+    // layout mode changes, so error/caption text is measured against the
+    // actual container width rather than a stale fallback.
     updateTextAreaMaxWidth();
   }
   applyWaveformVisibility(compactBatchMode);
