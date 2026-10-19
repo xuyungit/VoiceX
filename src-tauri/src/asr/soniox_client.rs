@@ -214,6 +214,9 @@ impl SonioxClient {
                                     .get("error_message")
                                     .and_then(Value::as_str)
                                     .unwrap_or("Unknown error");
+                                // Keep the explicit "Soniox error <code>" prefix:
+                                // the shared classifier reads this status field,
+                                // never arbitrary digits in diagnostics/request IDs.
                                 return Err(AsrError::ServerError(format!(
                                     "Soniox error {}: {}",
                                     code, error_msg

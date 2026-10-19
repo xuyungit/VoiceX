@@ -6,10 +6,6 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum CancelReason {
     EscapeKey,
-    TooShort {
-        duration_ms: u64,
-        audio_path: Option<String>,
-    },
 }
 
 #[derive(Debug)]
@@ -25,6 +21,9 @@ pub enum SessionMessage {
     AsrEvent(AsrEvent),
     AsrStreamFinished {
         error: Option<AsrFailure>,
+    },
+    AsrStartupFailed {
+        reason: String,
     },
     CorrectingStart,
     CorrectingStop,

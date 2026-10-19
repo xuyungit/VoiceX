@@ -76,10 +76,7 @@ fn apply_windows_tray_icon(app: &tauri::App) {
 
 /// Initialize the application state and services
 pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logger (default to info if RUST_LOG not set)
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .init();
+    logging::init(&app.path().app_log_dir()?)?;
     log::info!("VoiceX starting...");
 
     // Initialize database

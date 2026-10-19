@@ -6,6 +6,11 @@ use super::super::SessionController;
 
 impl SessionController {
     pub fn on_hotkey_pressed(&self, state: &mut AppState) {
+        if state.terminal_error_message.is_some() {
+            // The microphone was released by the terminal failure handler.
+            // A new press may retry immediately, including after a provider switch.
+            self.hide_hud_and_reset_state(state);
+        }
         self.cancel_auto_hide();
 
         let mut start_hold_timer = None;
@@ -86,6 +91,11 @@ impl SessionController {
     }
 
     pub fn on_hotkey_released(&self, state: &mut AppState) {
+        if state.terminal_error_message.is_some() {
+            // Releasing the failed recording's key must not replace the error
+            // display timer with the shorter normal-finalization timer.
+            return;
+        }
         self.cancel_hold_timer();
 
         let was_recording = state.is_recording;

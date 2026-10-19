@@ -11,6 +11,46 @@ use crate::storage;
 #[derive(Clone, Default)]
 pub struct AsrManager;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_configuration_finishes_once_and_closes_audio_receiver() {
+        for provider in [
+            AsrProviderType::Volcengine,
+            AsrProviderType::Qwen,
+            AsrProviderType::OpenAI,
+        ] {
+            let config = AsrConfig {
+                provider_type: provider,
+                ..AsrConfig::default()
+            };
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let finished = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = finished.clone();
+            AsrManager::new()
+                .stream_with_config(
+                    config,
+                    16_000,
+                    1,
+                    rx,
+                    cancel.clone(),
+                    |_| panic!("invalid config must not emit a transcript"),
+                    move |failure| observed.lock().unwrap().push(failure.unwrap()),
+                )
+                .await;
+            assert!(cancel.is_cancelled());
+            assert!(tx.is_closed());
+            let failures = finished.lock().unwrap();
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].kind, crate::asr::AsrFailureKind::Config);
+            assert!(!failures[0].retryable);
+        }
+    }
+}
+
 impl AsrManager {
     pub fn new() -> Self {
         Self
@@ -24,34 +64,34 @@ impl AsrManager {
         cancel: tokio_util::sync::CancellationToken,
         on_event: impl Fn(AsrEvent) + Send + Sync + 'static,
         on_finished: impl Fn(Option<AsrFailure>) + Send + Sync + 'static,
-    ) {
-        let settings = match storage::get_settings() {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("ASR skipped, failed to load settings: {}", e);
-                return;
-            }
-        };
+    ) -> Result<(), String> {
+        let settings = storage::get_settings().map_err(|err| err.to_string())?;
         let config = AsrConfig::from(&settings);
-        if !config.is_valid() {
-            log::warn!("ASR config invalid, failing streaming start");
-            let failure = AsrFailure::from_error(
-                config.provider_type,
-                &crate::asr::AsrError::ConnectionFailed("Invalid ASR configuration".to_string())
-                    .in_phase(crate::asr::AsrPhase::Connect),
-            );
-            cancel.cancel();
-            on_finished(Some(failure));
-            return;
-        }
+        self.stream_with_config(
+            config,
+            sample_rate,
+            channels,
+            rx,
+            cancel,
+            on_event,
+            on_finished,
+        )
+        .await;
+        Ok(())
+    }
 
-        if let Err(message) = config.validate_model_selection() {
-            log::warn!("ASR model validation failed: {}", message);
-            let failure = AsrFailure::from_error(
-                config.provider_type,
-                &crate::asr::AsrError::ProtocolError(message)
-                    .in_phase(crate::asr::AsrPhase::Connect),
-            );
+    async fn stream_with_config(
+        &self,
+        config: AsrConfig,
+        sample_rate: u32,
+        channels: u16,
+        rx: Receiver<Vec<u8>>,
+        cancel: tokio_util::sync::CancellationToken,
+        on_event: impl Fn(AsrEvent) + Send + Sync + 'static,
+        on_finished: impl Fn(Option<AsrFailure>) + Send + Sync + 'static,
+    ) {
+        if let Err(failure) = config.validate_for_recognition(crate::asr::AsrPhase::Connect) {
+            failure.log("Streaming ASR configuration validation failed");
             cancel.cancel();
             on_finished(Some(failure));
             return;

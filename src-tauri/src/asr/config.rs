@@ -710,86 +710,199 @@ impl AsrConfig {
         self.pipeline_mode().is_batch()
     }
 
-    /// Check if the configuration is valid for the selected provider
-    pub fn is_valid(&self) -> bool {
-        match self.provider_type {
-            AsrProviderType::Volcengine => {
-                !self.app_key.is_empty()
-                    && !self.access_key.is_empty()
-                    && !self.resource_id.is_empty()
-            }
-            AsrProviderType::Google => {
-                !self.google_project_id.is_empty() && !self.google_api_key.is_empty()
-            }
-            AsrProviderType::FunAsr => {
-                !self.funasr_api_key.trim().is_empty()
-                    && !self.funasr_model.trim().is_empty()
-                    && !self.funasr_ws_url.trim().is_empty()
-            }
-            AsrProviderType::Qwen => {
-                !self.qwen_api_key.is_empty()
-                    && !self.qwen_ws_url.is_empty()
-                    && match self.qwen_recognition_mode {
-                        QwenRecognitionMode::Realtime => {
-                            !self.qwen_model.trim().is_empty()
-                                && (!self.post_recording_batch_refine_enabled()
-                                    || !self.qwen_batch_model.trim().is_empty())
-                        }
-                        QwenRecognitionMode::Batch => !self.qwen_batch_model.trim().is_empty(),
-                    }
-            }
-            AsrProviderType::Gemini => {
-                !self.gemini_api_key.is_empty() && !self.gemini_model.is_empty()
-            }
-            AsrProviderType::GeminiLive => {
-                !self.gemini_api_key.is_empty() && !self.gemini_live_model.is_empty()
-            }
-            AsrProviderType::Cohere => {
-                !self.cohere_api_key.is_empty()
-                    && !self.cohere_model.is_empty()
-                    && !self.cohere_language.is_empty()
-            }
-            AsrProviderType::OpenAI => {
-                !self.openai_asr_api_key.is_empty()
-                    && !self.openai_asr_model.is_empty()
-                    && !self.openai_asr_base_url.is_empty()
-            }
-            AsrProviderType::ElevenLabs => {
-                !self.elevenlabs_api_key.trim().is_empty()
-                    && match self.elevenlabs_recognition_mode {
-                        ElevenLabsRecognitionMode::Realtime => {
-                            !self.elevenlabs_realtime_model.trim().is_empty()
-                                && (!self.post_recording_batch_refine_enabled()
-                                    || !self.elevenlabs_batch_model.trim().is_empty())
-                        }
-                        ElevenLabsRecognitionMode::Batch => {
-                            !self.elevenlabs_batch_model.trim().is_empty()
-                        }
-                    }
-            }
-            AsrProviderType::Soniox => !self.soniox_api_key.is_empty(),
-            AsrProviderType::StepAudio => {
-                !self.stepaudio_api_key.trim().is_empty()
-                    && !self.stepaudio_model.trim().is_empty()
-                    && !self.stepaudio_base_url.trim().is_empty()
-            }
-            AsrProviderType::Mimo => {
-                !self.mimo_api_key.trim().is_empty()
-                    && !self.mimo_model.trim().is_empty()
-                    && !self.mimo_base_url.trim().is_empty()
-            }
-            AsrProviderType::Coli => {
-                crate::asr::resolve_coli_command(&self.coli_command_path).is_some()
-            }
-            // The binary itself is resolved from PATH at call time; only the
-            // model directory has no sensible default.
-            AsrProviderType::QwenLocal => !self.qwen_local_model_dir.trim().is_empty(),
+    /// Validate required fields and the selected model, retaining separate diagnostics
+    /// and user-facing explanations. Neither includes credential values.
+    pub fn validate_for_recognition(
+        &self,
+        phase: super::AsrPhase,
+    ) -> Result<(), super::AsrFailure> {
+        let missing = self.missing_configuration_fields();
+        if !missing.is_empty() {
+            let fields = missing
+                .iter()
+                .map(|(field, _)| *field)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let labels = missing
+                .iter()
+                .map(|(_, label)| *label)
+                .collect::<Vec<_>>()
+                .join("、");
+            let mut failure = super::AsrFailure::configuration(
+                self.provider_type,
+                phase,
+                format!("Missing or unavailable ASR configuration fields: {fields}"),
+            );
+            failure.display_message = format!(
+                "{} 配置不完整，请检查{}。",
+                self.provider_type.display_name(),
+                labels
+            );
+            return Err(failure);
         }
+        self.validate_model_selection_details().map_err(|error| {
+            let mut failure = super::AsrFailure::configuration(
+                self.provider_type,
+                phase,
+                error.technical_message,
+            );
+            failure.display_message = format!(
+                "{} 配置无效：{}",
+                self.provider_type.display_name(),
+                error.display_message
+            );
+            failure
+        })
+    }
+
+    /// Check required fields for the selected provider; catalogue checks are separate.
+    pub fn is_valid(&self) -> bool {
+        self.missing_configuration_fields().is_empty()
+    }
+
+    /// Returns field names for logs and labels for UI, never the configured values.
+    fn missing_configuration_fields(&self) -> Vec<(&'static str, &'static str)> {
+        use AsrProviderType::*;
+        let mut missing = Vec::new();
+        let mut require = |field, label, value: &str| {
+            if value.trim().is_empty() {
+                missing.push((field, label));
+            }
+        };
+        match self.provider_type {
+            Volcengine => {
+                require("app_key", "App Key", &self.app_key);
+                require("access_key", "Access Key", &self.access_key);
+                require("resource_id", "资源 ID", &self.resource_id);
+            }
+            Google => {
+                require("google_project_id", "项目 ID", &self.google_project_id);
+                require("google_api_key", "服务账号密钥", &self.google_api_key);
+            }
+            FunAsr => {
+                require("funasr_api_key", "API Key", &self.funasr_api_key);
+                require("funasr_model", "识别模型", &self.funasr_model);
+                require("funasr_ws_url", "服务地址", &self.funasr_ws_url);
+            }
+            Qwen => {
+                require("qwen_api_key", "API Key", &self.qwen_api_key);
+                require("qwen_ws_url", "服务地址", &self.qwen_ws_url);
+                if !self.is_batch() {
+                    require("qwen_model", "实时模型", &self.qwen_model);
+                }
+                if self.is_batch() || self.post_recording_batch_refine_enabled() {
+                    require("qwen_batch_model", "批量识别模型", &self.qwen_batch_model);
+                }
+            }
+            Gemini | GeminiLive => {
+                require("gemini_api_key", "API Key", &self.gemini_api_key);
+                if self.provider_type == Gemini {
+                    require("gemini_model", "识别模型", &self.gemini_model);
+                } else {
+                    require("gemini_live_model", "实时模型", &self.gemini_live_model);
+                }
+            }
+            Cohere => {
+                require("cohere_api_key", "API Key", &self.cohere_api_key);
+                require("cohere_model", "识别模型", &self.cohere_model);
+                require("cohere_language", "识别语言", &self.cohere_language);
+            }
+            OpenAI => {
+                require("openai_asr_api_key", "API Key", &self.openai_asr_api_key);
+                require("openai_asr_model", "识别模型", &self.openai_asr_model);
+                require("openai_asr_base_url", "服务地址", &self.openai_asr_base_url);
+                if self.post_recording_batch_refine_enabled() {
+                    require(
+                        "openai_asr_refine_model",
+                        "精修模型",
+                        &self.openai_asr_refine_model,
+                    );
+                }
+            }
+            ElevenLabs => {
+                require("elevenlabs_api_key", "API Key", &self.elevenlabs_api_key);
+                if !self.is_batch() {
+                    require(
+                        "elevenlabs_realtime_model",
+                        "实时模型",
+                        &self.elevenlabs_realtime_model,
+                    );
+                }
+                if self.is_batch() || self.post_recording_batch_refine_enabled() {
+                    require(
+                        "elevenlabs_batch_model",
+                        "批量识别模型",
+                        &self.elevenlabs_batch_model,
+                    );
+                }
+            }
+            Soniox => {
+                require("soniox_api_key", "API Key", &self.soniox_api_key);
+            }
+            StepAudio => {
+                require("stepaudio_api_key", "API Key", &self.stepaudio_api_key);
+                require("stepaudio_model", "识别模型", &self.stepaudio_model);
+                require("stepaudio_base_url", "服务地址", &self.stepaudio_base_url);
+            }
+            Mimo => {
+                require("mimo_api_key", "API Key", &self.mimo_api_key);
+                require("mimo_model", "识别模型", &self.mimo_model);
+                require("mimo_base_url", "服务地址", &self.mimo_base_url);
+            }
+            QwenLocal => {
+                require(
+                    "qwen_local_model_dir",
+                    "本地模型目录",
+                    &self.qwen_local_model_dir,
+                );
+            }
+            Coli => {
+                if crate::asr::resolve_coli_command(&self.coli_command_path).is_none() {
+                    missing.push(("coli_command_path", "本地识别程序路径"));
+                }
+            }
+        }
+        missing
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn validation_names_missing_fields_without_exposing_values() {
+        let mut config = super::AsrConfig::default();
+        config.provider_type = super::AsrProviderType::Qwen;
+        config.qwen_api_key = "private-test-key".into();
+        config.qwen_recognition_mode = super::QwenRecognitionMode::Batch;
+        config.qwen_batch_model = " ".into();
+        let error = config
+            .validate_for_recognition(crate::asr::AsrPhase::Finalizing)
+            .unwrap_err();
+        assert_eq!(error.kind, crate::asr::AsrFailureKind::Config);
+        assert!(error.technical_message.contains("qwen_batch_model"));
+        assert!(error.display_message.contains("批量识别模型"));
+        assert!(!error.technical_message.contains("private-test-key"));
+        assert!(!error.display_message.contains("private-test-key"));
+        assert!(!config.is_valid());
+    }
+
+    #[test]
+    fn model_validation_preserves_model_and_mode_in_user_message() {
+        let mut config = super::AsrConfig::default();
+        config.provider_type = super::AsrProviderType::Qwen;
+        config.qwen_api_key = "private-test-key".into();
+        config.qwen_recognition_mode = super::QwenRecognitionMode::Batch;
+        config.qwen_batch_model = "qwen3-asr-flash-realtime".into();
+        let error = config
+            .validate_for_recognition(crate::asr::AsrPhase::Finalizing)
+            .unwrap_err();
+        for message in [&error.technical_message, &error.display_message] {
+            assert!(message.contains("qwen3-asr-flash-realtime"));
+            assert!(message.contains("batch"));
+        }
+        assert!(!error.retryable);
+    }
+
     use super::{
         AsrConfig, AsrPipelineMode, AsrProviderType, ElevenLabsRecognitionMode,
         PostRecordingBatchRefineMode, QwenRecognitionMode,

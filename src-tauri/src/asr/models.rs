@@ -96,9 +96,15 @@ pub fn migrate_default_model_settings(value: &mut serde_json::Value) -> bool {
 }
 
 pub fn supports_delay(provider: &str, id: &str) -> bool {
-    catalog().models.iter().filter(|m| m.provider == provider &&
-        (m.id == id.trim() || id.trim().starts_with(&format!("{}-", m.id))))
-        .max_by_key(|m| m.id.len()).is_some_and(|m| m.delay)
+    catalog()
+        .models
+        .iter()
+        .filter(|m| {
+            m.provider == provider
+                && (m.id == id.trim() || id.trim().starts_with(&format!("{}-", m.id)))
+        })
+        .max_by_key(|m| m.id.len())
+        .is_some_and(|m| m.delay)
 }
 
 pub fn max_recording_minutes(provider: &str, id: &str) -> Option<u32> {
@@ -113,20 +119,37 @@ pub fn max_recording_minutes(provider: &str, id: &str) -> Option<u32> {
         .and_then(|model| model.max_recording_minutes)
 }
 
+/// A local catalogue error has a safe, actionable explanation and full diagnostics.
+#[derive(Debug)]
+pub(crate) struct ModelSelectionError {
+    pub technical_message: String,
+    pub display_message: String,
+}
+
 pub fn validate_model(provider: &str, id: &str, mode: &str) -> Result<(), String> {
+    validate_model_details(provider, id, mode).map_err(|error| error.technical_message)
+}
+
+fn validate_model_details(provider: &str, id: &str, mode: &str) -> Result<(), ModelSelectionError> {
     if id.trim().is_empty() {
-        return Err(format!("{provider}: 请选择识别模型 / Select a model"));
+        return Err(ModelSelectionError {
+            technical_message: format!("{provider}: 请选择识别模型 / Select a model (mode={mode})"),
+            display_message: "请选择识别模型。".into(),
+        });
     }
     if let Some(model) = catalog().retired.iter().find(|model| {
         (model.provider == provider
             || (provider.starts_with("gemini") && model.provider.starts_with("gemini")))
             && model.id == id.trim()
     }) {
-        return Err(format!(
-            "{provider}: 模型 {} 已于 {} 停止服务。请选择 {} 或其他可用模型；原配置已保留。 / Model {} was shut down on {}. Select {} or another available model; your saved value is preserved.",
-            model.id, model.shutdown_date, model.replacement,
-            model.id, model.shutdown_date, model.replacement
-        ));
+        return Err(ModelSelectionError {
+            technical_message: format!(
+                "{provider}: 模型 {} 已于 {} 停止服务。请选择 {} 或其他可用模型；原配置已保留。 / Model {} was shut down on {}. Select {} or another available model; your saved value is preserved. (mode={mode})",
+                model.id, model.shutdown_date, model.replacement,
+                model.id, model.shutdown_date, model.replacement
+            ),
+            display_message: format!("模型 {} 已停止服务，请改用 {} 或其他可用模型。", model.id, model.replacement),
+        });
     }
     if let Some(model) = catalog()
         .models
@@ -139,7 +162,10 @@ pub fn validate_model(provider: &str, id: &str, mode: &str) -> Result<(), String
         .max_by_key(|m| m.id.len())
     {
         if model.provider != provider || !model.modes.iter().any(|m| m == mode) {
-            return Err(format!("{provider}: 模型 {id} 不支持当前 {mode} 模式 / Model is not supported in this mode"));
+            return Err(ModelSelectionError {
+                technical_message: format!("{provider}: 模型 {id} 不支持当前 {mode} 模式 / Model is not supported in this mode"),
+                display_message: format!("模型 {id} 不支持当前 {mode} 模式，请切换模型或识别模式。"),
+            });
         }
     }
     // Unknown IDs remain available for custom endpoints and future snapshots.
@@ -148,38 +174,49 @@ pub fn validate_model(provider: &str, id: &str, mode: &str) -> Result<(), String
 
 impl AsrConfig {
     pub fn validate_model_selection(&self) -> Result<(), String> {
+        self.validate_model_selection_details()
+            .map_err(|error| error.technical_message)
+    }
+
+    pub(crate) fn validate_model_selection_details(&self) -> Result<(), ModelSelectionError> {
         use AsrProviderType::*;
         match self.provider_type {
             OpenAI => {
-                validate_model("openai", &self.openai_asr_model, &self.openai_asr_mode)?;
+                validate_model_details("openai", &self.openai_asr_model, &self.openai_asr_mode)?;
                 if self.post_recording_batch_refine_enabled() {
-                    validate_model("openai", &self.openai_asr_refine_model, "batch")?;
+                    validate_model_details("openai", &self.openai_asr_refine_model, "batch")?;
                 }
                 Ok(())
             }
             Qwen => {
                 let realtime = !self.is_batch();
                 if realtime {
-                    validate_model("qwen", &self.qwen_model, "realtime")?;
+                    validate_model_details("qwen", &self.qwen_model, "realtime")?;
                 }
                 if !realtime || self.post_recording_batch_refine_enabled() {
-                    validate_model("qwen", &self.qwen_batch_model, "batch")?;
+                    validate_model_details("qwen", &self.qwen_batch_model, "batch")?;
                 }
                 Ok(())
             }
-            Gemini => validate_model("gemini", &self.gemini_model, "batch"),
-            GeminiLive => validate_model("gemini-live", &self.gemini_live_model, "realtime"),
-            FunAsr => validate_model("funasr", &self.funasr_model, "realtime"),
-            Soniox => validate_model("soniox", &self.soniox_model, "realtime"),
-            Cohere => validate_model("cohere", &self.cohere_model, "batch"),
-            StepAudio => validate_model("stepaudio", &self.stepaudio_model, "batch"),
-            Mimo => validate_model("mimo", &self.mimo_model, "batch"),
+            Gemini => validate_model_details("gemini", &self.gemini_model, "batch"),
+            GeminiLive => {
+                validate_model_details("gemini-live", &self.gemini_live_model, "realtime")
+            }
+            FunAsr => validate_model_details("funasr", &self.funasr_model, "realtime"),
+            Soniox => validate_model_details("soniox", &self.soniox_model, "realtime"),
+            Cohere => validate_model_details("cohere", &self.cohere_model, "batch"),
+            StepAudio => validate_model_details("stepaudio", &self.stepaudio_model, "batch"),
+            Mimo => validate_model_details("mimo", &self.mimo_model, "batch"),
             ElevenLabs => {
                 if !self.is_batch() {
-                    validate_model("elevenlabs", &self.elevenlabs_realtime_model, "realtime")?;
+                    validate_model_details(
+                        "elevenlabs",
+                        &self.elevenlabs_realtime_model,
+                        "realtime",
+                    )?;
                 }
                 if self.is_batch() || self.post_recording_batch_refine_enabled() {
-                    validate_model("elevenlabs", &self.elevenlabs_batch_model, "batch")?;
+                    validate_model_details("elevenlabs", &self.elevenlabs_batch_model, "batch")?;
                 }
                 Ok(())
             }
@@ -303,14 +340,21 @@ mod tests {
     #[test]
     fn retirement_does_not_claim_unknown_ids_or_other_providers() {
         assert!(validate_model("custom", "gemini-3.1-flash-lite-preview", "batch").is_ok());
-        assert!(validate_model("gemini", "gemini-3.1-flash-lite-preview-my-deployment", "batch").is_ok());
+        assert!(validate_model(
+            "gemini",
+            "gemini-3.1-flash-lite-preview-my-deployment",
+            "batch"
+        )
+        .is_ok());
     }
 
     #[test]
     fn retired_ids_are_not_presets_or_defaults() {
         for retired in &catalog().retired {
-            assert!(!catalog().models.iter().any(|model|
-                model.provider == retired.provider && model.id == retired.id));
+            assert!(!catalog()
+                .models
+                .iter()
+                .any(|model| model.provider == retired.provider && model.id == retired.id));
             assert!(!catalog().defaults.values().any(|id| id == &retired.id));
         }
     }

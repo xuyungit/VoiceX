@@ -70,6 +70,7 @@ pub enum AsrFailureKind {
     Config,
     RateLimited,
     AudioLimitExceeded,
+    AudioFile,
     EmptyResult,
     ProviderUnavailable,
     NetworkTransient,
@@ -85,6 +86,7 @@ impl AsrFailureKind {
             Self::Config => "config",
             Self::RateLimited => "rate_limited",
             Self::AudioLimitExceeded => "audio_limit_exceeded",
+            Self::AudioFile => "audio_file",
             Self::EmptyResult => "empty_result",
             Self::ProviderUnavailable => "provider_unavailable",
             Self::NetworkTransient => "network_transient",
@@ -141,6 +143,36 @@ impl AsrError {
 }
 
 impl AsrFailure {
+    /// Log original diagnostics, not the friendly text sent to the HUD/history.
+    pub fn log(&self, context: &str) {
+        log::warn!(
+            "{}: provider={} phase={} kind={} retryable={} original_error={}",
+            context,
+            self.provider.display_name(),
+            self.phase.as_str(),
+            self.kind.as_str(),
+            self.retryable,
+            self.technical_message
+        );
+    }
+
+    /// Local validation has a known cause; never infer it from wording.
+    pub fn configuration(
+        provider: AsrProviderType,
+        phase: AsrPhase,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider,
+            phase,
+            kind: AsrFailureKind::Config,
+            technical_message: reason.into(),
+            display_message: build_display_message(provider, phase, AsrFailureKind::Config),
+            retryable: false,
+            retry_after_ms: None,
+        }
+    }
+
     pub fn from_error(provider: AsrProviderType, error: &AsrError) -> Self {
         let phase = error.phase().unwrap_or(AsrPhase::Streaming);
         let technical_message = error.root_message();
@@ -161,7 +193,7 @@ impl AsrFailure {
     }
 
     pub fn from_raw_reason(provider: AsrProviderType, phase: AsrPhase, reason: &str) -> Self {
-        let technical_message = reason.trim().to_string();
+        let technical_message = reason.to_string();
         let lower = technical_message.to_lowercase();
         let (kind, retryable, retry_after_ms) = classify_message(&lower, false);
         let display_message = format_display_message(provider, phase, kind, &lower);
@@ -178,6 +210,7 @@ impl AsrFailure {
     }
 }
 
+/// Recognizes an ASR empty-result error. This is not an audio/silence detector.
 pub fn is_empty_asr_result_message(reason: &str) -> bool {
     let lower = reason.trim().to_lowercase();
     is_empty_result_lower(&lower)
@@ -198,7 +231,6 @@ fn is_empty_result_lower(lower: &str) -> bool {
             "insufficient_audio_activity",
             "返回空结果",
             "未返回任何结果",
-            "音频文件解码后为空",
         ],
     )
 }
@@ -209,8 +241,15 @@ fn format_display_message(
     kind: AsrFailureKind,
     lower: &str,
 ) -> String {
+    if kind == AsrFailureKind::AudioFile {
+        return if is_audio_read_error(lower) {
+            "无法读取录音文件，请检查文件是否存在及访问权限。".to_string()
+        } else {
+            "录音文件无法解码或格式不受支持，请重新录音或转换音频格式。".to_string()
+        };
+    }
     if lower.contains("proxy") || lower.contains("macos pac") {
-        if lower.contains("407") || lower.contains("authentication") {
+        if http_status(lower) == Some(407) || lower.contains("authentication") {
             "系统代理要求认证，请检查代理账号配置后重试。".to_string()
         } else if kind == AsrFailureKind::Config {
             "系统代理配置无法使用，请检查代理地址或自动代理设置。".to_string()
@@ -244,22 +283,39 @@ fn classify_message(
     lower: &str,
     assume_network_for_connection_errors: bool,
 ) -> (AsrFailureKind, bool, Option<u64>) {
+    // File/decode diagnostics can be wrapped in a provider's "ASR failed" prefix.
+    // They must not become provider capability/network errors (or HTTP codes
+    // accidentally extracted from a filename).
+    if is_audio_read_error(lower) || is_audio_decode_error(lower) {
+        return (AsrFailureKind::AudioFile, false, None);
+    }
+    let status = http_status(lower);
     if lower.contains("proxy")
-        && contains_any(
-            lower,
-            &[
-                "407",
-                "authentication",
-                "invalid",
-                "unsupported",
-                "not supported",
-                "missing",
-                "no host",
-                "no url",
-            ],
-        )
+        && (status == Some(407)
+            || contains_any(
+                lower,
+                &[
+                    "authentication",
+                    "invalid",
+                    "unsupported",
+                    "not supported",
+                    "missing",
+                    "no host",
+                    "no url",
+                ],
+            ))
     {
         return (AsrFailureKind::Config, false, None);
+    }
+
+    // Numeric codes are meaningful only in an explicit status field, never in
+    // a request ID, URL, duration or arbitrary provider diagnostic text.
+    match status {
+        Some(401 | 403) => return (AsrFailureKind::Auth, false, None),
+        Some(402 | 429) => return (AsrFailureKind::RateLimited, true, None),
+        Some(413) => return (AsrFailureKind::AudioLimitExceeded, false, None),
+        Some(500 | 502 | 503 | 504) => return (AsrFailureKind::ProviderUnavailable, true, None),
+        _ => {}
     }
 
     if is_empty_result_lower(lower) {
@@ -269,7 +325,6 @@ fn classify_message(
     if contains_any(
         lower,
         &[
-            "413",
             "payload too large",
             "request entity too large",
             "accepts up to 10 mb",
@@ -287,8 +342,6 @@ fn classify_message(
     if contains_any(
         lower,
         &[
-            "401",
-            "403",
             "unauthorized",
             "forbidden",
             "unauthenticated",
@@ -337,8 +390,6 @@ fn classify_message(
     if contains_any(
         lower,
         &[
-            "402",
-            "429",
             "rate limit",
             "rate_limit_exceeded",
             "concurrent_limit_exceeded",
@@ -365,10 +416,6 @@ fn classify_message(
     if contains_any(
         lower,
         &[
-            "500",
-            "502",
-            "503",
-            "504",
             "internal server error",
             "internal_error",
             "server_error",
@@ -439,7 +486,10 @@ fn build_display_message(
         AsrFailureKind::AudioLimitExceeded => {
             format!("{provider_name} 录音体积或时长超出限制。")
         }
-        AsrFailureKind::EmptyResult => format!("{provider_name} 未识别到有效语音"),
+        AsrFailureKind::AudioFile => "无法处理录音文件，请检查文件或重新录音。".to_string(),
+        AsrFailureKind::EmptyResult => {
+            format!("{provider_name} 未识别到有效语音，请检查录音或尝试其他模型。")
+        }
         AsrFailureKind::ProviderUnavailable => match phase {
             AsrPhase::Connect | AsrPhase::Handshake => {
                 format!("{provider_name} 当前服务不可用，无法启动识别。")
@@ -468,6 +518,55 @@ fn build_display_message(
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn is_audio_read_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "failed to read audio file",
+            "failed to open audio file",
+            "failed to read wav file",
+            "failed to read ogg file",
+            "录音文件不存在",
+            "音频文件不存在",
+        ],
+    )
+}
+
+fn is_audio_decode_error(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "unsupported wav",
+            "invalid wav",
+            "truncated wav",
+            "wav data chunk missing",
+            "unsupported audio format",
+            "unsupported channel count",
+            "invalid opushead",
+            "invalid opus packet",
+            "opus decode error",
+            "failed to create opus decoder",
+            "decode buffer error",
+            "failed to read ogg",
+            "ogg file contains no packets",
+            "音频文件解码后为空",
+        ],
+    )
+}
+
+fn http_status(message: &str) -> Option<u16> {
+    static STATUS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    STATUS
+        .get_or_init(|| {
+            regex::Regex::new(
+                r#"\b(?:http(?:/\d(?:\.\d)?)?(?:\s+error)?|status(?:[\s_]+code)?|soniox error)[\"']?\s*[:=]?\s*(\d{3})\b"#,
+            )
+            .expect("HTTP status pattern must compile")
+        })
+        .captures(message)
+        .and_then(|capture| capture[1].parse().ok())
 }
 
 /// Parsed server error frame payload.
@@ -723,6 +822,105 @@ pub fn parse_message_type(header: &[u8]) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_audio_errors_are_not_provider_capability_or_service_failures() {
+        for reason in [
+            "Unsupported WAV audio format: 3",
+            "Qwen ASR 失败: Protocol error: Unsupported WAV audio format: 3",
+            "Failed to read wav file /tmp/500_test.wav: permission denied",
+            "Failed to read OGG OpusHead packet: Invalid capture pattern",
+            "音频文件解码后为空",
+        ] {
+            let failure =
+                AsrFailure::from_raw_reason(AsrProviderType::Qwen, AsrPhase::Finalizing, reason);
+            assert_eq!(failure.kind, AsrFailureKind::AudioFile, "{reason}");
+            assert!(!failure.retryable);
+            assert!(!failure.display_message.contains("Qwen"));
+            assert_eq!(failure.technical_message, reason);
+        }
+    }
+
+    #[test]
+    fn friendly_messages_do_not_replace_original_diagnostics() {
+        for reason in [
+            "HTTP 503: {\"request_id\":\"test-413\",\"message\":\"upstream unavailable\"}\n",
+            "unclassified provider diagnostic: trace-xyz",
+            "Batch ASR returned empty result",
+        ] {
+            let failure =
+                AsrFailure::from_raw_reason(AsrProviderType::OpenAI, AsrPhase::Finalizing, reason);
+            assert_eq!(failure.technical_message, reason);
+            assert_ne!(failure.display_message, reason);
+        }
+    }
+
+    #[test]
+    fn status_codes_ignore_request_ids_and_preserve_retry_policy() {
+        use super::{AsrFailure, AsrFailureKind, AsrPhase};
+        use crate::asr::AsrProviderType;
+        for (raw, kind, retryable) in [
+            (
+                "HTTP 401: invalid api key request_id=abc413def",
+                AsrFailureKind::Auth,
+                false,
+            ),
+            (
+                "HTTP 503: temporary outage request_id=abc401413def",
+                AsrFailureKind::ProviderUnavailable,
+                true,
+            ),
+            (
+                "HTTP error: 429 Too Many Requests request_id=abc403def",
+                AsrFailureKind::RateLimited,
+                true,
+            ),
+            (
+                "HTTP 413: too large request_id=abc503def",
+                AsrFailureKind::AudioLimitExceeded,
+                false,
+            ),
+            (
+                "Response { status: 403, request_id: 413 }",
+                AsrFailureKind::Auth,
+                false,
+            ),
+            ("Soniox error 401: denied", AsrFailureKind::Auth, false),
+            ("status_code: 429", AsrFailureKind::RateLimited, true),
+            (r#"{"status_code":429}"#, AsrFailureKind::RateLimited, true),
+            ("429 Too Many Requests", AsrFailureKind::RateLimited, true),
+            (
+                "request_id=413 duration_ms=500 port=401",
+                AsrFailureKind::Unknown,
+                false,
+            ),
+            (
+                "HTTP 503: system_busy request_id=413",
+                AsrFailureKind::ProviderUnavailable,
+                true,
+            ),
+        ] {
+            let failure =
+                AsrFailure::from_raw_reason(AsrProviderType::ElevenLabs, AsrPhase::Connect, raw);
+            assert_eq!(
+                (failure.kind, failure.retryable),
+                (kind, retryable),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_configuration_failure_does_not_depend_on_error_wording() {
+        let failure = super::AsrFailure::configuration(
+            crate::asr::AsrProviderType::StepAudio,
+            super::AsrPhase::Connect,
+            "Invalid ASR configuration",
+        );
+        assert_eq!(failure.kind, super::AsrFailureKind::Config);
+        assert!(!failure.retryable);
+        assert!(failure.display_message.contains("配置无效"));
+    }
+
     use std::io::Write;
 
     use flate2::{write::GzEncoder, Compression};
@@ -794,21 +992,21 @@ mod tests {
                 AsrPhase::Finalizing,
                 "StepAudio ASR 失败: Protocol error: StepAudio returned an empty transcription",
                 AsrFailureKind::EmptyResult,
-                "StepAudio 未识别到有效语音",
+                "StepAudio 未识别到有效语音，请检查录音或尝试其他模型。",
             ),
             (
                 AsrProviderType::Mimo,
                 AsrPhase::Finalizing,
                 "MiMo ASR 失败: Server error: MiMo returned an empty transcript",
                 AsrFailureKind::EmptyResult,
-                "MiMo 未识别到有效语音",
+                "MiMo 未识别到有效语音，请检查录音或尝试其他模型。",
             ),
             (
                 AsrProviderType::ElevenLabs,
                 AsrPhase::Finalizing,
                 "ElevenLabs ASR 失败: Server error: ElevenLabs returned an empty transcription result",
                 AsrFailureKind::EmptyResult,
-                "ElevenLabs 未识别到有效语音",
+                "ElevenLabs 未识别到有效语音，请检查录音或尝试其他模型。",
             ),
             (
                 AsrProviderType::Gemini,

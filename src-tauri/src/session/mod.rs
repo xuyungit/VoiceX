@@ -31,7 +31,6 @@ use crate::{
 
 const FINALIZE_HIDE_DELAY_MS: u64 = 1200;
 const ERROR_HIDE_DELAY_MS: u64 = 2500;
-const MIN_RECORDING_MS: u64 = 800;
 const COUNTDOWN_THRESHOLD_SECS: u64 = 30;
 const MIN_CORRECTION_CHARS: usize = 5;
 const ASR_FINAL_WAIT_MS: u64 = 15_000;
@@ -355,6 +354,11 @@ impl SessionController {
                     self.on_asr_stream_failed_state(state, reason);
                 } else {
                     self.on_asr_stream_finished_state(state)
+                }
+            }
+            SessionMessage::AsrStartupFailed { reason } => {
+                if state.session_state != HotkeySessionState::Idle {
+                    self.on_asr_startup_failed_state(state, reason);
                 }
             }
             SessionMessage::CorrectingStart => self.on_correcting_start(state),
@@ -1322,20 +1326,6 @@ impl SessionController {
             return;
         }
 
-        if let Some(ms) = duration_ms {
-            if ms < MIN_RECORDING_MS {
-                log::info!(
-                    "Recording too short ({} ms); skipping ASR/LLM/injection",
-                    ms
-                );
-                self.send_message(SessionMessage::CancelSession(CancelReason::TooShort {
-                    duration_ms: ms,
-                    audio_path: path.clone(),
-                }));
-                return;
-            }
-        }
-
         // Batch mode: no streaming ASR was running — hand off to batch recognition.
         let is_batch = crate::storage::get_settings()
             .map(|s| crate::asr::AsrConfig::from(&s).is_batch())
@@ -1479,6 +1469,9 @@ impl Default for SessionController {
 }
 
 #[cfg(test)]
+mod asr_regression_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::HotkeySessionState;
@@ -1489,6 +1482,63 @@ mod tests {
 
     fn path_string(path: Option<&std::path::PathBuf>) -> Option<String> {
         path.map(|value| value.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn short_recording_is_not_cancelled_by_duration_alone() {
+        let controller = SessionController::default();
+        let (tx, mut rx) = unbounded_channel();
+        controller.attach_sender(tx);
+        let mut state = AppState::new();
+        state.asr_stream_finished = true;
+        controller.handle_audio_stopped_state(
+            &mut state,
+            Some("short.ogg".into()),
+            None,
+            Some(260),
+        );
+        assert_eq!(state.session_duration_ms, Some(260));
+        assert_eq!(
+            path_string(state.session_audio_path.as_ref()),
+            Some("short.ogg".into())
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "duration alone must not cancel the session"
+        );
+    }
+
+    #[test]
+    fn terminal_configuration_error_stops_capture_and_survives_key_release() {
+        let controller = SessionController::default();
+        let (tx, mut rx) = unbounded_channel();
+        controller.attach_sender(tx);
+        let mut state = AppState::new();
+        state.handle_hotkey_pressed();
+        let failure = crate::asr::AsrFailure::configuration(
+            crate::asr::AsrProviderType::Qwen,
+            crate::asr::AsrPhase::Connect,
+            "missing key",
+        );
+        controller.on_asr_stream_failed_state(&mut state, failure);
+        assert!(!state.is_recording);
+        assert_eq!(state.session_state, HotkeySessionState::Finalizing);
+        assert_eq!(state.asr_startup_retry_count, 0);
+        // Without a device manager, the attempted stop reports its failure.
+        // This proves the recording stop path was invoked, not just a flag change.
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(SessionMessage::AudioStopFailed { .. })
+        ));
+        let message = state.terminal_error_message.clone();
+        controller.on_hotkey_released(&mut state);
+        controller.on_finalize_hide_ready_state(&mut state);
+        assert_eq!(state.terminal_error_message, message);
+        controller.on_error_display_done_state(&mut state);
+        assert_eq!(state.session_state, HotkeySessionState::Idle);
+        assert!(state.terminal_error_message.is_none());
+        state.handle_hotkey_pressed();
+        assert!(state.is_recording);
     }
 
     #[test]

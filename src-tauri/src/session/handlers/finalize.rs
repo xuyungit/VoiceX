@@ -87,6 +87,9 @@ impl SessionController {
     }
 
     pub fn on_finalize_hide_ready_state(&self, state: &mut AppState) {
+        if state.terminal_error_message.is_some() {
+            return; // Only ErrorDisplayDone owns terminal-error cleanup.
+        }
         // If still correcting, defer hide/reset until correction finishes.
         if state.session_state == HotkeySessionState::Finalizing {
             if !state.asr_stream_finished {

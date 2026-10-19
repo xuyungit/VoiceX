@@ -247,7 +247,11 @@ pub async fn replay_history_injection(
 fn ensure_audio_file(audio_path: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(audio_path);
     if !path.is_file() {
-        return Err(format!("录音文件不存在: {}", path.display()));
+        log::warn!(
+            "Re-transcribe audio file missing or not a file: {}",
+            path.display()
+        );
+        return Err("录音文件不存在，请检查文件是否已被移动或删除。".to_string());
     }
     Ok(path)
 }
@@ -256,7 +260,10 @@ fn load_settings_with_provider_overrides(
     asr_provider: &str,
     llm_provider: Option<&String>,
 ) -> Result<AppSettings, String> {
-    let mut settings = storage::get_settings().map_err(|e| format!("加载设置失败: {}", e))?;
+    let mut settings = storage::get_settings().map_err(|error| {
+        log::warn!("Re-transcribe failed to load settings: {}", error);
+        "无法加载识别设置，请稍后重试。".to_string()
+    })?;
     settings.asr_provider_type = asr_provider.to_string();
     if let Some(llm_provider) = llm_provider {
         crate::commands::settings::apply_llm_provider_selection(&mut settings, llm_provider);
@@ -297,9 +304,12 @@ async fn run_transcription_pipeline(
     cancel: CancellationToken,
 ) -> Result<PipelineResult, String> {
     let mut config = AsrConfig::from(settings);
-    if !config.is_valid() {
-        return Err("所选 ASR 服务配置不完整，请先在设置页面填写相关凭证".into());
-    }
+    config
+        .validate_for_recognition(crate::asr::AsrPhase::Finalizing)
+        .map_err(|failure| {
+            failure.log("Re-transcribe configuration validation failed");
+            failure.display_message
+        })?;
 
     let outcome = transcribe_audio_path_detailed(path, &mut config, cancel.clone())
         .await
@@ -307,17 +317,13 @@ async fn run_transcription_pipeline(
             if cancel.is_cancelled() {
                 return "操作已取消".to_string();
             }
-            log::warn!(
-                "Re-transcribe ASR failed (provider={}): {}",
-                config.provider_type.display_name(),
-                err
-            );
-            crate::asr::AsrFailure::from_raw_reason(
+            let failure = crate::asr::AsrFailure::from_raw_reason(
                 config.provider_type,
                 crate::asr::AsrPhase::Finalizing,
                 &err,
-            )
-            .display_message
+            );
+            failure.log("Re-transcribe ASR failed");
+            failure.display_message
         })?;
     if cancel.is_cancelled() {
         return Err("操作已取消".to_string());
@@ -325,12 +331,13 @@ async fn run_transcription_pipeline(
 
     let asr_text = outcome.text;
     if asr_text.trim().is_empty() {
-        return Err(crate::asr::AsrFailure::from_raw_reason(
+        let failure = crate::asr::AsrFailure::from_raw_reason(
             config.provider_type,
             crate::asr::AsrPhase::Finalizing,
             "Batch ASR returned empty result",
-        )
-        .display_message);
+        );
+        failure.log("Re-transcribe ASR returned no text");
+        return Err(failure.display_message);
     }
 
     let (llm_text, llm_model_name) =
