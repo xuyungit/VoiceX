@@ -181,6 +181,7 @@ VoiceX can optionally pass ASR output through an LLM for correction or translati
 | Volcengine (Doubao) | `doubao-seed-2-0-mini-260428` |
 | OpenAI (or compatible) | `gpt-6-luna` |
 | Qwen (DashScope) | `qwen3.5-flash` |
+| DeepSeek | `deepseek-flash` |
 | Google Gemini | `gemini-3.5-flash-lite` |
 | Anthropic (Claude, native Messages API; official base URL by default, or any compatible endpoint) | `claude-haiku-5-5` |
 | Custom | Any OpenAI-compatible endpoint |

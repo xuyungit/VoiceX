@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.3] - 2026-10-19
+
+### Added
+
+- **Anthropic and DeepSeek LLM providers** — configure either directly in LLM settings; Anthropic uses its native Messages API.
+- **StepAudio 3 ASR** — select `stepaudio-3-asr-max` for batch recognition, with incremental text returned after recording stops.
+
+### Fixed
+
+- **ASR failures are visible and recoverable** — configuration and provider errors appear in the HUD; startup failures stop recording, and failed audio remains in history for retry. Empty results show a clear message, while diagnostic logs retain the original error. Short recordings are no longer discarded by a duration threshold.
+- **Microsoft Edge reading** — updated the synthesis and voice-list endpoints to restore online reading after the previous endpoint began rejecting requests.
+- Qwen ASR settings now follow the selected model's supported options; Soniox realtime authentication and Gemini reasoning parameters are corrected.
+- Updated provider defaults and retired ASR presets. Known compatible legacy defaults migrate precisely; unsupported saved models show an explanation, and custom endpoints and model choices are preserved.
+
+### Developer tooling
+
+- LLM benchmarks add parallel execution, native Anthropic support, whole-text evaluation, versioned scoring and a local feedback page.
+
 ## [0.17.2] - 2026-10-05
 
 ### Added
