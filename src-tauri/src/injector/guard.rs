@@ -17,15 +17,6 @@ const MODIFIER_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
 #[derive(Clone)]
 pub struct InjectionGuard {
     cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
-    #[cfg(target_os = "macos")]
-    target: Target,
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy)]
-enum Target {
-    Unrestricted,
-    Expected(Option<u32>),
 }
 
 impl Default for InjectionGuard {
@@ -38,25 +29,6 @@ impl InjectionGuard {
     pub fn new(cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         Self {
             cancelled: Arc::new(cancelled),
-            #[cfg(target_os = "macos")]
-            target: Target::Unrestricted,
-        }
-    }
-
-    /// macOS binds automatic input to the captured app. Windows keeps its
-    /// existing native focus/input behavior pending real-machine validation.
-    pub fn with_target(self, process_id: Option<u32>) -> Self {
-        #[cfg(target_os = "macos")]
-        {
-            Self {
-                target: Target::Expected(process_id),
-                ..self
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = process_id;
-            self
         }
     }
 
@@ -67,39 +39,15 @@ impl InjectionGuard {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
-    pub(super) fn check_target(&self) -> Result<(), InjectorError> {
-        self.check_cancelled()?;
-        if let Target::Expected(expected) = self.target {
-            let expected = expected.ok_or(InjectorError::TargetUnavailable)?;
-            self.check_process(expected)?;
-        }
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    pub(super) fn check_process(&self, expected: u32) -> Result<(), InjectorError> {
-        self.check_cancelled()?;
-        let current = super::clipboard::run_on_main_thread_blocking(
-            foreground_process_id,
-            Duration::from_secs(2),
-        )
-        .flatten();
-        self.check_cancelled()?;
-        check_process(expected, current)
-    }
-
     /// Check again at the actual event boundary; clearing an event's flags
     /// does not mean the user has released their physical shortcut chord.
     #[cfg(target_os = "macos")]
     pub(super) fn check_before_event(&self) -> Result<(), InjectorError> {
         self.check_cancelled()?;
-        #[cfg(target_os = "macos")]
-        {
-            self.check_target()?;
-            if modifiers_held() {
-                return Err(InjectorError::ModifiersHeld);
-            }
+        // The user chooses the destination by placing focus. A focus change
+        // must not cancel input or bind it back to the recording's original app.
+        if modifiers_held() {
+            return Err(InjectorError::ModifiersHeld);
         }
         Ok(())
     }
@@ -108,10 +56,7 @@ impl InjectionGuard {
         self.check_cancelled()?;
         #[cfg(target_os = "macos")]
         {
-            self.wait_for_release(MODIFIER_RELEASE_TIMEOUT, || {
-                self.check_target()?;
-                Ok(modifiers_held())
-            })?;
+            self.wait_for_release(MODIFIER_RELEASE_TIMEOUT, modifiers_held)?;
         }
         Ok(())
     }
@@ -120,12 +65,12 @@ impl InjectionGuard {
     fn wait_for_release(
         &self,
         timeout: Duration,
-        mut held: impl FnMut() -> Result<bool, InjectorError>,
+        mut held: impl FnMut() -> bool,
     ) -> Result<(), InjectorError> {
         let deadline = Instant::now() + timeout;
         loop {
             self.check_cancelled()?;
-            let is_held = held()?;
+            let is_held = held();
             self.check_cancelled()?;
             if !is_held {
                 return Ok(());
@@ -137,8 +82,7 @@ impl InjectionGuard {
         }
     }
 
-    /// Only cancellation is checked here: during a bridge round-trip VoiceX
-    /// temporarily owns focus, and the caller checks each expected focus state.
+    /// Keep waits cancellable, including while a clipboard bridge cycles focus.
     #[cfg(any(target_os = "macos", test))]
     pub(super) fn sleep(&self, duration: Duration) -> Result<(), InjectorError> {
         let deadline = Instant::now() + duration;
@@ -150,22 +94,6 @@ impl InjectionGuard {
             }
             std::thread::sleep(remaining.min(POLL_INTERVAL));
         }
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub(super) fn foreground_process_id() -> Option<u32> {
-    objc2_app_kit::NSWorkspace::sharedWorkspace()
-        .frontmostApplication()
-        .map(|app| app.processIdentifier() as u32)
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn check_process(expected: u32, current: Option<u32>) -> Result<(), InjectorError> {
-    match current {
-        Some(current) if current == expected => Ok(()),
-        Some(_) => Err(InjectorError::TargetChanged),
-        None => Err(InjectorError::TargetUnavailable),
     }
 }
 
@@ -236,28 +164,13 @@ mod tests {
     }
 
     #[test]
-    fn focus_changes_and_missing_focus_are_distinct() {
-        assert!(check_process(42, Some(42)).is_ok());
-        assert!(matches!(
-            check_process(42, Some(43)),
-            Err(InjectorError::TargetChanged)
-        ));
-        assert!(matches!(
-            check_process(42, None),
-            Err(InjectorError::TargetUnavailable)
-        ));
-    }
-
-    #[test]
     fn held_modifiers_timeout_without_sending_input() {
         let guard = InjectionGuard::default();
         assert!(matches!(
-            guard.wait_for_release(Duration::ZERO, || Ok(true)),
+            guard.wait_for_release(Duration::ZERO, || true),
             Err(InjectorError::ModifiersHeld)
         ));
-        guard
-            .wait_for_release(Duration::ZERO, || Ok(false))
-            .unwrap();
+        guard.wait_for_release(Duration::ZERO, || false).unwrap();
     }
 
     #[test]
@@ -268,7 +181,7 @@ mod tests {
         assert!(matches!(
             guard.wait_for_release(Duration::ZERO, || {
                 cancelled.store(true, Ordering::SeqCst);
-                Ok(false)
+                false
             }),
             Err(InjectorError::Cancelled)
         ));
@@ -283,25 +196,6 @@ mod tests {
             Err(InjectorError::Cancelled)
         ));
         assert!(started.elapsed() < Duration::from_secs(1));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn an_uncaptured_target_refuses_input_without_querying_other_apps() {
-        let guard = InjectionGuard::default().with_target(None);
-        assert!(matches!(
-            guard.wait_until_ready(),
-            Err(InjectorError::TargetUnavailable)
-        ));
-    }
-
-    #[test]
-    fn focus_loss_during_a_modifier_wait_stops_the_attempt() {
-        let guard = InjectionGuard::default();
-        assert!(matches!(
-            guard.wait_for_release(Duration::from_secs(3), || Err(InjectorError::TargetChanged)),
-            Err(InjectorError::TargetChanged)
-        ));
     }
 
     #[test]

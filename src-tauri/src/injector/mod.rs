@@ -55,11 +55,29 @@ pub fn inject_serialized_with_guard(
     focus_roundtrip_pid: Option<u32>,
     guard: InjectionGuard,
 ) -> Result<(), InjectorError> {
-    with_injection_lock(&INJECTION_MUTEX, &guard, || {
+    inject_serialized_with_resolver(text, guard, || {
         TextInjector::with_mode(mode, skip_clipboard_restore)
             .with_focus_roundtrip_target(focus_roundtrip_pid)
-            .with_guard(guard.clone())
-            .inject(text)
+    })
+}
+
+/// Resolve app-specific settings after queued work and physical modifiers have
+/// cleared, so an app selected during either wait is the actual destination.
+pub fn inject_serialized_with_resolver(
+    text: &str,
+    guard: InjectionGuard,
+    resolve: impl FnOnce() -> TextInjector,
+) -> Result<(), InjectorError> {
+    with_injection_lock(&INJECTION_MUTEX, &guard, || {
+        if text.is_empty() {
+            return Ok(());
+        }
+        guard.wait_until_ready()?;
+        let injector = resolve().with_guard(guard.clone());
+        // Foreground-app lookup may wait on the main thread. Cancellation
+        // during that lookup must also prevent native Windows input.
+        guard.check_cancelled()?;
+        injector.inject_ready(text)
     })
 }
 

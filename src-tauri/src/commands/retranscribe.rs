@@ -210,8 +210,7 @@ pub async fn replay_history_injection(
 
         let final_text = pipeline.final_text.clone();
         let injection_cancel = cancel.clone();
-        let guard = InjectionGuard::new(move || injection_cancel.is_cancelled())
-            .with_target(Some(target_app.process_id));
+        let guard = InjectionGuard::new(move || injection_cancel.is_cancelled());
         tauri::async_runtime::spawn_blocking(move || {
             inject_serialized_with_guard(
                 injection_mode,

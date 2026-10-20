@@ -251,27 +251,23 @@ fn reactivate_target_on_main_thread(
     use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSRunningApplication};
 
     let mut reactivated = false;
-    // Only undo our own focus bounce. A user who switched to a third app
-    // during the away window must keep that app in front.
-    if super::guard::foreground_process_id() == Some(std::process::id()) {
-        if let Some(target) =
-            NSRunningApplication::runningApplicationWithProcessIdentifier(target_pid as libc::pid_t)
-        {
-            let requested = target.activateWithOptions(NSApplicationActivationOptions::empty());
-            reactivated = requested && wait_until(|| target.isActive(), 400);
-            if !reactivated {
-                log::warn!(
-                    "Focus round-trip: target reactivation fell short (requested={}, active={})",
-                    requested,
-                    target.isActive()
-                );
-            }
-        } else {
+    if let Some(target) =
+        NSRunningApplication::runningApplicationWithProcessIdentifier(target_pid as libc::pid_t)
+    {
+        let requested = target.activateWithOptions(NSApplicationActivationOptions::empty());
+        reactivated = requested && wait_until(|| target.isActive(), 400);
+        if !reactivated {
             log::warn!(
-                "Focus round-trip: target pid {} is no longer running",
-                target_pid
+                "Focus round-trip: target reactivation fell short (requested={}, active={})",
+                requested,
+                target.isActive()
             );
         }
+    } else {
+        log::warn!(
+            "Focus round-trip: target pid {} is no longer running",
+            target_pid
+        );
     }
 
     if let Some(policy) = policy_to_restore {
@@ -672,7 +668,10 @@ impl TextInjector {
             return Ok(());
         }
         self.guard.wait_until_ready()?;
+        self.inject_ready(text)
+    }
 
+    pub(super) fn inject_ready(&self, text: &str) -> Result<(), InjectorError> {
         match self.mode {
             TextInjectionMode::Pasteboard => self.inject_via_pasteboard(text),
             TextInjectionMode::Typing => self.inject_via_typing(text),
@@ -856,11 +855,13 @@ impl TextInjector {
     /// active again and announces the clipboard), then wait for the
     /// announcement to reach the remote side before the caller pastes.
     ///
-    /// A failed or interrupted round-trip aborts paste. Policy restoration
-    /// still runs, and focus is returned only while VoiceX still owns it.
+    /// Activation is best effort: macOS may report a denied activation even
+    /// while the native paste still works. Keep that warning visible and send
+    /// the paste to the final foreground app. Explicit cancellation still
+    /// stops input after unwinding our activation-policy change.
     #[cfg(target_os = "macos")]
     fn focus_roundtrip_before_paste(&self, target_pid: u32) -> Result<(), InjectorError> {
-        self.guard.check_process(target_pid)?;
+        self.guard.check_cancelled()?;
         log::info!(
             "Focus round-trip: bouncing activation through VoiceX (target pid {})",
             target_pid
@@ -870,9 +871,6 @@ impl TextInjector {
         let activation = run_on_main_thread_with_cleanup(
             move || {
                 guard.check_cancelled()?;
-                if super::guard::foreground_process_id() != Some(target_pid) {
-                    return Err(InjectorError::TargetChanged);
-                }
                 Ok(activate_self_on_main_thread())
             },
             move |activation| {
@@ -892,19 +890,19 @@ impl TextInjector {
             Some(Ok(SelfActivationOutcome::ActivatedWithPolicy(policy))) => Some(policy),
             Some(Err(err)) => return Err(err),
             Some(Ok(SelfActivationOutcome::Failed)) | None => {
-                return Err(InjectorError::PasteCommandFailed(
-                    "Clipboard bridge focus round-trip could not start".to_string(),
-                ));
+                log::warn!("Focus round-trip: self-activation denied; pasting without confirmed bridge sync");
+                return self
+                    .guard
+                    .sleep(Duration::from_millis(self.pre_paste_delay_ms));
             }
         };
 
         let away = self
             .guard
-            .sleep(Duration::from_millis(CLIPBOARD_FOCUS_ROUNDTRIP_AWAY_MS))
-            .and_then(|()| self.guard.check_process(std::process::id()));
+            .sleep(Duration::from_millis(CLIPBOARD_FOCUS_ROUNDTRIP_AWAY_MS));
 
         // Cleanup is deliberately not cancellation-gated. If this bounce put
-        // VoiceX in front, return focus and restore its original app policy.
+        // VoiceX in front, finish the round-trip and restore its app policy.
         let returned = run_on_main_thread_blocking(
             move || reactivate_target_on_main_thread(target_pid, policy_to_restore),
             Duration::from_secs(2),
@@ -927,13 +925,10 @@ impl TextInjector {
 
         away?;
         if returned != Some(true) {
-            return Err(InjectorError::PasteCommandFailed(
-                "Clipboard bridge target did not regain focus".to_string(),
-            ));
+            log::warn!("Focus round-trip: target activation was not confirmed; pasting into the final foreground app");
         }
         self.guard
-            .sleep(Duration::from_millis(CLIPBOARD_FOCUS_ROUNDTRIP_RETURN_MS))?;
-        self.guard.check_process(target_pid)
+            .sleep(Duration::from_millis(CLIPBOARD_FOCUS_ROUNDTRIP_RETURN_MS))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1189,12 +1184,6 @@ impl Default for TextInjector {
 pub enum InjectorError {
     #[error("Text injection cancelled before the next input event")]
     Cancelled,
-
-    #[error("The target application changed; automatic input was skipped")]
-    TargetChanged,
-
-    #[error("The target application could not be checked; automatic input was skipped")]
-    TargetUnavailable,
 
     #[error("Shortcut modifiers are still held; automatic input was skipped")]
     ModifiersHeld,

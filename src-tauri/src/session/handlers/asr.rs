@@ -361,41 +361,8 @@ impl SessionController {
         }
 
         let text = state.session_final_text.clone();
-        let matched_override = state
-            .session_target_app
-            .as_ref()
-            .and_then(|app| {
-                crate::foreground_app::match_text_injection_override(
-                    app,
-                    &state.text_injection_overrides,
-                )
-            })
-            .cloned();
-        let mode = matched_override
-            .as_ref()
-            .map(|override_item| crate::injector::TextInjectionMode::from_str(&override_item.mode))
-            .unwrap_or(state.text_injection_mode);
-        // Only overrides explicitly marked `skip_clipboard_restore` (targets that
-        // bridge the clipboard over a variable-latency channel, e.g. remote-desktop
-        // clients) keep the injected text on the clipboard; ordinary override
-        // targets get the normal backup → paste → restore behavior.
-        let skip_clipboard_restore_for_override = matched_override
-            .as_ref()
-            .map(|override_item| override_item.skip_clipboard_restore)
-            .unwrap_or(false);
-        // Clipboard-bridge targets additionally need the focus round-trip:
-        // their Mac-side client only announces the clipboard when it becomes
-        // active again, so we bounce activation through VoiceX before pasting
-        // (macOS only; injectors on other platforms ignore the pid).
-        let focus_roundtrip_pid = if skip_clipboard_restore_for_override {
-            state
-                .session_target_app
-                .as_ref()
-                .filter(|app| !app.is_self)
-                .map(|app| app.process_id)
-        } else {
-            None
-        };
+        let default_mode = state.text_injection_mode;
+        let text_injection_overrides = state.text_injection_overrides.clone();
         let duration_ms = state.session_duration_ms;
         let audio_path = state
             .session_audio_path
@@ -424,7 +391,6 @@ impl SessionController {
                 cancelled.load(std::sync::atomic::Ordering::SeqCst)
                     || epoch.load(std::sync::atomic::Ordering::SeqCst) != injection_epoch
             })
-            .with_target(state.session_target_app.as_ref().map(|app| app.process_id))
         };
         // Update local state with the to-be-injected final text so HUD has it if callbacks run before InjectDone.
         state.session_final_text = text.clone();
@@ -433,17 +399,16 @@ impl SessionController {
         self.emit_transcript(&text, true);
         state.injection_in_progress = true;
         log::info!(
-            "Inject attempt: len={}, mode={:?}, duration_ms={:?}, audio_path_set={}, version={}, target_app={:?}, override_match={:?}",
+            "Inject attempt: len={}, default_mode={:?}, duration_ms={:?}, audio_path_set={}, version={}, recording_app={:?}",
             text.chars().count(),
-            mode,
+            default_mode,
             duration_ms,
             audio_path.is_some(),
             injection_version,
             state
                 .session_target_app
                 .as_ref()
-                .and_then(|app| app.display_name.clone().or_else(|| app.process_name.clone())),
-            matched_override.as_ref().map(|override_item| override_item.app_name.clone())
+                .and_then(|app| app.display_name.clone().or_else(|| app.process_name.clone()))
         );
 
         tauri::async_runtime::spawn(async move {
@@ -524,9 +489,8 @@ impl SessionController {
             };
 
             log::info!(
-                "Injecting final text (len={}, mode={:?}, corrected_by_llm={}, was_processed={})",
+                "Injecting final text (len={}, corrected_by_llm={}, was_processed={})",
                 final_text.chars().count(),
-                mode,
                 corrected_by_llm,
                 was_processed
             );
@@ -537,14 +501,56 @@ impl SessionController {
                 return;
             }
             controller.emit_transcript(&final_text, true);
+            let target_controller = controller.clone();
             let inject_handle =
                 crate::services::text_injection_service::TextInjectionService::new()
                     .inject_background_guarded(
-                        mode,
                         final_text.clone(),
                         injection_guard,
-                        skip_clipboard_restore_for_override,
-                        focus_roundtrip_pid,
+                        move || {
+                            // Resolve only after queuing and modifier waits: the
+                            // user may choose a different app during either wait.
+                            let target_app = match target_controller.capture_foreground_app() {
+                                Ok(app) => Some(app),
+                                Err(err) => {
+                                    log::warn!(
+                                        "Cannot resolve per-app injection settings; using the configured global mode: {}",
+                                        err
+                                    );
+                                    None
+                                }
+                            };
+                            let matched_override = target_app.as_ref().and_then(|app| {
+                                crate::foreground_app::match_text_injection_override(
+                                    app,
+                                    &text_injection_overrides,
+                                )
+                            });
+                            let mode = matched_override
+                                .map(|item| crate::injector::TextInjectionMode::from_str(&item.mode))
+                                .unwrap_or(default_mode);
+                            let skip_clipboard_restore = matched_override
+                                .map(|item| item.skip_clipboard_restore)
+                                .unwrap_or(false);
+                            // Remote clipboard bridges still need their
+                            // activation round-trip before the paste shortcut.
+                            let focus_roundtrip_pid = target_app
+                                .as_ref()
+                                .filter(|app| skip_clipboard_restore && !app.is_self)
+                                .map(|app| app.process_id);
+                            log::info!(
+                                "Injection destination: app={:?}, pid={:?}, mode={:?}, override_match={:?}",
+                                target_app.as_ref().and_then(|app| app
+                                    .display_name
+                                    .as_deref()
+                                    .or(app.process_name.as_deref())),
+                                target_app.as_ref().map(|app| app.process_id),
+                                mode,
+                                matched_override.map(|item| item.app_name.as_str())
+                            );
+                            crate::injector::TextInjector::with_mode(mode, skip_clipboard_restore)
+                                .with_focus_roundtrip_target(focus_roundtrip_pid)
+                        },
                     );
             // Wait for the blocking injection to complete before signalling InjectDone.
             // This prevents a new injection from starting while the previous one is
