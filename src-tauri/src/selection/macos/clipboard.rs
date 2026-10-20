@@ -15,11 +15,9 @@ use std::time::{Duration, Instant};
 
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardTypeString, NSPasteboardWriting};
-use objc2_foundation::{NSArray, NSData, NSString};
+use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 
+use crate::mac_pasteboard::{PasteboardSnapshot, Unrestorable};
 use crate::selection::{SelectionError, SelectionRequest};
 
 /// Physical keycodes for a layout-independent Command+C.
@@ -57,14 +55,6 @@ const MODIFIER_POLL_INTERVAL_MS: u64 = 10;
 /// very large clipboard payloads.
 const MAX_SNAPSHOT_BYTES: usize = 32 * 1024 * 1024;
 
-/// Types whose payload is not the data on the pasteboard — a promise to be
-/// fulfilled later. Capturing the bytes does not capture the promise, so we
-/// cannot honestly restore them.
-const PROMISE_TYPE_PREFIXES: [&str; 2] = [
-    "com.apple.pasteboard.promised",
-    "Apple files promise pasteboard type",
-];
-
 #[allow(non_snake_case)]
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
@@ -97,36 +87,16 @@ fn wait_for_modifier_release(request: &SelectionRequest) -> Result<(), Selection
     Ok(())
 }
 
-/// A captured pasteboard, item by item and type by type.
-struct PasteboardSnapshot {
-    items: Vec<Vec<(String, Vec<u8>)>>,
-}
-
 /// Reason a type could not be captured, for the structured error.
 fn refuse(reason: impl Into<String>) -> SelectionError {
     SelectionError::ClipboardSnapshotRefused(reason.into())
 }
 
-fn is_promise_type(ty: &str) -> bool {
-    PROMISE_TYPE_PREFIXES
-        .iter()
-        .any(|prefix| ty.starts_with(prefix))
-}
-
-/// Add one type's payload to the running snapshot size, refusing past budget.
-///
-/// Split out from the capture loop so the rule can be tested: everything else
-/// in that loop needs a live `NSPasteboard`, and the fail-closed decisions are
-/// the part worth pinning down. Saturating on purpose — an overflow that
-/// wrapped would read as "plenty of room left".
-fn accumulate_snapshot_bytes(total: usize, added: usize) -> Result<usize, SelectionError> {
-    let total = total.saturating_add(added);
-    if total > MAX_SNAPSHOT_BYTES {
-        return Err(refuse(format!(
-            "clipboard exceeds {MAX_SNAPSHOT_BYTES} bytes"
-        )));
-    }
-    Ok(total)
+/// Capture the whole pasteboard or refuse: anything that cannot be put back
+/// faithfully means the copy fallback must not touch the clipboard.
+fn capture_snapshot(pasteboard: &NSPasteboard) -> Result<PasteboardSnapshot, SelectionError> {
+    PasteboardSnapshot::capture(pasteboard, MAX_SNAPSHOT_BYTES, Unrestorable::Refuse)
+        .map_err(refuse)
 }
 
 /// Whether the snapshot may be written back.
@@ -137,76 +107,6 @@ fn accumulate_snapshot_bytes(total: usize, added: usize) -> Result<usize, Select
 /// would see their clipboard silently revert.
 fn may_restore(change_count_after_copy: isize, change_count_now: isize) -> bool {
     change_count_after_copy == change_count_now
-}
-
-impl PasteboardSnapshot {
-    fn capture(pasteboard: &NSPasteboard) -> Result<Self, SelectionError> {
-        let mut items = Vec::new();
-        let mut total_bytes = 0usize;
-
-        let Some(pasteboard_items) = pasteboard.pasteboardItems() else {
-            // No items at all: nothing to restore, and nothing that can fail.
-            return Ok(Self { items });
-        };
-
-        for item in pasteboard_items.iter() {
-            let mut captured = Vec::new();
-            for ty in item.types().iter() {
-                let type_name = ty.to_string();
-                if is_promise_type(&type_name) {
-                    return Err(refuse(format!("promised type {type_name}")));
-                }
-
-                let Some(data) = item.dataForType(&ty) else {
-                    // Lazily-provided data whose owner refused or went away.
-                    return Err(refuse(format!("unreadable type {type_name}")));
-                };
-
-                total_bytes = accumulate_snapshot_bytes(total_bytes, data.len())?;
-
-                captured.push((type_name, data.to_vec()));
-            }
-            items.push(captured);
-        }
-
-        Ok(Self { items })
-    }
-
-    /// Put the captured contents back.
-    ///
-    /// Every item is rebuilt *before* the pasteboard is cleared: `clearContents`
-    /// is the destructive step, so anything that can fail must fail while the
-    /// user's clipboard is still intact. Clearing first and then hitting a
-    /// failure mid-rebuild would leave them with an empty or half-restored
-    /// clipboard.
-    fn restore(&self, pasteboard: &NSPasteboard) -> Result<(), String> {
-        let mut rebuilt: Vec<Retained<NSPasteboardItem>> = Vec::with_capacity(self.items.len());
-        for types in &self.items {
-            let item = NSPasteboardItem::new();
-            for (type_name, bytes) in types {
-                let ns_type = NSString::from_str(type_name);
-                let ns_data = NSData::with_bytes(bytes);
-                if !item.setData_forType(&ns_data, &ns_type) {
-                    return Err(format!("setData failed for {type_name}"));
-                }
-            }
-            rebuilt.push(item);
-        }
-
-        pasteboard.clearContents();
-        if rebuilt.is_empty() {
-            return Ok(());
-        }
-
-        let writable: Vec<&ProtocolObject<dyn NSPasteboardWriting>> = rebuilt
-            .iter()
-            .map(|item| ProtocolObject::from_ref(&**item))
-            .collect();
-        if !pasteboard.writeObjects(&NSArray::from_slice(&writable)) {
-            return Err("writeObjects returned false".to_string());
-        }
-        Ok(())
-    }
 }
 
 pub struct CopyReadOutcome {
@@ -240,7 +140,7 @@ pub fn read_via_copy(
     }
 
     let pasteboard = NSPasteboard::generalPasteboard();
-    let snapshot = PasteboardSnapshot::capture(&pasteboard)?;
+    let snapshot = capture_snapshot(&pasteboard)?;
     let change_count_before = pasteboard.changeCount();
 
     post_copy_shortcut()?;
@@ -273,7 +173,7 @@ pub fn read_via_copy(
     // Only restore if nothing else has touched the pasteboard since our copy;
     // a clipboard manager or another app must not lose its write.
     let restored = if may_restore(change_count_after_copy, pasteboard.changeCount()) {
-        match snapshot.restore(&pasteboard) {
+        match snapshot.restore(&pasteboard, false) {
             Ok(()) => true,
             Err(err) => {
                 log::warn!("Failed to restore the clipboard after a copy fallback: {err}");
@@ -320,7 +220,7 @@ fn watch_for_late_copy(snapshot: PasteboardSnapshot, change_count_before: isize)
             };
 
             let restored = if may_restore(landed, pasteboard.changeCount()) {
-                match snapshot.restore(&pasteboard) {
+                match snapshot.restore(&pasteboard, false) {
                     Ok(()) => true,
                     Err(err) => {
                         log::warn!("Failed to restore the clipboard after a late copy: {err}");
@@ -381,49 +281,6 @@ fn post_copy_shortcut() -> Result<(), SelectionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn promise_types_are_recognised() {
-        assert!(is_promise_type("com.apple.pasteboard.promised-file-url"));
-        assert!(is_promise_type(
-            "com.apple.pasteboard.promised-file-content-type"
-        ));
-        assert!(is_promise_type("Apple files promise pasteboard type"));
-        assert!(!is_promise_type("public.utf8-plain-text"));
-        assert!(!is_promise_type("public.png"));
-    }
-
-    #[test]
-    fn the_snapshot_budget_refuses_rather_than_holding_a_huge_clipboard() {
-        // Refusing the fallback keeps the clipboard untouched. Capturing it
-        // anyway would mean holding — and later rewriting — hundreds of
-        // megabytes to read a sentence.
-        assert_eq!(accumulate_snapshot_bytes(0, 1024).unwrap(), 1024);
-        assert_eq!(
-            accumulate_snapshot_bytes(MAX_SNAPSHOT_BYTES - 1, 1).unwrap(),
-            MAX_SNAPSHOT_BYTES,
-            "exactly at the budget still fits"
-        );
-
-        let refused = accumulate_snapshot_bytes(MAX_SNAPSHOT_BYTES, 1).unwrap_err();
-        assert_eq!(refused.code(), "clipboard_snapshot_refused");
-    }
-
-    #[test]
-    fn the_budget_is_a_running_total_across_types_not_a_per_type_limit() {
-        // One item can carry the same content in a dozen flavours; each under
-        // the cap while the whole is far over it.
-        let half = MAX_SNAPSHOT_BYTES / 2;
-        let after_first = accumulate_snapshot_bytes(0, half).unwrap();
-        assert!(accumulate_snapshot_bytes(after_first, half + 1).is_err());
-    }
-
-    #[test]
-    fn an_overflowing_total_refuses_instead_of_wrapping_to_roomy() {
-        // Saturating, not wrapping: a wrapped total would read as "plenty of
-        // room left" and let an unbounded capture through.
-        assert!(accumulate_snapshot_bytes(usize::MAX, usize::MAX).is_err());
-    }
 
     #[test]
     fn restore_is_skipped_when_anything_else_wrote_to_the_clipboard() {

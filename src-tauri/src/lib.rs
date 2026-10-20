@@ -13,6 +13,8 @@ pub mod i18n;
 pub mod injector;
 pub mod llm;
 mod logging;
+#[cfg(target_os = "macos")]
+mod mac_pasteboard;
 mod network;
 pub mod selection;
 pub mod services;
