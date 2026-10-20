@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::asr::{transcribe_audio_path, transcribe_audio_path_detailed, AsrConfig};
 use crate::commands::settings::AppSettings;
 use crate::foreground_app::{detect_foreground_app, match_text_injection_override};
-use crate::injector::{inject_serialized, TextInjectionMode};
+use crate::injector::{inject_serialized_with_guard, InjectionGuard, TextInjectionMode};
 use crate::llm::{correction_timeout_for_text, LLMClient, PromptBuildOptions};
 use crate::services::{
     history_service::HistoryService, llm_service::build_llm_config_from_settings,
@@ -209,12 +209,16 @@ pub async fn replay_history_injection(
         );
 
         let final_text = pipeline.final_text.clone();
+        let injection_cancel = cancel.clone();
+        let guard = InjectionGuard::new(move || injection_cancel.is_cancelled())
+            .with_target(Some(target_app.process_id));
         tauri::async_runtime::spawn_blocking(move || {
-            inject_serialized(
+            inject_serialized_with_guard(
                 injection_mode,
                 &final_text,
                 skip_clipboard_restore_for_override,
                 focus_roundtrip_pid,
+                guard,
             )
         })
         .await
@@ -233,6 +237,10 @@ pub async fn replay_history_injection(
     })
     .await;
 
+    if result.is_err() {
+        // Dropping a JoinHandle does not stop a queued blocking injection.
+        cancel.cancel();
+    }
     {
         let mut store = cancel_store().lock().unwrap();
         *store = None;

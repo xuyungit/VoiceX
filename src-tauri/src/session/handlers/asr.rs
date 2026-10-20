@@ -407,7 +407,8 @@ impl SessionController {
         let controller = self.clone();
         let injection_epoch = self
             .injection_epoch
-            .load(std::sync::atomic::Ordering::SeqCst);
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .wrapping_add(1);
         let injection_version = state.final_version;
         let remove_punctuation = state.remove_trailing_punctuation;
         let threshold = state.short_sentence_threshold;
@@ -416,6 +417,15 @@ impl SessionController {
         self.injection_cancel_flag
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let cancel_flag = self.injection_cancel_flag.clone();
+        let injection_guard = {
+            let cancelled = cancel_flag.clone();
+            let epoch = self.injection_epoch.clone();
+            crate::injector::InjectionGuard::new(move || {
+                cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                    || epoch.load(std::sync::atomic::Ordering::SeqCst) != injection_epoch
+            })
+            .with_target(state.session_target_app.as_ref().map(|app| app.process_id))
+        };
         // Update local state with the to-be-injected final text so HUD has it if callbacks run before InjectDone.
         state.session_final_text = text.clone();
         state.transcript_text = text.clone();
@@ -532,7 +542,7 @@ impl SessionController {
                     .inject_background_guarded(
                         mode,
                         final_text.clone(),
-                        cancel_flag.clone(),
+                        injection_guard,
                         skip_clipboard_restore_for_override,
                         focus_roundtrip_pid,
                     );
@@ -542,7 +552,12 @@ impl SessionController {
             if let Some(handle) = inject_handle {
                 let _ = handle.await;
             }
-            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            if cancel_flag.load(std::sync::atomic::Ordering::SeqCst)
+                || controller
+                    .injection_epoch
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    != injection_epoch
+            {
                 log::info!("Injection skipped: cancelled before InjectDone");
                 return;
             }

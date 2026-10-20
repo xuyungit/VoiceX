@@ -1,6 +1,8 @@
 use tauri::async_runtime;
 
-use crate::injector::{inject_serialized, TextInjectionMode};
+use crate::injector::{
+    inject_serialized, inject_serialized_with_guard, InjectionGuard, TextInjectionMode,
+};
 
 /// Handles text injection off the main async tasks to avoid blocking.
 #[derive(Clone, Default)]
@@ -32,12 +34,9 @@ impl TextInjectionService {
         }
 
         async_runtime::spawn_blocking(move || {
-            if let Err(err) = inject_serialized(
-                mode,
-                &text,
-                skip_clipboard_restore,
-                focus_roundtrip_pid,
-            ) {
+            if let Err(err) =
+                inject_serialized(mode, &text, skip_clipboard_restore, focus_roundtrip_pid)
+            {
                 log::warn!("Text injection failed: {}", err);
             }
         });
@@ -57,7 +56,7 @@ impl TextInjectionService {
         &self,
         mode: TextInjectionMode,
         text: String,
-        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        guard: InjectionGuard,
         skip_clipboard_restore: bool,
         focus_roundtrip_pid: Option<u32>,
     ) -> Option<tauri::async_runtime::JoinHandle<()>> {
@@ -66,15 +65,12 @@ impl TextInjectionService {
         }
 
         Some(async_runtime::spawn_blocking(move || {
-            if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-                log::info!("Injection skipped: cancelled before start");
-                return;
-            }
-            if let Err(err) = inject_serialized(
+            if let Err(err) = inject_serialized_with_guard(
                 mode,
                 &text,
                 skip_clipboard_restore,
                 focus_roundtrip_pid,
+                guard,
             ) {
                 log::warn!("Text injection failed: {}", err);
             }

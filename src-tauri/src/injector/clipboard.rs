@@ -30,6 +30,7 @@ use std::borrow::Cow;
 use std::thread;
 use std::time::Duration;
 
+use super::InjectionGuard;
 #[cfg(target_os = "macos")]
 use crate::mac_pasteboard::{PasteboardSnapshot, Unrestorable};
 
@@ -161,17 +162,29 @@ fn macos_at_least(major: isize) -> bool {
 /// when the main-thread dispatcher is unavailable or the main thread is
 /// stuck for longer than `timeout`.
 #[cfg(target_os = "macos")]
-fn run_on_main_thread_blocking<T: Send + 'static>(
+pub(super) fn run_on_main_thread_blocking<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
     timeout: Duration,
 ) -> Option<T> {
+    run_on_main_thread_with_cleanup(f, drop, timeout)
+}
+
+#[cfg(target_os = "macos")]
+fn run_on_main_thread_with_cleanup<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+    abandoned: impl FnOnce(T) + Send + 'static,
+    timeout: Duration,
+) -> Option<T> {
+    if objc2::MainThreadMarker::new().is_some() {
+        return Some(f());
+    }
     let app = super::MAIN_THREAD_APP.get()?;
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    app.run_on_main_thread(move || {
-        let _ = tx.send(f());
-    })
-    .ok()?;
-    rx.recv_timeout(timeout).ok()
+    super::guard::dispatch_and_wait(
+        |task| app.run_on_main_thread(task).map_err(|_| ()),
+        f,
+        abandoned,
+        timeout,
+    )
 }
 
 /// Must run on the main thread. Attempts to make VoiceX the active app.
@@ -238,23 +251,27 @@ fn reactivate_target_on_main_thread(
     use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSRunningApplication};
 
     let mut reactivated = false;
-    if let Some(target) =
-        NSRunningApplication::runningApplicationWithProcessIdentifier(target_pid as libc::pid_t)
-    {
-        let requested = target.activateWithOptions(NSApplicationActivationOptions::empty());
-        reactivated = requested && wait_until(|| target.isActive(), 400);
-        if !reactivated {
+    // Only undo our own focus bounce. A user who switched to a third app
+    // during the away window must keep that app in front.
+    if super::guard::foreground_process_id() == Some(std::process::id()) {
+        if let Some(target) =
+            NSRunningApplication::runningApplicationWithProcessIdentifier(target_pid as libc::pid_t)
+        {
+            let requested = target.activateWithOptions(NSApplicationActivationOptions::empty());
+            reactivated = requested && wait_until(|| target.isActive(), 400);
+            if !reactivated {
+                log::warn!(
+                    "Focus round-trip: target reactivation fell short (requested={}, active={})",
+                    requested,
+                    target.isActive()
+                );
+            }
+        } else {
             log::warn!(
-                "Focus round-trip: target reactivation fell short (requested={}, active={})",
-                requested,
-                target.isActive()
+                "Focus round-trip: target pid {} is no longer running",
+                target_pid
             );
         }
-    } else {
-        log::warn!(
-            "Focus round-trip: target pid {} is no longer running",
-            target_pid
-        );
     }
 
     if let Some(policy) = policy_to_restore {
@@ -319,7 +336,7 @@ extern "C" {
 /// its release (espanso issue #159). `text` must not contain line breaks or
 /// tabs (see [`typing_needs_pasteboard`]).
 #[cfg(target_os = "macos")]
-fn type_unicode_text_macos(text: &str) -> Result<usize, InjectorError> {
+fn type_unicode_text_macos(text: &str, guard: &InjectionGuard) -> Result<usize, InjectorError> {
     // Without Accessibility trust every post is silently discarded.
     if !unsafe { AXIsProcessTrusted() } {
         return Err(InjectorError::TypingError(
@@ -331,7 +348,7 @@ fn type_unicode_text_macos(text: &str) -> Result<usize, InjectorError> {
         .map_err(|_| InjectorError::TypingError("CGEventSource::new failed".to_string()))?;
     let started = std::time::Instant::now();
 
-    let post_key = |keydown: bool, chunk: Option<&str>| -> Result<(), InjectorError> {
+    let make_key = |keydown: bool, chunk: Option<&str>| -> Result<CGEvent, InjectorError> {
         let event = CGEvent::new_keyboard_event(source.clone(), MACOS_SPACE_KEYCODE, keydown)
             .map_err(|_| {
                 InjectorError::TypingError("CGEvent::new_keyboard_event failed".to_string())
@@ -345,19 +362,30 @@ fn type_unicode_text_macos(text: &str) -> Result<usize, InjectorError> {
         );
         // Modifiers held on the physical keyboard must not reach the text.
         event.set_flags(CGEventFlags::CGEventFlagNull);
-        event.post(CGEventTapLocation::HID);
-        Ok(())
+        Ok(event)
     };
 
     let chunks = utf16_chunks(text, UNICODE_EVENT_MAX_UTF16_UNITS);
-    for chunk in &chunks {
-        post_key(true, Some(chunk))?;
-        post_key(false, None)?;
-    }
+    let mut posted = 0;
+    let result = (|| {
+        for chunk in &chunks {
+            guard.check_before_event()?;
+            // Construct both halves before posting, and always release a key
+            // we pressed even if cancellation arrives between the two posts.
+            let down = make_key(true, Some(chunk))?;
+            let up = make_key(false, None)?;
+            down.post(CGEventTapLocation::HID);
+            up.post(CGEventTapLocation::HID);
+            posted += 1;
+        }
+        Ok(())
+    })();
 
-    let settle = Duration::from_millis(UNICODE_EVENT_SETTLE_MS * chunks.len() as u64);
+    // Already-posted events still need the source to outlive them, including
+    // when a later chunk was cancelled. Never resend the partial text.
+    let settle = Duration::from_millis(UNICODE_EVENT_SETTLE_MS * posted as u64);
     thread::sleep(settle.saturating_sub(started.elapsed()));
-    Ok(chunks.len())
+    result.map(|()| posted)
 }
 
 /// Put the dictated text on the general pasteboard and return the change
@@ -432,6 +460,21 @@ fn verify_pasteboard_text(
     // The returned NSString is a snapshot. Its conversion/comparison can
     // succeed even if another process replaced the clipboard meanwhile.
     ensure_pasteboard_unchanged(pasteboard, written_change_count)
+}
+
+#[cfg(target_os = "macos")]
+fn restore_pasteboard_if_unchanged(
+    pasteboard: &NSPasteboard,
+    backup: &PasteboardSnapshot,
+    written_change_count: isize,
+) {
+    if pasteboard.changeCount() != written_change_count {
+        log::info!("Skipping clipboard restore because clipboard changed after injection");
+        return;
+    }
+    if let Err(err) = backup.restore(pasteboard, true) {
+        log::warn!("Failed to restore the clipboard after injection: {err}");
+    }
 }
 
 /// Text injection mode
@@ -568,6 +611,7 @@ pub struct TextInjector {
     restore_delay_ms: u64,
     skip_clipboard_restore: bool,
     focus_roundtrip_pid: Option<u32>,
+    guard: InjectionGuard,
 }
 
 impl TextInjector {
@@ -578,6 +622,7 @@ impl TextInjector {
             restore_delay_ms: CLIPBOARD_RESTORE_DELAY_MS,
             skip_clipboard_restore: false,
             focus_roundtrip_pid: None,
+            guard: InjectionGuard::default(),
         }
     }
 
@@ -596,6 +641,7 @@ impl TextInjector {
             restore_delay_ms: CLIPBOARD_RESTORE_DELAY_MS,
             skip_clipboard_restore,
             focus_roundtrip_pid: None,
+            guard: InjectionGuard::default(),
         }
     }
 
@@ -615,11 +661,17 @@ impl TextInjector {
         self
     }
 
+    pub fn with_guard(mut self, guard: InjectionGuard) -> Self {
+        self.guard = guard;
+        self
+    }
+
     /// Inject text using the configured mode
     pub fn inject(&self, text: &str) -> Result<(), InjectorError> {
         if text.is_empty() {
             return Ok(());
         }
+        self.guard.wait_until_ready()?;
 
         match self.mode {
             TextInjectionMode::Pasteboard => self.inject_via_pasteboard(text),
@@ -663,29 +715,41 @@ impl TextInjector {
             };
 
             // 2. Set new text
+            self.guard.check_before_event()?;
             let written_change_count =
                 write_pasteboard_text(&pasteboard, text, !self.skip_clipboard_restore)?;
 
-            // 3. Give the target a chance to observe the new clipboard content.
-            // Clipboard-bridge targets get a focus round-trip, which forces the
-            // announcement; plain targets just wait out the pre-paste delay.
-            if !self.run_focus_roundtrip_if_configured() && self.pre_paste_delay_ms > 0 {
-                thread::sleep(Duration::from_millis(self.pre_paste_delay_ms));
-            }
+            let pasted = (|| {
+                // 3. Allow clipboard observers to see our payload. A cancelled
+                // wait must not continue to the paste shortcut.
+                if !self.run_focus_roundtrip_if_configured()? && self.pre_paste_delay_ms > 0 {
+                    self.guard
+                        .sleep(Duration::from_millis(self.pre_paste_delay_ms))?;
+                }
 
-            // 4. Send paste command only while our payload still owns the board.
-            ensure_pasteboard_unchanged(&pasteboard, written_change_count)?;
-            self.send_paste_command()?;
+                // 4. Recheck after the wait, before sending any paste keys.
+                self.guard.wait_until_ready()?;
+                self.guard.check_before_event()?;
+                ensure_pasteboard_unchanged(&pasteboard, written_change_count)?;
+                self.send_paste_command()
+            })();
 
             // 5. Schedule the clipboard restore off the injection critical path.
             if let Some(backup) = backup {
-                self.schedule_pasteboard_restore(backup, written_change_count);
+                if pasted.is_ok() {
+                    self.schedule_pasteboard_restore(backup, written_change_count);
+                } else {
+                    // No paste was sent: undo our temporary clipboard write
+                    // immediately, provided no newer copy owns the board.
+                    restore_pasteboard_if_unchanged(&pasteboard, &backup, written_change_count);
+                }
             } else if self.skip_clipboard_restore {
                 log::debug!(
                     "Skipping clipboard restore for this target (configured as a variable-latency clipboard bridge)"
                 );
             }
 
+            pasted?;
             log::debug!("Injected {} characters via pasteboard", text.len());
             Ok(())
         })
@@ -709,15 +773,7 @@ impl TextInjector {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 let pasteboard = NSPasteboard::generalPasteboard();
-                if pasteboard.changeCount() != written_change_count {
-                    log::info!(
-                        "Skipping clipboard restore because clipboard changed after injection"
-                    );
-                    return;
-                }
-                if let Err(err) = backup.restore(&pasteboard, true) {
-                    log::warn!("Failed to restore the clipboard after injection: {err}");
-                }
+                restore_pasteboard_if_unchanged(&pasteboard, &backup, written_change_count);
             });
         });
     }
@@ -748,7 +804,7 @@ impl TextInjector {
         // 3. Give the target a chance to observe the new clipboard content.
         // Clipboard-bridge targets get a focus round-trip, which forces the
         // announcement; plain targets just wait out the pre-paste delay.
-        if !self.run_focus_roundtrip_if_configured() && self.pre_paste_delay_ms > 0 {
+        if !self.run_focus_roundtrip_if_configured()? && self.pre_paste_delay_ms > 0 {
             thread::sleep(Duration::from_millis(self.pre_paste_delay_ms));
         }
 
@@ -775,22 +831,22 @@ impl TextInjector {
     /// Perform the activate-self → reactivate-target focus bounce if a
     /// round-trip target is configured. Returns `true` when a round-trip ran
     /// (its return wait replaces the plain pre-paste delay).
-    fn run_focus_roundtrip_if_configured(&self) -> bool {
+    fn run_focus_roundtrip_if_configured(&self) -> Result<bool, InjectorError> {
         let Some(target_pid) = self.focus_roundtrip_pid else {
-            return false;
+            return Ok(false);
         };
 
         #[cfg(target_os = "macos")]
         {
-            self.focus_roundtrip_before_paste(target_pid);
-            true
+            self.focus_roundtrip_before_paste(target_pid)?;
+            Ok(true)
         }
 
         #[cfg(not(target_os = "macos"))]
         {
             let _ = target_pid;
             log::debug!("Focus round-trip is macOS-only; ignoring the configured target");
-            false
+            Ok(false)
         }
     }
 
@@ -800,59 +856,84 @@ impl TextInjector {
     /// active again and announces the clipboard), then wait for the
     /// announcement to reach the remote side before the caller pastes.
     ///
-    /// Failures are logged and never abort the injection: a paste without
-    /// the round-trip is no worse than the previous behavior.
+    /// A failed or interrupted round-trip aborts paste. Policy restoration
+    /// still runs, and focus is returned only while VoiceX still owns it.
     #[cfg(target_os = "macos")]
-    fn focus_roundtrip_before_paste(&self, target_pid: u32) {
+    fn focus_roundtrip_before_paste(&self, target_pid: u32) -> Result<(), InjectorError> {
+        self.guard.check_process(target_pid)?;
         log::info!(
             "Focus round-trip: bouncing activation through VoiceX (target pid {})",
             target_pid
         );
 
-        let activation =
-            run_on_main_thread_blocking(activate_self_on_main_thread, Duration::from_secs(2));
-        let policy_to_restore = match activation {
-            Some(SelfActivationOutcome::AlreadyActive) => None,
-            Some(SelfActivationOutcome::Activated) => None,
-            Some(SelfActivationOutcome::ActivatedWithPolicy(policy)) => Some(policy),
-            Some(SelfActivationOutcome::Failed) | None => {
-                log::warn!("Focus round-trip: self-activation denied; pasting without bridge sync");
-                if self.pre_paste_delay_ms > 0 {
-                    thread::sleep(Duration::from_millis(self.pre_paste_delay_ms));
+        let guard = self.guard.clone();
+        let activation = run_on_main_thread_with_cleanup(
+            move || {
+                guard.check_cancelled()?;
+                if super::guard::foreground_process_id() != Some(target_pid) {
+                    return Err(InjectorError::TargetChanged);
                 }
-                return;
+                Ok(activate_self_on_main_thread())
+            },
+            move |activation| {
+                let policy = match activation {
+                    Ok(SelfActivationOutcome::ActivatedWithPolicy(policy)) => Some(policy),
+                    Ok(SelfActivationOutcome::Activated) => None,
+                    _ => return,
+                };
+                reactivate_target_on_main_thread(target_pid, policy);
+            },
+            Duration::from_secs(2),
+        );
+        let policy_to_restore = match activation {
+            Some(Ok(SelfActivationOutcome::AlreadyActive | SelfActivationOutcome::Activated)) => {
+                None
+            }
+            Some(Ok(SelfActivationOutcome::ActivatedWithPolicy(policy))) => Some(policy),
+            Some(Err(err)) => return Err(err),
+            Some(Ok(SelfActivationOutcome::Failed)) | None => {
+                return Err(InjectorError::PasteCommandFailed(
+                    "Clipboard bridge focus round-trip could not start".to_string(),
+                ));
             }
         };
 
-        thread::sleep(Duration::from_millis(CLIPBOARD_FOCUS_ROUNDTRIP_AWAY_MS));
+        let away = self
+            .guard
+            .sleep(Duration::from_millis(CLIPBOARD_FOCUS_ROUNDTRIP_AWAY_MS))
+            .and_then(|()| self.guard.check_process(std::process::id()));
 
-        match run_on_main_thread_blocking(
+        // Cleanup is deliberately not cancellation-gated. If this bounce put
+        // VoiceX in front, return focus and restore its original app policy.
+        let returned = run_on_main_thread_blocking(
             move || reactivate_target_on_main_thread(target_pid, policy_to_restore),
             Duration::from_secs(2),
-        ) {
-            Some(true) => {}
-            Some(false) => {
-                log::warn!("Focus round-trip: target did not regain active state; pasting anyway");
-            }
-            None => {
-                log::warn!("Focus round-trip: target reactivation dispatch failed; pasting anyway");
-                // The reactivation hop owns the policy restore; run a
-                // best-effort restore here since it never did.
-                if let Some(policy) = policy_to_restore {
-                    let _ = run_on_main_thread_blocking(
-                        move || {
-                            use objc2_app_kit::NSApplication;
-                            let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
-                            let ns_app = NSApplication::sharedApplication(mtm);
-                            let _ = ns_app.setActivationPolicy(policy);
-                        },
-                        Duration::from_secs(1),
-                    );
-                }
+        );
+        if returned.is_none() {
+            // The reactivation hop owns the policy restore; run a
+            // best-effort restore here since it never did.
+            if let Some(policy) = policy_to_restore {
+                let _ = run_on_main_thread_blocking(
+                    move || {
+                        use objc2_app_kit::NSApplication;
+                        let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
+                        let ns_app = NSApplication::sharedApplication(mtm);
+                        let _ = ns_app.setActivationPolicy(policy);
+                    },
+                    Duration::from_secs(1),
+                );
             }
         }
 
-        thread::sleep(Duration::from_millis(CLIPBOARD_FOCUS_ROUNDTRIP_RETURN_MS));
+        away?;
+        if returned != Some(true) {
+            return Err(InjectorError::PasteCommandFailed(
+                "Clipboard bridge target did not regain focus".to_string(),
+            ));
+        }
+        self.guard
+            .sleep(Duration::from_millis(CLIPBOARD_FOCUS_ROUNDTRIP_RETURN_MS))?;
+        self.guard.check_process(target_pid)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -962,7 +1043,7 @@ impl TextInjector {
 
         #[cfg(target_os = "macos")]
         {
-            let chunks = type_unicode_text_macos(text)?;
+            let chunks = type_unicode_text_macos(text, &self.guard)?;
             log::debug!(
                 "Injected {} characters via simulated typing on macOS ({} chunks of ≤{} UTF-16 units)",
                 char_count,
@@ -1106,6 +1187,18 @@ impl Default for TextInjector {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InjectorError {
+    #[error("Text injection cancelled before the next input event")]
+    Cancelled,
+
+    #[error("The target application changed; automatic input was skipped")]
+    TargetChanged,
+
+    #[error("The target application could not be checked; automatic input was skipped")]
+    TargetUnavailable,
+
+    #[error("Shortcut modifiers are still held; automatic input was skipped")]
+    ModifiersHeld,
+
     #[error("Clipboard error: {0}")]
     ClipboardError(String),
 
@@ -1181,6 +1274,66 @@ mod tests {
             let err = verify_pasteboard_text(&pasteboard, text, written).unwrap_err();
             assert!(err.to_string().contains("Clipboard changed"));
             assert_eq!(pasteboard.changeCount(), later_copy);
+            pasteboard.clearContents();
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn aborted_paste_cleanup_restores_formats_but_preserves_a_newer_copy() {
+        autoreleasepool(|_| {
+            let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+            let extra_type = NSString::from_str("com.voicex.guard-test");
+            let item = NSPasteboardItem::new();
+            assert!(
+                item.setString_forType(&NSString::from_str("original"), unsafe {
+                    NSPasteboardTypeString
+                })
+            );
+            assert!(item.setData_forType(
+                &objc2_foundation::NSData::with_bytes(&[0, 1, 2]),
+                &extra_type,
+            ));
+            let writable = [ProtocolObject::<dyn NSPasteboardWriting>::from_ref(&*item)];
+            pasteboard.clearContents();
+            assert!(pasteboard.writeObjects(&NSArray::from_slice(&writable)));
+            let backup =
+                PasteboardSnapshot::capture(&pasteboard, 4096, Unrestorable::Refuse).unwrap();
+
+            let written = write_pasteboard_text(&pasteboard, "dictated", true).unwrap();
+            restore_pasteboard_if_unchanged(&pasteboard, &backup, written);
+            assert_eq!(
+                unsafe { pasteboard.stringForType(NSPasteboardTypeString) }
+                    .unwrap()
+                    .to_string(),
+                "original"
+            );
+            assert_eq!(
+                pasteboard
+                    .pasteboardItems()
+                    .unwrap()
+                    .objectAtIndex(0)
+                    .dataForType(&extra_type)
+                    .unwrap()
+                    .to_vec(),
+                [0, 1, 2]
+            );
+
+            let written = write_pasteboard_text(&pasteboard, "dictated", true).unwrap();
+            pasteboard.clearContents();
+            assert!(unsafe {
+                pasteboard
+                    .setString_forType(&NSString::from_str("new copy"), NSPasteboardTypeString)
+            });
+            let user_revision = pasteboard.changeCount();
+            restore_pasteboard_if_unchanged(&pasteboard, &backup, written);
+            assert_eq!(pasteboard.changeCount(), user_revision);
+            assert_eq!(
+                unsafe { pasteboard.stringForType(NSPasteboardTypeString) }
+                    .unwrap()
+                    .to_string(),
+                "new copy"
+            );
             pasteboard.clearContents();
         });
     }
