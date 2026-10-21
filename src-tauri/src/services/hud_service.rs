@@ -135,6 +135,7 @@ impl HudService {
         // hears the presentation, and must not be overwritten by this reset.
         self.sync_bounds(presentation);
         hud::set_hud_shadow(&self.app_handle, presentation != HudPresentation::Caption);
+        hud::set_hud_click_through(&self.app_handle, presentation == HudPresentation::Caption);
         self.emit_presentation_mode(presentation);
         hud::show_hud(&self.app_handle);
     }

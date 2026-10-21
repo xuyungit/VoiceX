@@ -485,6 +485,23 @@ pub fn set_hud_shadow(app: &AppHandle, shadow: bool) {
     let _ = (app, shadow);
 }
 
+/// Windows: let clicks fall through the caption window. It is a transparent
+/// strip 80% of the screen wide, so while it is up it would otherwise swallow
+/// clicks on whatever is underneath without any visible reason. macOS does
+/// this for every presentation in `configure_macos_hud`; Windows has it for
+/// captions only, because Tauri implements it with `WS_EX_LAYERED`, which the
+/// other presentations have no reason to risk against WebView2's compositor.
+pub fn set_hud_click_through(app: &AppHandle, click_through: bool) {
+    #[cfg(target_os = "windows")]
+    if let Some(window) = app.get_webview_window("hud") {
+        if let Err(err) = window.set_ignore_cursor_events(click_through) {
+            log::warn!("Failed to set HUD click-through: {err}");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (app, click_through);
+}
+
 /// Show the HUD window
 pub fn show_hud(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("hud") {
