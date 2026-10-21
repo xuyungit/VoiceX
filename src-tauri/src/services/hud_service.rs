@@ -127,6 +127,7 @@ impl HudService {
     }
 
     pub fn show(&self, presentation: HudPresentation) {
+        hud::set_hud_caption_mode(presentation == HudPresentation::Caption);
         // Recreate/position in case display changed.
         if let Err(err) = hud::create_hud_window(&self.app_handle) {
             log::warn!("Failed to create HUD window: {}", err);

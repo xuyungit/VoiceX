@@ -20,6 +20,8 @@ pub const CAPTION_HUD_HEIGHT: f64 = 96.0;
 pub const CAPTION_HUD_MAX_HEIGHT: f64 = 112.0;
 
 const HUD_BOTTOM_MARGIN: f64 = 120.0;
+/// Space below the caption pill, measured from the target screen's work area.
+const CAPTION_BOTTOM_GAP: f64 = 24.0;
 // The clamps bound what any presentation may ask for; a size outside them
 // would be shown smaller than its stylesheet lays out, and silently so.
 const HUD_MIN_WIDTH: f64 = 128.0;
@@ -35,7 +37,14 @@ const HUD_MAX_HEIGHT: f64 = CAPTION_HUD_MAX_HEIGHT;
 #[cfg(target_os = "macos")]
 const HUD_WINDOW_ALPHA: f64 = 0.88;
 
-/// Desired logical content size, last set via `set_hud_content_bounds`.
+#[derive(Clone, Copy)]
+struct HudLayout {
+    width: f64,
+    height: f64,
+    caption: bool,
+}
+
+/// Desired logical content size and placement for the current presentation.
 ///
 /// Single source of truth for repositioning. The desired size must never be
 /// read back from the window: on Windows, tao's `WM_DPICHANGED` handling can
@@ -43,13 +52,33 @@ const HUD_WINDOW_ALPHA: f64 = 0.88;
 /// with different scale factors, and treating that distorted size as the
 /// desired one would freeze the error in place (refresh would compute the
 /// same wrong size forever).
-static DESIRED_BOUNDS: std::sync::Mutex<(f64, f64)> =
-    std::sync::Mutex::new((STREAM_HUD_WIDTH, STREAM_HUD_HEIGHT));
+static DESIRED_LAYOUT: std::sync::Mutex<HudLayout> = std::sync::Mutex::new(HudLayout {
+    width: STREAM_HUD_WIDTH,
+    height: STREAM_HUD_HEIGHT,
+    caption: false,
+});
 
-fn desired_bounds() -> (f64, f64) {
-    *DESIRED_BOUNDS
+fn desired_layout() -> HudLayout {
+    *DESIRED_LAYOUT
         .lock()
-        .expect("DESIRED_BOUNDS mutex poisoned")
+        .expect("DESIRED_LAYOUT mutex poisoned")
+}
+
+pub fn set_hud_caption_mode(caption: bool) {
+    DESIRED_LAYOUT
+        .lock()
+        .expect("DESIRED_LAYOUT mutex poisoned")
+        .caption = caption;
+}
+
+/// All distances are logical points. Only captions anchor to the work area;
+/// dictation keeps its existing distance from the full screen's bottom edge.
+fn hud_bottom_margin(caption: bool, reserved_bottom: f64, work_height: f64, height: f64) -> f64 {
+    if caption {
+        reserved_bottom + CAPTION_BOTTOM_GAP.min((work_height - height).max(0.0))
+    } else {
+        HUD_BOTTOM_MARGIN
+    }
 }
 
 fn hud_transparent_from_settings() -> bool {
@@ -68,11 +97,11 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
         return Ok(());
     }
 
-    let (width, height) = desired_bounds();
+    let layout = desired_layout();
     let builder =
         WebviewWindowBuilder::new(app, "hud", WebviewUrl::App("src/hud/index.html".into()))
             .title("VoiceX HUD")
-            .inner_size(width, height)
+            .inner_size(layout.width, layout.height)
             .resizable(false)
             .decorations(false)
             .always_on_top(true)
@@ -101,7 +130,7 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
         .map_err(|e| HudError::CreateFailed(e.to_string()))?;
 
     // Position at the bottom center of the screen under the cursor
-    position_hud_window(&window, width, height)?;
+    position_hud_window(&window, layout)?;
     apply_platform_hud_appearance(app, &window, transparent)?;
 
     log::info!("HUD window created");
@@ -150,27 +179,22 @@ fn apply_platform_hud_appearance(
 }
 
 fn reposition_hud_window(window: &tauri::WebviewWindow) -> Result<(), HudError> {
-    let (width, height) = desired_bounds();
-    position_hud_window(window, width, height)
+    position_hud_window(window, desired_layout())
 }
 
-fn position_hud_window(
-    window: &tauri::WebviewWindow,
-    width: f64,
-    height: f64,
-) -> Result<(), HudError> {
-    let width = width.clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH);
-    let height = height.clamp(HUD_MIN_HEIGHT, HUD_MAX_HEIGHT);
+fn position_hud_window(window: &tauri::WebviewWindow, layout: HudLayout) -> Result<(), HudError> {
+    let width = layout.width.clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH);
+    let height = layout.height.clamp(HUD_MIN_HEIGHT, HUD_MAX_HEIGHT);
 
     // Track the screen the cursor is on: that is where the user is working.
     // Deliberately not `window.current_monitor()` — while hidden, the HUD
     // stays on whatever screen the system placed it at startup (usually the
     // one with the main settings window) and never follows the user.
     #[cfg(target_os = "macos")]
-    return position_hud_on_cursor_screen_macos(window, width, height);
+    return position_hud_on_cursor_screen_macos(window, width, height, layout.caption);
 
     #[cfg(not(target_os = "macos"))]
-    position_hud_on_cursor_screen(window, width, height)
+    position_hud_on_cursor_screen(window, width, height, layout.caption)
 }
 
 /// macOS: place the HUD at the bottom center of the screen nearest the
@@ -189,6 +213,7 @@ fn position_hud_on_cursor_screen_macos(
     window: &tauri::WebviewWindow,
     width: f64,
     height: f64,
+    caption: bool,
 ) -> Result<(), HudError> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSEvent, NSScreen, NSWindow};
@@ -254,21 +279,24 @@ fn position_hud_on_cursor_screen_macos(
             #[allow(clippy::undocumented_unsafe_blocks)]
             let ns_win: &NSWindow = unsafe { &*(ns_window_ptr as *const NSWindow) };
 
-            // No clamp against the screen bounds is needed here: the page
-            // caps a caption at 80% of its screen's width, and
-            // HUD_BOTTOM_MARGIN + height fit within any real display. (The Windows branch keeps an explicit clamp
-            // because its physical-pixel math makes one cheap.)
             let frame = screen.frame();
+            let work_area = screen.visibleFrame();
             let x = frame.origin.x + (frame.size.width - width) / 2.0;
-            // HUD_BOTTOM_MARGIN means "window bottom edge above the screen
-            // bottom"; the Cocoa origin is the screen's bottom-left corner.
-            let bottom_y = frame.origin.y + HUD_BOTTOM_MARGIN;
+            // A bottom Dock raises visibleFrame's bottom edge; a screen with
+            // no bottom Dock has no reserved strip to leave beneath captions.
+            let bottom_margin = hud_bottom_margin(
+                caption,
+                work_area.origin.y - frame.origin.y,
+                work_area.size.height,
+                height,
+            );
+            let bottom_y = frame.origin.y + bottom_margin;
 
             let current = ns_win.frame();
             let size_changed = (current.size.width - width).abs() > 0.5
                 || (current.size.height - height).abs() > 0.5;
-            let position_changed = (current.origin.x - x).abs() > 0.5
-                || (current.origin.y - bottom_y).abs() > 0.5;
+            let position_changed =
+                (current.origin.x - x).abs() > 0.5 || (current.origin.y - bottom_y).abs() > 0.5;
 
             if size_changed {
                 // display=true: the HUD may be visible right now (e.g. a
@@ -308,6 +336,7 @@ fn position_hud_on_cursor_screen(
     window: &tauri::WebviewWindow,
     width: f64,
     height: f64,
+    caption: bool,
 ) -> Result<(), HudError> {
     let app = window.app_handle();
     let monitor = app
@@ -327,12 +356,21 @@ fn position_hud_on_cursor_screen(
     let monitor_size = monitor.size();
     let origin_x = monitor.position().x as f64;
     let origin_y = monitor.position().y as f64;
+    let screen_bottom = origin_y + monitor_size.height as f64;
+    let work_area = monitor.work_area();
+    let work_bottom = work_area.position.y as f64 + work_area.size.height as f64;
+    let bottom_margin = hud_bottom_margin(
+        caption,
+        (screen_bottom - work_bottom) / scale,
+        work_area.size.height as f64 / scale,
+        height,
+    ) * scale;
 
     let x = (origin_x + (monitor_size.width as f64 - target_w) / 2.0).clamp(
         origin_x,
         origin_x + (monitor_size.width as f64 - target_w).max(0.0),
     );
-    let y = (origin_y + monitor_size.height as f64 - target_h - HUD_BOTTOM_MARGIN * scale).clamp(
+    let y = (screen_bottom - target_h - bottom_margin).clamp(
         origin_y,
         origin_y + (monitor_size.height as f64 - target_h).max(0.0),
     );
@@ -395,12 +433,17 @@ pub fn refresh_hud_window(window: &tauri::WebviewWindow) -> Result<(), HudError>
 }
 
 pub fn set_hud_content_bounds(app: &AppHandle, width: f64, height: f64) -> Result<(), HudError> {
-    *DESIRED_BOUNDS
-        .lock()
-        .expect("DESIRED_BOUNDS mutex poisoned") = (width, height);
+    let layout = {
+        let mut layout = DESIRED_LAYOUT
+            .lock()
+            .expect("DESIRED_LAYOUT mutex poisoned");
+        layout.width = width;
+        layout.height = height;
+        *layout
+    };
 
     if let Some(window) = app.get_webview_window("hud") {
-        position_hud_window(&window, width, height)?;
+        position_hud_window(&window, layout)?;
     }
     Ok(())
 }
@@ -534,6 +577,29 @@ pub enum HudError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captions_leave_the_same_gap_above_each_screens_work_area() {
+        for (reserved_bottom, work_height) in [(0.0, 900.0), (80.0, 820.0), (48.0, 1032.0)] {
+            let margin = hud_bottom_margin(true, reserved_bottom, work_height, 93.0);
+            assert_eq!(margin - reserved_bottom, 24.0);
+        }
+    }
+
+    #[test]
+    fn caption_gap_fits_a_short_work_area() {
+        assert_eq!(hud_bottom_margin(true, 80.0, 100.0, 93.0), 87.0);
+    }
+
+    #[test]
+    fn dictation_keeps_its_screen_bottom_margin() {
+        for reserved_bottom in [0.0, 48.0, 80.0] {
+            assert_eq!(
+                hud_bottom_margin(false, reserved_bottom, 900.0, 100.0),
+                120.0
+            );
+        }
+    }
 
     /// A presentation asking for more than the clamp allows would be shown
     /// smaller than its stylesheet lays out, and the clamp never says so.
