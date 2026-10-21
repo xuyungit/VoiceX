@@ -155,14 +155,30 @@ body.hud-windows.hud-translucent .hud-container {
     /* exactly 2 lines; truncation is handled by fitText() in hud.ts */
 }
 
-/* A caption is the sentence being spoken and nothing else: no status row,
-   no chip, no bars, no frame — text large enough to read from across the
-   room. Four lines at this size hold a 120-character piece, the caption
-   piece limit, so truncation only happens for a piece that wraps past that. */
+/* A caption is the sentence being spoken and nothing else, laid out like a
+   film subtitle: no status row, no chip, no bars, no frame. Its window is
+   fixed for the whole read — 80% of the screen wide, two lines tall,
+   transparent and click-through (hud.ts `sizeCaptionWindow`) — and the visible
+   caption is the pill below, sitting on the window's bottom edge and growing
+   with its text. Padding and font size here are what hud.ts measures with
+   (CAPTION_PADDING_X / CAPTION_PADDING_Y there). */
+html body.caption-mode,
+html body.caption-mode.hud-windows.hud-translucent {
+    background: transparent;
+}
+
+body.caption-mode #hud {
+    align-items: flex-end;
+}
+
 body.caption-mode .hud-container {
-    padding: 14px 24px;
+    width: fit-content;
+    max-width: 100%;
+    height: auto;
+    padding: 10px 20px;
     gap: 0;
     border: none;
+    border-radius: 10px;
     justify-content: center;
 }
 
@@ -173,10 +189,10 @@ body.caption-mode .waveform-hybrid {
 }
 
 body.caption-mode .text-area {
-    font-size: 20px;
+    font-size: 26px;
     line-height: 1.4;
-    max-height: calc(20px * 1.4 * 4 + 2px);
-    color: rgba(255, 255, 255, 0.92);
+    max-height: calc(26px * 1.4 * 2 + 2px);
+    color: rgba(255, 255, 255, 0.95);
     text-align: center;
 }
 

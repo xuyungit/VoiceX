@@ -18,7 +18,9 @@ protoc-bin-vendored = "3"
 
 [dependencies]
 # Tauri core
-tauri = { version = "2", features = ["image-png", "tray-icon"] }
+# macos-private-api: the caption HUD is a transparent window with a pill
+# drawn inside it; WKWebView only draws transparent with it.
+tauri = { version = "2", features = ["image-png", "tray-icon", "macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 rfd = "0.17"

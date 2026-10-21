@@ -103,10 +103,13 @@ let waveformFrameId = 0;
 let waveformLastFrameTime = 0;
 let waveformShiftAccumulator = 0;
 const MAX_LINES = 2;
-// A caption is read, not glanced at, and drawn large (hud.css): four
-// lines hold a 120-character piece, the caption piece limit, so only a
-// piece that wraps past that loses its head to the ellipsis.
-const CAPTION_MAX_LINES = 4;
+// A caption is a film subtitle: at most two lines, as wide as 80% of the
+// screen. A piece that wraps past two lines loses its head to the ellipsis.
+const CAPTION_MAX_LINES = 2;
+const CAPTION_SCREEN_WIDTH_FRACTION = 0.8;
+// Must match `body.caption-mode .hud-container` padding in hud.css.
+const CAPTION_PADDING_X = 20;
+const CAPTION_PADDING_Y = 10;
 const ELLIPSIS = "\u2026";
 const WAVEFORM_ATTACK = 0.4;
 const WAVEFORM_RELEASE = 0.15;
@@ -166,7 +169,12 @@ function updateTextAreaMaxWidth() {
   const style = getComputedStyle(textArea);
   const pl = parseFloat(style.paddingLeft) || 0;
   const pr = parseFloat(style.paddingRight) || 0;
-  textAreaMaxWidth = textArea.clientWidth - pl - pr;
+  // A caption window is sized to its text, so the widest it may become —
+  // not the window's current width — is what the text is wrapped against.
+  textAreaMaxWidth = isCaptionMode()
+    ? Math.floor(window.screen.width * CAPTION_SCREEN_WIDTH_FRACTION) -
+      2 * CAPTION_PADDING_X
+    : textArea.clientWidth - pl - pr;
   if (textAreaMaxWidth <= 0) textAreaMaxWidth = 230;
 
   const parsedLineHeight = parseFloat(style.lineHeight);
@@ -190,6 +198,17 @@ function updateTextAreaMaxWidth() {
   measureEl.style.wordBreak = style.wordBreak;
   measureEl.style.overflowWrap = style.overflowWrap;
   measureEl.style.textTransform = style.textTransform;
+}
+
+/// A caption window is fixed for the whole read: 80% of the screen wide and
+/// two lines tall, transparent and click-through. The visible caption is a
+/// pill inside it (hud.css) that follows the text, so changing sentences never
+/// resizes the native window — which cannot be redrawn in step with the page,
+/// and flashed a strip of unpainted window each time it grew.
+function sizeCaptionWindow() {
+  const width = Math.floor(window.screen.width * CAPTION_SCREEN_WIDTH_FRACTION);
+  const height = Math.ceil(CAPTION_MAX_LINES * textAreaLineHeight) + 2 * CAPTION_PADDING_Y;
+  void invoke("set_hud_content_bounds", { width, height });
 }
 
 function maxLines() {
@@ -1099,6 +1118,9 @@ async function initListeners() {
         smoothedAudioLevel = 0;
       }
       renderTranscript();
+      // After the render: it is what switches to the caption layout and
+      // measures its line height.
+      if (isCaptionMode()) sizeCaptionWindow();
     },
   );
 

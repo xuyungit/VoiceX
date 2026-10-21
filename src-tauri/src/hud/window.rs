@@ -9,19 +9,25 @@ pub const STREAM_HUD_HEIGHT: f64 = 100.0;
 /// Batch-mode HUD content size (logical points).
 pub const BATCH_HUD_WIDTH: f64 = 204.0;
 pub const BATCH_HUD_HEIGHT: f64 = 78.0;
-/// A read with captions: the sentence being spoken and nothing else, at a
-/// font readable from across the room; wide enough that four lines hold a
-/// 120-character piece (the caption piece limit) without truncation.
-pub const CAPTION_HUD_WIDTH: f64 = 680.0;
-pub const CAPTION_HUD_HEIGHT: f64 = 140.0;
+/// A read with captions: the sentence being spoken and nothing else, laid out
+/// like a film subtitle. The window is transparent and click-through, and the
+/// page draws the caption as a pill inside it, so the window never follows the
+/// text. The page sets the real size once per read (80% of its screen wide —
+/// only it knows the screen); these are what it opens at.
+pub const CAPTION_HUD_WIDTH: f64 = 960.0;
+pub const CAPTION_HUD_HEIGHT: f64 = 96.0;
+/// Tallest a caption window may be: two lines plus padding (see `hud.css`).
+pub const CAPTION_HUD_MAX_HEIGHT: f64 = 112.0;
 
 const HUD_BOTTOM_MARGIN: f64 = 120.0;
 // The clamps bound what any presentation may ask for; a size outside them
 // would be shown smaller than its stylesheet lays out, and silently so.
 const HUD_MIN_WIDTH: f64 = 128.0;
-const HUD_MAX_WIDTH: f64 = CAPTION_HUD_WIDTH;
+// Width is bounded only by what the page asks for: a caption window is 80%
+// of the screen, which the page knows and this module does not.
+const HUD_MAX_WIDTH: f64 = 4096.0;
 const HUD_MIN_HEIGHT: f64 = 56.0;
-const HUD_MAX_HEIGHT: f64 = CAPTION_HUD_HEIGHT;
+const HUD_MAX_HEIGHT: f64 = CAPTION_HUD_MAX_HEIGHT;
 /// macOS whole-window opacity via `NSWindow::setAlphaValue` when the setting
 /// is on. Windows does not read this: it keeps the native window
 /// composition-transparent and changes CSS alpha instead (see
@@ -79,6 +85,11 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
     // window on toggle would flash and could race a live recording.
     // `shadow(false)` avoids the 1px white border Tauri draws on undecorated
     // Windows windows, which would show through a translucent fill.
+    // macOS: the caption presentation needs a transparent window too. Its
+    // other presentations stay visually opaque — their pages fill the window.
+    #[cfg(target_os = "macos")]
+    let builder = builder.transparent(true);
+
     #[cfg(target_os = "windows")]
     let builder = builder
         .transparent(true)
@@ -243,9 +254,9 @@ fn position_hud_on_cursor_screen_macos(
             #[allow(clippy::undocumented_unsafe_blocks)]
             let ns_win: &NSWindow = unsafe { &*(ns_window_ptr as *const NSWindow) };
 
-            // No clamp against the screen bounds is needed here: width ≤
-            // HUD_MAX_WIDTH and HUD_BOTTOM_MARGIN + height fit within any
-            // real display. (The Windows branch keeps an explicit clamp
+            // No clamp against the screen bounds is needed here: the page
+            // caps a caption at 80% of its screen's width, and
+            // HUD_BOTTOM_MARGIN + height fit within any real display. (The Windows branch keeps an explicit clamp
             // because its physical-pixel math makes one cheap.)
             let frame = screen.frame();
             let x = frame.origin.x + (frame.size.width - width) / 2.0;
@@ -460,6 +471,20 @@ fn apply_windows_hud_appearance(app: &AppHandle, transparent: bool) -> Result<()
     Ok(())
 }
 
+/// A transparent caption window would cast a shadow the width of the whole
+/// window around its empty area, so it goes without one. macOS only: Windows
+/// already creates the window shadowless.
+pub fn set_hud_shadow(app: &AppHandle, shadow: bool) {
+    #[cfg(target_os = "macos")]
+    if let Some(window) = app.get_webview_window("hud") {
+        if let Err(err) = window.set_shadow(shadow) {
+            log::warn!("Failed to set HUD shadow: {err}");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, shadow);
+}
+
 /// Show the HUD window
 pub fn show_hud(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("hud") {
@@ -501,6 +526,7 @@ mod tests {
             (STREAM_HUD_WIDTH, STREAM_HUD_HEIGHT),
             (BATCH_HUD_WIDTH, BATCH_HUD_HEIGHT),
             (CAPTION_HUD_WIDTH, CAPTION_HUD_HEIGHT),
+            (CAPTION_HUD_WIDTH, CAPTION_HUD_MAX_HEIGHT),
         ] {
             assert_eq!(width.clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH), width);
             assert_eq!(height.clamp(HUD_MIN_HEIGHT, HUD_MAX_HEIGHT), height);

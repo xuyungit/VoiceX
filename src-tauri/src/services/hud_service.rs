@@ -131,8 +131,11 @@ impl HudService {
         if let Err(err) = hud::create_hud_window(&self.app_handle) {
             log::warn!("Failed to create HUD window: {}", err);
         }
-        self.emit_presentation_mode(presentation);
+        // Bounds first: a caption page sizes the window itself as soon as it
+        // hears the presentation, and must not be overwritten by this reset.
         self.sync_bounds(presentation);
+        hud::set_hud_shadow(&self.app_handle, presentation != HudPresentation::Caption);
+        self.emit_presentation_mode(presentation);
         hud::show_hud(&self.app_handle);
     }
 
