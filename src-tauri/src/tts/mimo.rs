@@ -29,11 +29,12 @@ use serde_json::{json, Value};
 
 use super::cloud_playback::{self, PieceStream};
 use super::decode::RECV_POLL;
-use super::resample::LinearResampler;
 use super::playback::{negotiate_sample_rate, Playback, PlaybackHandle};
+use super::render::{require_api_key, PieceSink};
+use super::resample::LinearResampler;
 use super::{
-    cloud_http_client, log_cloud_retry, log_event, piece_limit_for, CancelToken, CloudStreamError,
-    SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
+    cloud_http_client, log_cloud_retry, log_event, piece_limit_for, split_for_backend, CancelToken,
+    CloudStreamError, SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
 };
 
 const ENDPOINT: &str = "https://api.xiaomimimo.com/v1/chat/completions";
@@ -84,6 +85,23 @@ pub struct MimoConfig {
     /// pitch parameter — so it rides in the config rather than pretending to be
     /// a per-request voice parameter.
     pub instruction: String,
+}
+
+impl MimoConfig {
+    pub fn from_settings(settings: &crate::commands::settings::AppSettings) -> Self {
+        Self {
+            api_key: settings.mimo_tts_api_key.clone(),
+            instruction: settings.mimo_tts_instruction.clone(),
+        }
+    }
+}
+
+fn voice_for(request: &TtsRequest) -> String {
+    request
+        .voice
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| default_voice().to_string())
 }
 
 pub struct MimoBackend {
@@ -195,11 +213,7 @@ impl MimoBackend {
         let device_rate = negotiate_sample_rate()
             .map_err(|err| TtsError::Backend(format!("{} ({})", err, err.code())))?;
 
-        let voice = request
-            .voice
-            .clone()
-            .filter(|id| !id.trim().is_empty())
-            .unwrap_or_else(|| default_voice().to_string());
+        let voice = voice_for(&request);
         // `request.rate` is deliberately ignored: the API has no speed
         // parameter, and the settings page hides the rate slider for this
         // provider so an ignored value cannot look like a broken one.
@@ -293,12 +307,50 @@ impl MimoBackend {
     }
 }
 
+/// Synthesize `request` to MP3 pieces for a file instead of the speakers.
+///
+/// Uses non-streaming `"mp3"` per piece: streaming `"mp3"` returns independent
+/// MP3 files per SSE chunk whose encoder padding stutters when concatenated
+/// (see the module docs), whereas non-streaming returns one continuous MP3 per
+/// piece and needs no local MP3 encoder on any platform.
+pub(crate) async fn render(
+    config: MimoConfig,
+    request: &TtsRequest,
+    token: &CancelToken,
+    sink: &mut PieceSink<'_>,
+) -> Result<(), String> {
+    require_api_key(&config.api_key)?;
+    let voice = voice_for(request);
+    let pieces = split_for_backend(&request.text, piece_limit_for(request.piece_limit, MAX_CHARS));
+    let total = pieces.len();
+    for (index, piece) in pieces.iter().enumerate() {
+        let body = build_render_body(piece, &voice, &config.instruction);
+        let bytes = fetch_mp3_with_retry(&config.api_key, &body, token).await?;
+        sink(index, total, piece, bytes)?;
+    }
+    Ok(())
+}
+
 /// The chat-shaped synthesis request. The assistant message is the text to
 /// speak — the service rejects a request without one ("messages must contain an
 /// assistant role for TTS model"). The user message is the style instruction
 /// and is simply omitted when there is none; an empty one is also accepted, but
 /// sending nothing is the honest form of "no instruction".
 fn build_body(text: &str, voice: &str, instruction: &str) -> Value {
+    build_body_with_format(text, voice, instruction, "pcm16", true)
+}
+
+fn build_render_body(text: &str, voice: &str, instruction: &str) -> Value {
+    build_body_with_format(text, voice, instruction, "mp3", false)
+}
+
+fn build_body_with_format(
+    text: &str,
+    voice: &str,
+    instruction: &str,
+    format: &str,
+    stream: bool,
+) -> Value {
     let mut messages = Vec::with_capacity(2);
     let instruction = instruction.trim();
     if !instruction.is_empty() {
@@ -310,14 +362,85 @@ fn build_body(text: &str, voice: &str, instruction: &str) -> Value {
         "model": MODEL,
         "messages": messages,
         "audio": {
-            // pcm16, not mp3: the streamed MP3 chunks are independent encodes
-            // whose padding survives concatenation as ~80 ms of silence per
-            // chunk — audible stuttering. See the module docs.
-            "format": "pcm16",
+            "format": format,
             "voice": voice,
         },
-        "stream": true,
+        "stream": stream,
     })
+}
+
+async fn fetch_mp3_with_retry(
+    api_key: &str,
+    body: &Value,
+    token: &CancelToken,
+) -> Result<Vec<u8>, String> {
+    let mut retries_done = 0;
+    loop {
+        match fetch_mp3(api_key, body).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) => {
+                if token.is_cancelled() {
+                    return Err("cancelled".to_string());
+                }
+                if let Some(delay_ms) = err.retry_delay_ms(retries_done) {
+                    log_cloud_retry("mimo", retries_done, delay_ms, err.reason());
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    if token.is_cancelled() {
+                        return Err("cancelled".to_string());
+                    }
+                    retries_done += 1;
+                    continue;
+                }
+                return Err(err.into_detail());
+            }
+        }
+    }
+}
+
+async fn fetch_mp3(api_key: &str, body: &Value) -> Result<Vec<u8>, CloudStreamError> {
+    let response = cloud_http_client()?
+        .post(ENDPOINT)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(body)
+        .send()
+        .await
+        .map_err(CloudStreamError::request)?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().await.unwrap_or_default();
+        return Err(CloudStreamError::http(status, describe_failure(&detail)));
+    }
+
+    let payload = response
+        .bytes()
+        .await
+        .map_err(|err| CloudStreamError::stream(err, false))?;
+    parse_render_response(&payload).map_err(|err| CloudStreamError::response(err, false))
+}
+
+fn parse_render_response(payload: &[u8]) -> Result<Vec<u8>, String> {
+    let value: Value =
+        serde_json::from_slice(payload).map_err(|err| format!("malformed response: {err}"))?;
+    if let Some(error) = value.get("error") {
+        let message = error
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or("unknown error");
+        let code = error
+            .get("code")
+            .and_then(|code| code.as_str())
+            .unwrap_or("");
+        return Err(format!("provider error {code}: {message}"));
+    }
+    let data = value
+        .pointer("/choices/0/message/audio/data")
+        .and_then(|data| data.as_str())
+        .filter(|data| !data.is_empty())
+        .ok_or_else(|| "the stream ended before any audio arrived".to_string())?;
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|err| format!("bad base64 in response: {err}"))
 }
 
 /// Stateful 16-bit little-endian PCM to f32 converter.
@@ -681,6 +804,23 @@ mod tests {
         assert_eq!(messages.len(), 1, "no instruction, no user message");
         assert_eq!(messages[0]["role"], "assistant");
         assert_eq!(messages[0]["content"], "你好");
+
+        let render_body = build_render_body("你好", "冰糖", "");
+        assert_eq!(render_body["stream"], false);
+        assert_eq!(render_body["audio"]["format"], "mp3");
+        assert_eq!(render_body["audio"]["voice"], "冰糖");
+    }
+
+    #[test]
+    fn non_streaming_response_extracts_base64_mp3() {
+        let payload = br#"{"choices":[{"message":{"audio":{"data":"aGVsbG8="}},"finish_reason":"stop"}]}"#;
+        assert_eq!(parse_render_response(payload).unwrap(), b"hello");
+
+        let empty = br#"{"choices":[{"message":{"audio":{"data":""}}}]}"#;
+        assert!(parse_render_response(empty).is_err());
+
+        let err_payload = br#"{"error":{"code":"400","message":"bad"}}"#;
+        assert!(parse_render_response(err_payload).unwrap_err().contains("bad"));
     }
 
     #[test]

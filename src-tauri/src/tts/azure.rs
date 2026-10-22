@@ -22,9 +22,10 @@ use futures_util::StreamExt;
 
 use super::cloud_playback::{self, PieceStream};
 use super::playback::{negotiate_sample_rate_among, prebuffer_samples, PlaybackHandle};
+use super::render::{collect_piece, require_api_key, PieceSink, RENDER_SAMPLE_RATE};
 use super::{
-    cloud_http_client, log_cloud_retry, piece_limit_for, CancelToken, CloudStreamError,
-    SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
+    cloud_http_client, log_cloud_retry, piece_limit_for, split_for_backend, CancelToken,
+    CloudStreamError, SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
 };
 
 /// Speech resources are bound to one region and the key only works there, so
@@ -90,6 +91,23 @@ pub struct AzureConfig {
     /// per resource and a resource lives in exactly one region, so a mismatch
     /// is a 401 — not a slower success.
     pub region: String,
+}
+
+impl AzureConfig {
+    pub fn from_settings(settings: &crate::commands::settings::AppSettings) -> Self {
+        Self {
+            api_key: settings.azure_tts_api_key.clone(),
+            region: settings.azure_tts_region.clone(),
+        }
+    }
+}
+
+fn voice_for(request: &TtsRequest) -> String {
+    request
+        .voice
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| default_voice().to_string())
 }
 
 /// Convert the stored 0.0..=1.0 rate into the SSML prosody multiplier.
@@ -266,11 +284,7 @@ impl AzureBackend {
         let sample_rate = negotiate_sample_rate_among(&SAMPLE_RATES)
             .map_err(|err| TtsError::Backend(format!("{} ({})", err, err.code())))?;
 
-        let voice = request
-            .voice
-            .clone()
-            .filter(|id| !id.trim().is_empty())
-            .unwrap_or_else(|| default_voice().to_string());
+        let voice = voice_for(&request);
         let speed = speed_from_normalized(request.rate);
         let gain = request.volume.unwrap_or(1.0);
         // Unlike CosyVoice, synthesis here outruns even 2x playback — but the
@@ -372,6 +386,41 @@ impl AzureBackend {
 
         Ok(())
     }
+}
+
+/// Synthesize `request` to MP3 pieces for a file instead of the speakers.
+pub(crate) async fn render(
+    config: AzureConfig,
+    request: &TtsRequest,
+    token: &CancelToken,
+    sink: &mut PieceSink<'_>,
+) -> Result<(), String> {
+    require_api_key(&config.api_key)?;
+    let voice = voice_for(request);
+    let speed = speed_from_normalized(request.rate);
+    let pieces = split_for_backend(
+        &request.text,
+        piece_limit_for(request.piece_limit, piece_chars_for(speed)),
+    );
+    let total = pieces.len();
+    for (index, piece) in pieces.iter().enumerate() {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let outcome = stream_audio_with_retry(
+            &config,
+            &Synthesis {
+                text: piece,
+                voice: &voice,
+                sample_rate: RENDER_SAMPLE_RATE,
+                rate: speed,
+            },
+            &tx,
+            token,
+        )
+        .await;
+        drop(tx);
+        sink(index, total, piece, collect_piece(outcome, rx)?)?;
+    }
+    Ok(())
 }
 
 /// The synthesis parameters, already on the provider's own scales.

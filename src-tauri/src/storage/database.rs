@@ -1087,57 +1087,67 @@ pub fn get_device_tts_stats(device_id: &str) -> Result<TtsCounters, StorageError
 
 /// Get settings
 pub fn get_settings() -> Result<AppSettings, StorageError> {
-    with_db(|conn| {
-        let value: Option<String> = conn
-            .query_row(
-                "SELECT value FROM user_config WHERE key = 'app_settings' LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    with_db(read_settings_from_connection)
+}
 
-        if let Some(json) = value {
-            match serde_json::from_str::<serde_json::Value>(&json) {
-                Ok(mut raw) => {
-                    crate::commands::settings::migrate_llm_custom_endpoints(&mut raw);
-                    crate::commands::settings::migrate_openai_refine_model(&mut raw);
-                    crate::commands::settings::migrate_text_injection_override_restore_flag(
-                        &mut raw,
-                    );
-                    crate::commands::settings::migrate_hotkey_digit_key_codes(&mut raw);
-                    crate::commands::settings::migrate_volcengine_minimal_effort(&mut raw);
-                    crate::commands::settings::migrate_retired_volcengine_default(&mut raw);
-                    crate::commands::settings::migrate_scheduled_model_defaults(&mut raw);
-                    crate::asr::models::migrate_known_model_settings(&mut raw);
-                    crate::commands::settings::migrate_tts_provider_without_system_voice(
-                        &mut raw,
-                    );
-                    match serde_json::from_value::<AppSettings>(raw) {
-                        Ok(mut settings) => {
-                            crate::commands::settings::normalize_text_injection_overrides(
-                                &mut settings,
-                            );
-                            Ok(settings)
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to parse settings, falling back to defaults: {}", e);
-                            Ok(AppSettings::default())
-                        }
+/// Read [`AppSettings`] from an existing database file without opening it for
+/// writing or initializing global storage. Used by CLI tools that share the
+/// desktop app's stored credentials and preferences.
+pub fn load_settings_from_path(path: &Path) -> Result<AppSettings, StorageError> {
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
+    read_settings_from_connection(&conn)
+}
+
+fn read_settings_from_connection(conn: &Connection) -> Result<AppSettings, StorageError> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM user_config WHERE key = 'app_settings' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+    if let Some(json) = value {
+        match serde_json::from_str::<serde_json::Value>(&json) {
+            Ok(mut raw) => {
+                crate::commands::settings::migrate_llm_custom_endpoints(&mut raw);
+                crate::commands::settings::migrate_openai_refine_model(&mut raw);
+                crate::commands::settings::migrate_text_injection_override_restore_flag(&mut raw);
+                crate::commands::settings::migrate_hotkey_digit_key_codes(&mut raw);
+                crate::commands::settings::migrate_volcengine_minimal_effort(&mut raw);
+                crate::commands::settings::migrate_retired_volcengine_default(&mut raw);
+                crate::commands::settings::migrate_scheduled_model_defaults(&mut raw);
+                crate::asr::models::migrate_known_model_settings(&mut raw);
+                crate::commands::settings::migrate_tts_provider_without_system_voice(&mut raw);
+                match serde_json::from_value::<AppSettings>(raw) {
+                    Ok(mut settings) => {
+                        crate::commands::settings::normalize_text_injection_overrides(
+                            &mut settings,
+                        );
+                        Ok(settings)
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to parse settings, falling back to defaults: {}", e);
+                        Ok(AppSettings::default())
                     }
                 }
-                Err(e) => {
-                    log::warn!(
-                        "Failed to parse settings JSON, falling back to defaults: {}",
-                        e
-                    );
-                    Ok(AppSettings::default())
-                }
             }
-        } else {
-            Ok(AppSettings::default())
+            Err(e) => {
+                log::warn!(
+                    "Failed to parse settings JSON, falling back to defaults: {}",
+                    e
+                );
+                Ok(AppSettings::default())
+            }
         }
-    })
+    } else {
+        Ok(AppSettings::default())
+    }
 }
 
 /// Save settings

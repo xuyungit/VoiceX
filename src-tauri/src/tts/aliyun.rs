@@ -32,6 +32,7 @@ use serde_json::{json, Value};
 use super::caption_timeline::{self, CaptionTimeline};
 use super::cloud_playback::{self, PieceStream};
 use super::playback::{negotiate_sample_rate_among, prebuffer_samples, PlaybackHandle};
+use super::render::{collect_piece, require_api_key, PieceSink, RENDER_SAMPLE_RATE};
 use super::{
     cloud_http_client, log_cloud_retry, log_event, piece_limit_for, split_for_backend, CancelToken,
     CloudStreamError, SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
@@ -436,6 +437,39 @@ pub struct AliyunConfig {
     pub instruction: String,
 }
 
+impl AliyunConfig {
+    pub fn from_settings(settings: &crate::commands::settings::AppSettings) -> Self {
+        Self {
+            api_key: settings.aliyun_tts_api_key.clone(),
+            model: settings.aliyun_tts_model.clone(),
+            instruction: settings.aliyun_tts_instruction.clone(),
+        }
+    }
+}
+
+/// Trimmed, not just trim-checked: a designed-voice id is pasted by hand, and
+/// a trailing newline from the console would otherwise reach the service
+/// verbatim and come back as the same 418 a wrong id gets.
+fn voice_for(spec: &ModelSpec, request: &TtsRequest) -> Result<String, String> {
+    match request.voice.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => Ok(id.to_string()),
+        _ => spec
+            .default_voice()
+            .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "{} has no system voices; configure a cloned or designed voice id",
+                    spec.id
+                )
+            }),
+    }
+}
+
+fn instruction_for(spec: &ModelSpec, config: &AliyunConfig) -> Option<String> {
+    Some(config.instruction.trim().to_string())
+        .filter(|instruction| spec.accepts_instruction && !instruction.is_empty())
+}
+
 /// Convert the stored 0.0..=1.0 rate into the provider's own multiplier.
 ///
 /// The stored value is normalized around the macOS engine default of 0.5, shown
@@ -627,21 +661,7 @@ impl AliyunBackend {
         let sample_rate = negotiate_sample_rate_among(spec.sample_rates)
             .map_err(|err| TtsError::Backend(format!("{} ({})", err, err.code())))?;
 
-        // Trimmed, not just trim-checked: a designed-voice id is pasted by
-        // hand, and a trailing newline from the console would otherwise reach
-        // the service verbatim and come back as the same 418 a wrong id gets.
-        let voice = match request.voice.as_deref().map(str::trim) {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => spec
-                .default_voice()
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    TtsError::Backend(format!(
-                        "{} has no system voices; configure a cloned or designed voice id",
-                        spec.id
-                    ))
-                })?,
-        };
+        let voice = voice_for(spec, &request).map_err(TtsError::Backend)?;
         // Pitch is deliberately not sent. `pitch_rate` does apply, but halving
         // it stretched the audio to 4.2x rather than the 2x a resampling pitch
         // shift would give, so what it actually changes is unclear and the
@@ -662,8 +682,7 @@ impl AliyunBackend {
         // the request rejected outright; the `min` only guards a future spec
         // whose two limits drift past each other. Split before anything
         // starts, so `progress` can name the piece the sink is on.
-        let instruction = Some(config.instruction.trim().to_string())
-            .filter(|instruction| spec.accepts_instruction && !instruction.is_empty());
+        let instruction = instruction_for(spec, &config);
 
         let (split_limit, caption_limit) = piece_plan(spec, request.piece_limit);
         let written = cloud_playback::split_pieces(&request.text, split_limit, &self.pieces);
@@ -763,6 +782,49 @@ impl AliyunBackend {
 
         Ok(())
     }
+}
+
+/// Synthesize `request` to MP3 pieces for a file instead of the speakers.
+///
+/// Same model spec, number-spacing cleanup and per-model piece budget as
+/// [`AliyunBackend::begin`]; caption timestamps are not requested.
+pub(crate) async fn render(
+    config: AliyunConfig,
+    request: &TtsRequest,
+    token: &CancelToken,
+    sink: &mut PieceSink<'_>,
+) -> Result<(), String> {
+    require_api_key(&config.api_key)?;
+    let spec = spec_for(&config.model);
+    let voice = voice_for(spec, request)?;
+    let speed = speed_from_normalized(request.rate);
+    let instruction = instruction_for(spec, &config);
+    let (split_limit, _) = piece_plan(spec, request.piece_limit);
+    let written = split_for_backend(&request.text, split_limit);
+    let total = written.len();
+    for (index, raw) in written.iter().enumerate() {
+        let piece = SentPiece::new(index, raw, None);
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let outcome = stream_audio_with_retry(
+            &config.api_key,
+            spec,
+            &Synthesis {
+                text: &piece.text,
+                voice: &voice,
+                sample_rate: RENDER_SAMPLE_RATE,
+                rate: speed,
+                instruction: instruction.as_deref(),
+                word_timestamps: false,
+            },
+            &tx,
+            None,
+            token,
+        )
+        .await;
+        drop(tx);
+        sink(index, total, raw, collect_piece(outcome, rx)?)?;
+    }
+    Ok(())
 }
 
 /// How a read is split into requests, and the caption size when the service

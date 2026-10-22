@@ -25,6 +25,7 @@ pub mod mac_say;
 pub mod mac_system;
 pub mod mimo;
 pub mod playback;
+pub mod render;
 pub mod volcengine;
 
 use std::sync::atomic::{AtomicU64, Ordering};

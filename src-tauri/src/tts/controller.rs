@@ -97,12 +97,13 @@ fn lingers_after_read(captions: bool, shown: Option<&SpeechProgress>) -> bool {
     !captions || shown.is_some()
 }
 
-/// Settings values selecting a cloud backend.
-const PROVIDER_VOLCENGINE: &str = "volcengine";
-const PROVIDER_ALIYUN: &str = "aliyun";
-const PROVIDER_MIMO: &str = "mimo";
-const PROVIDER_AZURE: &str = "azure";
-const PROVIDER_EDGE: &str = "edge";
+/// Settings values selecting a cloud backend. Public so the file renderer
+/// ([`super::render`]) dispatches on the same strings the settings store.
+pub const PROVIDER_VOLCENGINE: &str = "volcengine";
+pub const PROVIDER_ALIYUN: &str = "aliyun";
+pub const PROVIDER_MIMO: &str = "mimo";
+pub const PROVIDER_AZURE: &str = "azure";
+pub const PROVIDER_EDGE: &str = "edge";
 
 /// What a reading session does with its text before speaking it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -553,10 +554,7 @@ impl TtsController {
                     .ok()
                     .and_then(|slot| slot.clone());
                 if let (Some(cloud), Some(settings)) = (cloud, settings) {
-                    cloud.apply_config(VolcengineConfig {
-                        api_key: settings.volc_tts_api_key.clone(),
-                        resource_id: settings.volc_tts_resource_id.clone(),
-                    });
+                    cloud.apply_config(VolcengineConfig::from_settings(settings));
                     return Some(cloud as Arc<dyn TtsBackend>);
                 }
                 log_event("backend_fallback", &[("provider", provider.to_string())]);
@@ -567,11 +565,7 @@ impl TtsController {
                     // The model has to be applied here and not only at speak
                     // time: it decides which voice list the settings page shows
                     // and which text limit the truncation uses.
-                    cloud.apply_config(AliyunConfig {
-                        api_key: settings.aliyun_tts_api_key.clone(),
-                        model: settings.aliyun_tts_model.clone(),
-                        instruction: settings.aliyun_tts_instruction.clone(),
-                    });
+                    cloud.apply_config(AliyunConfig::from_settings(settings));
                     return Some(cloud as Arc<dyn TtsBackend>);
                 }
                 log_event("backend_fallback", &[("provider", provider.to_string())]);
@@ -579,10 +573,7 @@ impl TtsController {
             PROVIDER_MIMO => {
                 let cloud = self.inner.mimo.lock().ok().and_then(|slot| slot.clone());
                 if let (Some(cloud), Some(settings)) = (cloud, settings) {
-                    cloud.apply_config(MimoConfig {
-                        api_key: settings.mimo_tts_api_key.clone(),
-                        instruction: settings.mimo_tts_instruction.clone(),
-                    });
+                    cloud.apply_config(MimoConfig::from_settings(settings));
                     return Some(cloud as Arc<dyn TtsBackend>);
                 }
                 log_event("backend_fallback", &[("provider", provider.to_string())]);
@@ -590,10 +581,7 @@ impl TtsController {
             PROVIDER_AZURE => {
                 let cloud = self.inner.azure.lock().ok().and_then(|slot| slot.clone());
                 if let (Some(cloud), Some(settings)) = (cloud, settings) {
-                    cloud.apply_config(AzureConfig {
-                        api_key: settings.azure_tts_api_key.clone(),
-                        region: settings.azure_tts_region.clone(),
-                    });
+                    cloud.apply_config(AzureConfig::from_settings(settings));
                     return Some(cloud as Arc<dyn TtsBackend>);
                 }
                 log_event("backend_fallback", &[("provider", provider.to_string())]);
@@ -1262,7 +1250,17 @@ fn apply_translate_voice_override(settings: &mut AppSettings) -> Option<String> 
         .get(&key)
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())?;
-    let slot = match settings.tts_provider_type.as_str() {
+    *provider_voice_slot(settings) = voice.clone();
+    Some(voice)
+}
+
+/// The settings field holding the voice of the selected provider (and, for
+/// Aliyun, of the selected model) — the one field [`voice_request`] reads the
+/// voice from. Writing through it is how a voice chosen elsewhere (the
+/// translate override, the file renderer's `--voice`) reaches a request
+/// without either learning the per-provider field names.
+pub fn provider_voice_slot(settings: &mut AppSettings) -> &mut String {
+    match settings.tts_provider_type.as_str() {
         PROVIDER_VOLCENGINE => &mut settings.volc_tts_speaker,
         PROVIDER_ALIYUN => {
             if settings.aliyun_tts_model == aliyun::MODEL_QWEN_AUDIO {
@@ -1281,9 +1279,7 @@ fn apply_translate_voice_override(settings: &mut AppSettings) -> Option<String> 
         PROVIDER_AZURE => &mut settings.azure_tts_voice,
         PROVIDER_EDGE => &mut settings.edge_tts_voice,
         _ => &mut settings.system_tts_voice_id,
-    };
-    *slot = voice.clone();
-    Some(voice)
+    }
 }
 
 /// Keep the translation where the settings say to: the clipboard, history,
@@ -1430,7 +1426,7 @@ fn uses_say_voice(settings: &AppSettings) -> bool {
 /// An empty voice id means "backend default", which is not the same as a voice
 /// literally named "". For the system provider that default is `say` without
 /// `-v`, not AVSpeech's locale compact voice.
-fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
+pub fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
     let (voice, rate, volume, pitch) = match settings.tts_provider_type.as_str() {
         PROVIDER_EDGE => (
             settings.edge_tts_voice.clone(),

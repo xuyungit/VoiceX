@@ -5,11 +5,20 @@ description = "A cross-platform voice workspace for your desktop: dictate, trans
 authors = ["VoiceX Contributors"]
 license = "MIT"
 edition = "2021"
+default-run = "voicex"
 
 [lib]
 name = "voicex_lib"
 # Desktop only (macOS/Windows): the bin links the rlib; staticlib/cdylib are only needed for iOS/Android.
 crate-type = ["rlib"]
+
+[[bin]]
+name = "voicex"
+path = "src/main.rs"
+
+[[bin]]
+name = "voicex-tts"
+path = "src/bin/voicex_tts.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -35,6 +44,9 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 # Database
 rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Atomic MP3 file export with exclusive temporary files on macOS and Windows.
+tempfile = "3"
 
 # Clipboard
 arboard = "3"

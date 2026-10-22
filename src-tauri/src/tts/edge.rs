@@ -26,6 +26,7 @@ use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error as WsError
 use super::caption_timeline::{self, CaptionTimeline};
 use super::cloud_playback::{self, PieceStream};
 use super::playback::{negotiate_sample_rate_among, prebuffer_samples, PlaybackHandle};
+use super::render::{collect_piece, PieceSink};
 use super::{
     cloud_http_client, log_cloud_retry, log_event, split_for_backend, CancelToken,
     CloudStreamError, SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
@@ -169,6 +170,31 @@ fn split_requests(text: &str, voice: &str, rate: f32, pitch: i32) -> Result<Vec<
     Ok(pieces)
 }
 
+/// Prepared synthesis pieces and voice parameters shared by playback and file
+/// rendering.
+fn prepare_pieces(request: &TtsRequest) -> Result<(String, f32, i32, Vec<String>), String> {
+    if request
+        .text
+        .chars()
+        .any(|c| c < ' ' && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        return Err("Text contains a control character unsupported by Edge SSML".to_string());
+    }
+    let voice = request
+        .voice
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or(default_voice())
+        .to_string();
+    let pace = speed(request.rate);
+    let pitch = request.pitch_hz.unwrap_or(0).clamp(-100, 100);
+    let pieces = split_requests(&request.text, &voice, pace, pitch)?;
+    if pieces.is_empty() {
+        return Err("Nothing to speak".to_string());
+    }
+    Ok((voice, pace, pitch, pieces))
+}
+
 #[derive(Deserialize)]
 struct VoiceRecord {
     #[serde(rename = "ShortName")]
@@ -269,31 +295,11 @@ impl EdgeBackend {
             .read
             .lock()
             .map_err(|_| TtsError::Backend("Edge read lock is poisoned".to_string()))? = None;
-        if request
-            .text
-            .chars()
-            .any(|c| c < ' ' && !matches!(c, '\n' | '\r' | '\t'))
-        {
-            return Err(TtsError::Backend(
-                "Text contains a control character unsupported by Edge SSML".to_string(),
-            ));
-        }
+        let (voice, pace, pitch, pieces) =
+            prepare_pieces(&request).map_err(TtsError::Backend)?;
         let rate = negotiate_sample_rate_among(&[48_000, 44_100, STREAM_RATE])
             .map_err(|e| TtsError::Backend(e.to_string()))?;
-        let voice = request
-            .voice
-            .as_deref()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or(default_voice())
-            .to_string();
-        let pace = speed(request.rate);
-        let pitch = request.pitch_hz.unwrap_or(0).clamp(-100, 100);
         let caption_limit = request.piece_limit.unwrap_or(DEFAULT_CAPTION_CHARS);
-        let pieces =
-            split_requests(&request.text, &voice, pace, pitch).map_err(TtsError::Backend)?;
-        if pieces.is_empty() {
-            return Err(TtsError::Backend("Nothing to speak".to_string()));
-        }
         let read = Arc::new(EdgeRead::new(rate));
         *self
             .read
@@ -413,6 +419,35 @@ impl TtsBackend for EdgeBackend {
         let timeline = read.timeline.lock().ok()?;
         caption_timeline::progress(&read.speaking, &timeline, &read.playback)
     }
+}
+
+/// Synthesize `request` to MP3 pieces for a file instead of the speakers.
+pub(crate) async fn render(
+    request: &TtsRequest,
+    token: &CancelToken,
+    sink: &mut PieceSink<'_>,
+) -> Result<(), String> {
+    let (voice, pace, pitch, pieces) = prepare_pieces(request)?;
+    let clock = EdgeClock::default();
+    let timeline = Mutex::new(CaptionTimeline::new(STREAM_RATE));
+    let caption_limit = request.piece_limit.unwrap_or(DEFAULT_CAPTION_CHARS);
+    let total = pieces.len();
+    for (index, piece) in pieces.iter().enumerate() {
+        let (tx, rx) = mpsc::channel();
+        let synthesis = Synthesis {
+            text: piece,
+            voice: &voice,
+            rate: pace,
+            pitch,
+            index,
+            timeline: &timeline,
+            caption_limit,
+        };
+        let outcome = stream_with_retry(&synthesis, &tx, token, &clock).await;
+        drop(tx);
+        sink(index, total, piece, collect_piece(outcome, rx)?)?;
+    }
+    Ok(())
 }
 
 struct Synthesis<'a> {

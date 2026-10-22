@@ -21,9 +21,10 @@ use serde::Serialize;
 
 use super::cloud_playback::{self, PieceStream};
 use super::playback::{negotiate_sample_rate, prebuffer_samples, PlaybackHandle};
+use super::render::{collect_piece, require_api_key, PieceSink, RENDER_SAMPLE_RATE};
 use super::{
-    cloud_http_client, log_cloud_retry, piece_limit_for, CancelToken, CloudStreamError,
-    SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
+    cloud_http_client, log_cloud_retry, piece_limit_for, split_for_backend, CancelToken,
+    CloudStreamError, SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
 };
 
 const ENDPOINT: &str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
@@ -62,6 +63,24 @@ pub fn default_speaker() -> &'static str {
 pub struct VolcengineConfig {
     pub api_key: String,
     pub resource_id: String,
+}
+
+impl VolcengineConfig {
+    pub fn from_settings(settings: &crate::commands::settings::AppSettings) -> Self {
+        Self {
+            api_key: settings.volc_tts_api_key.clone(),
+            resource_id: settings.volc_tts_resource_id.clone(),
+        }
+    }
+}
+
+/// The speaker a request names, or the default one.
+fn speaker_for(request: &TtsRequest) -> String {
+    request
+        .voice
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| default_speaker().to_string())
 }
 
 #[derive(Serialize)]
@@ -211,11 +230,7 @@ impl VolcengineBackend {
         let sample_rate = negotiate_sample_rate()
             .map_err(|err| TtsError::Backend(format!("{} ({})", err, err.code())))?;
 
-        let speaker = request
-            .voice
-            .clone()
-            .filter(|id| !id.trim().is_empty())
-            .unwrap_or_else(|| default_speaker().to_string());
+        let speaker = speaker_for(&request);
         // Volcengine has no pitch parameter; the settings page hides that row
         // for cloud providers (plan §5.4).
         let speech_rate = speech_rate_from_normalized(request.rate);
@@ -313,6 +328,39 @@ impl VolcengineBackend {
 
         Ok(())
     }
+}
+
+/// Synthesize `request` to MP3 pieces for a file instead of the speakers.
+///
+/// Same pieces, speaker and rate as [`VolcengineBackend::begin`]; only the
+/// sample rate is fixed rather than negotiated with an output device.
+pub(crate) async fn render(
+    config: VolcengineConfig,
+    request: &TtsRequest,
+    token: &CancelToken,
+    sink: &mut PieceSink<'_>,
+) -> Result<(), String> {
+    require_api_key(&config.api_key)?;
+    let speaker = speaker_for(request);
+    let speech_rate = speech_rate_from_normalized(request.rate);
+    let pieces = split_for_backend(&request.text, piece_limit_for(request.piece_limit, MAX_CHARS));
+    let total = pieces.len();
+    for (index, piece) in pieces.iter().enumerate() {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let outcome = stream_audio_with_retry(
+            &config,
+            piece,
+            &speaker,
+            RENDER_SAMPLE_RATE,
+            speech_rate,
+            &tx,
+            token,
+        )
+        .await;
+        drop(tx);
+        sink(index, total, piece, collect_piece(outcome, rx)?)?;
+    }
+    Ok(())
 }
 
 /// Stream one synthesis response, forwarding decoded audio bytes to `tx`.
