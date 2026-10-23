@@ -63,6 +63,8 @@ impl SonioxClient {
         }
 
         let stream_rate: u32 = 16_000;
+        // Validate before opening a connection; never clamp legacy settings.
+        let mut config_msg = build_soniox_config_message(&self.config, stream_rate)?;
         let diagnostics_enabled = self.config.enable_diagnostics;
         let ws_url = resolve_soniox_ws_url();
         let injected_fault = SonioxFaultMode::from_env();
@@ -105,10 +107,6 @@ impl SonioxClient {
             )
             .in_phase(AsrPhase::Handshake));
         }
-
-        // Build initial configuration message
-        // Ref: https://soniox.com/docs/stt/api-reference/websocket-api
-        let mut config_msg = build_soniox_config_message(&self.config, stream_rate);
 
         // Language hints — comma-separated string → JSON array
         if !self.config.soniox_language.is_empty() {
@@ -574,7 +572,15 @@ fn build_soniox_ws_request(ws_url: &str, api_key: &str) -> Result<Request, AsrEr
     Ok(request)
 }
 
-fn build_soniox_config_message(config: &AsrConfig, stream_rate: u32) -> Value {
+fn build_soniox_config_message(config: &AsrConfig, stream_rate: u32) -> Result<Value, AsrError> {
+    // https://soniox.com/docs/api-reference/stt/websocket-api
+    if let Some(delay) = config.soniox_max_endpoint_delay_ms {
+        if !(500..=3000).contains(&delay) {
+            return Err(AsrError::ConnectionFailed(format!(
+                "Invalid configuration: Soniox max_endpoint_delay_ms={delay}; expected 500–3000 ms. Update this value in Soniox settings or clear it to use the service default."
+            )).in_phase(AsrPhase::Connect));
+        }
+    }
     let mut config_msg = json!({
         "model": config.soniox_model,
         "enable_endpoint_detection": true,
@@ -587,7 +593,7 @@ fn build_soniox_config_message(config: &AsrConfig, stream_rate: u32) -> Value {
         config_msg["max_endpoint_delay_ms"] = json!(max_delay_ms);
     }
 
-    config_msg
+    Ok(config_msg)
 }
 
 #[cfg(test)]
@@ -616,7 +622,7 @@ mod tests {
     fn soniox_config_contains_no_credential() {
         let mut config = AsrConfig::default();
         config.soniox_api_key = "fake-key-never-in-json".into();
-        let payload = build_soniox_config_message(&config, 16_000);
+        let payload = build_soniox_config_message(&config, 16_000).unwrap();
         assert!(payload.get("api_key").is_none());
         assert!(!payload.to_string().contains(&config.soniox_api_key));
         assert_eq!(payload["model"], config.soniox_model);
@@ -687,7 +693,9 @@ mod tests {
                 let request = build_soniox_ws_request(&url, &config.soniox_api_key).unwrap();
                 let (mut ws, _) = connect_async(request).await.unwrap();
                 ws.send(Message::Text(
-                    build_soniox_config_message(&config, 16_000).to_string(),
+                    build_soniox_config_message(&config, 16_000)
+                        .unwrap()
+                        .to_string(),
                 ))
                 .await
                 .unwrap();
@@ -772,19 +780,58 @@ mod tests {
     fn soniox_config_omits_endpoint_delay_when_unset() {
         let config = AsrConfig::default();
 
-        let payload = build_soniox_config_message(&config, 16_000);
+        let payload = build_soniox_config_message(&config, 16_000).unwrap();
 
         assert!(payload.get("max_endpoint_delay_ms").is_none());
     }
 
     #[test]
     fn soniox_config_includes_endpoint_delay_when_set() {
+        for delay in [500, 2000, 3000] {
+            let mut config = AsrConfig::default();
+            config.soniox_max_endpoint_delay_ms = Some(delay);
+            let payload = build_soniox_config_message(&config, 16_000).unwrap();
+            assert_eq!(payload["max_endpoint_delay_ms"].as_u64(), Some(delay as u64));
+        }
+    }
+
+    #[tokio::test]
+    async fn soniox_invalid_endpoint_delay_stops_before_connect_and_releases_receiver() {
         let mut config = AsrConfig::default();
-        config.soniox_max_endpoint_delay_ms = Some(10_000);
+        config.provider_type = AsrProviderType::Soniox;
+        config.soniox_api_key = "fake-key".into();
+        config.soniox_max_endpoint_delay_ms = Some(3001);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let error = SonioxClient::new(config)
+            .stream_session(
+                16_000,
+                1,
+                rx,
+                tokio_util::sync::CancellationToken::new(),
+                vec![],
+                |_| panic!("invalid config must not emit transcription events"),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("max_endpoint_delay_ms=3001"));
+        assert_eq!(error.phase(), Some(AsrPhase::Connect));
+        assert!(tx.is_closed());
+    }
 
-        let payload = build_soniox_config_message(&config, 16_000);
-
-        assert_eq!(payload["max_endpoint_delay_ms"].as_u64(), Some(10_000));
+    #[test]
+    fn soniox_config_rejects_invalid_endpoint_delay_without_changing_it() {
+        for delay in [0, 499, 3001, 10_000, 120_000, u32::MAX] {
+            let mut config = AsrConfig::default();
+            config.soniox_max_endpoint_delay_ms = Some(delay);
+            let error = build_soniox_config_message(&config, 16_000).unwrap_err();
+            assert!(error.to_string().contains(&format!("max_endpoint_delay_ms={delay}")));
+            assert!(error.to_string().contains("500–3000"));
+            assert!(error.to_string().contains("clear it"));
+            let failure = AsrFailure::from_error(AsrProviderType::Soniox, &error);
+            assert_eq!(failure.kind, AsrFailureKind::Config);
+            assert!(!failure.retryable);
+            assert_eq!(config.soniox_max_endpoint_delay_ms, Some(delay));
+        }
     }
 }
 

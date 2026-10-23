@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { isValidSonioxEndpointDelay } from '../../utils/sonioxSettings'
 import AsrModelSelect from './AsrModelSelect.vue'
 import { NInput, NInputNumber } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
@@ -67,11 +68,14 @@ const sonioxMaxEndpointDelayMs = computed({
         <div class="field-text">
           <div class="field-label">{{ t('asr.sonioxMaxEndpointDelay') }}</div>
           <div class="field-note">{{ t('asr.sonioxMaxEndpointDelayNote') }}</div>
+          <div v-if="!isValidSonioxEndpointDelay(sonioxMaxEndpointDelayMs)" class="field-note" role="alert">
+            {{ t('asr.sonioxMaxEndpointDelayInvalid', { value: sonioxMaxEndpointDelayMs }) }}
+          </div>
         </div>
         <NInputNumber
           v-model:value="sonioxMaxEndpointDelayMs"
-          :min="0"
-          :max="120000"
+          :validator="isValidSonioxEndpointDelay"
+          :status="isValidSonioxEndpointDelay(sonioxMaxEndpointDelayMs) ? undefined : 'error'"
           :placeholder="t('asr.serviceDefault')"
           class="field-control short"
           clearable
