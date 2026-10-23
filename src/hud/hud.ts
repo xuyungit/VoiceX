@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import zhCN from "../i18n/locales/zh-CN";
 import enUS from "../i18n/locales/en-US";
 import { isWindows } from "../utils/platform";
+import { trimCaptionPunctuation } from "../utils/text";
 
 const statusIcon = document.getElementById("statusIcon");
 const countdown = document.getElementById("countdown");
@@ -797,9 +798,12 @@ function handleAudioSpectrumUpdate(bands: number[] | undefined) {
 function renderTranscript() {
   const showError = currentMode === "error";
   // An error is carried in the transcript slots whatever the layout.
+  // A read caption is a subtitle: the mark that closes it closes nothing, so
+  // it goes before the line is laid out (and before it is measured for the
+  // ellipsis). Only here — what reaches the engine keeps its punctuation.
   const rawText =
     isCaptionMode() && !showError
-      ? captionText.trim()
+      ? trimCaptionPunctuation(captionText)
       : partialText.trim() || lastNonEmptyText.trim();
   const batchWaveMode = isBatchWaveMode();
   const compactBatchMode = isCompactBatchMode() && !showError;
