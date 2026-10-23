@@ -10,9 +10,10 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use crate::commands::settings::AppSettings;
-use crate::llm::LLMConfig;
+use crate::llm::{correction_timeout_for_text, LLMConfig};
 use crate::services::llm_service::{build_llm_config_for_key, LLM_PROVIDER_FOLLOW};
 
 use super::aliyun::{self, AliyunConfig};
@@ -22,10 +23,16 @@ use super::controller::{
     PROVIDER_MIMO, PROVIDER_VOLCENGINE,
 };
 use super::edge;
-use super::llm_stage::{fill_translate_prompt, run_llm_stage, LlmStageError, TRANSLATE_MAX_CHARS};
+use super::llm_stage::{
+    fill_translate_prompt, run_llm_stage_attempt, wait_before_retry, LlmStageError,
+    TRANSLATE_MAX_CHARS,
+};
 use super::mimo::{self, MimoConfig};
 use super::volcengine::{self, VolcengineConfig};
-use super::{split_for_backend, SessionSlot, TtsRequest};
+use super::{split_for_backend, CancelToken, SessionSlot, TtsRequest};
+
+const LLM_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
+const MAX_LLM_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// Sample rate requested from cloud providers when rendering to a file.
 ///
@@ -99,6 +106,14 @@ pub enum RenderEvent<'a> {
     LlmDone {
         input_chars: usize,
         output_chars: usize,
+    },
+    LlmRetry {
+        index: usize,
+        total: usize,
+        attempt: usize,
+        max_attempts: usize,
+        delay: Duration,
+        reason: String,
     },
     TtsPiece {
         index: usize,
@@ -367,7 +382,35 @@ pub fn optimize_text_for_speech(
             total,
             chars: piece_trimmed.chars().count(),
         });
-        let reply = run_llm_stage(config.clone(), system_prompt, piece_trimmed, &token)?;
+        let reply = run_piece_with_retry(
+            config,
+            system_prompt,
+            piece_trimmed,
+            &token,
+            correction_timeout_for_text(piece_trimmed),
+            |attempt, delay, reason| {
+                on_event(RenderEvent::LlmRetry {
+                    index,
+                    total,
+                    attempt,
+                    max_attempts: LLM_RETRY_DELAYS.len() + 1,
+                    delay,
+                    reason,
+                });
+            },
+        )
+        .map_err(|(attempts, source)| {
+            if source == LlmStageError::Cancelled {
+                source
+            } else {
+                LlmStageError::ChunkFailed {
+                    index,
+                    total,
+                    attempts,
+                    source: Box::new(source),
+                }
+            }
+        })?;
         outputs.push(reply);
     }
 
@@ -377,6 +420,46 @@ pub fn optimize_text_for_speech(
         output_chars: joined.chars().count(),
     });
     Ok(joined)
+}
+
+fn run_piece_with_retry(
+    config: &LLMConfig,
+    prompt: &str,
+    text: &str,
+    token: &CancelToken,
+    timeout: Duration,
+    mut on_retry: impl FnMut(usize, Duration, String),
+) -> Result<String, (usize, LlmStageError)> {
+    let mut attempt = 1;
+    loop {
+        let failure = match run_llm_stage_attempt(config.clone(), prompt, text, token, timeout) {
+            Ok(reply) => return Ok(reply),
+            Err(failure) => failure,
+        };
+        let delay = LLM_RETRY_DELAYS.get(attempt - 1).copied();
+        if !failure.is_retryable() || delay.is_none() {
+            return Err((attempt, failure.into_stage_error()));
+        }
+        let delay = delay
+            .unwrap()
+            .max(failure.retry_after().unwrap_or_default());
+        // Do not ignore a provider's long Retry-After and send early. Report
+        // the failure when its required wait exceeds this bounded retry policy.
+        if delay > MAX_LLM_RETRY_DELAY {
+            return Err((
+                attempt,
+                LlmStageError::Failed(format!(
+                    "{}; provider requested a retry wait of {} seconds, above the {} second limit",
+                    failure.into_stage_error(),
+                    delay.as_secs(),
+                    MAX_LLM_RETRY_DELAY.as_secs()
+                )),
+            ));
+        }
+        on_retry(attempt + 1, delay, failure.retry_reason());
+        wait_before_retry(token, delay).map_err(|error| (attempt, error))?;
+        attempt += 1;
+    }
 }
 
 /// Synthesize `request` with the chosen cloud provider and stream each piece's
@@ -493,6 +576,148 @@ pub(crate) fn collect_piece(
 mod tests {
     use super::*;
     use crate::commands::settings::CustomLlmEndpoint;
+
+    /// Script a real HTTP endpoint so retry tests exercise response parsing
+    /// and typed error propagation, not a second version of the retry loop.
+    fn serve_replies(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (
+        LLMConfig,
+        Receiver<serde_json::Value>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{BufRead, BufReader, Read};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            for (status, body) in replies {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "request did not arrive"
+                            );
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut size = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((key, value)) = line.split_once(':') {
+                        if key.eq_ignore_ascii_case("content-length") {
+                            size = value.trim().parse().unwrap();
+                        }
+                    }
+                }
+                let mut request = vec![0; size];
+                reader.read_exact(&mut request).unwrap();
+                tx.send(serde_json::from_slice(&request).unwrap()).unwrap();
+                write!(stream, "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let mut config = LLMConfig::default();
+        config.base_url = format!("http://{address}/v1");
+        config.api_key = "fixture-only".to_string();
+        (config, rx, worker)
+    }
+
+    const FIRST_REPLY: &str =
+        r#"{"choices":[{"message":{"content":"first"},"finish_reason":"stop"}]}"#;
+    const SECOND_REPLY: &str =
+        r#"{"choices":[{"message":{"content":"second"},"finish_reason":"stop"}]}"#;
+
+    #[test]
+    fn only_the_failed_piece_is_retried_and_its_output_is_appended_once() {
+        let (config, requests, worker) =
+            serve_replies(vec![(200, FIRST_REPLY), (503, "busy"), (200, SECOND_REPLY)]);
+        let text = format!("{}尾", "字".repeat(TRANSLATE_MAX_CHARS));
+        let mut retries = Vec::new();
+        let result = optimize_text_for_speech(&config, "prepare", &text, |event| {
+            if let RenderEvent::LlmRetry {
+                index,
+                attempt,
+                reason,
+                ..
+            } = event
+            {
+                retries.push((index, attempt, reason));
+            }
+        })
+        .unwrap();
+        worker.join().unwrap();
+        let requests: Vec<_> = requests.into_iter().collect();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["messages"][1]["content"], "字".repeat(5000));
+        assert_eq!(requests[1]["messages"][1]["content"], "尾");
+        assert_eq!(requests[1], requests[2]);
+        assert_eq!(result, "first\n\nsecond");
+        assert_eq!(retries, vec![(1, 2, "HTTP 503".to_string())]);
+    }
+
+    #[test]
+    fn retry_budget_exhaustion_reports_the_failed_chunk() {
+        let (config, requests, worker) = serve_replies(vec![(503, "busy"); 3]);
+        let result = optimize_text_for_speech(&config, "prepare", "hello", |_| {});
+        worker.join().unwrap();
+        assert_eq!(requests.into_iter().count(), 3);
+        assert!(matches!(
+            result,
+            Err(LlmStageError::ChunkFailed {
+                index: 0,
+                total: 1,
+                attempts: 3,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn authentication_failure_is_not_retried() {
+        let (config, requests, worker) = serve_replies(vec![(401, "invalid key")]);
+        let result = optimize_text_for_speech(&config, "prepare", "hello", |_| {});
+        worker.join().unwrap();
+        assert_eq!(requests.into_iter().count(), 1);
+        assert!(matches!(
+            result,
+            Err(LlmStageError::ChunkFailed { attempts: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn cancellation_during_backoff_prevents_the_next_attempt() {
+        let (config, requests, worker) = serve_replies(vec![(503, "busy")]);
+        let slot = SessionSlot::default();
+        let token = slot.claim();
+        let result = run_piece_with_retry(
+            &config,
+            "prepare",
+            "hello",
+            &token,
+            Duration::from_secs(1),
+            |_, _, _| {
+                slot.release();
+            },
+        );
+        worker.join().unwrap();
+        assert_eq!(requests.into_iter().count(), 1);
+        assert_eq!(result, Err((1, LlmStageError::Cancelled)));
+    }
 
     fn custom_endpoint(id: &str) -> CustomLlmEndpoint {
         CustomLlmEndpoint {

@@ -86,7 +86,9 @@ impl LLMClient {
                 return self.correct_with_gemini(system_prompt, user_message).await;
             }
             LLMProviderType::Anthropic => {
-                return self.correct_with_anthropic(system_prompt, user_message).await;
+                return self
+                    .correct_with_anthropic(system_prompt, user_message)
+                    .await;
             }
             _ => {}
         }
@@ -274,11 +276,16 @@ impl LLMClient {
                 started_at.elapsed().as_millis(),
                 e
             );
-            LLMError::HttpError(e.to_string())
+            LLMError::HttpError(e)
         })?;
 
         let headers_ms = started_at.elapsed().as_millis();
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_retry_after);
         let bytes = response.bytes().await.map_err(|e| {
             log::info!(
                 "LLM body read failed after {}ms (headers={}ms): {}",
@@ -286,7 +293,18 @@ impl LLMClient {
                 headers_ms,
                 e
             );
-            LLMError::HttpError(e.to_string())
+            if status.is_success() {
+                LLMError::HttpError(e)
+            } else {
+                // A broken error body must not turn a known permanent status
+                // (e.g. 401) into a retryable transport failure, or lose 429's
+                // Retry-After advice.
+                LLMError::HttpStatus {
+                    status: status.as_u16(),
+                    body: format!("failed to read error response: {e}"),
+                    retry_after,
+                }
+            }
         })?;
         let total_ms = started_at.elapsed().as_millis();
         let body_text = String::from_utf8_lossy(&bytes).to_string();
@@ -307,6 +325,7 @@ impl LLMClient {
             return Err(LLMError::HttpStatus {
                 status: status.as_u16(),
                 body: body_text,
+                retry_after,
             });
         }
 
@@ -323,10 +342,14 @@ pub enum LLMError {
     InvalidRequest(String),
 
     #[error("HTTP error: {0}")]
-    HttpError(String),
+    HttpError(#[source] reqwest::Error),
 
     #[error("HTTP status {status}: {body}")]
-    HttpStatus { status: u16, body: String },
+    HttpStatus {
+        status: u16,
+        body: String,
+        retry_after: Option<std::time::Duration>,
+    },
 
     #[error("Invalid response: {0}")]
     InvalidResponse(String),
@@ -345,6 +368,52 @@ pub enum LLMError {
     /// There is no reply to use, and an empty one would read as "no change".
     #[error("The model declined the request: {0}")]
     Refused(String),
+}
+
+impl LLMError {
+    /// Classification only: callers choose whether and how often to retry.
+    pub(crate) fn is_retryable(&self) -> bool {
+        match self {
+            Self::HttpError(error) => {
+                error.is_connect() || error.is_timeout() || error.is_request() || error.is_body()
+            }
+            Self::HttpStatus { status, .. } => {
+                matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504 | 529)
+            }
+            Self::EmptyResponse => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::HttpStatus { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
+    /// Progress must not echo response bodies, documents or credential URLs.
+    pub(crate) fn retry_reason(&self) -> String {
+        match self {
+            Self::HttpStatus { status, .. } => format!("HTTP {status}"),
+            Self::HttpError(_) => "network request failed".to_string(),
+            Self::EmptyResponse => "empty reply".to_string(),
+            _ => "LLM request failed".to_string(),
+        }
+    }
+}
+
+fn parse_retry_after(value: &str) -> Option<std::time::Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(std::time::Duration::from_secs(seconds));
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    Some(
+        (date.with_timezone(&chrono::Utc) - chrono::Utc::now())
+            .to_std()
+            .unwrap_or_default(),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,9 +507,7 @@ fn anthropic_reply_text(parsed: AnthropicResponse) -> Result<String, LLMError> {
             let category = details
                 .and_then(|d| d.category.as_deref())
                 .unwrap_or("uncategorized");
-            let explanation = details
-                .and_then(|d| d.explanation.as_deref())
-                .unwrap_or("");
+            let explanation = details.and_then(|d| d.explanation.as_deref()).unwrap_or("");
             return Err(LLMError::Refused(
                 format!("{category} {explanation}").trim().to_string(),
             ));
@@ -760,6 +827,83 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn retry_classification_keeps_permanent_failures_visible() {
+        for (status, retryable) in [
+            (400, false),
+            (401, false),
+            (403, false),
+            (404, false),
+            (408, true),
+            (422, false),
+            (429, true),
+            (500, true),
+            (501, false),
+            (502, true),
+            (503, true),
+            (504, true),
+            (529, true),
+        ] {
+            let error = super::LLMError::HttpStatus {
+                status,
+                body: "private response body".to_string(),
+                retry_after: None,
+            };
+            assert_eq!(error.is_retryable(), retryable, "HTTP {status}");
+            assert_eq!(error.retry_reason(), format!("HTTP {status}"));
+        }
+        assert!(super::LLMError::EmptyResponse.is_retryable());
+        for error in [
+            super::LLMError::Truncated,
+            super::LLMError::Refused("refused".to_string()),
+            super::LLMError::InvalidConfig("invalid".to_string()),
+            super::LLMError::InvalidResponse("not JSON".to_string()),
+        ] {
+            assert!(!error.is_retryable());
+        }
+    }
+
+    #[test]
+    fn retry_after_accepts_seconds_and_http_dates() {
+        use std::time::Duration;
+        assert_eq!(
+            super::parse_retry_after(" 12 "),
+            Some(Duration::from_secs(12))
+        );
+        assert_eq!(super::parse_retry_after("-1"), None);
+        assert_eq!(super::parse_retry_after("invalid"), None);
+        let future = chrono::Utc::now() + chrono::Duration::seconds(30);
+        let delay = super::parse_retry_after(&future.to_rfc2822()).unwrap();
+        assert!(delay > Duration::from_secs(27) && delay <= Duration::from_secs(30));
+        assert_eq!(
+            super::parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn disconnect_before_response_headers_is_retryable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (connection, _) = listener.accept().unwrap();
+            drop(connection);
+        });
+        let error = tauri::async_runtime::block_on(async {
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .post(format!("http://{address}/v1/chat/completions"))
+                .body("{}")
+                .send()
+                .await
+                .unwrap_err()
+        });
+        worker.join().unwrap();
+        assert!(super::LLMError::HttpError(error).is_retryable());
+    }
+
+    #[test]
     fn parses_responses_sse_delta_stream() {
         let sse = concat!(
             "event: response.created\n",
@@ -878,7 +1022,10 @@ mod tests {
             "event: response.incomplete\n",
             "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
         );
-        assert!(matches!(parse_responses_sse(sse), Err(super::LLMError::Truncated)));
+        assert!(matches!(
+            parse_responses_sse(sse),
+            Err(super::LLMError::Truncated)
+        ));
     }
 
     #[test]
@@ -950,9 +1097,13 @@ mod tests {
     fn malformed_extra_body_is_a_configuration_error() {
         let mut payload = serde_json::json!({ "model": "m" });
         let not_json = super::merge_extra_body(&mut payload, Some("{enable_thinking: false}"));
-        assert!(matches!(not_json, Err(super::LLMError::InvalidConfig(msg)) if msg.contains("valid JSON")));
+        assert!(
+            matches!(not_json, Err(super::LLMError::InvalidConfig(msg)) if msg.contains("valid JSON"))
+        );
         let not_object = super::merge_extra_body(&mut payload, Some("[1, 2]"));
-        assert!(matches!(not_object, Err(super::LLMError::InvalidConfig(msg)) if msg.contains("JSON object")));
+        assert!(
+            matches!(not_object, Err(super::LLMError::InvalidConfig(msg)) if msg.contains("JSON object"))
+        );
         assert_eq!(payload, serde_json::json!({ "model": "m" }));
     }
 }

@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use crate::llm::{correction_timeout_for_text, LLMClient, LLMConfig};
+use crate::llm::{correction_timeout_for_text, LLMClient, LLMConfig, LLMError};
 
 use super::{log_event, CancelToken};
 
@@ -127,9 +127,18 @@ pub enum LlmStageError {
     /// The chosen provider has no API key.
     NotConfigured,
     /// The selection is over [`TRANSLATE_MAX_CHARS`].
-    TooLong { chars: usize },
+    TooLong {
+        chars: usize,
+    },
     Timeout(Duration),
     Failed(String),
+    /// Document rendering failed without publishing a partial prepared text.
+    ChunkFailed {
+        index: usize,
+        total: usize,
+        attempts: usize,
+        source: Box<LlmStageError>,
+    },
     /// The session was stopped or superseded while the request was in flight.
     /// Not a HUD error: the user asked for it.
     Cancelled,
@@ -142,6 +151,7 @@ impl LlmStageError {
             LlmStageError::TooLong { .. } => "text_too_long",
             LlmStageError::Timeout(_) => "llm_timeout",
             LlmStageError::Failed(_) => "llm_failed",
+            LlmStageError::ChunkFailed { source, .. } => source.code(),
             LlmStageError::Cancelled => "cancelled",
         }
     }
@@ -159,6 +169,16 @@ impl std::fmt::Display for LlmStageError {
                 write!(f, "no reply within {} ms", after.as_millis())
             }
             LlmStageError::Failed(detail) => write!(f, "{detail}"),
+            LlmStageError::ChunkFailed {
+                index,
+                total,
+                attempts,
+                source,
+            } => write!(
+                f,
+                "chunk {}/{total} failed after {attempts} attempt(s): {source}",
+                index + 1
+            ),
             LlmStageError::Cancelled => write!(f, "cancelled"),
         }
     }
@@ -180,10 +200,60 @@ pub fn run_llm_stage(
     text: &str,
     token: &CancelToken,
 ) -> Result<String, LlmStageError> {
-    if !config.is_valid() {
-        return Err(LlmStageError::NotConfigured);
-    }
     let timeout = correction_timeout_for_text(text);
+    run_llm_stage_attempt(config, system_prompt, text, token, timeout)
+        .map_err(LlmAttemptError::into_stage_error)
+}
+
+/// Keep request failure metadata until the document renderer has decided
+/// whether another attempt is useful. Interactive reads still use one attempt.
+#[derive(Debug)]
+pub(crate) enum LlmAttemptError {
+    Stage(LlmStageError),
+    Request(LLMError),
+}
+
+impl LlmAttemptError {
+    pub(crate) fn is_retryable(&self) -> bool {
+        match self {
+            Self::Stage(LlmStageError::Timeout(_)) => true,
+            Self::Request(error) => error.is_retryable(),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Request(error) => error.retry_after(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn retry_reason(&self) -> String {
+        match self {
+            Self::Stage(error) => error.to_string(),
+            Self::Request(error) => error.retry_reason(),
+        }
+    }
+
+    pub(crate) fn into_stage_error(self) -> LlmStageError {
+        match self {
+            Self::Stage(error) => error,
+            Self::Request(error) => LlmStageError::Failed(error.to_string()),
+        }
+    }
+}
+
+pub(crate) fn run_llm_stage_attempt(
+    config: LLMConfig,
+    system_prompt: &str,
+    text: &str,
+    token: &CancelToken,
+    timeout: Duration,
+) -> Result<String, LlmAttemptError> {
+    if !config.is_valid() {
+        return Err(LlmAttemptError::Stage(LlmStageError::NotConfigured));
+    }
     let client = LLMClient::new(config);
 
     tauri::async_runtime::block_on(async {
@@ -191,21 +261,31 @@ pub fn run_llm_stage(
             // `biased` so a session already cancelled on entry is reported as
             // such rather than racing the request's first poll.
             biased;
-            _ = wait_for_cancel(token) => Err(LlmStageError::Cancelled),
+            _ = wait_for_cancel(token) => Err(LlmAttemptError::Stage(LlmStageError::Cancelled)),
             result = tokio::time::timeout(timeout, client.complete(system_prompt, text)) => {
                 match result {
                     Ok(Ok(reply)) => {
                         let reply = reply.trim().to_string();
                         if reply.is_empty() {
-                            Err(LlmStageError::Failed("empty reply".to_string()))
+                            Err(LlmAttemptError::Request(LLMError::EmptyResponse))
                         } else {
                             Ok(reply)
                         }
                     }
-                    Ok(Err(err)) => Err(LlmStageError::Failed(err.to_string())),
-                    Err(_) => Err(LlmStageError::Timeout(timeout)),
+                    Ok(Err(err)) => Err(LlmAttemptError::Request(err)),
+                    Err(_) => Err(LlmAttemptError::Stage(LlmStageError::Timeout(timeout))),
                 }
             }
+        }
+    })
+}
+
+pub(crate) fn wait_before_retry(token: &CancelToken, delay: Duration) -> Result<(), LlmStageError> {
+    tauri::async_runtime::block_on(async {
+        tokio::select! {
+            biased;
+            _ = wait_for_cancel(token) => Err(LlmStageError::Cancelled),
+            _ = tokio::time::sleep(delay) => Ok(()),
         }
     })
 }
@@ -218,7 +298,12 @@ async fn wait_for_cancel(token: &CancelToken) {
 
 /// Structured log line for one stage outcome, so the three paths — done,
 /// failed, cancelled — are told apart in the same place.
-pub fn log_stage_result(stage: &str, input_chars: usize, elapsed_ms: u128, result: &Result<String, LlmStageError>) {
+pub fn log_stage_result(
+    stage: &str,
+    input_chars: usize,
+    elapsed_ms: u128,
+    result: &Result<String, LlmStageError>,
+) {
     match result {
         Ok(text) => log_event(
             "llm_stage_ok",
@@ -247,6 +332,39 @@ mod tests {
     use super::*;
     use crate::llm::{LLMApiMode, LLMProviderType, ReasoningChoice};
     use crate::tts::SessionSlot;
+
+    #[test]
+    fn cancellation_interrupts_a_retry_wait() {
+        let slot = std::sync::Arc::new(SessionSlot::default());
+        let token = slot.claim();
+        let cancel = slot.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            cancel.release();
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(
+            wait_before_retry(&token, Duration::from_secs(10)),
+            Err(LlmStageError::Cancelled)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn chunk_failure_keeps_the_original_error_code_and_location() {
+        let error = LlmStageError::ChunkFailed {
+            index: 1,
+            total: 5,
+            attempts: 3,
+            source: Box::new(LlmStageError::Timeout(Duration::from_secs(60))),
+        };
+        assert_eq!(error.code(), "llm_timeout");
+        assert_eq!(
+            error.to_string(),
+            "chunk 2/5 failed after 3 attempt(s): no reply within 60000 ms"
+        );
+    }
 
     #[test]
     fn placeholders_are_filled_with_the_prompt_facing_names() {
@@ -317,8 +435,14 @@ mod tests {
         // `llmPrompts.ts` holds the copy the settings page resets to; if the
         // two drift, "restore default" silently changes the prompt.
         let ts = include_str!("../../../src/utils/llmPrompts.ts");
-        assert!(ts.contains(DEFAULT_TRANSLATE_PROMPT_ZH), "zh translate prompt differs from llmPrompts.ts");
-        assert!(ts.contains(DEFAULT_PREPROCESS_PROMPT_ZH), "zh preprocess prompt differs from llmPrompts.ts");
+        assert!(
+            ts.contains(DEFAULT_TRANSLATE_PROMPT_ZH),
+            "zh translate prompt differs from llmPrompts.ts"
+        );
+        assert!(
+            ts.contains(DEFAULT_PREPROCESS_PROMPT_ZH),
+            "zh preprocess prompt differs from llmPrompts.ts"
+        );
     }
 
     #[test]
@@ -433,7 +557,13 @@ mod tests {
         log_stage_result("translate", text.chars().count(), elapsed, &result);
         let reply = result.expect("translate stage");
         eprintln!("elapsed_ms={elapsed}\n--- input ---\n{text}\n--- output ---\n{reply}");
-        assert!(!reply.contains("##"), "markdown heading marks leaked into the reply");
-        assert!(!reply.contains("https://"), "the URL was read out instead of dropped");
+        assert!(
+            !reply.contains("##"),
+            "markdown heading marks leaked into the reply"
+        );
+        assert!(
+            !reply.contains("https://"),
+            "the URL was read out instead of dropped"
+        );
     }
 }

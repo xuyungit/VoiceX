@@ -299,6 +299,20 @@ fn run() -> Result<(), String> {
                     } => {
                         eprintln!("[llm] done ({input_chars} -> {output_chars} chars)");
                     }
+                    RenderEvent::LlmRetry {
+                        index,
+                        total,
+                        attempt,
+                        max_attempts,
+                        delay,
+                        reason,
+                    } => {
+                        eprintln!(
+                            "[llm] chunk {}/{total}: {reason}; retry {attempt}/{max_attempts} in {:.1}s",
+                            index + 1,
+                            delay.as_secs_f64()
+                        );
+                    }
                     _ => {}
                 }
             })
