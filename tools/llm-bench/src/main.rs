@@ -12,6 +12,9 @@ mod feedback;
 mod decisions;
 mod typesafe;
 mod uncertainty;
+mod quick;
+mod quick_judge;
+mod quick_standings;
 
 #[path = "../../../src-tauri/src/gemini.rs"]
 mod gemini;
@@ -156,6 +159,9 @@ struct Cases {
 #[serde(deny_unknown_fields)]
 struct TestCase {
     name: String,
+    /// Basic requirement for the quick whole-text check, also printed for manual inspection.
+    #[serde(default)]
+    focus: String,
     /// What the recognizer produced.
     input: String,
     /// What the speaker said. The sites to correct are the differences between the two.
@@ -700,33 +706,57 @@ async fn main() {
         }
         return;
     }
+    let selection = quick::Selection::parse(&args).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    if let Some(source) = get_arg(&args, "--standings-results") {
+        if args.iter().filter(|a| a.starts_with("--")).any(|a| !matches!(a.as_str(), "--standings-results" | "--config" | "--log-dir" | "--standings")) {
+            eprintln!("--standings-results accepts only --config, --log-dir and --standings; it makes no model calls");
+            std::process::exit(1);
+        }
+        let config_path = get_arg(&args, "--config").unwrap_or_else(|| "config.toml".into());
+        let lens = StandingLens::from_eval(&load_config(&config_path).eval);
+        let directory = get_arg(&args, "--log-dir").unwrap_or_else(|| "runs".into());
+        let destination = get_arg(&args, "--standings").unwrap_or_else(|| "quick-standings.json".into());
+        quick_standings::from_file(Path::new(&source), Path::new(&directory), Path::new(&destination), &lens)
+            .unwrap_or_else(|e| { eprintln!("Quick standings failed: {e}"); std::process::exit(1); });
+        return;
+    }
     let run_started = Instant::now();
     let config_path = get_arg(&args, "--config").unwrap_or("config.toml".into());
-    let cases_path = get_arg(&args, "--cases").unwrap_or("test_cases.toml".into());
-    let rounds_override: Option<usize> = get_arg(&args, "--rounds").and_then(|s| s.parse().ok());
+    let cases_path = get_arg(&args, "--cases").unwrap_or_else(|| selection.default_cases().into());
+    let rounds_override: Option<usize> = get_arg(&args, "--rounds")
+        .map(|s| s.parse().expect("--rounds must be a positive integer"));
     let output_path = get_arg(&args, "--output");
     let skip_judge = args.iter().any(|a| a == "--skip-judge");
     let skip_standings = args.iter().any(|a| a == "--no-standings");
     let standings_path =
-        get_arg(&args, "--standings").unwrap_or("standings.json".into());
+        get_arg(&args, "--standings").unwrap_or_else(|| if selection.full { "standings.json" } else { "quick-standings.json" }.into());
     let log_dir = get_arg(&args, "--log-dir").unwrap_or("runs".into());
     let skip_log = args.iter().any(|a| a == "--no-log");
 
     let config = load_config(&config_path);
-    let cases = load_cases(&cases_path);
+    let cases = Cases {
+        case: selection.select_cases(load_cases(&cases_path).case).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }),
+    };
     let eval_cfg = config.eval.clone();
 
     if skip_log {
         runlog::disable();
     }
 
-    let rounds = rounds_override.or(config.rounds).unwrap_or(3);
+    let rounds = rounds_override.unwrap_or_else(|| if selection.full { config.rounds.unwrap_or(3) } else { 1 });
     let concurrency = match get_arg(&args, "--concurrency") {
         Some(value) => value.parse::<usize>().expect("--concurrency must be a positive integer"),
         None => config.concurrency.unwrap_or(6),
     };
     let reviewer_concurrency = eval_cfg.reviewer_concurrency.unwrap_or(4);
-    assert!(rounds > 0 && concurrency > 0 && reviewer_concurrency > 0, "rounds and concurrency limits must be positive");
+    assert!(rounds > 0 && concurrency > 0, "rounds and concurrency limits must be positive");
+    assert!(!selection.full || reviewer_concurrency > 0, "reviewer concurrency must be positive");
     let prompt_source = config.prompt_source.clone().unwrap_or_else(|| "config".into());
     let (prompt, dictionary, app_db) = match prompt_source.as_str() {
         "config" => {
@@ -755,6 +785,39 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let providers = selection.select_providers(config.provider)
+        .unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
+    if !selection.full {
+        if skip_judge {
+            eprintln!("Use --speed-only to skip quick basic checks, or --full for legacy evaluation.");
+            std::process::exit(1);
+        }
+        quick::run(quick::Run {
+            args: &args, config_path: &config_path, cases_path: &cases_path,
+            providers, cases: &cases.case, prompt: &prompt, dictionary: &dictionary,
+            prompt_source: &prompt_source, app_db, rounds, concurrency,
+            judge: config.judge, judge_concurrency: eval_cfg.typesafe_concurrency.unwrap_or(8),
+            speed_only: selection.speed_only,
+            standings_path: &standings_path, skip_standings, standing_lens: StandingLens::from_eval(&eval_cfg),
+            log_dir: &log_dir, output_path: output_path.as_deref(), skip_log,
+            dry_run: selection.dry_run || args.iter().any(|a| a == "--check-cases"),
+        }).await.unwrap_or_else(|e| {
+            eprintln!("Quick comparison failed: {e}");
+            std::process::exit(1);
+        });
+        return;
+    }
+    eval_cfg.validate().unwrap_or_else(|e| {
+        eprintln!("{config_path}: {e}");
+        std::process::exit(1);
+    });
+    if selection.dry_run {
+        quick::print_plan(&providers, &cases.case, rounds, true);
+        return;
+    }
     let finalize = get_arg(&args, "--finalize-results");
     let rescore = get_arg(&args, "--rescore-results");
     let saved_scores = rescore.clone().or_else(|| finalize.clone());
@@ -784,8 +847,7 @@ async fn main() {
         );
     }
 
-    let providers: Vec<Provider> = config
-        .provider
+    let providers: Vec<Provider> = providers
         .into_iter()
         .map(resolve_provider)
         .collect();
@@ -1842,19 +1904,11 @@ async fn main() {
             },
         });
         let json = serde_json::to_string_pretty(&payload).unwrap();
-        let feedback_path = run_dir.as_ref().map(|dir| dir.join("feedback.html"))
-            .or_else(|| output_path.as_ref().map(|p| Path::new(p).with_extension("feedback.html")));
         let results = run_dir.iter().map(|dir| dir.join(runlog::RESULTS_FILE)).chain(output_path.map(Into::into));
         for path in results {
             match std::fs::write(&path, &json) {
                 Ok(()) => println!("Results written to {}", path.display()),
                 Err(e) => eprintln!("Failed to write {}: {}", path.display(), e),
-            }
-        }
-        if let Some(path) = feedback_path {
-            match feedback::write(&path, &payload) {
-                Ok(()) => println!("Feedback page: {}", path.display()),
-                Err(error) => eprintln!("Feedback page failed: {error}"),
             }
         }
     }
@@ -2888,17 +2942,13 @@ fn load_config(path: &str) -> Config {
         eprintln!("Failed to parse {}: {}", path, e);
         std::process::exit(1);
     });
-    if let Err(e) = config.eval.validate() {
-        eprintln!("{}: {}", path, e);
-        std::process::exit(1);
-    }
     config
 }
 
 fn load_cases(path: &str) -> Cases {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Failed to read {}: {}", path, e);
-        eprintln!("Hint: copy test_cases.example.toml to test_cases.toml");
+        eprintln!("Hint: copy quick_cases.example.toml to quick_cases.toml for quick comparisons; test_cases.example.toml to test_cases.toml for --full");
         std::process::exit(1);
     });
     parse_cases(&text).unwrap_or_else(|e| {
@@ -2982,7 +3032,13 @@ struct QualityProbe {
 
 fn parse_cases(text: &str) -> Result<Cases, String> {
     let cases: Cases = toml::from_str(text).map_err(|e| e.to_string())?;
+    if cases.case.is_empty() { return Err("at least one case is required".into()); }
+    let mut names = std::collections::HashSet::new();
     for case in &cases.case {
+        if case.name.trim().is_empty() || !names.insert(&case.name) {
+            return Err(format!("case names must be nonempty and unique: {:?}", case.name));
+        }
+        if case.input.trim().is_empty() { return Err(format!("case {:?} has empty input", case.name)); }
         if let Some(pin) = case.pin.iter().find(|p| !(0.0..=1.0).contains(&p.credit)) {
             return Err(format!(
                 "case `{}`: pin {:?} → {:?} has credit {}, which must be between 0 and 1",
@@ -3050,7 +3106,15 @@ fn print_usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --config <path>    Provider config file (default: config.toml)");
-    eprintln!("  --cases <path>     Test cases file (default: test_cases.toml)");
+    eprintln!("  Default: quick comparison, one round, all configured providers; results and ranking in the terminal.");
+    eprintln!("  --speed-only      Rank successful calls by speed without a quality judge");
+    eprintln!("  --full            Opt in to the legacy full evaluation, judges and standings");
+    eprintln!("  --quick           Explicit quick mode (cannot combine with full evaluation actions)");
+    eprintln!("  --cases <path>     Cases file (quick: quick_cases.toml; full: test_cases.toml)");
+    eprintln!("  --provider <name> Select an exact configured provider name; repeat to compare candidates");
+    eprintln!("  --all-providers   Compare every configured provider (the default)");
+    eprintln!("  --case <name>     Select a named case; repeat to retest only specific cases");
+    eprintln!("  --dry-run         Show selected cases, providers and call count, then stop without API calls");
     eprintln!("  --check-cases      Print every case's correction tasks and cleanup sites, then stop; no API calls");
     eprintln!("  --rescore-results <path> Reuse saved correction credits/outputs/timings; judge new quality rules");
     eprintln!("  --replay <path>    Rejudge saved results; reuse outputs/timing, make no correction calls");
@@ -3063,14 +3127,15 @@ fn print_usage() {
         "  --fidelity-rubric <path> Override only the probe question; normal scoring unchanged"
     );
     eprintln!("  --finalize-results <path> Resolve saved pending hallucination checks; retain base scores/timings");
-    eprintln!("  --rounds <n>       Override number of rounds per test");
+    eprintln!("  --rounds <n>       Rounds per case (quick: 1; full: config rounds, otherwise 3)");
     eprintln!("  --concurrency <n>  Concurrent providers (default 6); one model at one URL origin runs serially");
     eprintln!("  --feedback-results <path> Build a local feedback page from saved results; no API calls");
     eprintln!("  --output <path>    Write a copy of the detailed results JSON here as well");
     eprintln!("  --log-dir <path>   Where each run keeps its report.log (the console output) and results.json,");
     eprintln!("                     in a directory named after the start time (default: runs)");
-    eprintln!("  --no-log           Keep nothing on disk for this run");
-    eprintln!("  --standings <path> Rolling championship file (default: standings.json)");
+    eprintln!("  --no-log           Skip the per-run directory; use --no-standings to also skip rolling history");
+    eprintln!("  --standings <path> Rolling table file (quick: quick-standings.json; full: standings.json)");
+    eprintln!("  --standings-results <path> Show saved quick results and update rolling standings; no API calls");
     eprintln!("  --no-standings     Do not update or print long-term standings");
     eprintln!("  --skip-judge       Do not call the judge; missing judgments score zero with visible evaluation errors");
     eprintln!("  -h, --help         Show this help");
@@ -3493,7 +3558,27 @@ fn award_points(ranked: &[RankedProvider], scheme: StandingScheme) -> Vec<RunPla
     out
 }
 
-fn windowed_runs(runs: &[StandingRun], window: usize) -> &[StandingRun] {
+/// The rolling points calculation is shared by full and quick benchmarks; their histories stay separate.
+trait StandingPlace {
+    fn provider(&self) -> &str;
+    fn place(&self) -> usize;
+    fn points(&self) -> f64;
+}
+trait StandingRace {
+    type Place: StandingPlace;
+    fn places(&self) -> &[Self::Place];
+}
+impl StandingPlace for RunPlace {
+    fn provider(&self) -> &str { &self.provider }
+    fn place(&self) -> usize { self.place }
+    fn points(&self) -> f64 { self.points }
+}
+impl StandingRace for StandingRun {
+    type Place = RunPlace;
+    fn places(&self) -> &[RunPlace] { &self.ranking }
+}
+
+fn windowed_runs<T>(runs: &[T], window: usize) -> &[T] {
     if window == 0 || runs.len() <= window {
         runs
     } else {
@@ -3501,10 +3586,10 @@ fn windowed_runs(runs: &[StandingRun], window: usize) -> &[StandingRun] {
     }
 }
 
-fn consecutive_absences(provider: &str, runs: &[StandingRun]) -> usize {
+fn consecutive_absences<R: StandingRace>(provider: &str, runs: &[R]) -> usize {
     let mut n = 0usize;
     for run in runs.iter().rev() {
-        if run.ranking.iter().any(|p| p.provider == provider) {
+        if run.places().iter().any(|p| p.provider() == provider) {
             break;
         }
         n += 1;
@@ -3512,7 +3597,7 @@ fn consecutive_absences(provider: &str, runs: &[StandingRun]) -> usize {
     n
 }
 
-fn recompute_standings(runs: &[StandingRun], lens: &StandingLens) -> Vec<StandingEntry> {
+fn recompute_standings<R: StandingRace>(runs: &[R], lens: &StandingLens) -> Vec<StandingEntry> {
     struct Acc {
         total_points: f64,
         runs: usize,
@@ -3529,8 +3614,8 @@ fn recompute_standings(runs: &[StandingRun], lens: &StandingLens) -> Vec<Standin
     let mut map: HashMap<String, Acc> = HashMap::new();
 
     for run in runs {
-        for p in &run.ranking {
-            let acc = map.entry(p.provider.clone()).or_insert(Acc {
+        for p in run.places() {
+            let acc = map.entry(p.provider().to_owned()).or_insert(Acc {
                 total_points: 0.0,
                 runs: 0,
                 best_place: usize::MAX,
@@ -3540,19 +3625,19 @@ fn recompute_standings(runs: &[StandingRun], lens: &StandingLens) -> Vec<Standin
                 weight_sum: 0.0,
                 window_runs: 0,
             });
-            acc.total_points += p.points;
+            acc.total_points += p.points();
             acc.runs += 1;
-            acc.best_place = acc.best_place.min(p.place);
-            acc.last_place = p.place;
-            acc.last_points = p.points;
+            acc.best_place = acc.best_place.min(p.place());
+            acc.last_place = p.place();
+            acc.last_points = p.points();
         }
     }
 
     for (age_from_end, run) in windowed.iter().rev().enumerate() {
         let weight = decay.powi(age_from_end as i32);
-        for p in &run.ranking {
-            if let Some(acc) = map.get_mut(&p.provider) {
-                acc.decayed_points += p.points * weight;
+        for p in run.places() {
+            if let Some(acc) = map.get_mut(p.provider()) {
+                acc.decayed_points += p.points() * weight;
                 acc.weight_sum += weight;
                 acc.window_runs += 1;
             }
@@ -4774,7 +4859,7 @@ model = "m"
     #[test]
     fn a_case_set_is_known_by_its_inputs_references_and_pins_not_names_or_order() {
         let case = |name: &str, input: &str, expected: &str| TestCase {
-            name: name.into(), input: input.into(), expected: expected.into(), all_or_nothing: false, pin: Vec::new(),
+            name: name.into(), focus: String::new(), input: input.into(), expected: expected.into(), all_or_nothing: false, pin: Vec::new(),
         };
         let set = [case("a", "下一集", "下一级"), case("b", "cloud md", "CLAUDE.md")];
         let renamed_and_reordered = [case("y", "cloud md", "CLAUDE.md"), case("x", "下一集", "下一级")];

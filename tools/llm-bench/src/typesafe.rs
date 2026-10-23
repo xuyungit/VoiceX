@@ -154,7 +154,7 @@ impl Backend {
     }
 
     /// The questions about one state, each under its id: an ask's kind names its question.
-    fn body(self, model: &str, state: &Value, questions: &[(&str, &Value)]) -> Result<Value, String> {
+    pub(crate) fn body(self, model: &str, state: &Value, questions: &[(&str, &Value)]) -> Result<Value, String> {
         match self {
             Backend::TypeSafe => {
                 let questions: serde_json::Map<String, Value> =
@@ -165,7 +165,7 @@ impl Backend {
         }
     }
 
-    fn read(self, text: &str) -> Result<Reply, String> {
+    pub(crate) fn read(self, text: &str) -> Result<Reply, String> {
         match self {
             Backend::TypeSafe => {
                 let response: Response = serde_json::from_str(text).map_err(|e| e.to_string())?;

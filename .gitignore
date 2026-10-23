@@ -21,7 +21,11 @@ tools/llm-bench/target
 # Local config with credentials (use *.example.toml as template)
 tools/llm-bench/config.toml
 tools/llm-bench/test_cases.toml
+tools/llm-bench/quick_cases.toml
 tools/llm-bench/standings.json
+tools/llm-bench/quick-standings.json
+tools/llm-bench/quick-standings.json.tmp
+tools/llm-bench/quick-standings.json.lock
 tools/llm-bench/.jev_key
 tools/llm-bench/.anthropic_key
 tools/llm-bench/runs

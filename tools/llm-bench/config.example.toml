@@ -6,7 +6,11 @@
 # again later; `--log-dir` moves that, `--no-log` skips it (see --help).
 
 # Global settings
-rounds = 3  # Number of rounds per provider per test case
+# Quick mode tests every [[provider]], once per case, and prints a basic-quality/speed ranking.
+# Use --provider <name> to narrow the list. Configure one [judge] below, or use --speed-only.
+# Quick rolling standings use quick-standings.json; --no-standings disables them.
+# The standing_* settings below control the same points/decay engine in both modes.
+rounds = 3  # Full evaluation only (--full); quick mode defaults to 1 unless --rounds is given
 concurrency = 6  # Independent correction providers in flight; --concurrency overrides this
 # Providers with the same model at the same base URL origin share one lane; other
 # models of one platform run in parallel (Ark and Gemini limit each model). Set the
@@ -57,7 +61,9 @@ Abaqus
 Midas
 """
 
-# --- Scoring version 6 ---
+# --- Legacy full evaluation only (--full), scoring version 10 ---
+# Quick mode uses [judge] for one basic whole-text check per distinct output.
+# It does not use legacy scoring weights or the secondary reviewer.
 # Each case is 100 points, with equal case weight. Average rounds within each case.
 # Correction (30): fixed repair tasks from input/expected. Repeated occurrences of
 # the same dictionary repair share one task; partial repair gets proportional credit.
@@ -66,7 +72,8 @@ Midas
 # Speed (10): measured correction latency only, full at 500 ms and zero at the
 # app's text-dependent timeout (10 s up to 120 chars, 1.5x per doubling, max 60 s).
 # Missing repair credit is confined to that task. A severe hallucination, confirmed
-# by automatic second review, zeros only that output's quality; speed remains.
+# by automatic second review, zeros that output's quality and deducts two more rounds
+# of quality. This legacy penalty is not calibrated to personal preference; speed remains.
 # Failed correction calls score zero everywhere. Evaluator failures remain visible,
 # score zero in the affected component, and never wait for a human to rank models.
 # The judge settles contextual repairs and whole-text fidelity/readability/style outside timing.
@@ -77,7 +84,7 @@ Midas
 # every following key until the next table header.
 # api_key accepts a literal, ${ENV_VAR}, or file:<path>.
 # The judge is one of two decision models; keep exactly one [judge] table.
-# Both ask the same questions (typesafe_questions / quality_questions / rubric).
+# Quick mode asks quick_question.json; full mode asks typesafe_questions / quality_questions / rubric.
 # TypeSafe JEV is the default; the OpenAI Decisions judge is experimental until
 # it matches JEV on the probes (README "Choosing the judge").
 # [judge]
@@ -96,7 +103,7 @@ Midas
 # model = "gpt-6-luna"
 # type = "openai"
 
-# Independent final reviewer, used for severe/ambiguous/missing judge hallucination answers.
+# Full mode only: independent reviewer for severe/ambiguous/missing hallucination answers.
 # Uses the same Provider schema/API modes as correction models. Reasoning is outside latency.
 # Configure a model verified against the severe-hallucination probes before use.
 # [hallucination_reviewer]

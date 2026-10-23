@@ -1,8 +1,113 @@
 # LLM correction benchmark
 
-Copy `config.example.toml` and `test_cases.example.toml` to the local config/cases
-files, then run `cargo run` in this directory. Credentials, run artifacts and
-standings are ignored by Git. Each run saves `report.log` and `results.json`.
+The default is a **short CLI benchmark of every configured model**: three short
+cases, one round, actual outputs and times in the terminal, then the current ranking and rolling standings.
+Copy `config.example.toml` to `config.toml`, fill in provider credentials and
+uncomment one `[judge]`. Copy `quick_cases.example.toml` to `quick_cases.toml`
+and replace the illustrative examples with your own dictations.
+
+```sh
+cargo run -- --dry-run                # inputs, all models and call counts; no API calls
+cargo run                            # all [[provider]] entries × three short cases × 1 round
+cargo run -- --provider "model A" --provider "model B"
+cargo run -- --provider "model A" --case "典型纠错" --rounds 3
+cargo run -- --speed-only             # explicit speed ranking, without quality judgments
+```
+
+The final ranking sorts by **basic passes**, then **successful calls**, then
+**median request time** (descending, descending, ascending). Exactly equal keys
+share a place. Each whole answer receives one `pass / needs_revision / uncertain`
+judgment from the configured judge. `focus` states the basic requirement;
+`expected` illustrates an acceptable correction, not a unique wording or a
+human-validated label. The rubric checks the whole meaning, basic cleanup and
+necessary repairs; it allows equivalent wording and does not fact-check names
+against outside knowledge. The terminal shows the inputs, outputs and each
+judgment, so the ranking can be inspected directly. The content-preservation case
+checks unauthorized name/version substitution, not the position of negation:
+equivalent wording and completing an omitted speech verb are acceptable when
+the rejected and intended entities remain the same. Replacing an intended name
+with a more familiar one fails the basic check, regardless of fluency or speed.
+
+Identical judgments are deduplicated across models/rounds. One request per
+distinct output, concurrency 8 by default (`eval.typesafe_concurrency`), a 15 s
+timeout, no retries, no edit questions and no secondary reviewer. Confidence
+below 0.7 is a visible review hint; it does not rewrite the decision or affect rank.
+This threshold is not a calibrated correctness guarantee. A model with any
+explicitly uncertain/failed judgment is listed
+as **pending**, without a numerical place. Failed/empty correction calls count as
+failures, retain their elapsed times, and cannot earn a basic pass. They are not
+sent to the judge. Successful-call medians/ranges exclude those failed calls.
+
+Each run saves the same terminal output to `report.log`, plus outputs, timings,
+judge rubric/verdicts and ranking in `results.json`. No HTML is generated.
+Quick mode updates `quick-standings.json` and prints a **rolling leaderboard** after
+the current ranking. It reuses the previous points/decay calculation: Borda points
+(N..1, tied positions share their points), recent 10 runs, decay 0.9 by default.
+`eval.standing_scheme`, `standing_window`, `standing_decay`, and
+`standing_retire_after` retain their meanings. The rolling table shows recent
+weighted-average points, change from the preceding cumulative table, and this
+run's place/basic passes. `--no-standings` disables history reads/writes and the
+rolling table; `--standings <path>` selects a different quick history file.
+
+Saved quick rankings under `--log-dir` are imported automatically without model
+calls; duplicate views/copies of one run do not earn extra points. Unchanged files
+are cached so large legacy reports are not reparsed each time. Cases (including
+focus), prompt/dictionary, rounds, model roster/settings recorded in the result,
+judge/rubric/reported version and ranking policy must match within a season.
+Different seasons remain in history and are reported separately. The old full
+benchmark's `standings.json` is preserved separately. A run with pending judgments
+does not earn standings points: missing evaluation is not treated as model failure.
+Changing the case/rubric can therefore start a season with only one comparable run.
+
+Show a saved run and its cumulative standings up to that run, without API calls:
+
+```sh
+cargo run -- --standings-results runs/<run>/results.json
+```
+
+This reads standing settings from the config; it does not load credentials or
+rewrite the saved result. Each live run also embeds its cumulative-table snapshot
+in `results.json`. `--no-log` skips the per-run directory; combine it with
+`--no-standings` to also avoid writing rolling history.
+Private cases, credentials and run artifacts are ignored by Git.
+
+Use one everyday cleanup, one typical repair, and one correct-content preservation
+case. These few samples provide an initial comparison, not a general capability
+leaderboard. Add rounds/cases when needed. Quick mode defaults to one round even
+if the legacy root `rounds` is larger; use `--rounds` to repeat it. Every configured
+provider runs by default; `--provider` narrows the list. The former `quick_providers`
+shortlist is no longer used and can be removed from old configs.
+
+## Full evaluation and targeted regression checks
+
+The previous evaluation pipeline is available with **`--full`**. It uses
+`test_cases.toml`, the config's `rounds` (default 3), all providers unless filtered,
+and the old judges, score formulas and standings. Its rankings are legacy
+diagnostics, not a validated measure of personal preference. Existing cases and
+saved runs are retained.
+
+You can also run a difficult case through quick mode with the same basic check:
+
+```sh
+cargo run -- --cases test_cases.toml --case "case name" --provider "model A"
+cargo run -- --full --no-standings     # all legacy checks, without adding a season entry
+cargo run -- --full --case "case name" --provider "model A" --no-standings
+```
+
+`--replay`, `--rescore-results`, `--finalize-results`, `--probe-fidelity` and
+`--probe-quality` explicitly select the legacy evaluation pipeline too. They
+keep their existing behavior. `--quick` conflicts with those evaluation actions.
+`--skip-judge` remains a legacy full-mode flag; it is not how quick mode works.
+
+Verify quick mode without contacting any model service (Rust unit tests plus a
+local HTTP fixture that checks the real CLI, call counts, failures, empty outputs,
+selection, saved artifacts, rolling history and preserved full-mode standings):
+
+```sh
+cargo test
+cargo build
+uv run python scripts/verify_quick.py
+```
 
 ## The app's prompt and dictionary
 
@@ -20,7 +125,7 @@ prompt or dictionary has since changed in the app.
 Check what a case file will be scored on before spending calls:
 
 ```sh
-cargo run -- --check-cases
+cargo run -- --full --check-cases
 ```
 
 It prints every case's correction tasks (dictionary or semantic, repeats shared)
@@ -39,7 +144,7 @@ not share a quota. Join providers that do share one with
 time is excluded from request latency; saved case/provider/round ordering remains
 unchanged.
 
-The slowest provider of the newest saved run under `--log-dir` starts first, and
+In full mode, the slowest provider of the newest saved run under `--log-dir` starts first, and
 a provider that run did not have starts before it. The stage lasts at least as
 long as its slowest provider, so that one should not start last. On the
 2026-10-10 run this ordering and per-model groups take the simulated correction
@@ -47,8 +152,8 @@ stage from 149 s to about 109 s. `run.execution.start_order` records which run
 the order came from.
 
 ```sh
-cargo run -- --concurrency 6
-cargo run -- --concurrency 1 --no-standings
+cargo run -- --full --concurrency 6
+cargo run -- --full --concurrency 1 --no-standings
 ```
 
 The root `concurrency` config key controls the same limit. `[eval]`
@@ -59,8 +164,8 @@ times and the scheduling policy. Replay preserves recorded request times and
 records its execution mode separately. Parallel wall-time gains are measured
 per run, not guaranteed; endpoints and network conditions can affect latency.
 
-Every saved run also creates **`feedback.html`**, a standalone local page with
-embedded results. Open `runs/<run>/feedback.html`; `src/feedback.html` is the
+The explicit `--feedback-results` export creates **`feedback.html`**, a standalone
+local page with embedded results. Normal CLI runs do not generate it. `src/feedback.html` is the
 source template and contains no cases. The generated page shows
 the raw input and output. Mark **可直接用 / 需要修改 / 明显改错**, optionally add a
 note or preferred wording, and export the feedback JSON (copy text or download;

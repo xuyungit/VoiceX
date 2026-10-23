@@ -1,0 +1,21 @@
+# Copy to quick_cases.toml and replace with three short dictations from your own use.
+# These are illustrative examples, not measured user history or a representative benchmark.
+# `focus` states the basic requirement. `expected` illustrates acceptable meaning, not an exact-match target.
+
+[[case]]
+name = "日常清理"
+focus = "去掉口癖和口吃，保留可能、也许等不确定语气。"
+input = "嗯，这个方案可可能会快一点，但是效果也许不一定更好，我们先试试看。"
+expected = "这个方案可能会快一点，但是效果也许不一定更好，我们先试试看。"
+
+[[case]]
+name = "典型纠错"
+focus = "在有限元语境下，Abacus 应写成词典中的 Abaqus；保留先验证再决定的意图。"
+input = "我们先用 Abacus 做一下这个有限元分析，验证完以后再决定要不要改参数。"
+expected = "我们先用 Abaqus 做一下有限元分析，验证完以后再决定要不要改参数。"
+
+[[case]]
+name = "正确内容保持"
+focus = "保留所指的 GPT 6.1、Luna 和问句，不得因熟悉其他名称而擅自替换。否定位置、语法和标点可自然调整，只要仍表达说的是 GPT 6.1 而不是 GPT 4；不做外部事实核查。"
+input = "我说的是 GPT 6.1，不是 GPT 4。Luna 这个名字先不要改，可以吗？"
+expected = "我说的是 GPT 6.1，不是 GPT 4。Luna 这个名字先不要改，可以吗？"
