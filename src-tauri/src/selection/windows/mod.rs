@@ -34,7 +34,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::foreground_app;
-use crate::selection::windows_rules::elevation_blocks_reading;
+use crate::selection::windows_rules::{elevation_blocks_reading, is_terminal_control};
 use crate::selection::{
     normalize_text, SelectionError, SelectionOutcome, SelectionProbe, SelectionRequest,
     SelectionSource, SelectionTarget,
@@ -152,7 +152,17 @@ pub fn read_selection(
         }
     }
 
-    if !request.allow_clipboard_fallback {
+    let terminal = is_terminal_control(
+        app_info.process_name.as_deref(),
+        probe.focused_subrole.as_deref(),
+    );
+    if terminal {
+        log_event(
+            "selection_copy_skipped",
+            &[("reason", "terminal_interrupt".to_string())],
+        );
+    }
+    if terminal || !request.allow_clipboard_fallback {
         return Err(if uia_reported_empty {
             SelectionError::NoSelection
         } else {

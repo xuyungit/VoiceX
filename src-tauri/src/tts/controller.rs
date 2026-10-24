@@ -899,6 +899,21 @@ impl TtsController {
         // the session is claimed. This runs on the hotkey hook's worker, and a
         // database read is cheap enough not to matter there.
         let mut settings = load_settings();
+        if let Err(err) = validate_read_settings(kind, settings.as_ref()) {
+            // Translation cannot use the selection without an LLM. Refuse
+            // before touching another app or claiming any session resources.
+            log_event(
+                "llm_stage_err",
+                &[
+                    ("stage", "translate".to_string()),
+                    ("phase", "preflight".to_string()),
+                    ("error", err.code().to_string()),
+                    ("detail", err.to_string()),
+                ],
+            );
+            self.show_failure_without_read(kind, err.code());
+            return;
+        }
         if kind == ReadKind::Translate {
             // Applied before the backend is picked: for the system provider
             // the voice id decides between `say` and AVSpeech.
@@ -1127,6 +1142,18 @@ impl TtsController {
             })
             .expect("failed to spawn the TTS read worker");
     }
+}
+
+/// Translation requires the reading feature's selected LLM, even when the
+/// dictation LLM switch is off. Plain reading can proceed without one.
+fn validate_read_settings(kind: ReadKind, settings: Option<&AppSettings>) -> Result<(), LlmStageError> {
+    if kind == ReadKind::Translate {
+        let settings = settings.ok_or(LlmStageError::NotConfigured)?;
+        if !build_llm_config_for_key(settings, &settings.tts_llm_provider_key).is_valid() {
+            return Err(LlmStageError::NotConfigured);
+        }
+    }
+    Ok(())
 }
 
 /// Run the LLM stage the kind calls for, or pass the text through.
@@ -1566,7 +1593,8 @@ mod tests {
 
     use super::super::SessionSlot;
     use super::{
-        is_cloud_provider, voice_request, wait_for_read_to_end, StopReason, TtsController, HUD_POLL,
+        is_cloud_provider, validate_read_settings, voice_request, wait_for_read_to_end, StopReason,
+        TtsController, HUD_POLL,
     };
     use crate::commands::settings::AppSettings;
 
@@ -2144,6 +2172,63 @@ mod tests {
             result,
             Err(LlmStageError::TooLong { chars }) if chars == TRANSLATE_MAX_CHARS + 1
         ));
+    }
+
+    #[test]
+    fn translation_preflight_rejects_fresh_and_unavailable_settings() {
+        assert_eq!(
+            validate_read_settings(ReadKind::Translate, None),
+            Err(LlmStageError::NotConfigured)
+        );
+        let settings = AppSettings::default();
+        assert_eq!(
+            validate_read_settings(ReadKind::Translate, Some(&settings)),
+            Err(LlmStageError::NotConfigured)
+        );
+    }
+
+    #[test]
+    fn translation_preflight_checks_the_reading_provider_and_allows_retry_after_setup() {
+        let mut settings = AppSettings::default();
+        settings.llm_provider_type = "volcengine".to_string();
+        settings.llm_volcengine_api_key = "configured-dictation-key".to_string();
+        settings.tts_llm_provider_key = "openai".to_string();
+        assert_eq!(
+            validate_read_settings(ReadKind::Translate, Some(&settings)),
+            Err(LlmStageError::NotConfigured),
+            "another provider's key must not make translation available"
+        );
+
+        settings.llm_openai_api_key = "configured-reading-key".to_string();
+        assert_eq!(
+            validate_read_settings(ReadKind::Translate, Some(&settings)),
+            Ok(())
+        );
+
+        settings.llm_openai_api_key = "  ".to_string();
+        settings.tts_llm_provider_key = "follow".to_string();
+        assert_eq!(
+            validate_read_settings(ReadKind::Translate, Some(&settings)),
+            Ok(()),
+            "follow must use the active LLM provider"
+        );
+        settings.tts_llm_provider_key = "openai".to_string();
+        assert_eq!(
+            validate_read_settings(ReadKind::Translate, Some(&settings)),
+            Err(LlmStageError::NotConfigured),
+            "whitespace is not an API key"
+        );
+    }
+
+    #[test]
+    fn reading_preflight_does_not_require_an_llm_even_with_optional_preprocessing() {
+        assert_eq!(validate_read_settings(ReadKind::Read, None), Ok(()));
+        let mut settings = AppSettings::default();
+        settings.tts_preprocess_enabled = true;
+        assert_eq!(
+            validate_read_settings(ReadKind::Read, Some(&settings)),
+            Ok(())
+        );
     }
 
     #[test]

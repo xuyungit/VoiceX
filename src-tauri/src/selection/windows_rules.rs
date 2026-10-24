@@ -7,6 +7,29 @@
 
 use super::SelectionError;
 
+/// Ctrl+C is an interrupt in terminals when nothing is selected. Only the
+/// UI Automation path may read those controls; a failed read must not send
+/// a keystroke that can terminate the foreground command or its children.
+pub fn is_terminal_control(process_name: Option<&str>, class_name: Option<&str>) -> bool {
+    process_name.is_some_and(|name| {
+        [
+            "WindowsTerminal.exe",
+            "WindowsTerminalPreview.exe",
+            "OpenConsole.exe",
+            "conhost.exe",
+            "cmd.exe",
+            "powershell.exe",
+            "pwsh.exe",
+        ]
+        .iter()
+        .any(|terminal| name.eq_ignore_ascii_case(terminal))
+    }) || class_name.is_some_and(|name| {
+        ["TermControl", "ConsoleWindowClass"]
+            .iter()
+            .any(|terminal| name.eq_ignore_ascii_case(terminal))
+    })
+}
+
 /// Predefined clipboard formats the snapshot treats specially. Numbers from
 /// `WinUser.h`; spelled out so this file needs no Windows bindings.
 pub mod cf {
@@ -190,6 +213,29 @@ mod tests {
     const UNICODETEXT: u32 = 13;
     const TEXT: u32 = 1;
     const LOCALE: u32 = 16;
+
+    #[test]
+    fn terminal_controls_must_not_receive_a_copy_shortcut() {
+        assert!(is_terminal_control(
+            Some("WindowsTerminal.exe"),
+            Some("TermControl")
+        ));
+        assert!(is_terminal_control(Some("WINDOWSTERMINAL.EXE"), None));
+        assert!(is_terminal_control(Some("OpenConsole.exe"), None));
+        assert!(is_terminal_control(Some("pwsh.exe"), None));
+        assert!(is_terminal_control(None, Some("TermControl")));
+        assert!(is_terminal_control(None, Some("ConsoleWindowClass")));
+    }
+
+    #[test]
+    fn ordinary_controls_keep_copy_compatibility() {
+        assert!(!is_terminal_control(Some("notepad.exe"), Some("Edit")));
+        assert!(!is_terminal_control(
+            Some("msedge.exe"),
+            Some("Chrome_RenderWidgetHostHWND")
+        ));
+        assert!(!is_terminal_control(None, None));
+    }
 
     fn plan_of(plans: &[(u32, FormatPlan)], format: u32) -> FormatPlan {
         plans
