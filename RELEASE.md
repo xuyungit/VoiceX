@@ -25,11 +25,12 @@
 
 ## 版本号同步位置
 
-每次发版时，版本号必须同时更新以下 3 处：
+每次发版时，版本号必须同时更新以下 3 处，并同步 Cargo 锁文件中的主包版本：
 
 - `package.json`
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
+- `src-tauri/Cargo.lock` 中的 `voicex` 包版本
 
 版本 tag 使用 `vX.Y.Z` 格式，例如：
 
@@ -70,6 +71,7 @@ cd ..
 - `package.json`
 - `src-tauri/Cargo.toml`
 - `src-tauri/tauri.conf.json`
+- `src-tauri/Cargo.lock` 中的 `voicex` 包版本
 
 ### 4. 更新变更记录
 
@@ -128,7 +130,7 @@ pnpm mac:setup-signing
 提交信息沿用 conventional commits，建议使用：
 
 ```bash
-git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json CHANGELOG.md README.md README.en.md
+git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json CHANGELOG.md README.md README.en.md README.zh-CN.md
 git commit -m "chore: release vX.Y.Z"
 ```
 
@@ -202,7 +204,7 @@ gh release upload vX.Y.Z /path/to/VoiceX_X.Y.Z_aarch64.dmg --clobber
 - 发布范围已确认
 - `pnpm build` 已通过
 - 如果涉及 `src-tauri/`，`cargo check` 已通过
-- 三处版本号已同步
+- 三处版本号和 Cargo 锁文件中的主包版本已同步
 - `CHANGELOG.md` 已更新
 - README 是否需要更新已确认
 - macOS 已执行 `pnpm mac:build-local`

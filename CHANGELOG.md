@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.4] - 2026-10-24
+
+### Added
+
+- **Command-line MP3 export** — `voicex-tts` converts text and Markdown files to MP3 with the desktop app's TTS and LLM settings. Supports speech cleanup, translation, voice and speed overrides, and saving the prepared text. Output is replaced only after synthesis finishes successfully.
+
+### Changed
+
+- **Subtitle-style reading captions** — larger text in a transparent window that stays fixed between sentences, with placement based on each screen's work area above the Dock or taskbar. Windows captions allow clicks through to the application underneath. Sentence-ending punctuation is simplified for display without changing the text sent to speech synthesis.
+
+### Fixed
+
+- **Text injection** — improved macOS Unicode typing, clipboard format preservation and cancellation during queued input. Dictation follows the application focused when injection starts, including when switching applications during recognition; per-app overrides follow that destination. Restored clipboard bridge paste behavior for remote-desktop clients.
+- **Microsoft Edge reading** — updated synthesis and voice discovery to the service's v2 authentication and consumer speech endpoint.
+- **Translation setup errors** — validate the selected reading LLM before reading the selection; configuration errors keep the caption layout and allow another attempt after setup.
+- **Windows terminal selection** — skip the Ctrl + C compatibility path in recognized terminal controls so reading does not interrupt the running command.
+- **Synced recording counts** — count recordings independently of the usage-event cursor, repair counts from existing history, and avoid counting replayed sync events twice.
+- **Windows right Win key** — recognize the right Windows key and preserve existing saved hotkey bindings.
+- **Soniox endpoint delay** — reject invalid endpoint-delay settings before connecting, with a visible configuration error.
+- **Long-document MP3 preprocessing** — keep the 5000-character LLM split and retry only the failed piece for transient errors, with bounded delays and cancellation.
+
+### Developer tooling
+
+- LLM benchmarks default to quick comparisons, maintain rolling standings and can import saved quick results without new model calls. The previous evaluation pipeline remains available with `--full`.
+
+Windows native selection, right-Win bindings and caption click-through still need verification on a real machine.
+
 ## [0.17.3] - 2026-10-19
 
 ### Added

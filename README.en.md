@@ -55,6 +55,8 @@ from the tray menu. Tray reading on Windows still needs testing on a real machin
 
 > **On Windows** the selection is read through UI Automation, falling back to a
 > synthetic Ctrl + C with the clipboard restored — the same two layers as on macOS.
+> Recognized terminal controls use UI Automation only; VoiceX does not send Ctrl + C
+> there because it can interrupt a running command.
 > There is no system voice on Windows; the default engine there is Microsoft Edge
 > online speech (no key; the text goes to Microsoft's online service), and any other
 > cloud engine can be chosen instead. The default keys use the same modifiers as the
@@ -69,11 +71,36 @@ from the tray menu. Tray reading on Windows still needs testing on a real machin
 | | Detail |
 |---|---|
 | **How text is read** | Straight from the Accessibility API where possible (8–15 ms on macOS; UI Automation on Windows); otherwise a synthetic Command + C (Ctrl + C on Windows), with your clipboard restored afterwards (the compatibility mode; on macOS, switching it off loses Safari and VS Code). If there is still no selection, the **clipboard's** plain text is read instead and the HUD says so. Never in a password field, and content a password manager marks as concealed is never read |
-| **Captions** | On by default. The HUD switches to a text-only caption showing the sentence being spoken, for plain and translated reads alike. The default system voice (`say`) reports no progress, so it keeps the compact HUD |
+| **Captions** | On by default. Larger text, up to two lines, sits in a transparent window whose size stays fixed between sentences. Placement follows each screen's work area above the Dock or taskbar. Sentence-ending punctuation is simplified only for display; synthesis keeps the original text. Works for plain and translated reads. The default system voice (`say`) reports no progress, so it keeps the compact HUD. Windows caption click-through still needs testing on a real machine |
 | **Translate and read** | Its own LLM choice (follow the LLM page, a provider, or a custom endpoint) and optional voices per target language; up to 5000 characters per read. A failed, timed-out or unconfigured LLM is reported on the HUD and **never falls back to reading the untranslated text**. Source and translation are kept on the History page by default (no audio, not synced), and the translation can also be copied to the clipboard |
 | **Tidy before reading** (optional) | Before a plain read, the LLM strips Markdown, HTML markup and link URLs so only the prose is read; if tidying fails, the original is read. The reading and translation prompts read a table copied from a web page as sentences rather than cell by cell |
 | **Speech engines** | The system voice (macOS only; offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS); or, in the cloud, Volcengine Doubao Seed-TTS 2.0, Alibaba Cloud Model Studio (default `qwen-audio-3.1-tts-flash` for longer text at about a sixth of 3.0's price; `qwen-audio-3.0-tts-flash` for its 500+ extra basic voices; `qwen3-tts-flash` for dialect voices; `cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`, the latter taking a Voice Design / cloned `voice_id`), Xiaomi MiMo, Microsoft Azure Speech, or Microsoft Edge online speech (no account or key; voices searchable by language, pitch in Hz, captions timed by the service's sentence and word boundaries; the default engine on Windows). Cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey; long selections are split at sentence boundaries instead of being truncated. Voice, rate and volume are stored per engine; Alibaba Cloud models that accept one also take a plain-language style instruction, by default a calm delivery suited to technical text |
 | **Yields to dictation** | Starting dictation stops reading — otherwise the microphone would record the speech and transcribe it back |
+
+### Export MP3 from the command line
+
+`voicex-tts` turns a text or Markdown file into MP3 using the desktop app's saved
+TTS, voice and LLM settings. Run it from source:
+
+```bash
+# Use Edge online speech directly, without an LLM
+cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --tts edge --no-llm
+
+# Translate to English with the configured reading LLM and save the prepared text
+cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --translate --to en --save-text notes.en.txt -o notes.en.mp3
+```
+
+The default output appends `.mp3` to the input filename, such as `notes.md.mp3`.
+Use `--tts`, `--voice` and `--speed` to override synthesis settings, or `--db` to
+select a settings database; see `--help` for all options. If the desktop app uses
+the system voice, file export uses Edge because the system voice does not return
+MP3 data.
+
+Long-document LLM cleanup and translation use chunks of at most 5000 characters.
+Transient failures retry only the current chunk with visible progress; persistent
+failures report an error. The target MP3 is replaced only after synthesis finishes,
+so a failed export preserves any existing file. Text goes to the selected cloud
+TTS provider and, when cleanup or translation is enabled, the selected LLM.
 
 ### How this differs from the built-in "Speak selection"
 
@@ -216,7 +243,7 @@ Features:
 
 - Global support for clipboard paste and simulated typing modes.
 - Per-app overrides can be created from recent target apps, so standard text fields can keep clipboard paste while editors that are sensitive to paste events can switch to typing.
-- On macOS, VoiceX records the target app when the hotkey starts, reducing the chance that the HUD or main window changes the injection target.
+- Text goes to the application focused when injection starts, so you can switch destinations while recognition runs. Per-app injection overrides follow that destination. On macOS, input waits for physical modifiers to be released and checks cancellation while queued or typing in chunks.
 
 ## History & Statistics
 
@@ -227,6 +254,7 @@ Features:
 - Configurable retention policies for text and audio (7 / 30 / 180 / 365 days, or forever).
 - Overview dashboard: total duration, character count, AI correction calls, average dictation speed; plus a Reading section with plain reads, translated reads, characters read, reading time and the AI calls reads triggered. Each shows the account total alongside this device.
 - Translate-and-read rows appear in History too, but stay on this device.
+- Recording counts are tracked independently of the usage sync cursor. Upgrading repairs missed counts from existing history, and replayed sync events do not count a recording twice.
 
 ## Localization
 
