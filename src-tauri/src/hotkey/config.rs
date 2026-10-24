@@ -141,6 +141,15 @@ impl HotkeyConfiguration {
         }
 
         let key_code = parts[0].parse().ok()?;
+        // Older Windows hooks omitted VK_RWIN from rdev's key table and
+        // persisted it as Unknown(92). Keep those bindings working now that
+        // the hook produces MetaRight (VoiceX code 54). On macOS, raw 92 is
+        // a different key and must retain its meaning.
+        let key_code = if cfg!(target_os = "windows") && key_code == 92 {
+            54
+        } else {
+            key_code
+        };
         let modifiers = parts[1].parse().ok()?;
         let uses_fn = parts.get(2).map(|s| *s == "1").unwrap_or(false);
 
@@ -281,6 +290,27 @@ impl Default for HotkeyConfiguration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_windows_right_win_binding_keeps_matching_the_named_key() {
+        let cfg = HotkeyConfiguration::from_storage("92|0|0").unwrap();
+        if cfg!(target_os = "windows") {
+            assert_eq!(cfg, HotkeyConfiguration::new(54, 0, false));
+            assert!(cfg.is_modifier_only());
+            assert_eq!(cfg.display_string(), "Right Win");
+            assert_eq!(cfg.to_storage(), "54|0|0");
+        } else {
+            assert_eq!(cfg.key_code, 92);
+        }
+        // Right Alt/Option is a separate key on every platform.
+        let alt = HotkeyConfiguration::from_storage("61|0|0").unwrap();
+        assert_eq!(alt.key_code, 61);
+        assert!(alt.is_modifier_only());
+        assert_eq!(
+            alt.display_string(),
+            format!("Right {}", HotkeyConfiguration::alt_display_name())
+        );
+    }
 
     #[test]
     fn the_reading_defaults_differ_per_platform_but_stay_a_pair() {

@@ -1,4 +1,4 @@
-import { isMacOS } from './platform';
+import { isMacOS, isWindows } from './platform';
 
 // Platform-specific display names
 const ctrlDisplayName = isMacOS ? 'Control' : 'Ctrl';
@@ -12,7 +12,9 @@ export function formatHotkey(config: string | null): string | null {
   const parts = config.split('|');
   if (parts.length < 2) return config;
 
-  const keyCode = Number(parts[0]);
+  const storedKeyCode = Number(parts[0]);
+  // Match config.rs: old Windows hooks stored the unmapped VK_RWIN (92).
+  const keyCode = isWindows && storedKeyCode === 92 ? 54 : storedKeyCode;
   const modifiers = Number(parts[1]);
   const usesFn = parts[2] === '1';
   const segments: string[] = [];
