@@ -500,11 +500,16 @@ impl TtsController {
     }
 
     /// Put `code` on the HUD for a read that never started, with the same
-    /// linger as a failed one. No session is claimed: there is nothing to stop.
-    fn show_failure_without_read(&self, kind: ReadKind, code: &str) {
+    /// linger and caption preference as a failed one. No session is claimed:
+    /// there is nothing to stop, but its error still belongs to the TTS HUD.
+    fn show_failure_without_read(&self, kind: ReadKind, code: &str, captions_enabled: bool) {
         let Some(hud) = self.hud() else { return };
         hud.cancel_hide();
-        hud.show(HudPresentation::Batch);
+        hud.show(if captions_enabled {
+            HudPresentation::Caption
+        } else {
+            HudPresentation::Batch
+        });
         hud.emit_caption(None);
         hud.emit_reading(kind.hud_kind(), ReadingSource::Selection, None);
         hud.emit_error(Some(code));
@@ -899,6 +904,7 @@ impl TtsController {
         // the session is claimed. This runs on the hotkey hook's worker, and a
         // database read is cheap enough not to matter there.
         let mut settings = load_settings();
+        let captions_enabled = settings.as_ref().is_some_and(|s| s.tts_captions_enabled);
         if let Err(err) = validate_read_settings(kind, settings.as_ref()) {
             // Translation cannot use the selection without an LLM. Refuse
             // before touching another app or claiming any session resources.
@@ -911,7 +917,7 @@ impl TtsController {
                     ("detail", err.to_string()),
                 ],
             );
-            self.show_failure_without_read(kind, err.code());
+            self.show_failure_without_read(kind, err.code(), captions_enabled);
             return;
         }
         if kind == ReadKind::Translate {
@@ -938,7 +944,7 @@ impl TtsController {
                 "speak_err",
                 &[("error", code.to_string()), ("provider", provider)],
             );
-            self.show_failure_without_read(kind, code);
+            self.show_failure_without_read(kind, code, captions_enabled);
             return;
         };
 
@@ -946,8 +952,7 @@ impl TtsController {
         // pieces and a backend that can say which piece it is on; `say` has
         // no such signal and keeps the compact HUD. Decided here, before the
         // HUD is shown, because the layout is fixed for the session.
-        let piece_limit =
-            caption_piece_limit(settings.as_ref().is_some_and(|s| s.tts_captions_enabled));
+        let piece_limit = caption_piece_limit(captions_enabled);
         let captions = piece_limit.is_some() && backend.reports_progress();
 
         let token = self.inner.session.claim();
