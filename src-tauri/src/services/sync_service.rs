@@ -732,10 +732,10 @@ fn apply_server_event(
                 llm_model_name: record.llm_model_name,
             };
 
-            if let Ok(inserted) = storage::insert_history_record_with_stats(&local_record, false) {
-                if inserted {
-                    emit_history_updated(app, &local_record.id);
-                }
+            let inserted = storage::insert_history_record_with_stats(&local_record, false)
+                .map_err(|err| format!("Sync insert failed id={} err={}", local_record.id, err))?;
+            if inserted {
+                emit_history_updated(app, &local_record.id);
             }
 
             if let Ok((mut server_state, _)) =

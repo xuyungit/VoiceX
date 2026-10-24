@@ -9,6 +9,7 @@ use std::sync::Mutex;
 
 use crate::commands::settings::AppSettings;
 use crate::foreground_app::RecentTargetApp;
+use crate::services::history_service::{HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ};
 use uuid::Uuid;
 
 static DB: std::sync::OnceLock<Mutex<Connection>> = std::sync::OnceLock::new();
@@ -122,64 +123,6 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
         }
     }
 
-    // Backfill total_recording_count from actual history_record rows.
-    // The cached counter may be too low if the column was added after
-    // recordings already existed and a few increment calls have since
-    // bumped it above 0.  Correct it whenever the actual count is larger.
-    {
-        let cached: i64 = conn
-            .query_row(
-                "SELECT total_recording_count FROM usage_stats WHERE id = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        let actual: i64 = conn
-            .query_row("SELECT COUNT(*) FROM history_record", [], |r| r.get(0))
-            .unwrap_or(0);
-        if actual > cached {
-            conn.execute(
-                "UPDATE usage_stats SET total_recording_count = ?1 WHERE id = 1",
-                params![actual],
-            )
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        }
-    }
-    // Per-device usage_stats – recompute total_recording_count from
-    // history_record for every cached device row where the stored count
-    // is smaller than the actual number of records (i.e. the counter
-    // missed older recordings that existed before this column was added).
-    {
-        let mut stmt = conn
-            .prepare("SELECT device_id, total_recording_count FROM device_usage_stats")
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        let rows: Vec<(String, i64)> = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
-        drop(stmt);
-        for (did, cached_count) in rows {
-            let actual_count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM history_record
-                 WHERE source_device_id = ?1 OR source_device_id IS NULL OR source_device_id = ''",
-                    params![did],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            if actual_count > cached_count {
-                conn.execute(
-                    "UPDATE device_usage_stats SET total_recording_count = ?1 WHERE device_id = ?2",
-                    params![actual_count, did],
-                )
-                .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-            }
-        }
-    }
-
     ensure_column(&conn, "history_record", "source_device_id", "TEXT")?;
     ensure_column(&conn, "history_record", "llm_invoked", "INTEGER DEFAULT 0")?;
     ensure_column(&conn, "history_record", "error_message", "TEXT")?;
@@ -190,12 +133,71 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     ensure_column(&conn, "sync_server_state", "usage_seq", "INTEGER DEFAULT 0")?;
     ensure_column(&conn, "sync_server_state", "seeded_at", "TEXT")?;
 
+    migrate_recording_counts(&conn)?;
+
     // Upgrade the persisted settings blob in place (e.g. legacy single custom
     // LLM endpoint -> named endpoints array). Best-effort: never block startup.
     migrate_settings_blob(&conn);
 
     let _ = DB.set(Mutex::new(conn));
     log::info!("Database initialized at {:?}", path);
+    Ok(())
+}
+
+/// Recording counts are owned locally, independently of the server's usage
+/// snapshot/usage_seq (which cover duration, characters and LLM calls only).
+/// Keep counted IDs after text deletion so event replay cannot count them again.
+fn migrate_recording_counts(conn: &Connection) -> Result<(), StorageError> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS counted_recordings (record_id TEXT PRIMARY KEY);")
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    tx.execute(
+        "INSERT OR IGNORE INTO counted_recordings (record_id)
+         SELECT id FROM history_record WHERE error_code = ?1 AND mode != ?2",
+        params![HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ],
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    // Preserve lifetime totals when older history has already been deleted.
+    tx.execute(
+        "UPDATE usage_stats SET total_recording_count =
+             MAX(total_recording_count, (SELECT COUNT(*) FROM counted_recordings))
+         WHERE id = 1",
+        [],
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    tx.execute(
+        "UPDATE device_usage_stats SET total_recording_count = MAX(total_recording_count, (
+             SELECT COUNT(*) FROM history_record
+             WHERE error_code = ?1 AND mode != ?2
+               AND (source_device_id = device_usage_stats.device_id
+                    OR source_device_id IS NULL OR source_device_id = '')
+         ))",
+        params![HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ],
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    tx.commit()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))
+}
+
+fn count_recording_conn(conn: &Connection, record: &HistoryRecord) -> Result<(), StorageError> {
+    if record.error_code != HISTORY_ERROR_NONE || record.mode == HISTORY_MODE_TRANSLATE_READ {
+        return Ok(());
+    }
+    let counted = conn
+        .execute(
+            "INSERT OR IGNORE INTO counted_recordings (record_id) VALUES (?1)",
+            params![record.id],
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    if counted == 1 {
+        conn.execute(
+            "UPDATE usage_stats SET total_recording_count = total_recording_count + 1 WHERE id = 1",
+            [],
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -541,8 +543,18 @@ pub fn insert_history_record_with_stats(
     record: &HistoryRecord,
     update_stats: bool,
 ) -> Result<bool, StorageError> {
-    with_db(|conn| {
-        let inserted = conn.execute(
+    with_db(|conn| insert_history_record_with_stats_conn(conn, record, update_stats))
+}
+
+fn insert_history_record_with_stats_conn(
+    conn: &Connection,
+    record: &HistoryRecord,
+    update_stats: bool,
+) -> Result<bool, StorageError> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    let inserted = tx.execute(
             "INSERT OR IGNORE INTO history_record (
                 id, timestamp, text, original_text, ai_correction_applied, llm_invoked, mode, duration_ms, audio_path, is_final, error_code, error_message, source_device_id, asr_model_name, llm_model_name
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
@@ -566,20 +578,20 @@ pub fn insert_history_record_with_stats(
         )
         .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
-        if inserted == 1 {
-            if update_stats {
-                increment_usage_stats_conn(
-                    conn,
-                    record.duration_ms,
-                    record.text.chars().count() as i64,
-                    record.llm_invoked,
-                )?;
-            }
-            Ok(true)
-        } else {
-            Ok(false)
+    if inserted == 1 {
+        count_recording_conn(&tx, record)?;
+        if update_stats {
+            increment_usage_stats_conn(
+                &tx,
+                record.duration_ms,
+                record.text.chars().count() as i64,
+                record.llm_invoked,
+            )?;
         }
-    })
+    }
+    tx.commit()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    Ok(inserted == 1)
 }
 
 /// The `mode` of one history record, or `None` when there is no such row.
@@ -761,9 +773,8 @@ pub fn set_usage_stats(stats: &UsageStats) -> Result<(), StorageError> {
         // total_recording_count is intentionally excluded from the server-driven
         // overwrite.  The sync server does not yet track this field (it arrives
         // as 0 via #[serde(default)]), so writing it here would corrupt the
-        // locally-maintained count.  The field is kept accurate by:
-        //   1. one-time backfill from history_record at DB init,
-        //   2. increment_usage_stats() on each new recording / sync event.
+        // locally-maintained count. Count unique recording IDs at insertion,
+        // independently of whether a server snapshot already covers the event.
         // Once the server starts supplying a real count, add it back here.
         //
         // The reading counters are likewise absent from the server's `usage`
@@ -895,7 +906,6 @@ fn increment_usage_stats_conn(
          SET total_duration_ms = total_duration_ms + ?1,
              total_characters = total_characters + ?2,
              llm_correction_count = llm_correction_count + ?3,
-             total_recording_count = total_recording_count + 1,
              last_updated = ?4
          WHERE id = 1",
         params![dur, chars, llm, Utc::now().to_rfc3339()],
@@ -1577,6 +1587,154 @@ pub enum StorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recording_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE history_record (
+                 id TEXT PRIMARY KEY, timestamp TEXT DEFAULT '', text TEXT DEFAULT '',
+                 original_text TEXT, ai_correction_applied INTEGER DEFAULT 0,
+                 llm_invoked INTEGER DEFAULT 0, mode TEXT DEFAULT 'assistant_raw',
+                 duration_ms INTEGER DEFAULT 0, audio_path TEXT, is_final INTEGER DEFAULT 1,
+                 error_code INTEGER DEFAULT 0, error_message TEXT, source_device_id TEXT,
+                 asr_model_name TEXT, llm_model_name TEXT
+             );
+             CREATE TABLE usage_stats (
+                 id INTEGER PRIMARY KEY, total_recording_count INTEGER DEFAULT 0,
+                 total_duration_ms INTEGER DEFAULT 0, total_characters INTEGER DEFAULT 0,
+                 llm_correction_count INTEGER DEFAULT 0, last_updated TEXT
+             );
+             INSERT INTO usage_stats (id) VALUES (1);
+             CREATE TABLE device_usage_stats (
+                 device_id TEXT PRIMARY KEY, total_recording_count INTEGER DEFAULT 0
+             );",
+        )
+        .unwrap();
+        migrate_recording_counts(&conn).unwrap();
+        conn
+    }
+
+    fn recording(id: &str) -> HistoryRecord {
+        HistoryRecord {
+            id: id.into(),
+            timestamp: Utc::now().to_rfc3339(),
+            text: "hello".into(),
+            original_text: None,
+            ai_correction_applied: false,
+            llm_invoked: true,
+            mode: "assistant_raw".into(),
+            duration_ms: 1200,
+            audio_path: None,
+            is_final: true,
+            error_code: HISTORY_ERROR_NONE,
+            error_message: None,
+            source_device_id: Some("device-a".into()),
+            source_device_name: None,
+            asr_model_name: None,
+            llm_model_name: None,
+        }
+    }
+
+    fn recording_totals(conn: &Connection) -> (i64, i64, i64, i64) {
+        conn.query_row(
+            "SELECT total_recording_count, total_duration_ms, total_characters,
+                    llm_correction_count FROM usage_stats WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn recording_count_repairs_large_synced_history_and_preserves_deleted_totals() {
+        let conn = recording_conn();
+        conn.execute_batch(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 17000)
+             INSERT INTO history_record (id, source_device_id) SELECT CAST(i AS TEXT), 'device-a' FROM n;
+             INSERT INTO history_record (id, mode) VALUES ('reading', 'translate_read');
+             INSERT INTO history_record (id, error_code) VALUES ('failure', 1);
+             UPDATE usage_stats SET total_recording_count = 3,
+                 total_duration_ms = 12345, total_characters = 67890, llm_correction_count = 123;
+             INSERT INTO device_usage_stats VALUES ('device-a', 3);",
+        )
+        .unwrap();
+
+        migrate_recording_counts(&conn).unwrap();
+        assert_eq!(recording_totals(&conn), (17000, 12345, 67890, 123));
+        let device_count: i64 = conn
+            .query_row(
+                "SELECT total_recording_count FROM device_usage_stats",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(device_count, 17000);
+        migrate_recording_counts(&conn).unwrap();
+        assert_eq!(recording_totals(&conn).0, 17000);
+
+        conn.execute_batch(
+            "DELETE FROM history_record;
+             UPDATE usage_stats SET total_recording_count = 18000;",
+        )
+        .unwrap();
+        migrate_recording_counts(&conn).unwrap();
+        assert_eq!(recording_totals(&conn).0, 18000);
+    }
+
+    #[test]
+    fn recording_count_is_independent_of_usage_cursor_and_survives_event_replay() {
+        let conn = recording_conn();
+        let record = recording("synced");
+        // A server snapshot already covers this row: no aggregate delta is needed.
+        assert!(insert_history_record_with_stats_conn(&conn, &record, false).unwrap());
+        assert_eq!(recording_totals(&conn), (1, 0, 0, 0));
+        assert!(!insert_history_record_with_stats_conn(&conn, &record, false).unwrap());
+        assert_eq!(recording_totals(&conn).0, 1);
+
+        // A live event beyond usage_seq updates aggregates but must not count twice.
+        increment_usage_stats_conn(&conn, 1200, 5, true).unwrap();
+        assert_eq!(recording_totals(&conn), (1, 1200, 5, 1));
+        conn.execute("DELETE FROM history_record WHERE id = 'synced'", [])
+            .unwrap();
+        assert!(insert_history_record_with_stats_conn(&conn, &record, false).unwrap());
+        migrate_recording_counts(&conn).unwrap();
+        assert_eq!(recording_totals(&conn), (1, 1200, 5, 1));
+    }
+
+    #[test]
+    fn recording_count_includes_local_dictation_and_excludes_reading_and_failures() {
+        let conn = recording_conn();
+        assert!(insert_history_record_with_stats_conn(&conn, &recording("local"), true).unwrap());
+        assert_eq!(recording_totals(&conn), (1, 1200, 5, 1));
+        let mut reading = recording("reading");
+        reading.mode = HISTORY_MODE_TRANSLATE_READ.into();
+        insert_history_record_with_stats_conn(&conn, &reading, false).unwrap();
+        let mut failure = recording("failure");
+        failure.error_code = crate::services::history_service::HISTORY_ERROR_ASR_FAILED;
+        insert_history_record_with_stats_conn(&conn, &failure, false).unwrap();
+        migrate_recording_counts(&conn).unwrap();
+        assert_eq!(recording_totals(&conn), (1, 1200, 5, 1));
+    }
+
+    #[test]
+    fn recording_count_failure_rolls_back_history_and_can_be_retried() {
+        let conn = recording_conn();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_count BEFORE UPDATE OF total_recording_count ON usage_stats
+             BEGIN SELECT RAISE(ABORT, 'test count failure'); END;",
+        )
+        .unwrap();
+        let record = recording("retry");
+        assert!(insert_history_record_with_stats_conn(&conn, &record, true).is_err());
+        let history_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM history_record", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(history_count, 0);
+        assert_eq!(recording_totals(&conn), (0, 0, 0, 0));
+        conn.execute_batch("DROP TRIGGER reject_count;").unwrap();
+        assert!(insert_history_record_with_stats_conn(&conn, &record, true).unwrap());
+        assert_eq!(recording_totals(&conn), (1, 1200, 5, 1));
+    }
 
     fn setup_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
