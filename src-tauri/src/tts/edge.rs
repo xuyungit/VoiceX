@@ -2,13 +2,10 @@
 //! No user credentials are required. Protocol identifiers are versioned here;
 //! upstream changes fail visibly rather than switching to another provider.
 //!
-//! Since October 2026 `speech.platform.bing.com` answers the synthesis
-//! WebSocket with HTTP 403 in most regions while its voice list keeps working.
-//! The host Edge itself uses, `api.msedgeservices.com/tts/cognitiveservices`,
-//! still accepts the same `Sec-MS-GEC` token; only the query parameter name
-//! becomes `Ocp-Apim-Subscription-Key`. `Sec-MS-GEC-Version` must keep the `1-`
-//! prefix: the service refuses `2-…`, the version Edge 155 sends, unless the
-//! request carries the v2 token, whose algorithm is not public.
+//! The current consumer endpoint requires Sec-MS-GEC v2 (CS64 plus salted
+//! SHA-256). The former `api.msedgeservices.com` route can return an empty
+//! HTTP 200 instead of upgrading the WebSocket. Use the same consumer host
+//! and v2 authentication as edge-tts 7.3.1 for synthesis and voice discovery.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -20,7 +17,6 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error as WsError, Message};
 
 use super::caption_timeline::{self, CaptionTimeline};
@@ -33,16 +29,16 @@ use super::{
 };
 
 mod captions;
+mod drm;
 use captions::{Boundary, CaptionFeed};
+use drm::gec_at;
 
 const CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const EDGE_VERSION: &str = "143.0.3650.75";
-/// Keep this a complete Edge user agent: the current host answers a truncated
-/// browser one (Chrome-only, or a bare `Edg/…`) with 403. Its version need not
-/// match `EDGE_VERSION`.
+/// Keep the complete browser user agent paired with the token version.
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
-const BASE_URL: &str = "api.msedgeservices.com/tts/cognitiveservices";
-const SYNTHESIS_PATH: &str = "websocket/v1";
+const BASE_URL: &str = "speech.platform.bing.com/consumer/speech/synthesize/readaloud";
+const SYNTHESIS_PATH: &str = "edge/v1";
 const VOICE_LIST_PATH: &str = "voices/list";
 const STREAM_RATE: u32 = 24_000;
 const OUTPUT_FORMAT: &str = "audio-24khz-48kbitrate-mono-mp3";
@@ -71,17 +67,9 @@ impl EdgeClock {
     }
 }
 
-fn gec_at(unix_seconds: i64) -> String {
-    // Windows FILETIME epoch, five-minute buckets, then SHA-256.
-    let seconds = unix_seconds + 11_644_473_600;
-    let ticks = (seconds - seconds.rem_euclid(300)) as u64 * 10_000_000;
-    hex::encode_upper(Sha256::digest(format!("{ticks}{CLIENT_TOKEN}").as_bytes()))
-}
 fn auth_query(clock: &EdgeClock) -> String {
-    // The `1-` prefix is part of the token family, not of the Edge version: the
-    // service rejects `2-…` unless the request carries a v2 token.
     format!(
-        "Ocp-Apim-Subscription-Key={CLIENT_TOKEN}&Sec-MS-GEC={}&Sec-MS-GEC-Version=1-{EDGE_VERSION}",
+        "TrustedClientToken={CLIENT_TOKEN}&Sec-MS-GEC={}&Sec-MS-GEC-Version=2-{EDGE_VERSION}",
         gec_at(clock.now())
     )
 }
@@ -199,9 +187,7 @@ fn prepare_pieces(request: &TtsRequest) -> Result<(String, f32, i32, Vec<String>
 struct VoiceRecord {
     #[serde(rename = "ShortName")]
     id: String,
-    /// The current host names the display name `DisplayName`; the legacy host
-    /// it replaces used `FriendlyName`, which this list does not carry.
-    #[serde(rename = "DisplayName")]
+    #[serde(rename = "FriendlyName")]
     name: String,
     #[serde(rename = "Locale")]
     language: String,
@@ -295,8 +281,7 @@ impl EdgeBackend {
             .read
             .lock()
             .map_err(|_| TtsError::Backend("Edge read lock is poisoned".to_string()))? = None;
-        let (voice, pace, pitch, pieces) =
-            prepare_pieces(&request).map_err(TtsError::Backend)?;
+        let (voice, pace, pitch, pieces) = prepare_pieces(&request).map_err(TtsError::Backend)?;
         let rate = negotiate_sample_rate_among(&[48_000, 44_100, STREAM_RATE])
             .map_err(|e| TtsError::Backend(e.to_string()))?;
         let caption_limit = request.piece_limit.unwrap_or(DEFAULT_CAPTION_CHARS);
@@ -507,7 +492,7 @@ fn ws_error(err: WsError, emitted: bool, clock: &EdgeClock) -> CloudStreamError 
                 && clock.correct(response.headers().get("Date").and_then(|v| v.to_str().ok()));
             let retryable = skew || matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504);
             CloudStreamError::new(
-                format!("Edge connection returned HTTP {status}"),
+                format!("Edge WebSocket handshake failed: HTTP {status} (expected HTTP 101 Switching Protocols)"),
                 retryable,
                 emitted,
                 if skew { "clock_skew" } else { "http" },
@@ -931,40 +916,43 @@ mod tests {
     fn client_hash_rotates_only_at_five_minute_boundaries() {
         assert_eq!(gec_at(1_700_000_100), gec_at(1_700_000_101));
         assert_ne!(gec_at(1_700_000_100), gec_at(1_700_000_400));
-        assert_eq!(gec_at(1_700_000_100).len(), 64);
+        assert_eq!(gec_at(1_700_000_100).len(), 81);
     }
-    /// The legacy host and its `TrustedClientToken` parameter answered every
-    /// synthesis WebSocket with 403 from October 2026; the current host takes
-    /// the same token under the subscription-key name.
     #[test]
-    fn auth_query_uses_the_subscription_key_and_a_v1_token() {
+    fn auth_query_uses_the_consumer_key_and_a_v2_token() {
         let query = auth_query(&EdgeClock::default());
         let rest = query
-            .strip_prefix(&format!("Ocp-Apim-Subscription-Key={CLIENT_TOKEN}&Sec-MS-GEC="))
-            .expect("the subscription key comes first");
+            .strip_prefix(&format!("TrustedClientToken={CLIENT_TOKEN}&Sec-MS-GEC="))
+            .expect("the consumer key comes first");
         let (gec, version) = rest
             .split_once("&Sec-MS-GEC-Version=")
             .expect("the version comes last");
-        assert_eq!(gec.len(), 64);
-        assert!(gec.chars().all(|c| c.is_ascii_hexdigit() && !c.is_lowercase()));
-        assert_eq!(version, format!("1-{EDGE_VERSION}"));
-        assert!(!query.contains("TrustedClientToken"));
+        let (cs64, sha256) = gec.split_once('-').expect("v2 has two digests");
+        assert_eq!(cs64.len(), 16);
+        assert_eq!(sha256.len(), 64);
+        assert!(cs64
+            .chars()
+            .chain(sha256.chars())
+            .all(|c| c.is_ascii_hexdigit() && !c.is_lowercase()));
+        assert_eq!(version, format!("2-{EDGE_VERSION}"));
+        assert!(!query.contains("Ocp-Apim-Subscription-Key"));
     }
-    /// The current voice list carries `DisplayName`, not the `FriendlyName` of
-    /// the legacy host, and it must not fall back to the SSML `Name`.
     #[test]
-    fn voice_records_read_the_display_name_of_the_current_host() {
+    fn voice_records_read_the_consumer_friendly_name() {
         let records: Vec<VoiceRecord> = serde_json::from_str(
             r#"[{"Name":"Microsoft Server Speech Text to Speech Voice (zh-CN, XiaoxiaoNeural)",
-                 "DisplayName":"Xiaoxiao","LocalName":"晓晓",
+                 "FriendlyName":"Microsoft Xiaoxiao Online (Natural) - Chinese (Mainland)",
                  "ShortName":"zh-CN-XiaoxiaoNeural","Locale":"zh-CN"}]"#,
         )
         .unwrap();
         assert_eq!(records[0].id, "zh-CN-XiaoxiaoNeural");
-        assert_eq!(records[0].name, "Xiaoxiao");
+        assert_eq!(
+            records[0].name,
+            "Microsoft Xiaoxiao Online (Natural) - Chinese (Mainland)"
+        );
         assert_eq!(records[0].language, "zh-CN");
         assert!(serde_json::from_str::<Vec<VoiceRecord>>(
-            r#"[{"ShortName":"zh-CN-XiaoxiaoNeural","FriendlyName":"Microsoft Xiaoxiao Online (Natural) - Chinese (Mainland)","Locale":"zh-CN"}]"#
+            r#"[{"ShortName":"zh-CN-XiaoxiaoNeural","DisplayName":"Xiaoxiao","Locale":"zh-CN"}]"#
         )
         .is_err());
     }
@@ -1014,6 +1002,18 @@ mod tests {
     fn connection_failure_cannot_retry_after_audio_emission() {
         let error = CloudStreamError::new("lost".to_string(), true, true, "transport");
         assert_eq!(error.retry_delay_ms(0), None);
+    }
+    #[test]
+    fn http_200_is_a_failed_upgrade_and_keeps_the_status_visible() {
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(200)
+            .body(None)
+            .unwrap();
+        let error = ws_error(WsError::Http(response), false, &EdgeClock::default());
+        assert_eq!(error.retry_delay_ms(0), None);
+        let detail = error.into_detail();
+        assert!(detail.contains("HTTP 200 OK"));
+        assert!(detail.contains("expected HTTP 101"));
     }
     #[test]
     #[ignore = "contacts the Microsoft online speech service"]
