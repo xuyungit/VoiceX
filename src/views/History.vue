@@ -8,6 +8,7 @@ import { useSyncStore } from '../stores/sync'
 import { useSettingsStore } from '../stores/settings'
 import { trimTrailingPunctuation } from '../utils/text'
 import ReTranscribeDialog from '../components/ReTranscribeDialog.vue'
+import HistoryTranslationDialog from '../components/HistoryTranslationDialog.vue'
 
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
@@ -63,6 +64,8 @@ const detailVisible = ref(false)
 const detailRecord = ref<HistoryRecord | null>(null)
 const reTranscribeVisible = ref(false)
 const reTranscribeRecord = ref<HistoryRecord | null>(null)
+const translationVisible = ref(false)
+const translationRecord = ref<HistoryRecord | null>(null)
 const audioPlayer = ref<HTMLAudioElement | null>(null)
 const playingId = ref<string | null>(null)
 const objectUrl = ref<string | null>(null)
@@ -392,6 +395,12 @@ function moreOptions(record: HistoryRecord): DropdownOption[] {
       icon: renderIcon('M17.65 6.35A7.96 7.96 0 0 0 12 4C7.58 4 4.01 7.58 4.01 12S7.58 20 12 20c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z')
     },
     {
+      label: t('history.translateToEnglish'),
+      key: 'translate',
+      disabled: isFailedRecord(record) || !hasRecordText(record),
+      icon: renderIcon('M12.87 15.07 10.33 12.56l.03-.03A17.52 17.52 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17A15.7 15.7 0 0 1 9 11.35 15.65 15.65 0 0 1 6.69 8H4.69a17.58 17.58 0 0 0 2.98 4.56L2.58 17.58 4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7 1.62-4.33L19.12 17h-3.24z')
+    },
+    {
       label: t('history.viewDetails'),
       key: 'details',
       icon: renderIcon('M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm0 2.5L17.5 8H14V4.5zM8 13h8v2H8v-2zm0 4h8v2H8v-2zm0-8h5v2H8V9z')
@@ -413,6 +422,11 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
   if (key === 'details') {
     openDetails(record)
+  }
+
+  if (key === 'translate' && !isFailedRecord(record) && hasRecordText(record)) {
+    translationRecord.value = record
+    translationVisible.value = true
   }
 }
 </script>
@@ -668,6 +682,10 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
     <ReTranscribeDialog
       v-model:show="reTranscribeVisible"
       :record="reTranscribeRecord"
+    />
+    <HistoryTranslationDialog
+      v-model:show="translationVisible"
+      :record="translationRecord"
     />
   </div>
 </template>

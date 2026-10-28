@@ -264,6 +264,7 @@ pub fn run() {
         .manage(SessionController::default())
         .manage(SyncService::default())
         .manage(TtsController::default())
+        .manage(commands::history_translation::HistoryTranslationState::default())
         .on_window_event(|window, event| {
             // Keep the process alive when the main window is closed; just hide it.
             if window.label() == "main" {
@@ -382,6 +383,8 @@ pub fn run() {
             commands::retranscribe::re_transcribe,
             commands::retranscribe::replay_history_injection,
             commands::retranscribe::cancel_retranscribe,
+            commands::history_translation::translate_history_text,
+            commands::history_translation::cancel_history_translation,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

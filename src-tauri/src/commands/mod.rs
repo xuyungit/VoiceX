@@ -5,6 +5,7 @@
 pub mod audio;
 pub mod build_info;
 pub mod history;
+pub mod history_translation;
 pub mod hotkey;
 pub mod hotword;
 pub mod hud;
