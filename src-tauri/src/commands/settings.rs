@@ -478,7 +478,7 @@ impl Default for AppSettings {
             openai_asr_refine_model: crate::asr::models::default_model("openaiRefine"),
             openai_asr_base_url: "https://api.openai.com/v1".to_string(),
             openai_asr_language: String::new(),
-            openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
+            openai_asr_prompt: String::new(),
             openai_asr_mode: "batch".to_string(),
             openai_asr_delay: String::new(),
             openai_asr_post_recording_refine: "off".to_string(),
@@ -1382,6 +1382,32 @@ pub fn save_settings(
 pub async fn list_local_qwen_models(configured: String) -> Result<Vec<crate::asr::local_models::LocalModel>, String> {
     tauri::async_runtime::spawn_blocking(move || crate::asr::local_models::discover(&configured))
         .await.map_err(|e| e.to_string())?
+}
+
+/// List IDs visible to the configured account. The Models API does not report
+/// which endpoint each ID supports, so callers must not present this as a list
+/// of verified chat models.
+#[tauri::command]
+pub async fn list_openai_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
+    let endpoint = format!("{}/models", base_url.trim().trim_end_matches('/'));
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build().map_err(|e| e.to_string())?
+        .get(endpoint).bearer_auth(api_key.trim()).send().await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("OpenAI models HTTP {}", status.as_u16()));
+    }
+    #[derive(serde::Deserialize)]
+    struct ModelList { data: Vec<ModelId> }
+    #[derive(serde::Deserialize)]
+    struct ModelId { id: String }
+    let result: ModelList = response.json().await.map_err(|e| e.to_string())?;
+    let mut ids: Vec<String> = result.data.into_iter().map(|model| model.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
 }
 
 #[tauri::command]

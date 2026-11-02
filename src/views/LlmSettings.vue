@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NInput, NSwitch, NButton, NSelect, NTabs, NTabPane } from 'naive-ui'
+import { NInput, NAutoComplete, NSwitch, NButton, NSelect, NTabs, NTabPane } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ResolvedLocale } from '../i18n'
 import { useSettingsStore, type AppSettings, type CustomLlmEndpoint } from '../stores/settings'
@@ -317,6 +317,31 @@ const activePromptTab = ref<'assistant' | 'translation'>('assistant')
 const llmProbeLoading = ref(false)
 const llmProbeResult = ref<LlmProviderProbeResult | null>(null)
 const llmProbeError = ref('')
+const openaiModels = ref<string[]>([])
+const openaiModelsLoading = ref(false)
+const openaiModelsError = ref('')
+let openaiModelsRequest = 0
+watch([llmOpenaiBaseUrl, llmOpenaiApiKey], () => {
+  openaiModelsRequest++
+  openaiModels.value = []
+  openaiModelsError.value = ''
+  openaiModelsLoading.value = false
+})
+async function loadOpenaiModels() {
+  const request = ++openaiModelsRequest
+  openaiModelsLoading.value = true
+  openaiModelsError.value = ''
+  try {
+    const models = await invoke<string[]>('list_openai_models', {
+      baseUrl: llmOpenaiBaseUrl.value, apiKey: llmOpenaiApiKey.value
+    })
+    if (request === openaiModelsRequest) openaiModels.value = models
+  } catch (error) {
+    if (request === openaiModelsRequest) openaiModelsError.value = String(error)
+  } finally {
+    if (request === openaiModelsRequest) openaiModelsLoading.value = false
+  }
+}
 
 // The reasoning fields the selected provider will be sent, resolved by the
 // backend from the page's current values, saved or not.
@@ -513,8 +538,13 @@ async function runLlmProviderProbe() {
           <div class="field-row">
             <div class="field-text">
               <div class="field-label">{{ t('llm.modelName') }}</div>
+              <div class="field-sub">{{ t('llm.openaiModelsNote') }}</div>
+              <div v-if="openaiModelsError" class="field-sub">{{ openaiModelsError }}</div>
             </div>
-            <NInput v-model:value="llmOpenaiModel" class="field-control short" />
+            <div class="field-control">
+              <NAutoComplete v-model:value="llmOpenaiModel" :options="openaiModels.map(value => ({ value, label: value }))" />
+              <NButton size="small" :loading="openaiModelsLoading" @click="loadOpenaiModels">{{ t('llm.openaiModelsFetch') }}</NButton>
+            </div>
           </div>
           <div class="field-row">
             <div class="field-text">

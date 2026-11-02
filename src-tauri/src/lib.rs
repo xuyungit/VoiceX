@@ -360,6 +360,7 @@ pub fn run() {
             commands::settings::save_settings,
             commands::settings::probe_local_asr,
             commands::settings::list_local_qwen_models,
+            commands::settings::list_openai_models,
             commands::settings::choose_local_model_directory,
             commands::settings::probe_current_asr_provider,
             commands::settings::probe_current_llm_provider,

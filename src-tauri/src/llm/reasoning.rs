@@ -203,9 +203,14 @@ fn enable_thinking_false() -> LowestKnob {
 }
 
 /// OpenAI's floor moved with the model line: the o-series stops at `low`,
-/// gpt-5 at `minimal`, gpt-5.1 and later take `none` (and reject `minimal`),
-/// and models before gpt-5 reject the field outright.
+/// gpt-5 at `minimal`, and most gpt-5.1 and later models take `none`.
+/// GPT-6 Astra and GPT-6.1 Sol require at least `low`.
 fn openai_knob(model: &str) -> Option<LowestKnob> {
+    if model == "gpt-6-astra" || model.starts_with("gpt-6-astra-")
+        || model == "gpt-6.1-sol" || model.starts_with("gpt-6.1-sol-")
+    {
+        return Some(LowestKnob::Effort("low"));
+    }
     if let Some(version) = model.strip_prefix("gpt-") {
         let numeric: String = version
             .chars()

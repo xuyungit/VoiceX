@@ -318,7 +318,7 @@ impl Default for AsrConfig {
             openai_asr_refine_model: crate::asr::models::default_model("openaiRefine"),
             openai_asr_base_url: "https://api.openai.com/v1".to_string(),
             openai_asr_language: String::new(),
-            openai_asr_prompt: "Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.".to_string(),
+            openai_asr_prompt: String::new(),
             openai_asr_mode: "batch".to_string(),
             openai_asr_delay: String::new(),
             openai_asr_post_recording_refine: PostRecordingBatchRefineMode::Off,

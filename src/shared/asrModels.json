@@ -1,6 +1,7 @@
 {
   "defaults": {
     "openai": "gpt-transcribe",
+    "openaiRealtime": "gpt-live-transcribe",
     "openaiRefine": "gpt-transcribe",
     "gemini": "gemini-3.5-flash-lite",
     "geminiLive": "gemini-3.5-transcribe-live",

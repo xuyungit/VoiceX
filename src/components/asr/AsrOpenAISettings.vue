@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import AsrModelSelect from './AsrModelSelect.vue'
-import { findAsrModel } from '../../utils/asrModels'
+import { findAsrModel, openAiModelForMode } from '../../utils/asrModels'
 import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
@@ -22,6 +22,8 @@ const openaiAsrApiKey = computed({
 const openaiAsrMode = computed({
   get: () => settingsStore.settings.openaiAsrMode,
   set: (v: 'batch' | 'realtime') => {
+    if (v === settingsStore.settings.openaiAsrMode) return
+    settingsStore.updateSetting('openaiAsrModel', openAiModelForMode(settingsStore.settings.openaiAsrModel, v))
     settingsStore.updateSetting('openaiAsrMode', v)
     settingsStore.updateSetting(
       'openaiAsrPostRecordingRefine',
@@ -81,26 +83,25 @@ const openaiDelayOptions = computed(() => [
 
 // `delay` only exists on the realtime transcription session, and only the
 // newer models accept it.
-const delayDisabled = computed(
-  () => openaiAsrMode.value !== 'realtime' || !findAsrModel('openai', openaiAsrModel.value)?.delay
+const showDelay = computed(
+  () => openaiAsrMode.value === 'realtime' && !!findAsrModel('openai', openaiAsrModel.value)?.delay
 )
+const committedRealtime = computed(() => openaiAsrMode.value === 'realtime' &&
+  findAsrModel('openai', openaiAsrModel.value)?.id === 'gpt-transcribe')
 
 const openaiModeOptions = computed(() => buildOpenAiRecognitionModeOptions(t))
 const openaiPostRecordingRefineOptions = computed(() => buildOpenAiPostRecordingRefineOptions(t))
-const batchRefineDisabled = computed(() => openaiAsrMode.value === 'batch')
 </script>
 
 <template>
   <div class="surface-card asr-card">
     <div class="card-header">
       <div class="card-title">{{ t('asr.openaiConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.openaiConfigurationSub') }}</div>
     </div>
     <div class="field-list">
       <div class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.apiCredentials') }}</div>
-          <div class="field-note">{{ t('asr.openaiApiKeyNote') }}</div>
         </div>
         <NInput
           v-model:value="openaiAsrApiKey"
@@ -113,7 +114,6 @@ const batchRefineDisabled = computed(() => openaiAsrMode.value === 'batch')
       <div class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.recognitionMode') }}</div>
-          <div class="field-note">{{ t('asr.openaiModeNote') }}</div>
         </div>
         <NSelect
           v-model:value="openaiAsrMode"
@@ -124,48 +124,34 @@ const batchRefineDisabled = computed(() => openaiAsrMode.value === 'batch')
       </div>
       <div class="field-row">
         <div class="field-text">
-          <div class="field-label">{{ t('asr.postRecordingRefine') }}</div>
-          <div class="field-note">{{ t('asr.openaiPostRecordingRefineNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="openaiAsrPostRecordingRefine"
-          :options="openaiPostRecordingRefineOptions"
-          :disabled="batchRefineDisabled"
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.model') }}</div>
-          <div class="field-note">{{ t('asr.openaiModelNote') }}</div>
+          <div class="field-label">{{ t(openaiAsrMode === 'realtime' ? 'asr.openaiRealtimeModel' : 'asr.openaiBatchModel') }}</div>
+          <div v-if="committedRealtime" class="field-note">{{ t('asr.openaiCommittedRealtimeNote') }}</div>
         </div>
         <AsrModelSelect v-model:value="openaiAsrModel" provider="openai" :mode="openaiAsrMode" class="field-control" />
+      </div>
+      <div v-if="showDelay" class="field-row">
+        <div class="field-text">
+          <div class="field-label">{{ t('asr.openaiDelay') }}</div>
+          <div class="field-note">{{ t('asr.openaiDelayShortNote') }}</div>
+        </div>
+        <NSelect v-model:value="openaiAsrDelay" :options="openaiDelayOptions" size="small" class="field-control" />
+      </div>
+      <div v-if="openaiAsrMode === 'realtime'" class="field-row">
+        <div class="field-text">
+          <div class="field-label">{{ t('asr.postRecordingRefine') }}</div>
+          <div class="field-note">{{ t('asr.openaiRefineShortNote') }}</div>
+        </div>
+        <NSelect v-model:value="openaiAsrPostRecordingRefine" :options="openaiPostRecordingRefineOptions" size="small" class="field-control" />
       </div>
       <div v-if="openaiAsrMode === 'realtime' && openaiAsrPostRecordingRefine === 'batch_refine'" class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.refineModel') }}</div>
-          <div class="field-note">{{ t('asr.refineModelNote') }}</div>
         </div>
         <AsrModelSelect v-model:value="openaiAsrRefineModel" provider="openai" mode="batch" class="field-control" />
       </div>
       <div class="field-row">
         <div class="field-text">
-          <div class="field-label">{{ t('asr.openaiDelay') }}</div>
-          <div class="field-note">{{ t('asr.openaiDelayNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="openaiAsrDelay"
-          :options="openaiDelayOptions"
-          :disabled="delayDisabled"
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
           <div class="field-label">{{ t('asr.endpoint') }}</div>
-          <div class="field-note">{{ t('asr.openaiBaseUrlNote') }}</div>
         </div>
         <NInput
           v-model:value="openaiAsrBaseUrl"
@@ -176,18 +162,18 @@ const batchRefineDisabled = computed(() => openaiAsrMode.value === 'batch')
       <div class="field-row">
         <div class="field-text">
           <div class="field-label">{{ t('asr.languageHint') }}</div>
-          <div class="field-note">{{ t('asr.openaiLanguageNote') }}</div>
+          <div class="field-note">{{ t('asr.openaiLanguageShortNote') }}</div>
         </div>
         <NInput
           v-model:value="openaiAsrLanguage"
-          placeholder="zh"
+          placeholder="zh, en"
           class="field-control"
         />
       </div>
       <div class="field-row align-start">
         <div class="field-text">
           <div class="field-label">{{ t('asr.prompt') }}</div>
-        <div class="field-note">{{ t('asr.openaiPromptNote') }}</div>
+          <div class="field-note">{{ t('asr.openaiPromptShortNote') }}</div>
         </div>
         <NInput
           v-model:value="openaiAsrPrompt"
@@ -202,4 +188,11 @@ const batchRefineDisabled = computed(() => openaiAsrMode.value === 'batch')
 
 <style scoped>
 @import '../../styles/asr-settings.css';
+.asr-card { container-type: inline-size; }
+.field-control { flex: 0 1 420px; min-width: 0; }
+.field-text { min-width: 0; }
+@container (max-width: 560px) {
+  .field-row { flex-direction: column; align-items: stretch; gap: 6px; }
+  .field-control { flex: auto; width: 100%; }
+}
 </style>

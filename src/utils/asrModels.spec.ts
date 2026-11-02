@@ -1,4 +1,4 @@
-import { ASR_MODEL_DEFAULTS, buildModelOptions, findRetiredAsrModel, modelSelectionError } from './asrModels'
+import { ASR_MODEL_DEFAULTS, buildModelOptions, findAsrModel, findRetiredAsrModel, modelSelectionError, openAiModelForMode } from './asrModels'
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message)
@@ -9,6 +9,16 @@ export function checkAsrModelOptions() {
   const t = (key: string) => key
   const choices = buildModelOptions('gemini', 'batch', 'gemini-3.5-flash-lite', t)
   assert(!choices.some(option => option.value === retiredId), 'Retired model must not be offered as a preset')
+
+  const live = ASR_MODEL_DEFAULTS.openaiRealtime
+  const batch = ASR_MODEL_DEFAULTS.openai
+  assert(openAiModelForMode(batch, 'realtime') === live, 'Switching to realtime should select live partials')
+  assert(openAiModelForMode(live, 'batch') === batch, 'Switching to batch must replace a realtime-only model')
+  assert(openAiModelForMode('gpt-4o-transcribe', 'batch') === 'gpt-4o-transcribe', 'Keep compatible saved models')
+  assert(openAiModelForMode('my-deployment', 'realtime') === 'my-deployment', 'Keep custom deployment IDs')
+  assert(!buildModelOptions('openai', 'batch', '', t).some(option => option.value === live), 'Batch choices exclude realtime-only models')
+  assert(buildModelOptions('openai', 'realtime', '', t).some(option => option.value === batch && !option.disabled), 'Committed-turn model remains available in realtime mode')
+  assert(findAsrModel('openai', live)?.delay === true && !findAsrModel('openai', batch)?.delay, 'Delay only applies to live model')
 
   const saved = buildModelOptions('gemini', 'batch', retiredId, t).find(option => option.value === retiredId)
   assert(saved?.disabled && saved.label.includes('asr.modelStatus_retired'), 'Saved retired value must remain visible and disabled')
@@ -49,5 +59,5 @@ export function checkAsrModelOptions() {
     }
   }
   assert(findRetiredAsrModel('qwen', 'qwen3-asr-flash-filetrans-2025-11-17')?.note === 'modelRetiredFiletransNote', 'Unsupported asynchronous migration must explain its limitation')
-  return 48
+  return 55
 }

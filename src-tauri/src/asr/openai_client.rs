@@ -72,10 +72,10 @@ impl OpenAITranscriptionClient {
             // Modern models take structured `keywords` / `languages`; keep `prompt`
             // for scene description only so the dictionary can't dilute it.
             for language in &languages {
-                form = form.text("languages", language.clone());
+                form = form.text("languages[]", language.clone());
             }
             for keyword in cleaned_openai_keywords(&self.config.hotwords) {
-                form = form.text("keywords", keyword);
+                form = form.text("keywords[]", keyword);
             }
             let prompt = self.config.openai_asr_prompt.trim();
             if !prompt.is_empty() {

@@ -25,6 +25,18 @@ export function modelSelectionError(provider: string, id: string, mode: ModelMod
   return !!model && (model.provider !== provider || !model.modes.includes(mode))
 }
 
+// Switching from the standard batch model should select the live model, which
+// actually emits partial text. Keep explicit compatible and custom selections.
+export function openAiModelForMode(id: string, mode: ModelMode): string {
+  if (mode === 'realtime' && id === ASR_MODEL_DEFAULTS.openai) {
+    return ASR_MODEL_DEFAULTS.openaiRealtime
+  }
+  if (modelSelectionError('openai', id, mode) || !id.trim()) {
+    return mode === 'realtime' ? ASR_MODEL_DEFAULTS.openaiRealtime : ASR_MODEL_DEFAULTS.openai
+  }
+  return id
+}
+
 export function buildModelOptions(
   provider: string, mode: ModelMode, current: string, t: (key: string) => string
 ) {

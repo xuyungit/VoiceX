@@ -393,7 +393,7 @@ const defaultSettings: AppSettings = {
     openaiAsrRefineModel: ASR_MODEL_DEFAULTS.openaiRefine,
     openaiAsrBaseUrl: 'https://api.openai.com/v1',
     openaiAsrLanguage: '',
-    openaiAsrPrompt: 'Transcribe faithfully with natural punctuation and capitalization. Preserve the original wording and do not omit spoken content.',
+    openaiAsrPrompt: '',
     openaiAsrMode: 'batch',
     openaiAsrDelay: '',
     openaiAsrPostRecordingRefine: 'off',

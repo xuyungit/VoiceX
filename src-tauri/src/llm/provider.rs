@@ -427,6 +427,12 @@ mod tests {
         assert!(lowest.get("max_completion_tokens").is_none());
         assert_eq!(lowest["reasoning_effort"], "none");
 
+        for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-sol-2026-10-01"] {
+            config.model_name = model.to_string();
+            let request = OpenAIProvider.build_chat_request(user_message(), &config);
+            assert_eq!(request["reasoning_effort"], "low", "{model}");
+        }
+
         config.model_name = "gpt-4.1-mini".to_string();
         let plain = OpenAIProvider.build_chat_request(user_message(), &config);
         assert!(plain.get("reasoning_effort").is_none());
