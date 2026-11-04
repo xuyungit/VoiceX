@@ -25,6 +25,8 @@ impl SessionController {
         }
 
         if start_recording {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            crate::post_edit::coordinator::next_recording();
             match self.capture_foreground_app() {
                 Ok(app_info) => {
                     log::info!(

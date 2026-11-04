@@ -30,6 +30,7 @@ use std::borrow::Cow;
 use std::thread;
 use std::time::Duration;
 
+use super::receipt::DispatchTracker;
 use super::InjectionGuard;
 #[cfg(target_os = "macos")]
 use crate::mac_pasteboard::{PasteboardSnapshot, Unrestorable};
@@ -332,7 +333,11 @@ extern "C" {
 /// its release (espanso issue #159). `text` must not contain line breaks or
 /// tabs (see [`typing_needs_pasteboard`]).
 #[cfg(target_os = "macos")]
-fn type_unicode_text_macos(text: &str, guard: &InjectionGuard) -> Result<usize, InjectorError> {
+fn type_unicode_text_macos(
+    text: &str,
+    guard: &InjectionGuard,
+    tracker: Option<&DispatchTracker>,
+) -> Result<usize, InjectorError> {
     // Without Accessibility trust every post is silently discarded.
     if !unsafe { AXIsProcessTrusted() } {
         return Err(InjectorError::TypingError(
@@ -370,8 +375,14 @@ fn type_unicode_text_macos(text: &str, guard: &InjectionGuard) -> Result<usize, 
             // we pressed even if cancellation arrives between the two posts.
             let down = make_key(true, Some(chunk))?;
             let up = make_key(false, None)?;
+            if let Some(tracker) = tracker {
+                tracker.attempting_input();
+            }
             down.post(CGEventTapLocation::HID);
             up.post(CGEventTapLocation::HID);
+            if let Some(tracker) = tracker {
+                tracker.input_returned();
+            }
             posted += 1;
         }
         Ok(())
@@ -608,6 +619,7 @@ pub struct TextInjector {
     skip_clipboard_restore: bool,
     focus_roundtrip_pid: Option<u32>,
     guard: InjectionGuard,
+    dispatch_tracker: Option<DispatchTracker>,
 }
 
 impl TextInjector {
@@ -619,6 +631,7 @@ impl TextInjector {
             skip_clipboard_restore: false,
             focus_roundtrip_pid: None,
             guard: InjectionGuard::default(),
+            dispatch_tracker: None,
         }
     }
 
@@ -638,6 +651,7 @@ impl TextInjector {
             skip_clipboard_restore,
             focus_roundtrip_pid: None,
             guard: InjectionGuard::default(),
+            dispatch_tracker: None,
         }
     }
 
@@ -660,6 +674,29 @@ impl TextInjector {
     pub fn with_guard(mut self, guard: InjectionGuard) -> Self {
         self.guard = guard;
         self
+    }
+
+    pub(super) fn with_dispatch_tracker(mut self, tracker: DispatchTracker) -> Self {
+        self.dispatch_tracker = Some(tracker);
+        self
+    }
+
+    #[cfg(any(
+        target_os = "windows",
+        not(any(target_os = "macos", target_os = "windows"))
+    ))]
+    fn tracked_input<T>(
+        &self,
+        f: impl FnOnce() -> Result<T, InjectorError>,
+    ) -> Result<T, InjectorError> {
+        if let Some(tracker) = &self.dispatch_tracker {
+            tracker.attempting_input();
+        }
+        let result = f();
+        if let Some(tracker) = &self.dispatch_tracker {
+            tracker.input_returned();
+        }
+        result
     }
 
     /// Inject text using the configured mode
@@ -1038,7 +1075,8 @@ impl TextInjector {
 
         #[cfg(target_os = "macos")]
         {
-            let chunks = type_unicode_text_macos(text, &self.guard)?;
+            let chunks =
+                type_unicode_text_macos(text, &self.guard, self.dispatch_tracker.as_ref())?;
             log::debug!(
                 "Injected {} characters via simulated typing on macOS ({} chunks of ≤{} UTF-16 units)",
                 char_count,
@@ -1053,9 +1091,11 @@ impl TextInjector {
             let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
                 InjectorError::TypingError(format!("Failed to create Enigo: {}", e))
             })?;
-            enigo
-                .text(text)
-                .map_err(|e| InjectorError::TypingError(format!("Failed to type text: {}", e)))?;
+            self.tracked_input(|| {
+                enigo
+                    .text(text)
+                    .map_err(|e| InjectorError::TypingError(format!("Failed to type text: {}", e)))
+            })?;
             log::debug!(
                 "Injected {} characters via simulated typing on Windows",
                 char_count
@@ -1081,15 +1121,18 @@ impl TextInjector {
             let mut enigo = Enigo::new(&Settings::default()).map_err(|e| {
                 InjectorError::PasteCommandFailed(format!("Failed to create Enigo: {e}"))
             })?;
-            enigo
-                .key(EnigoKey::Control, Direction::Press)
-                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
-            enigo
-                .key(EnigoKey::V, Direction::Click)
-                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
-            enigo
-                .key(EnigoKey::Control, Direction::Release)
-                .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
+            self.tracked_input(|| {
+                enigo
+                    .key(EnigoKey::Control, Direction::Press)
+                    .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
+                enigo
+                    .key(EnigoKey::V, Direction::Click)
+                    .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
+                enigo
+                    .key(EnigoKey::Control, Direction::Release)
+                    .map_err(|e| InjectorError::PasteCommandFailed(format!("{e}")))?;
+                Ok(())
+            })?;
             return Ok(());
         }
 
@@ -1104,7 +1147,7 @@ impl TextInjector {
                 .chain(modifiers.iter().rev().map(|m| EventType::KeyRelease(*m)));
 
             for evt in sequence {
-                self.simulate_key(evt)?;
+                self.tracked_input(|| self.simulate_key(evt))?;
             }
 
             Ok(())
@@ -1153,7 +1196,13 @@ impl TextInjector {
                     i64::from(enigo::EVENT_MARKER),
                 );
                 event.set_flags(flags);
+                if let Some(tracker) = &self.dispatch_tracker {
+                    tracker.attempting_input();
+                }
                 event.post(CGEventTapLocation::HID);
+                if let Some(tracker) = &self.dispatch_tracker {
+                    tracker.input_returned();
+                }
                 Ok(())
             };
 
@@ -1182,6 +1231,8 @@ impl Default for TextInjector {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InjectorError {
+    #[error("Text injection was empty")]
+    EmptyText,
     #[error("Text injection cancelled before the next input event")]
     Cancelled,
 
@@ -1199,6 +1250,20 @@ pub enum InjectorError {
 
     #[error("Platform not supported")]
     UnsupportedPlatform,
+}
+
+impl InjectorError {
+    pub(super) fn code(&self) -> &'static str {
+        match self {
+            Self::EmptyText => "empty_text",
+            Self::Cancelled => "cancelled",
+            Self::ModifiersHeld => "modifiers_held",
+            Self::ClipboardError(_) => "clipboard_error",
+            Self::PasteCommandFailed(_) => "paste_command_failed",
+            Self::TypingError(_) => "typing_error",
+            Self::UnsupportedPlatform => "unsupported_platform",
+        }
+    }
 }
 
 #[cfg(test)]

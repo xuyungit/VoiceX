@@ -1,8 +1,8 @@
 use tauri::async_runtime;
 
 use crate::injector::{
-    inject_serialized, inject_serialized_with_resolver, InjectionGuard, TextInjectionMode,
-    TextInjector,
+    inject_serialized, inject_serialized_with_receipt, AttemptIdentity, InjectionGuard, InjectionReceipt,
+    ResolvedApp, TextInjectionMode, TextInjector,
 };
 
 /// Handles text injection off the main async tasks to avoid blocking.
@@ -52,16 +52,15 @@ impl TextInjectionService {
         &self,
         text: String,
         guard: InjectionGuard,
-        resolve: impl FnOnce() -> TextInjector + Send + 'static,
-    ) -> Option<tauri::async_runtime::JoinHandle<()>> {
+        identity: AttemptIdentity,
+        resolve: impl FnOnce() -> (TextInjector, Option<ResolvedApp>) + Send + 'static,
+    ) -> Option<tauri::async_runtime::JoinHandle<InjectionReceipt>> {
         if text.is_empty() {
             return None;
         }
 
         Some(async_runtime::spawn_blocking(move || {
-            if let Err(err) = inject_serialized_with_resolver(&text, guard, resolve) {
-                log::warn!("Text injection failed: {}", err);
-            }
+            inject_serialized_with_receipt(&text, guard, identity, resolve)
         }))
     }
 }

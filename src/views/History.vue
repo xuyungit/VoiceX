@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NButton, NSpin, NEmpty, NSelect, NModal, NDropdown, useDialog, type DropdownOption } from 'naive-ui'
+import { NButton, NTabs, NTabPane, NSpin, NEmpty, NSelect, NModal, NDropdown, useDialog, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useHistoryStore, type HistoryRecord } from '../stores/history'
 import { useSyncStore } from '../stores/sync'
@@ -9,7 +9,9 @@ import { useSettingsStore } from '../stores/settings'
 import { trimTrailingPunctuation } from '../utils/text'
 import ReTranscribeDialog from '../components/ReTranscribeDialog.vue'
 import HistoryTranslationDialog from '../components/HistoryTranslationDialog.vue'
+import PostEditHistory from '../components/PostEditHistory.vue'
 
+const activeTab = ref('dictations')
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
 const syncStore = useSyncStore()
@@ -435,7 +437,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   <div class="page history-page">
     <div class="page-header">
       <h1 class="page-title">{{ t('history.title') }}</h1>
-      <div class="page-subtitle">
+      <div v-if="activeTab === 'dictations'" class="page-subtitle">
         <span class="subtitle-item">
           <span class="subtitle-label">{{ t('history.textRetention') }}</span>
           <span class="pill">{{ textRetention === 0 ? t('common.forever') : t('common.days', { count: textRetention }) }}</span>
@@ -447,6 +449,8 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
       </div>
     </div>
 
+    <NTabs v-model:value="activeTab" type="line" animated class="history-tabs" :theme-overrides="{ tabTextColorActiveLine: 'var(--color-accent)', tabTextColorHoverLine: 'var(--color-accent-hover)', barColor: 'var(--color-accent)' }">
+      <NTabPane name="dictations" :tab="t('postEdit.allDictations')">
     <div class="surface-card retention-card">
       <div class="retention-title">
         <div class="section-title">{{ t('history.retentionPolicy') }}</div>
@@ -576,6 +580,12 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
       </div>
     </div>
 
+      </NTabPane>
+      <NTabPane name="edits" :tab="t('postEdit.tab')" display-directive="show:lazy">
+        <PostEditHistory />
+      </NTabPane>
+    </NTabs>
+
     <NModal
       v-model:show="detailVisible"
       preset="card"
@@ -691,6 +701,9 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 </template>
 
 <style scoped>
+.history-tabs { min-width: 0; }
+.history-tabs :deep(.n-tab-pane) { padding-top: 18px; }
+.retention-card { margin-bottom: 20px; }
 .retention-card {
   display: flex;
   align-items: center;

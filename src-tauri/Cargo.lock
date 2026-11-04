@@ -6209,6 +6209,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tonic-build",
+ "unicode-segmentation",
  "urlencoding",
  "uuid",
  "windows 0.61.3",

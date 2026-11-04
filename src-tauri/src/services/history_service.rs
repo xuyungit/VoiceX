@@ -75,16 +75,37 @@ impl HistoryService {
         llm_model_name: Option<String>,
         app_handle: Option<AppHandle>,
     ) {
+        let _ = self.persist_with_id(
+            Uuid::new_v4(), final_text, original_text, ai_correction_applied,
+            llm_invoked, mode, duration_ms, audio_path, asr_model_name,
+            llm_model_name, app_handle,
+        );
+    }
+
+    pub fn persist_with_id(
+        &self,
+        record_id: Uuid,
+        final_text: String,
+        original_text: Option<String>,
+        ai_correction_applied: bool,
+        llm_invoked: bool,
+        mode: String,
+        duration_ms: Option<u64>,
+        audio_path: Option<String>,
+        asr_model_name: Option<String>,
+        llm_model_name: Option<String>,
+        app_handle: Option<AppHandle>,
+    ) -> Result<tauri::async_runtime::JoinHandle<Result<bool, String>>, String> {
         let settings = match storage::get_settings() {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("History not persisted (failed to load settings): {}", e);
-                return;
+                return Err(e.to_string());
             }
         };
 
         let record = HistoryRecord {
-            id: Uuid::new_v4().to_string(),
+            id: record_id.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             text: final_text,
             original_text,
@@ -103,7 +124,7 @@ impl HistoryService {
         };
 
         let behavior = Self::behavior_for_mode(&record.mode, &settings);
-        self.persist_record(record, behavior, app_handle);
+        Ok(self.persist_record(record, behavior, app_handle))
     }
 
     pub fn persist_failed_asr(
@@ -150,7 +171,7 @@ impl HistoryService {
             llm_model_name: None,
         };
 
-        self.persist_record(record, Self::local_failure_behavior(&settings), app_handle);
+        let _ = self.persist_record(record, Self::local_failure_behavior(&settings), app_handle);
     }
 
     pub fn get_recent_history(&self, limit: u32) -> Vec<String> {
@@ -202,7 +223,7 @@ impl HistoryService {
         record: HistoryRecord,
         behavior: PersistBehavior,
         app_handle: Option<AppHandle>,
-    ) {
+    ) -> tauri::async_runtime::JoinHandle<Result<bool, String>> {
         let handle_for_emit = app_handle;
 
         tauri::async_runtime::spawn_blocking(move || {
@@ -213,13 +234,13 @@ impl HistoryService {
                 }
             }
 
-            let mut persisted = false;
-            match storage::insert_history_record_with_stats(&record, behavior.update_stats) {
-                Ok(inserted) => persisted = inserted,
-                Err(err) => log::warn!("Failed to persist history: {}", err),
-            }
+            let persisted = storage::insert_history_record_with_stats(&record, behavior.update_stats)
+                .map_err(|err| {
+                    log::warn!("Failed to persist history: {}", err);
+                    err.to_string()
+                })?;
             if !persisted {
-                return;
+                return Ok(false);
             }
 
             if behavior.update_device_stats {
@@ -253,7 +274,8 @@ impl HistoryService {
             if let Some(app) = handle_for_emit {
                 let _ = app.emit("history:updated", json!({ "id": record.id }));
             }
-        });
+            Ok(true)
+        })
     }
 
     fn completed_behavior(settings: &AppSettings) -> PersistBehavior {

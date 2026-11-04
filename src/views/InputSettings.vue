@@ -5,8 +5,11 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { NButton, NSelect, NInputNumber, NCheckbox, NSwitch } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore, type AppSettings } from '../stores/settings'
+import { usePostEditStore } from '../stores/postEdit'
 import { formatHotkey } from '../utils/hotkey'
 import type { OutputMuteStatus } from '../utils/outputMute'
+import PostEditModeSelect from '../components/PostEditModeSelect.vue'
+import type { PostEditTestSnapshot } from '../types/postEdit'
 import {
   exceedsRecordingHardLimit,
   resolveAsrRecordingHardLimitMinutes
@@ -35,8 +38,29 @@ interface InjectionAppRow extends RecentTargetApp {
 }
 
 const settingsStore = useSettingsStore()
+const postEditStore = usePostEditStore()
 const { t } = useI18n()
 const recentTargetApps = ref<RecentTargetApp[]>([])
+const postEditTest = ref<PostEditTestSnapshot | null>(null)
+const postEditTestError = ref<string | null>(null)
+let postEditTestTimer: ReturnType<typeof setInterval> | null = null
+let postEditTestRequest = 0
+
+async function refreshPostEditTest() {
+  const request = ++postEditTestRequest
+  try {
+    const result = await invoke<PostEditTestSnapshot>('get_post_edit_test_status')
+    if (!inputSettingsDisposed && request === postEditTestRequest) {
+      postEditTest.value = result
+      postEditTestError.value = null
+    }
+  } catch (error) {
+    if (!inputSettingsDisposed && request === postEditTestRequest) postEditTestError.value = String(error)
+  }
+}
+
+watch(() => postEditStore.settings?.mode, () => { void refreshPostEditTest() })
+
 const loadingRecentTargetApps = ref(false)
 let unlistenRecentTargetApps: UnlistenFn | null = null
 
@@ -463,6 +487,10 @@ function getAppBadgeLabel(appName: string) {
 }
 
 onMounted(async () => {
+  void refreshPostEditTest()
+  postEditTestTimer = setInterval(() => {
+    if (postEditStore.settings?.mode !== 'off' && !document.hidden) void refreshPostEditTest()
+  }, 1000)
   const unlistenMute = await listen<OutputMuteStatus>('audio:output-mute-status', event => {
     if (event.payload.revision < (outputMuteStatus.value?.revision ?? 0)) return
     outputMuteStatus.value = event.payload
@@ -484,6 +512,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   inputSettingsDisposed = true
+  if (postEditTestTimer) clearInterval(postEditTestTimer)
   unlistenOutputMute?.()
   if (unlistenRecentTargetApps) {
     unlistenRecentTargetApps()
@@ -647,6 +676,30 @@ onBeforeUnmount(() => {
         <div class="card-sub">{{ t('input.textInjectionSub') }}</div>
       </div>
       <div class="field-list">
+        <div class="field-row">
+          <div class="field-text">
+            <div class="field-label">{{ t('input.postEditTestTitle') }}</div>
+            <div class="field-note">{{ t('input.postEditTestPrivacy') }}</div>
+            <div class="field-note">{{ t('input.postEditTestLimit') }}</div>
+            <div v-if="postEditTest?.enabled" class="field-note">
+              {{ t(`input.postEditStatus.${postEditTest.status}`) }}
+              <template v-if="postEditTest.reason !== 'none'"> · {{ t(`input.postEditReason.${postEditTest.reason}`) }}</template>
+              <template v-if="postEditTest.nativeCode !== null"> ({{ postEditTest.nativeCode }})</template>
+            </div>
+            <div v-if="postEditTest?.insertions !== null && postEditTest?.insertions !== undefined" class="field-note">
+              {{ t('input.postEditCounts', { insertions: postEditTest.insertions, deletions: postEditTest.deletions, substitutions: postEditTest.substitutions }) }}
+            </div>
+            <div v-if="postEditTest?.strategy && postEditTest.rangeEvidence" class="field-note">
+              {{ t('input.postEditObservationDetail', {
+                strategy: t(`input.postEditStrategies.${postEditTest.strategy}`),
+                evidence: t(`input.postEditEvidence.${postEditTest.rangeEvidence}`),
+                seconds: ((postEditTest.lastObservedMs ?? 0) / 1000).toFixed(1)
+              }) }}
+            </div>
+            <div v-if="postEditTestError" class="field-note limit-hint">{{ t('input.postEditError', { message: postEditTestError }) }}</div>
+          </div>
+          <PostEditModeSelect />
+        </div>
         <div class="field-row">
           <div class="field-text">
             <div class="field-label">{{ t('input.injectionMode') }}</div>

@@ -1,6 +1,6 @@
 //! macOS selection reader: layered Accessibility read with a Copy fallback.
 
-mod ax;
+pub(crate) mod ax;
 mod clipboard;
 
 use std::collections::HashSet;

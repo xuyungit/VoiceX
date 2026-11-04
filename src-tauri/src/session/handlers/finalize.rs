@@ -38,7 +38,8 @@ impl SessionController {
         );
 
         let history = crate::services::history_service::HistoryService::new();
-        history.persist(
+        let _ = history.persist_with_id(
+            *state.session_record_id.get_or_insert_with(uuid::Uuid::new_v4),
             text,
             original_for_history,
             corrected,

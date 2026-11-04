@@ -377,6 +377,13 @@ impl SessionController {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             .wrapping_add(1);
         let injection_version = state.final_version;
+        let injection_identity = crate::injector::AttemptIdentity {
+            session_id: *state.session_id.get_or_insert_with(uuid::Uuid::new_v4),
+            record_id: *state.session_record_id.get_or_insert_with(uuid::Uuid::new_v4),
+            injection_epoch,
+        };
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let post_edit_attempt = crate::post_edit::coordinator::begin_attempt();
         let remove_punctuation = state.remove_trailing_punctuation;
         let threshold = state.short_sentence_threshold;
         let rules = state.replacement_rules.clone();
@@ -502,11 +509,14 @@ impl SessionController {
             }
             controller.emit_transcript(&final_text, true);
             let target_controller = controller.clone();
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            let (post_edit_tx, post_edit_rx) = std::sync::mpsc::sync_channel(1);
             let inject_handle =
                 crate::services::text_injection_service::TextInjectionService::new()
                     .inject_background_guarded(
                         final_text.clone(),
                         injection_guard,
+                        injection_identity,
                         move || {
                             // Resolve only after queuing and modifier waits: the
                             // user may choose a different app during either wait.
@@ -548,15 +558,56 @@ impl SessionController {
                                 mode,
                                 matched_override.map(|item| item.app_name.as_str())
                             );
-                            crate::injector::TextInjector::with_mode(mode, skip_clipboard_restore)
-                                .with_focus_roundtrip_target(focus_roundtrip_pid)
+                            let resolved = target_app.as_ref().map(|app| crate::injector::ResolvedApp {
+                                process_id: app.process_id,
+                                app_name: app.display_name.clone().or_else(|| app.process_name.clone()),
+                                remote_bridge: {
+                                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                                    { crate::post_edit::coordinator::known_remote_target(app, skip_clipboard_restore) }
+                                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                                    { skip_clipboard_restore }
+                                },
+                            });
+                            #[cfg(any(target_os = "macos", target_os = "windows"))]
+                            {
+                                use crate::post_edit::diagnostics::Reason;
+                                if intent != ProcessingIntent::Assistant {
+                                    crate::post_edit::coordinator::skipped(post_edit_attempt, Reason::ModeExcluded);
+                                } else if resolved.as_ref().is_some_and(|app| app.remote_bridge) {
+                                    crate::post_edit::coordinator::skipped(post_edit_attempt, Reason::RemoteTargetUnsupported);
+                                } else if let Some(app) = target_app.as_ref().filter(|app| !app.is_self) {
+                                    if let Some(pending) = crate::post_edit::coordinator::prepare(post_edit_attempt, app.process_id) {
+                                        let _ = post_edit_tx.try_send(pending);
+                                    }
+                                } else {
+                                    crate::post_edit::coordinator::skipped(post_edit_attempt, Reason::TargetUnavailable);
+                                }
+                            }
+                            (crate::injector::TextInjector::with_mode(mode, skip_clipboard_restore)
+                                .with_focus_roundtrip_target(focus_roundtrip_pid), resolved)
                         },
                     );
             // Wait for the blocking injection to complete before signalling InjectDone.
             // This prevents a new injection from starting while the previous one is
             // still writing to the clipboard or typing characters.
             if let Some(handle) = inject_handle {
-                let _ = handle.await;
+                match handle.await {
+                    Ok(receipt) => {
+                        log::debug!("Injection dispatch {}: {:?}", receipt.injection_id, receipt.outcome);
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
+                        if let Ok(pending) = post_edit_rx.try_recv() {
+                            pending.dispatched(receipt, final_text.clone());
+                        }
+                    },
+                    Err(err) => {
+                        log::warn!("Injection worker failed: {}", err);
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
+                        crate::post_edit::coordinator::skipped(post_edit_attempt, crate::post_edit::diagnostics::Reason::DispatchFailed);
+                    }
+                }
+            } else {
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                crate::post_edit::coordinator::skipped(post_edit_attempt, crate::post_edit::diagnostics::Reason::DispatchFailed);
             }
             if cancel_flag.load(std::sync::atomic::Ordering::SeqCst)
                 || controller

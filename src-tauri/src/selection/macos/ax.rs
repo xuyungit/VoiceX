@@ -24,10 +24,10 @@ const K_AX_ERROR_NOT_IMPLEMENTED: AXError = -25208;
 const WRONG_TYPE_STATUS: AXError = 1;
 
 #[repr(C)]
-struct __AXUIElement {
+pub(crate) struct __AXUIElement {
     _private: [u8; 0],
 }
-type AXUIElementRef = *const __AXUIElement;
+pub(crate) type AXUIElementRef = *const __AXUIElement;
 
 #[allow(non_snake_case)]
 #[link(name = "ApplicationServices", kind = "framework")]

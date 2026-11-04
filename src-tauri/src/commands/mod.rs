@@ -8,6 +8,7 @@ pub mod history;
 pub mod history_translation;
 pub mod hotkey;
 pub mod hotword;
+pub mod post_edit;
 pub mod hud;
 pub mod retranscribe;
 pub mod settings;

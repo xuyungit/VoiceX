@@ -139,6 +139,7 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     // LLM endpoint -> named endpoints array). Best-effort: never block startup.
     migrate_settings_blob(&conn);
 
+    crate::post_edit::records::create_schema(&conn)?;
     let _ = DB.set(Mutex::new(conn));
     log::info!("Database initialized at {:?}", path);
     Ok(())
@@ -305,7 +306,7 @@ fn migrate_settings_blob(conn: &Connection) {
     }
 }
 
-fn with_db<T, F>(f: F) -> Result<T, StorageError>
+pub(crate) fn with_db<T, F>(f: F) -> Result<T, StorageError>
 where
     F: FnOnce(&Connection) -> Result<T, StorageError>,
 {
@@ -636,15 +637,19 @@ fn delete_history_record_internal(id: &str, warn_on_missing: bool) -> Result<(),
     }
 
     with_db(|conn| {
-        let affected = conn
+        let tx = conn.unchecked_transaction()
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        crate::post_edit::records::delete_source(&tx, id)?;
+        let affected = tx
             .execute("DELETE FROM history_record WHERE id = ?1", params![id])
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         if affected == 0 && warn_on_missing {
             log::warn!("History delete: record not found id={}", id);
         }
-        Ok(())
+        tx.commit().map_err(|e| StorageError::QueryFailed(e.to_string()))
     })?;
 
+    crate::post_edit::records::changed();
     Ok(())
 }
 

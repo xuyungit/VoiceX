@@ -18,7 +18,7 @@ use std::sync::{
 use std::thread;
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub(crate) mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 // The Windows reader's pure decisions, compiled everywhere so their tests run

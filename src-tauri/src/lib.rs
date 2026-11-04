@@ -16,6 +16,7 @@ mod logging;
 #[cfg(target_os = "macos")]
 mod mac_pasteboard;
 mod network;
+pub mod post_edit;
 pub mod selection;
 pub mod services;
 pub mod session;
@@ -90,6 +91,7 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize storage
     storage::init_database(&db_path)?;
+    post_edit::records::init(app.handle())?;
     audio::output_mute::init(app.handle());
 
     // Initialize audio recordings directory
@@ -340,6 +342,12 @@ pub fn run() {
             commands::audio::get_recordings_dir,
             commands::audio::open_recordings_dir,
             commands::build_info::get_build_info,
+            commands::post_edit::get_post_edit_test_status,
+            commands::post_edit::get_post_edit_settings,
+            commands::post_edit::set_post_edit_mode,
+            commands::post_edit::get_post_edit_records,
+            commands::post_edit::delete_post_edit_record,
+            commands::post_edit::clear_post_edit_records,
             commands::hud::set_hud_content_bounds,
             commands::hud::hud_ready,
             commands::hotkey::record_hotkey,

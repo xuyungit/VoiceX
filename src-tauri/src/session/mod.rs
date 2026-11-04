@@ -1069,6 +1069,8 @@ impl SessionController {
 
     fn handle_cancel_session_state(&self, state: &mut AppState, reason: CancelReason) {
         log::info!("Cancelling session: {:?}", reason);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        crate::post_edit::coordinator::cancel();
         // Invalidate any in-flight injection tasks.
         self.injection_epoch.fetch_add(1, Ordering::SeqCst);
         self.injection_cancel_flag.store(true, Ordering::SeqCst);
@@ -1589,6 +1591,9 @@ mod tests {
 
     #[test]
     fn stale_audio_stopped_message_is_ignored_after_cancel() {
+        // Cancellation touches the same app-wide observer as diagnostics tests.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _post_edit_guard = crate::post_edit::diagnostics::TEST_LOCK.lock().unwrap();
         let controller = SessionController::default();
         let mut state = AppState::new();
         let t0 = Instant::now();

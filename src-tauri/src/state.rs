@@ -85,6 +85,8 @@ pub struct AppState {
     pub transcript_text: String,
 
     // Session data
+    pub(crate) session_id: Option<uuid::Uuid>,
+    pub(crate) session_record_id: Option<uuid::Uuid>,
     pub(crate) session_start: Option<Instant>,
     pub(crate) session_audio_path: Option<PathBuf>,
     pub(crate) session_refinement_audio_path: Option<PathBuf>,
@@ -152,6 +154,8 @@ impl AppState {
             session_start: None,
             session_audio_path: None,
             session_refinement_audio_path: None,
+            session_id: None,
+            session_record_id: None,
             session_duration_ms: None,
             session_sample_rate: None,
             session_channels: None,
@@ -213,6 +217,8 @@ impl AppState {
 
         match self.session_state {
             HotkeySessionState::Idle => {
+                self.session_id = Some(uuid::Uuid::new_v4());
+                self.session_record_id = Some(uuid::Uuid::new_v4());
                 self.session_state = HotkeySessionState::Pending;
                 self.hands_free_stop_armed = false;
                 self.recording_style = None;
@@ -380,6 +386,8 @@ impl AppState {
         self.is_correcting = false;
         self.transcript_text.clear();
         self.session_start = None;
+        self.session_id = None;
+        self.session_record_id = None;
         self.session_audio_path = None;
         self.session_refinement_audio_path = None;
         self.session_duration_ms = None;
@@ -427,6 +435,21 @@ mod tests {
 
     fn ms(value: u64) -> Duration {
         Duration::from_millis(value)
+    }
+
+    #[test]
+    fn session_and_history_ids_are_stable_until_reset_and_unique_per_recording() {
+        let mut state = AppState::new();
+        let t = Instant::now();
+        state.handle_hotkey_pressed_at(t);
+        let first = (state.session_id.unwrap(), state.session_record_id.unwrap());
+        state.handle_hotkey_pressed_at(t + ms(10));
+        assert_eq!((state.session_id.unwrap(), state.session_record_id.unwrap()), first);
+        state.reset();
+        assert!(state.session_id.is_none() && state.session_record_id.is_none());
+        state.handle_hotkey_pressed_at(t + ms(20));
+        assert_ne!(state.session_id.unwrap(), first.0);
+        assert_ne!(state.session_record_id.unwrap(), first.1);
     }
 
     #[test]

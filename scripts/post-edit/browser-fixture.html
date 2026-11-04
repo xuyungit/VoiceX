@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>VoiceX post-edit synthetic fixture</title>
+<body>
+  <label>单行文本 <input id="input" value="左返利右"></label>
+  <label>普通文本 <textarea id="text">左返利右</textarea></label>
+  <label>可编辑区域 <div id="editable" contenteditable="true">左返利右</div></label>
+  <label>测试密码 <input id="password" type="password" value="synthetic-password"></label>
+</body>
+<script>
+const target = document.getElementById(location.hash.slice(1) || 'text');
+function select(start, end) {
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+    target.setSelectionRange(start, end);
+  } else {
+    const range = document.createRange();
+    range.setStart(target.firstChild, start); range.setEnd(target.firstChild, end);
+    getSelection().removeAllRanges(); getSelection().addRange(range);
+  }
+}
+setTimeout(() => { target?.focus(); select(1, 3); }, 250);
+if (new URLSearchParams(location.search).has('observe') && target.id !== 'password') {
+  target.addEventListener('input', () => {
+    const text = target.isContentEditable ? target.textContent : target.value;
+    if (text !== '左反力右') return;
+    setTimeout(() => {
+      if (target.isContentEditable) target.textContent = '左反载右';
+      else target.value = '左反载右';
+      select(3, 3);
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+    }, 600);
+  });
+}
+</script>
+</html>
