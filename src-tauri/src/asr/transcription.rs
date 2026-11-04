@@ -46,7 +46,7 @@ pub async fn transcribe_audio_path_detailed(
         AsrProviderType::FunAsr => run_streaming_asr(path, config, cancel).await,
         AsrProviderType::Qwen => run_qwen_asr(path, config).await,
         AsrProviderType::Gemini => run_gemini_asr(path, config).await,
-        AsrProviderType::GeminiLive => run_streaming_asr(path, config, cancel).await,
+        AsrProviderType::GeminiLive => run_gemini_live_asr(path, config, cancel).await,
         AsrProviderType::Cohere => run_cohere_asr(path, config).await,
         AsrProviderType::OpenAI => run_openai_asr(path, config).await,
         AsrProviderType::ElevenLabs => run_elevenlabs_asr(path, config).await,
@@ -203,6 +203,40 @@ async fn run_gemini_asr(
     })
 }
 
+async fn run_gemini_live_asr(
+    path: &PathBuf,
+    config: &AsrConfig,
+    cancel: CancellationToken,
+) -> Result<AsrTranscriptionOutcome, String> {
+    let streaming = run_streaming_asr(path, config, cancel.clone()).await?;
+    if !config.post_recording_batch_refine_enabled() {
+        return Ok(streaming);
+    }
+    let result = GeminiTranscriptionClient::new(config.clone())
+        .transcribe_file(path)
+        .await;
+    if cancel.is_cancelled() {
+        return Err("转录已取消".into());
+    }
+    match result {
+        Ok(text) if !text.trim().is_empty() => Ok(AsrTranscriptionOutcome {
+            text: text.trim().to_string(),
+            model_name: HistoryService::gemini_realtime_batch_refine_model_name(&config.gemini_live_model, &config.gemini_model),
+        }),
+        Ok(_) => {
+            log::warn!("Gemini batch refinement returned empty text; keeping live transcription");
+            Ok(streaming)
+        }
+        Err(err) => {
+            log::warn!(
+                "Gemini batch refinement failed; keeping live transcription: {}",
+                err
+            );
+            Ok(streaming)
+        }
+    }
+}
+
 async fn run_cohere_asr(
     path: &PathBuf,
     config: &AsrConfig,
@@ -258,7 +292,8 @@ async fn run_openai_asr(
                     Ok(AsrTranscriptionOutcome {
                         text: refined,
                         model_name: HistoryService::openai_realtime_batch_refine_model_name(
-                            &config.openai_asr_model, &config.openai_asr_refine_model
+                            &config.openai_asr_model,
+                            &config.openai_asr_refine_model,
                         ),
                     })
                 }

@@ -72,6 +72,8 @@ pub struct AppSettings {
     pub gemini_model: String,
     pub gemini_live_model: String,
     pub gemini_language: String,
+    pub gemini_recognition_mode: String, // "batch" | "realtime"
+    pub gemini_post_recording_refine: String, // "off" | "batch_refine"
 
     // ASR Provider: Cohere Audio Transcription
     pub cohere_api_key: String,
@@ -470,6 +472,8 @@ impl Default for AppSettings {
             gemini_model: crate::asr::models::default_model("gemini"),
             gemini_live_model: crate::asr::models::default_model("geminiLive"),
             gemini_language: "auto".to_string(),
+            gemini_recognition_mode: "batch".to_string(),
+            gemini_post_recording_refine: "off".to_string(),
             cohere_api_key: String::new(),
             cohere_model: crate::asr::models::default_model("cohere"),
             cohere_language: "zh".to_string(),
@@ -1566,7 +1570,7 @@ mod tests {
         let mut raw = serde_json::json!({"llmOpenaiModel":"gpt-4o-mini","geminiLiveModel":"gemini-3.1-flash-live-preview"});
         assert!(super::migrate_scheduled_model_defaults(&mut raw));
         assert_eq!(raw["llmOpenaiModel"], "gpt-6-luna");
-        assert_eq!(raw["geminiLiveModel"], "gemini-3.5-transcribe-live");
+        assert_eq!(raw["geminiLiveModel"], "gemini-3.8-live");
         assert_eq!(raw["modelDefaultsVersion"], 1);
         raw["llmOpenaiModel"] = "gpt-4o-mini".into();
         raw["geminiLiveModel"] = "gemini-3.1-flash-live-preview".into();

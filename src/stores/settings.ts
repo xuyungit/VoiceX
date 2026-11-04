@@ -30,7 +30,7 @@ export interface AppSettings {
     modelDefaultsVersion: number
 
     // ASR
-    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'gemini-live' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'mimo' | 'coli' | 'qwen-local'
+    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'mimo' | 'coli' | 'qwen-local'
     asrAppKey: string
     asrAccessKey: string
     asrResourceId: string
@@ -82,6 +82,8 @@ export interface AppSettings {
     geminiModel: string
     geminiLiveModel: string
     geminiLanguage: 'auto' | 'zh' | 'en' | 'zh-en'
+    geminiRecognitionMode: 'batch' | 'realtime'
+    geminiPostRecordingRefine: 'off' | 'batch_refine'
     cohereApiKey: string
     cohereModel: string
     cohereLanguage: string
@@ -385,6 +387,8 @@ const defaultSettings: AppSettings = {
     geminiModel: ASR_MODEL_DEFAULTS.gemini,
     geminiLiveModel: ASR_MODEL_DEFAULTS.geminiLive,
     geminiLanguage: 'auto',
+    geminiRecognitionMode: 'batch',
+    geminiPostRecordingRefine: 'off',
     cohereApiKey: '',
     cohereModel: ASR_MODEL_DEFAULTS.cohere,
     cohereLanguage: 'zh',

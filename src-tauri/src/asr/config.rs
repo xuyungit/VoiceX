@@ -191,6 +191,7 @@ pub struct AsrConfig {
     pub gemini_model: String,
     pub gemini_live_model: String,
     pub gemini_language: String,
+    pub gemini_post_recording_refine: PostRecordingBatchRefineMode,
 
     // Cohere Audio Transcription settings
     pub cohere_api_key: String,
@@ -310,6 +311,7 @@ impl Default for AsrConfig {
             gemini_model: crate::asr::models::default_model("gemini"),
             gemini_live_model: crate::asr::models::default_model("geminiLive"),
             gemini_language: "auto".to_string(),
+            gemini_post_recording_refine: PostRecordingBatchRefineMode::Off,
             cohere_api_key: String::new(),
             cohere_model: crate::asr::models::default_model("cohere"),
             cohere_language: "zh".to_string(),
@@ -375,8 +377,10 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             "google" => AsrProviderType::Google,
             "funasr" => AsrProviderType::FunAsr,
             "qwen" => AsrProviderType::Qwen,
+            "gemini" if settings.gemini_recognition_mode == "realtime" => {
+                AsrProviderType::GeminiLive
+            }
             "gemini" => AsrProviderType::Gemini,
-            "gemini-live" => AsrProviderType::GeminiLive,
             "cohere" => AsrProviderType::Cohere,
             "openai" => AsrProviderType::OpenAI,
             "elevenlabs" => AsrProviderType::ElevenLabs,
@@ -422,6 +426,9 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             gemini_model: settings.gemini_model.clone(),
             gemini_live_model: settings.gemini_live_model.clone(),
             gemini_language: settings.gemini_language.clone(),
+            gemini_post_recording_refine: PostRecordingBatchRefineMode::from_str(
+                &settings.gemini_post_recording_refine,
+            ),
             cohere_api_key: settings.cohere_api_key.clone(),
             cohere_model: settings.cohere_model.clone(),
             cohere_language: settings.cohere_language.clone(),
@@ -557,9 +564,9 @@ impl AsrConfig {
             },
             AsrProviderType::GeminiLive => AsrProviderCapabilities {
                 supports_realtime: true,
-                supports_realtime_with_final_pass: false,
-                supports_batch: false,
-                supports_post_recording_batch_refine: false,
+                supports_realtime_with_final_pass: true,
+                supports_batch: true,
+                supports_post_recording_batch_refine: true,
             },
             AsrProviderType::Cohere => AsrProviderCapabilities {
                 supports_realtime: false,
@@ -633,6 +640,12 @@ impl AsrConfig {
             }
             AsrProviderType::Qwen => AsrPipelineMode::Realtime,
             AsrProviderType::Gemini => AsrPipelineMode::Batch,
+            AsrProviderType::GeminiLive
+                if self.gemini_post_recording_refine
+                    == PostRecordingBatchRefineMode::BatchRefine =>
+            {
+                AsrPipelineMode::RealtimeWithFinalPass
+            }
             AsrProviderType::GeminiLive => AsrPipelineMode::Realtime,
             AsrProviderType::Cohere => AsrPipelineMode::Batch,
             AsrProviderType::OpenAI if self.openai_asr_mode == "realtime" => {
@@ -686,6 +699,9 @@ impl AsrConfig {
     pub fn post_recording_batch_refine_enabled(&self) -> bool {
         self.capabilities().supports_post_recording_batch_refine
             && match self.provider_type {
+                AsrProviderType::GeminiLive => {
+                    self.gemini_post_recording_refine == PostRecordingBatchRefineMode::BatchRefine
+                }
                 AsrProviderType::ElevenLabs => {
                     self.elevenlabs_recognition_mode == ElevenLabsRecognitionMode::Realtime
                         && self.elevenlabs_post_recording_refine
@@ -800,6 +816,9 @@ impl AsrConfig {
                     require("gemini_model", "识别模型", &self.gemini_model);
                 } else {
                     require("gemini_live_model", "实时模型", &self.gemini_live_model);
+                    if self.post_recording_batch_refine_enabled() {
+                        require("gemini_model", "精修模型", &self.gemini_model);
+                    }
                 }
             }
             Cohere => {
@@ -972,6 +991,36 @@ mod tests {
             config.pipeline_mode(),
             AsrPipelineMode::RealtimeWithFinalPass
         );
+    }
+
+    #[test]
+    fn gemini_modes_and_refinement_map_to_correct_pipeline() {
+        let mut settings = crate::commands::settings::AppSettings::default();
+        settings.asr_provider_type = "gemini".into();
+        settings.gemini_api_key = "test-key".into();
+        let batch = AsrConfig::from(&settings);
+        assert_eq!(batch.provider_type, AsrProviderType::Gemini);
+        assert_eq!(batch.pipeline_mode(), AsrPipelineMode::Batch);
+        settings.gemini_recognition_mode = "realtime".into();
+        let live = AsrConfig::from(&settings);
+        assert_eq!(live.provider_type, AsrProviderType::GeminiLive);
+        assert_eq!(live.pipeline_mode(), AsrPipelineMode::Realtime);
+        settings.gemini_post_recording_refine = "batch_refine".into();
+        let refined = AsrConfig::from(&settings);
+        assert_eq!(
+            refined.pipeline_mode(),
+            AsrPipelineMode::RealtimeWithFinalPass
+        );
+        assert!(refined.post_recording_batch_refine_enabled());
+        assert!(refined.validate_model_selection().is_ok());
+        settings.gemini_model = "gemini-3.1-flash-lite-preview".into();
+        assert!(AsrConfig::from(&settings)
+            .validate_model_selection()
+            .is_err());
+        settings.gemini_post_recording_refine = "off".into();
+        assert!(AsrConfig::from(&settings)
+            .validate_model_selection()
+            .is_ok());
     }
 
     #[test]

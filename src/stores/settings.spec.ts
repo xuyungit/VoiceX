@@ -4,6 +4,7 @@ import asrModels from '../shared/asrModels.json'
 import { isMacOS } from '../utils/platform'
 import { useSettingsStore } from './settings'
 import { buildLlmProviderOptions, providerSelectionKey } from '../utils/llmOptions'
+import { buildAsrProviderOptions } from '../utils/providerOptions'
 
 export function checkLlmDefault(expectedMacOS: boolean) {
   if (isMacOS !== expectedMacOS) throw new Error('Platform fixture was not applied')
@@ -30,6 +31,13 @@ export function checkLlmDefault(expectedMacOS: boolean) {
     }
     if (store.settings.geminiLiveModel !== asrModels.defaults.geminiLive || store.settings.geminiLiveModel !== 'gemini-3.5-transcribe-live') {
       throw new Error('The settings UI must use the shared current Gemini Live default')
+    }
+    if (store.settings.geminiRecognitionMode !== 'batch' || store.settings.geminiPostRecordingRefine !== 'off') {
+      throw new Error('Gemini defaults must preserve batch mode and disable refinement')
+    }
+    const asrOptions = buildAsrProviderOptions(key => key)
+    if (asrOptions.filter(option => option.value === 'gemini').length !== 1 || asrOptions.some(option => String(option.value) === 'gemini-live')) {
+      throw new Error('Gemini must appear once in the shared ASR provider list')
     }
   } finally {
     disposePinia(pinia)

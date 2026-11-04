@@ -27,7 +27,7 @@ export function checkAsrModelOptions() {
   assert(retired?.shutdownDate === '2026-05-25' && retired.replacement === 'gemini-3.1-flash-lite', 'Warning must use shared retirement evidence')
 
   for (const [provider, id, mode] of [
-    ['gemini-live', 'gemini-3.1-flash-live-preview', 'realtime'],
+    ['gemini-live', 'gemini-3.8-live', 'realtime'],
     ['openai', 'whisper-1', 'batch'],
     ['openai', 'gpt-4o-transcribe', 'batch'],
     ['openai', 'gpt-4o-mini-transcribe', 'batch'],
@@ -38,9 +38,13 @@ export function checkAsrModelOptions() {
     const option = buildModelOptions(provider, mode, id, t).find(candidate => candidate.value === id)
     assert(option && !option.disabled, `Still-served option must remain selectable: ${id}`)
   }
+  assert(!buildModelOptions('gemini-live', 'realtime', '', t).some(option => option.value === 'gemini-3.1-flash-live-preview'), 'Replaced Live model must not be offered')
+  assert(modelSelectionError('gemini-live', 'gemini-3.1-flash-live-preview', 'realtime'), 'Replaced Live model must not be selectable')
   assert(!modelSelectionError('custom', retiredId, 'batch'), 'Retirement must not claim another provider’s model IDs')
   assert(!modelSelectionError('gemini', `${retiredId}-my-deployment`, 'batch'), 'Retirement must match the exact ID')
   assert(ASR_MODEL_DEFAULTS.geminiLive === 'gemini-3.5-transcribe-live', 'Gemini Live must default to the supported transcription model')
+  const gemini31 = buildModelOptions('gemini', 'batch', '', t).find(option => option.value === 'gemini-3.1-flash-lite')
+  assert(gemini31 && !gemini31.disabled && gemini31.label.includes('asr.modelGemini31EarliestShutdown'), 'Gemini 3.1 Flash-Lite remains usable with its future shutdown notice')
   assert(ASR_MODEL_DEFAULTS.soniox === 'stt-rt-v6', 'Soniox must default to v6')
   assert(findAsrModel('soniox', 'stt-rt-v5')?.status === 'legacy', 'Soniox v5 must remain available as a legacy model')
   const retiredSnapshots = [

@@ -20,7 +20,6 @@ const ASR_DISPLAY_NAMES: Record<string, string> = {
   funasr: 'Fun-ASR',
   qwen: 'Qwen',
   gemini: 'Gemini',
-  'gemini-live': 'Gemini Live',
   cohere: 'Cohere',
   openai: 'OpenAI',
   soniox: 'Soniox',

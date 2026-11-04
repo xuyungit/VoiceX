@@ -79,7 +79,8 @@
       "id": "gemini-3.1-flash-lite",
       "modes": [
         "batch"
-      ]
+      ],
+      "note": "modelGemini31EarliestShutdown"
     },
     {
       "provider": "gemini",
@@ -90,11 +91,16 @@
     },
     {
       "provider": "gemini-live",
-      "id": "gemini-3.1-flash-live-preview",
+      "id": "gemini-3.8-live",
       "modes": [
         "realtime"
-      ],
-      "status": "preview"
+      ]
+    },
+    {
+      "provider": "gemini-live",
+      "id": "gemini-3.1-flash-live-preview",
+      "modes": [],
+      "status": "legacy"
     },
     {
       "provider": "gemini-live",
@@ -360,11 +366,18 @@
       "source": "https://platform.qianwenai.com/docs/changelog/model-deprecations/old-models"
     }
   ],
+  "replacedModels": [
+    {
+      "field": "geminiLiveModel",
+      "previous": "gemini-3.1-flash-live-preview",
+      "replacement": "gemini-3.8-live"
+    }
+  ],
   "defaultMigrations": [
     {
       "field": "geminiLiveModel",
       "previous": "gemini-3.1-flash-live-preview",
-      "replacement": "gemini-3.5-transcribe-live"
+      "replacement": "gemini-3.8-live"
     }
   ]
 }

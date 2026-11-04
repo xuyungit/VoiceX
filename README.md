@@ -107,8 +107,7 @@ macOS 自带一个同类功能（系统设置 → 辅助功能 → 朗读内容�
 | Google Cloud Speech-to-Text V2 | 云端流式 (gRPC) | 多语种，Phrase Boost，可配置端点检测 |
 | Fun-ASR Realtime | 云端流式 (WebSocket) | DashScope；`fun-asr-realtime` / `fun-asr-flash-8k-realtime`；适合低延迟实时出字；部分模型支持以词典作为上下文增强 |
 | 通义千问（DashScope ASR） | 云端流式 / 批量文件识别 | 阿里云；新一代 `qwen-audio-3.1/3.0-asr-flash(-streaming)` 与既有 Qwen3-ASR 两代模型（3.1 按 token 计费，比 3.0 便宜约六成到九成）；支持 `Realtime`、`Batch` 和 `Realtime + 录后 Batch 精修`；新一代模型支持实时热词与权重、预编译热词表、上下文、语义断句；batch 路径当前受 5 分钟短音频接口限制 |
-| Gemini Audio Transcription | 云端批量文件识别 | 默认 `gemini-3.5-flash-lite`；也可选 `gemini-3.5-transcribe` 与 `gemini-3.1-flash-lite`；录音结束后上传整段音频；支持自动 / 中文 / English / 中英混合提示 |
-| Gemini Live Realtime | 云端流式 (WebSocket) | 默认 `gemini-3.5-transcribe-live`；原 `gemini-3.1-flash-live-preview` 在停服前仍可选；基于输入音频转写的实时识别，可附带语言提示；转写模型单次录音最长 10 分钟 |
+| Google Gemini | 云端实时或批处理 | 实时默认 `gemini-3.5-transcribe-live`（最长 10 分钟）；`gemini-3.8-live` 可能在录音结束后出字并产生语音输出费用。批处理默认 `gemini-3.5-flash-lite`，也可选 `gemini-3.5-transcribe`。可选录音后批处理重新识别，默认关闭。
 | Cohere Audio Transcription | 云端批量文件识别 | `cohere-transcribe-03-2026`；整段音频上传识别，需显式指定 ISO-639-1 语言码 |
 | Soniox Realtime | 云端流式 (WebSocket) | 默认 `stt-rt-v6`（已保存的模型选择保持不变，v5 和 v4 仍可选）；基于 token 的流式识别，支持热词和语言提示 |
 | StepAudio | 云端批量文件识别 (HTTP + SSE) | 阶跃星辰；默认 `stepaudio-3-asr-max`，保留 `stepaudio-2.5-asr`；录音结束后上传整段音频，VoiceX 录音上限 30 分钟，文本通过 SSE 增量返回 |
@@ -122,7 +121,9 @@ macOS 自带一个同类功能（系统设置 → 辅助功能 → 朗读内容�
 
 `gemini-3.1-flash-lite-preview` 已于 2026-05-25 [停止服务](https://ai.google.dev/gemini-api/docs/changelog#may-25-2026)，已从预设选项移除。已有配置值会保留并显示提示，识别前会拒绝该模型；请在 ASR 设置中自行选择 `gemini-3.1-flash-lite` 或其他可用模型。
 
-2026-10-10 下线的 Qwen/Fun-ASR 快照已从预设移除。精确匹配的已有实时、短音频快照配置会迁移至同提供商对应主线模型，提供商、接入地址和识别模式保持不变。已停服的异步 filetrans 快照因与短音频接口的能力限制不同，保留原值、禁用并提示手动选择；不自动跨协议替换。首次升级时，原 Gemini Live 默认配置迁移至 `gemini-3.5-transcribe-live`。
+正式版 `gemini-3.1-flash-lite` 目前仍可使用；Google 公布的最早停用日期是 2027-05-07，建议替代模型为 `gemini-3.5-flash-lite`。具体日期以 [Gemini API 弃用表](https://ai.google.dev/gemini-api/docs/deprecations) 为准。
+
+2026-10-10 下线的 Qwen/Fun-ASR 快照已从预设移除。精确匹配的已有实时、短音频快照配置会迁移至同提供商对应主线模型，提供商、接入地址和识别模式保持不变。已停服的异步 filetrans 快照因与短音频接口的能力限制不同，保留原值、禁用并提示手动选择；不自动跨协议替换。原 Gemini Live 提供商迁移为 Gemini 的实时模式。VoiceX 已退役旧的 `gemini-3.1-flash-live-preview` 选项，并将精确匹配的已有配置迁移至 `gemini-3.8-live`；Google 当前仍将旧模型列为 legacy preview。
 
 > **提示：** 云端 ASR 服务需要到对应平台申请 API Key。Coli 需要事先通过 npm 全局安装（`npm i -g @marswave/coli`），详见 [Coli 文档](https://www.npmjs.com/package/@marswave/coli)。流式识别（含 Qwen-Audio 3.0 streaming）会走系统代理：Windows 读 WinHTTP（含 PAC/WPAD），macOS 读系统代理与 PAC。
 

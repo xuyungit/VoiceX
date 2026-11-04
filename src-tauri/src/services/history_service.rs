@@ -335,7 +335,11 @@ impl HistoryService {
             },
             AsrProviderType::Gemini => Self::format_provider_model("Gemini", &config.gemini_model),
             AsrProviderType::GeminiLive => {
-                Self::format_provider_model("Gemini Live", &config.gemini_live_model)
+                if config.post_recording_batch_refine_enabled() {
+                    Self::gemini_realtime_batch_refine_model_name(&config.gemini_live_model, &config.gemini_model)
+                } else {
+                    Self::format_provider_model("Gemini Live", &config.gemini_live_model)
+                }
             }
             AsrProviderType::Cohere => Self::format_provider_model("Cohere", &config.cohere_model),
             AsrProviderType::OpenAI => match config.pipeline_mode() {
@@ -343,7 +347,10 @@ impl HistoryService {
                     Self::format_provider_model("OpenAI Realtime", &config.openai_asr_model)
                 }
                 AsrPipelineMode::RealtimeWithFinalPass => {
-                    Self::openai_realtime_batch_refine_model_name(&config.openai_asr_model, &config.openai_asr_refine_model)
+                    Self::openai_realtime_batch_refine_model_name(
+                        &config.openai_asr_model,
+                        &config.openai_asr_refine_model,
+                    )
                 }
                 AsrPipelineMode::Batch => {
                     Self::format_provider_model("OpenAI", &config.openai_asr_model)
@@ -436,9 +443,19 @@ impl HistoryService {
         ))
     }
 
-    pub fn openai_realtime_batch_refine_model_name(model: &str, refine_model: &str) -> Option<String> {
+    pub fn openai_realtime_batch_refine_model_name(
+        model: &str,
+        refine_model: &str,
+    ) -> Option<String> {
         let model = Self::normalize_model_or_default(model, "gpt-4o-transcribe");
-        Some(format!("OpenAI / {} + batch refine({})", model, refine_model))
+        Some(format!(
+            "OpenAI / {} + batch refine({})",
+            model, refine_model
+        ))
+    }
+
+    pub fn gemini_realtime_batch_refine_model_name(model: &str, batch_model: &str) -> Option<String> {
+        Some(format!("Gemini / {} + batch refine({})", model, batch_model))
     }
 
     pub fn resolve_llm_model_name(settings: &AppSettings) -> Option<String> {

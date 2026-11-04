@@ -30,7 +30,6 @@ const ASR_PROVIDER_LABEL_KEYS: Array<{
   { key: 'asr.providerFunAsr', value: 'funasr' },
   { key: 'asr.providerQwen', value: 'qwen' },
   { key: 'asr.providerGemini', value: 'gemini' },
-  { key: 'asr.providerGeminiLive', value: 'gemini-live' },
   { key: 'asr.providerCohere', value: 'cohere' },
   { key: 'asr.providerOpenAI', value: 'openai' },
   { key: 'asr.providerElevenLabs', value: 'elevenlabs' },

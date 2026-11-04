@@ -1104,11 +1104,9 @@ pub fn get_settings() -> Result<AppSettings, StorageError> {
 /// writing or initializing global storage. Used by CLI tools that share the
 /// desktop app's stored credentials and preferences.
 pub fn load_settings_from_path(path: &Path) -> Result<AppSettings, StorageError> {
-    let conn = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
     read_settings_from_connection(&conn)
 }
 
@@ -1795,7 +1793,7 @@ mod tests {
         let mut expected = raw.clone();
         expected["modelDefaultsVersion"] = 1.into();
         expected["llmOpenaiModel"] = crate::llm::default_openai_model().into();
-        expected["geminiLiveModel"] = crate::asr::models::default_model("geminiLive").into();
+        expected["geminiLiveModel"] = "gemini-3.8-live".into();
         expected["qwenAsrModel"] = crate::asr::models::default_model("qwen").into();
         expected["qwenAsrBatchModel"] = crate::asr::models::default_model("qwenBatch").into();
         expected["funasrModel"] = crate::asr::models::default_model("funasr").into();
@@ -1808,6 +1806,45 @@ mod tests {
         assert_eq!(read_settings_blob(&conn), expected);
         migrate_settings_blob(&conn);
         assert_eq!(read_settings_blob(&conn), expected);
+    }
+
+    #[test]
+    fn migrate_gemini_live_provider_preserves_recognition_configuration() {
+        let conn = setup_conn();
+        let raw = serde_json::json!({
+            "modelDefaultsVersion": 1,
+            "asrProviderType": "gemini-live",
+            "geminiApiKey": "example-key",
+            "geminiLiveModel": "gemini-3.5-transcribe-live",
+            "geminiModel": "gemini-3.5-transcribe",
+            "geminiLanguage": "zh-en"
+        });
+        conn.execute(
+            "INSERT INTO user_config (key,value) VALUES ('app_settings',?1)",
+            params![raw.to_string()],
+        )
+        .unwrap();
+        migrate_settings_blob(&conn);
+        let migrated = read_settings_blob(&conn);
+        assert_eq!(migrated["asrProviderType"], "gemini");
+        assert_eq!(migrated["geminiRecognitionMode"], "realtime");
+        for field in [
+            "geminiApiKey",
+            "geminiLiveModel",
+            "geminiModel",
+            "geminiLanguage",
+        ] {
+            assert_eq!(migrated[field], raw[field]);
+        }
+        migrate_settings_blob(&conn);
+        assert_eq!(read_settings_blob(&conn), migrated);
+        let settings: AppSettings = serde_json::from_value(migrated).unwrap();
+        let config = crate::asr::AsrConfig::from(&settings);
+        assert_eq!(
+            config.provider_type,
+            crate::asr::AsrProviderType::GeminiLive
+        );
+        assert!(!config.post_recording_batch_refine_enabled());
     }
 
     #[test]

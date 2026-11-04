@@ -9,6 +9,7 @@ struct Catalog {
     defaults: HashMap<String, String>,
     models: Vec<Model>,
     retired: Vec<RetiredModel>,
+    replaced_models: Vec<DefaultMigration>,
     default_migrations: Vec<DefaultMigration>,
 }
 #[derive(Deserialize)]
@@ -70,6 +71,18 @@ pub fn migrate_known_model_settings(value: &mut serde_json::Value) -> bool {
         for field in &model.settings_fields {
             replace(field, &model.id, &model.replacement);
         }
+    }
+    for model in &catalog().replaced_models {
+        replace(&model.field, &model.previous, &model.replacement);
+    }
+    if object
+        .get("asrProviderType")
+        .and_then(serde_json::Value::as_str)
+        == Some("gemini-live")
+    {
+        object.insert("asrProviderType".into(), "gemini".into());
+        object.insert("geminiRecognitionMode".into(), "realtime".into());
+        changed = true;
     }
     changed
 }
@@ -200,7 +213,11 @@ impl AsrConfig {
             }
             Gemini => validate_model_details("gemini", &self.gemini_model, "batch"),
             GeminiLive => {
-                validate_model_details("gemini-live", &self.gemini_live_model, "realtime")
+                validate_model_details("gemini-live", &self.gemini_live_model, "realtime")?;
+                if self.post_recording_batch_refine_enabled() {
+                    validate_model_details("gemini", &self.gemini_model, "batch")?;
+                }
+                Ok(())
             }
             FunAsr => validate_model_details("funasr", &self.funasr_model, "realtime"),
             Soniox => validate_model_details("soniox", &self.soniox_model, "realtime"),
@@ -266,7 +283,7 @@ mod tests {
     fn gemini_live_default_migration_preserves_custom_models_and_other_fields() {
         let mut raw = serde_json::json!({"geminiLiveModel":"gemini-3.1-flash-live-preview", "geminiModel":"gemini-3.1-flash-live-preview"});
         assert!(migrate_default_model_settings(&mut raw));
-        assert_eq!(raw["geminiLiveModel"], "gemini-3.5-transcribe-live");
+        assert_eq!(raw["geminiLiveModel"], "gemini-3.8-live");
         assert_eq!(raw["geminiModel"], "gemini-3.1-flash-live-preview");
         assert!(!migrate_default_model_settings(&mut raw));
         for id in [
@@ -281,6 +298,34 @@ mod tests {
             assert!(!migrate_default_model_settings(&mut raw));
             assert_eq!(raw, original);
         }
+    }
+
+    #[test]
+    fn replaced_gemini_live_model_migrates_even_after_prior_default_migration() {
+        let mut raw = serde_json::json!({"modelDefaultsVersion":1,"geminiLiveModel":"gemini-3.1-flash-live-preview","geminiModel":"gemini-3.1-flash-live-preview"});
+        assert!(migrate_known_model_settings(&mut raw));
+        assert_eq!(raw["geminiLiveModel"], "gemini-3.8-live");
+        assert_eq!(raw["geminiModel"], "gemini-3.1-flash-live-preview");
+        assert!(!migrate_known_model_settings(&mut raw));
+    }
+
+    #[test]
+    fn gemini_provider_migration_preserves_existing_modes_and_models() {
+        let mut live = serde_json::json!({"asrProviderType":"gemini-live", "geminiLiveModel":"custom-live", "geminiModel":"custom-batch", "geminiApiKey":"key"});
+        assert!(migrate_known_model_settings(&mut live));
+        assert_eq!(live["asrProviderType"], "gemini");
+        assert_eq!(live["geminiRecognitionMode"], "realtime");
+        assert_eq!(live["geminiLiveModel"], "custom-live");
+        assert_eq!(live["geminiModel"], "custom-batch");
+        assert_eq!(live["geminiApiKey"], "key");
+        assert!(!migrate_known_model_settings(&mut live));
+        let mut batch =
+            serde_json::json!({"asrProviderType":"gemini", "geminiModel":"custom-batch"});
+        assert!(!migrate_known_model_settings(&mut batch));
+        let restored: crate::commands::settings::AppSettings =
+            serde_json::from_value(batch).unwrap();
+        assert_eq!(restored.gemini_recognition_mode, "batch");
+        assert_eq!(restored.gemini_model, "custom-batch");
     }
 
     #[test]
@@ -329,7 +374,10 @@ mod tests {
 
     #[test]
     fn scheduled_retirements_and_routing_aliases_stay_available() {
-        assert!(validate_model("gemini-live", "gemini-3.1-flash-live-preview", "realtime").is_ok());
+        assert!(
+            validate_model("gemini-live", "gemini-3.1-flash-live-preview", "realtime").is_err()
+        );
+        assert!(validate_model("gemini-live", "gemini-3.8-live", "realtime").is_ok());
         for id in ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"] {
             assert!(validate_model("openai", id, "batch").is_ok());
         }

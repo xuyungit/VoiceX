@@ -165,16 +165,18 @@ impl GeminiLiveClient {
         let mut transcript = GeminiTranscriptAccumulator::default();
         let saw_input_transcription = AtomicBool::new(false);
         let mut ended = false;
+        let mut completed_after_end = false;
         let mut deadline = None;
         let mut audio_rx = audio_rx;
-        if dedicated {
-            let start = Message::Text(json!({"realtimeInput": {"activityStart": {}}}).to_string());
-            tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                result = tokio::time::timeout(Duration::from_secs(10), ws_write.send(start)) => {
-                    result.map_err(|_| AsrError::ConnectionFailed("Gemini Live activity start timed out".into()))?
-                        .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
-                }
+        // One recording is one activity, even if the speaker pauses. Otherwise
+        // the audio model can finish its turn before capture stops, leaving no
+        // completion event after audioStreamEnd.
+        let start = Message::Text(json!({"realtimeInput": {"activityStart": {}}}).to_string());
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            result = tokio::time::timeout(Duration::from_secs(10), ws_write.send(start)) => {
+                result.map_err(|_| AsrError::ConnectionFailed("Gemini Live activity start timed out".into()))?
+                    .map_err(|e| AsrError::ConnectionFailed(e.to_string()))?;
             }
         }
         loop {
@@ -201,8 +203,7 @@ impl GeminiLiveClient {
                                 STREAM_COMPLETION_WAIT_MS
                             } else { NO_INPUT_TRANSCRIPTION_WAIT_MS };
                             deadline = Some(tokio::time::Instant::now() + Duration::from_millis(wait_ms));
-                            if dedicated { json!({"realtimeInput": {"activityEnd": {}}}) }
-                            else { json!({"realtimeInput": {"audioStreamEnd": true}}) }
+                            json!({"realtimeInput": {"activityEnd": {}}})
                         }
                     };
                     tokio::select! {
@@ -223,7 +224,7 @@ impl GeminiLiveClient {
                     let done = if dedicated {
                         handle_transcribe_payload(&payload, &mut transcript, &on_event, ended)?
                     } else {
-                        handle_runtime_payload(&payload, &mut transcript, &on_event, ended,
+                        handle_runtime_payload(&payload, &mut transcript, &on_event, ended, &mut completed_after_end,
                             diagnostics_enabled, &saw_input_transcription)?
                     };
                     if done { return Ok(()); }
@@ -264,10 +265,13 @@ fn build_setup_message(config: &AsrConfig) -> Value {
             },
             "realtimeInputConfig": {
                 "automaticActivityDetection": {
-                    "disabled": false,
+                    "disabled": true,
                 }
             },
-            "inputAudioTranscription": {},
+            "inputAudioTranscription": {
+                "languageCodes": super::gemini_client::transcription_languages(&config.gemini_language),
+                "customVocabulary": super::gemini_client::transcription_vocabulary(config),
+            },
         }
     })
 }
@@ -282,7 +286,7 @@ fn build_system_instruction(language: &str) -> String {
             "The speaker primarily uses Mandarin Chinese, but may naturally mix in English words, names, or short phrases. Prefer Simplified Chinese transcription for the main sentence and preserve spoken English terms when they appear. When the audio is ambiguous, avoid misclassifying it as another language."
         }
         _ => {
-            "Auto-detect the spoken language, but strongly bias toward Mandarin Chinese with occasional English words or short phrases. Prefer Simplified Chinese transcription when the audio is ambiguous, and avoid misclassifying it as another language."
+            "Auto-detect the spoken language and preserve the words and languages actually spoken."
         }
     };
 
@@ -354,6 +358,7 @@ fn handle_runtime_payload(
     transcript: &mut GeminiTranscriptAccumulator,
     on_event: &Arc<impl Fn(AsrEvent) + Send + Sync + 'static>,
     audio_stream_ended: bool,
+    completed_after_end: &mut bool,
     diagnostics_enabled: bool,
     saw_input_transcription: &AtomicBool,
 ) -> Result<bool, AsrError> {
@@ -372,7 +377,9 @@ fn handle_runtime_payload(
         .and_then(|v| v.get("text"))
         .and_then(Value::as_str)
     {
-        saw_input_transcription.store(true, Ordering::SeqCst);
+        if !input_text.trim().is_empty() {
+            saw_input_transcription.store(true, Ordering::SeqCst);
+        }
         if diagnostics_enabled {
             // The recognized sentence in full lives in the app's own history and
             // HUD; an ordinary log line only says which one this is, and the
@@ -451,6 +458,19 @@ fn handle_runtime_payload(
     }
 
     if audio_stream_ended && turn_complete {
+        *completed_after_end = true;
+    }
+    if audio_stream_ended && *completed_after_end && saw_input_transcription.load(Ordering::SeqCst)
+    {
+        if let Some(combined) = transcript.commit_turn() {
+            on_event(AsrEvent {
+                text: combined,
+                is_final: true,
+                prefetch: false,
+                definite: true,
+                confidence: None,
+            });
+        }
         log::info!(
             "Gemini Live stopping after audio end on turnComplete (generationComplete={}, turnComplete={})",
             generation_complete,
@@ -782,14 +802,62 @@ mod tests {
     }
 
     #[test]
-    fn previously_selected_live_preview_keeps_its_native_audio_protocol() {
+    fn live_38_uses_native_audio_protocol_and_transcription_hints() {
         let mut config = AsrConfig::default();
-        config.gemini_live_model = "gemini-3.1-flash-live-preview".into();
+        config.gemini_live_model = "gemini-3.8-live".into();
+        config.gemini_language = "en".into();
+        config.hotwords = vec!["VoiceX".into()];
         let setup = build_setup_message(&config);
         assert_eq!(
             setup["setup"]["generationConfig"]["responseModalities"],
             json!(["AUDIO"])
         );
         assert!(setup["setup"].get("systemInstruction").is_some());
+        assert_eq!(
+            setup["setup"]["realtimeInputConfig"]["automaticActivityDetection"]["disabled"],
+            true
+        );
+        assert_eq!(
+            setup["setup"]["inputAudioTranscription"]["languageCodes"],
+            json!(["en-US"])
+        );
+        assert_eq!(
+            setup["setup"]["inputAudioTranscription"]["customVocabulary"],
+            json!(["VoiceX"])
+        );
+        assert!(setup["setup"]["generationConfig"]
+            .get("thinkingConfig")
+            .is_none());
+    }
+
+    #[test]
+    fn audio_turn_can_complete_before_input_transcription() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let callback = Arc::new(move |event: AsrEvent| captured.lock().unwrap().push(event));
+        let mut transcript = GeminiTranscriptAccumulator::default();
+        let seen = AtomicBool::new(false);
+        let mut completed = false;
+        assert!(!handle_runtime_payload(
+            &json!({"serverContent":{"turnComplete":true}}),
+            &mut transcript,
+            &callback,
+            true,
+            &mut completed,
+            false,
+            &seen
+        )
+        .unwrap());
+        assert!(handle_runtime_payload(
+            &json!({"serverContent":{"inputTranscription":{"text":"hello"}}}),
+            &mut transcript,
+            &callback,
+            true,
+            &mut completed,
+            false,
+            &seen
+        )
+        .unwrap());
+        assert_eq!(events.lock().unwrap().last().unwrap().text, "hello");
     }
 }

@@ -937,6 +937,7 @@ impl SessionController {
                 && matches!(
                     state.active_asr_refinement_provider,
                     Some(crate::asr::AsrProviderType::ElevenLabs)
+                        | Some(crate::asr::AsrProviderType::GeminiLive)
                         | Some(crate::asr::AsrProviderType::OpenAI)
                         | Some(crate::asr::AsrProviderType::Qwen)
                 );

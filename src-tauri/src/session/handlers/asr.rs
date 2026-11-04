@@ -5,7 +5,7 @@ use crate::{
     asr::{
         transcribe_audio_path_detailed, AsrConfig, AsrEvent, AsrFailure, AsrProviderType,
         ColiAsrClient, ColiRefinementMode, ElevenLabsTranscriptionClient,
-        OpenAITranscriptionClient, QwenTranscriptionClient,
+        GeminiTranscriptionClient, OpenAITranscriptionClient, QwenTranscriptionClient,
     },
     state::{AppState, HotkeySessionState, ProcessingIntent},
 };
@@ -787,6 +787,7 @@ impl SessionController {
             Some(AsrProviderType::ElevenLabs)
                 | Some(AsrProviderType::OpenAI)
                 | Some(AsrProviderType::Qwen)
+                | Some(AsrProviderType::GeminiLive)
         ) {
             self.emit_state_from(state);
         } else {
@@ -1033,6 +1034,7 @@ fn select_batch_audio_path(state: &AppState, config: &AsrConfig) -> Option<PathB
 enum PostRecordingRefineProvider {
     Coli,
     ElevenLabs,
+    Gemini,
     OpenAI,
     Qwen,
 }
@@ -1048,6 +1050,7 @@ impl PostRecordingRefineProvider {
             }
             _ if !config.post_recording_batch_refine_enabled() => None,
             AsrProviderType::ElevenLabs => Some(Self::ElevenLabs),
+            AsrProviderType::GeminiLive => Some(Self::Gemini),
             AsrProviderType::OpenAI => Some(Self::OpenAI),
             AsrProviderType::Qwen => Some(Self::Qwen),
             _ => None,
@@ -1058,6 +1061,7 @@ impl PostRecordingRefineProvider {
         match provider {
             AsrProviderType::Coli => Some(Self::Coli),
             AsrProviderType::ElevenLabs => Some(Self::ElevenLabs),
+            AsrProviderType::GeminiLive => Some(Self::Gemini),
             AsrProviderType::OpenAI => Some(Self::OpenAI),
             AsrProviderType::Qwen => Some(Self::Qwen),
             _ => None,
@@ -1068,6 +1072,7 @@ impl PostRecordingRefineProvider {
         match self {
             Self::Coli => AsrProviderType::Coli,
             Self::ElevenLabs => AsrProviderType::ElevenLabs,
+            Self::Gemini => AsrProviderType::GeminiLive,
             Self::OpenAI => AsrProviderType::OpenAI,
             Self::Qwen => AsrProviderType::Qwen,
         }
@@ -1077,6 +1082,7 @@ impl PostRecordingRefineProvider {
         match self {
             Self::Coli => "coli",
             Self::ElevenLabs => "ElevenLabs",
+            Self::Gemini => "Gemini",
             Self::OpenAI => "OpenAI",
             Self::Qwen => "Qwen",
         }
@@ -1086,6 +1092,7 @@ impl PostRecordingRefineProvider {
         match self {
             Self::Coli => "COLI_REFINE",
             Self::ElevenLabs => "ELEVENLABS_REFINE",
+            Self::Gemini => "GEMINI_REFINE",
             Self::OpenAI => "OPENAI_REFINE",
             Self::Qwen => "QWEN_REFINE",
         }
@@ -1102,7 +1109,7 @@ impl PostRecordingRefineProvider {
                 .clone()
                 .or(state.session_audio_path.clone())
                 .filter(|path| path.is_file()),
-            Self::ElevenLabs | Self::OpenAI | Self::Qwen => {
+            Self::ElevenLabs | Self::Gemini | Self::OpenAI | Self::Qwen => {
                 match state.session_audio_path.clone() {
                     Some(path) if path.is_file() => Some(path),
                     _ => None,
@@ -1115,6 +1122,7 @@ impl PostRecordingRefineProvider {
         match self {
             Self::Coli => "Local ASR refinement audio file is missing".to_string(),
             Self::ElevenLabs => "ElevenLabs batch refine audio file is missing".to_string(),
+            Self::Gemini => "Gemini batch refine audio file is missing".to_string(),
             Self::OpenAI => "OpenAI batch refine audio file is missing".to_string(),
             Self::Qwen => "Qwen batch refine audio file is missing".to_string(),
         }
@@ -1124,6 +1132,7 @@ impl PostRecordingRefineProvider {
         match self {
             Self::Coli => "Local ASR refinement returned empty result".to_string(),
             Self::ElevenLabs => "ElevenLabs batch refine returned empty result".to_string(),
+            Self::Gemini => "Gemini batch refine returned empty result".to_string(),
             Self::OpenAI => "OpenAI batch refine returned empty result".to_string(),
             Self::Qwen => "Qwen batch refine returned empty result".to_string(),
         }
@@ -1132,6 +1141,12 @@ impl PostRecordingRefineProvider {
     fn streaming_model_name(self, config: &AsrConfig) -> Option<String> {
         match self {
             Self::Coli => None,
+            Self::Gemini => {
+                crate::services::history_service::HistoryService::format_provider_model(
+                    "Gemini Live",
+                    &config.gemini_live_model,
+                )
+            }
             Self::ElevenLabs => {
                 crate::services::history_service::HistoryService::elevenlabs_realtime_model_name(
                     &config.elevenlabs_realtime_model,
@@ -1156,6 +1171,12 @@ impl PostRecordingRefineProvider {
     ) -> Option<String> {
         match self {
             Self::Coli => None,
+            Self::Gemini => {
+                crate::services::history_service::HistoryService::format_provider_model(
+                    "Gemini Live",
+                    &settings.gemini_live_model,
+                )
+            }
             Self::ElevenLabs => {
                 crate::services::history_service::HistoryService::elevenlabs_realtime_model_name(
                     &settings.elevenlabs_realtime_model,
@@ -1184,6 +1205,7 @@ impl PostRecordingRefineProvider {
                 &config.elevenlabs_realtime_model,
                 &config.elevenlabs_batch_model,
             ),
+            Self::Gemini => crate::services::history_service::HistoryService::gemini_realtime_batch_refine_model_name(&config.gemini_live_model, &config.gemini_model),
             Self::OpenAI => crate::services::history_service::HistoryService::openai_realtime_batch_refine_model_name(
                 &config.openai_asr_model, &config.openai_asr_refine_model
             ),
@@ -1210,6 +1232,19 @@ impl PostRecordingRefineProvider {
             }
             Self::ElevenLabs => {
                 let client = ElevenLabsTranscriptionClient::new(config);
+                let refined = client
+                    .transcribe_file(audio_path)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                let refined = refined.trim().to_string();
+                if refined.is_empty() {
+                    Err(self.empty_result_message())
+                } else {
+                    Ok((Some(refined), None))
+                }
+            }
+            Self::Gemini => {
+                let client = GeminiTranscriptionClient::new(config);
                 let refined = client
                     .transcribe_file(audio_path)
                     .await
@@ -1297,6 +1332,13 @@ impl PostRecordingRefineProvider {
                     "ElevenLabs 精修失败，且未保留到实时结果"
                 }
             }
+            Self::Gemini => {
+                if has_stream_fallback_result(state) {
+                    "Gemini 精修失败，已保留实时结果"
+                } else {
+                    "Gemini 精修失败，且未保留到实时结果"
+                }
+            }
             Self::OpenAI => {
                 if has_stream_fallback_result(state) {
                     "OpenAI 精修失败，已保留实时结果"
@@ -1338,6 +1380,7 @@ mod tests {
         for provider in [
             PostRecordingRefineProvider::Qwen,
             PostRecordingRefineProvider::ElevenLabs,
+            PostRecordingRefineProvider::Gemini,
             PostRecordingRefineProvider::OpenAI,
         ] {
             for has_stream_text in [false, true] {
@@ -1357,14 +1400,18 @@ mod tests {
                     if empty_completion {
                         controller.on_asr_refinement_done_state(&mut state, Some(" ".into()), None);
                     } else {
-                        controller.on_asr_refinement_failed_state(&mut state, provider.empty_result_message());
+                        controller.on_asr_refinement_failed_state(
+                            &mut state,
+                            provider.empty_result_message(),
+                        );
                     }
                     assert!(!state.asr_refinement_in_progress && state.asr_refinement_done);
                     assert!(state.active_asr_refinement_provider.is_none());
                     if has_stream_text {
                         assert!(state.has_final_result && state.terminal_error_message.is_none());
                         assert_eq!(state.session_final_text, "已有实时文本");
-                        assert!(provider.failure_message_for_reason(&state, &provider.empty_result_message())
+                        assert!(provider
+                            .failure_message_for_reason(&state, &provider.empty_result_message())
                             .contains("已保留实时结果"));
                     } else {
                         let message = state.terminal_error_message.as_deref().unwrap();

@@ -12,7 +12,6 @@ import AsrGoogleSettings from '../components/asr/AsrGoogleSettings.vue'
 import AsrFunAsrSettings from '../components/asr/AsrFunAsrSettings.vue'
 import AsrQwenSettings from '../components/asr/AsrQwenSettings.vue'
 import AsrGeminiSettings from '../components/asr/AsrGeminiSettings.vue'
-import AsrGeminiLiveSettings from '../components/asr/AsrGeminiLiveSettings.vue'
 import AsrCohereSettings from '../components/asr/AsrCohereSettings.vue'
 import AsrOpenAISettings from '../components/asr/AsrOpenAISettings.vue'
 import AsrElevenLabsSettings from '../components/asr/AsrElevenLabsSettings.vue'
@@ -100,7 +99,6 @@ const isGoogle = computed(() => settingsStore.settings.asrProviderType === 'goog
 const isFunAsr = computed(() => settingsStore.settings.asrProviderType === 'funasr')
 const isQwen = computed(() => settingsStore.settings.asrProviderType === 'qwen')
 const isGemini = computed(() => settingsStore.settings.asrProviderType === 'gemini')
-const isGeminiLive = computed(() => settingsStore.settings.asrProviderType === 'gemini-live')
 const isCohere = computed(() => settingsStore.settings.asrProviderType === 'cohere')
 const isOpenAI = computed(() => settingsStore.settings.asrProviderType === 'openai')
 const isElevenLabs = computed(() => settingsStore.settings.asrProviderType === 'elevenlabs')
@@ -358,7 +356,6 @@ async function clearSonioxDebugOverrides() {
     <AsrFunAsrSettings v-if="isFunAsr" />
     <AsrQwenSettings v-if="isQwen" />
     <AsrGeminiSettings v-if="isGemini" />
-    <AsrGeminiLiveSettings v-if="isGeminiLive" />
     <AsrCohereSettings v-if="isCohere" />
     <AsrOpenAISettings v-if="isOpenAI" />
     <AsrElevenLabsSettings v-if="isElevenLabs" />
