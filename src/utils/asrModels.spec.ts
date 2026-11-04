@@ -31,7 +31,9 @@ export function checkAsrModelOptions() {
     ['openai', 'whisper-1', 'batch'],
     ['openai', 'gpt-4o-transcribe', 'batch'],
     ['openai', 'gpt-4o-mini-transcribe', 'batch'],
-    ['soniox', 'stt-rt-v4', 'realtime']
+    ['soniox', 'stt-rt-v4', 'realtime'],
+    ['soniox', 'stt-rt-v5', 'realtime'],
+    ['soniox', 'stt-rt-v6', 'realtime']
   ] as const) {
     const option = buildModelOptions(provider, mode, id, t).find(candidate => candidate.value === id)
     assert(option && !option.disabled, `Still-served option must remain selectable: ${id}`)
@@ -39,6 +41,8 @@ export function checkAsrModelOptions() {
   assert(!modelSelectionError('custom', retiredId, 'batch'), 'Retirement must not claim another provider’s model IDs')
   assert(!modelSelectionError('gemini', `${retiredId}-my-deployment`, 'batch'), 'Retirement must match the exact ID')
   assert(ASR_MODEL_DEFAULTS.geminiLive === 'gemini-3.5-transcribe-live', 'Gemini Live must default to the supported transcription model')
+  assert(ASR_MODEL_DEFAULTS.soniox === 'stt-rt-v6', 'Soniox must default to v6')
+  assert(findAsrModel('soniox', 'stt-rt-v5')?.status === 'legacy', 'Soniox v5 must remain available as a legacy model')
   const retiredSnapshots = [
     ['qwen', 'qwen3-asr-flash-2025-09-08', 'batch'],
     ['qwen', 'qwen3-asr-flash-2026-02-10', 'batch'],

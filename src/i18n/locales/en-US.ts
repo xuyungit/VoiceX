@@ -586,7 +586,7 @@ const enUS = {
     sonioxConfiguration: 'Soniox Real-Time Configuration',
     sonioxConfigurationSub: 'VoiceX currently integrates only the Soniox realtime WebSocket API. Batch mode and post-recording refine are intentionally not exposed here. Interim results progressively stabilize into final tokens during recording.',
     sonioxApiKeyNote: 'Enter your Soniox API key from the Soniox dashboard.',
-    sonioxModelNote: 'Default: stt-rt-v5. The service routes the old v4 alias to v5.',
+    sonioxModelNote: 'Default: stt-rt-v6. After 2026-12-15, the service will route v5 to v6. Saved model selections are preserved.',
     sonioxLanguageNote: 'Comma-separated language hints, e.g. `en`, `zh`, or `en,zh` for multilingual.',
     sonioxMaxEndpointDelay: 'Endpoint Delay (ms)',
     sonioxMaxEndpointDelayNote: 'Enter an integer from 500 to 3000 ms. Leave empty to omit `max_endpoint_delay_ms` and use the Soniox service default.',

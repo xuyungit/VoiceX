@@ -626,6 +626,8 @@ mod tests {
         assert!(payload.get("api_key").is_none());
         assert!(!payload.to_string().contains(&config.soniox_api_key));
         assert_eq!(payload["model"], config.soniox_model);
+        assert_eq!(payload["model"], "stt-rt-v6");
+        assert!(payload.get("enable_agent_text_input").is_none());
         assert_eq!(payload["audio_format"], "s16le");
         assert_eq!(payload["sample_rate"], 16_000);
         assert_eq!(payload["num_channels"], 1);

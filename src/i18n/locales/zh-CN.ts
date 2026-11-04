@@ -586,7 +586,7 @@ const zhCN = {
     sonioxConfiguration: 'Soniox 实时配置',
     sonioxConfigurationSub: '当前只接入 Soniox 实时 WebSocket API，不提供 Batch 或录后精修模式。识别过程中会返回逐步稳定为 final token 的中间结果。',
     sonioxApiKeyNote: '填写 Soniox 控制台中的 API Key。',
-    sonioxModelNote: '默认 stt-rt-v5；旧 v4 名称由服务端自动转到 v5。',
+    sonioxModelNote: '默认 stt-rt-v6；v5 将于 2026-12-15 后由服务端自动转到 v6。已保存的模型选择保持不变。',
     sonioxLanguageNote: '语言提示，逗号分隔，例如 `en`、`zh`，或 `en,zh` 多语言。',
     sonioxMaxEndpointDelay: '端点检测延迟 (ms)',
     sonioxMaxEndpointDelayNote: '请输入 500–3000 毫秒的整数。留空则不传 `max_endpoint_delay_ms`，由 Soniox 使用服务端默认值。',

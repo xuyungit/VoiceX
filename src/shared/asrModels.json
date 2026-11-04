@@ -5,7 +5,7 @@
     "openaiRefine": "gpt-transcribe",
     "gemini": "gemini-3.5-flash-lite",
     "geminiLive": "gemini-3.5-transcribe-live",
-    "soniox": "stt-rt-v5",
+    "soniox": "stt-rt-v6",
     "qwen": "qwen3-asr-flash-realtime",
     "qwenBatch": "qwen3-asr-flash",
     "funasr": "fun-asr-realtime",
@@ -106,10 +106,18 @@
     },
     {
       "provider": "soniox",
-      "id": "stt-rt-v5",
+      "id": "stt-rt-v6",
       "modes": [
         "realtime"
       ]
+    },
+    {
+      "provider": "soniox",
+      "id": "stt-rt-v5",
+      "modes": [
+        "realtime"
+      ],
+      "status": "legacy"
     },
     {
       "provider": "soniox",
