@@ -250,6 +250,7 @@ Features:
 
 - Full history grouped by date, with per-record audio playback, copy, and detail view.
 - Side-by-side comparison of original ASR output vs. LLM-corrected text.
+- Translate an entry's final text into English, compare it with the source, and copy the result without creating a new history entry.
 - Re-transcribe any saved recording with a different ASR backend and optional LLM correction to compare providers on the same audio; replay the final text into the current app to test the full end-to-end flow.
 - Failed batch transcriptions are preserved locally with the original audio so you can retry later instead of repeating the whole dictation immediately.
 - Configurable retention policies for text and audio (7 / 30 / 180 / 365 days, or forever).

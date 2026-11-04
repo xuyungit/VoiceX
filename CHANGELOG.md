@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.17.5] - 2026-11-04
+
+### Added
+
+- **Translate history to English** — translate the final text of an existing history entry, compare source and translation, copy the result, cancel or retry. The translation does not create a new history entry.
+
+### Changed
+
+- **Gemini ASR** — realtime and batch are now modes of one provider. Realtime defaults to `gemini-3.5-transcribe-live`; `gemini-3.8-live` is also available and may return text after recording and incur audio output charges. Optional post-recording batch refinement is off by default. Existing Gemini Live provider settings migrate to realtime mode; the retired `gemini-3.1-flash-live-preview` selection migrates to `gemini-3.8-live`.
+- **Soniox** — new configurations default to `stt-rt-v6`; existing model selections are preserved, with v5 and v4 still available.
+- **OpenAI ASR and LLM** — added `gpt-live-transcribe`, mode-aware model selection, optional post-recording batch refinement with a separate model, and optional account model listing for LLM settings; manual model entry remains available.
+
+### Fixed
+
+- Corrected OpenAI batch language and keyword parameters and minimum reasoning settings for GPT-6 Astra and GPT-6.1 Sol.
+- Improved Gemini Live session completion and transcription handling after recording ends.
+
 ## [0.17.4] - 2026-10-24
 
 ### Added
