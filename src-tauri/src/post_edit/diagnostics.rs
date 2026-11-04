@@ -48,6 +48,8 @@ pub enum Reason {
     NextRecording,
     NextInjection,
     ElementDestroyed,
+    SessionCancelled,
+    CompositionActive,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -162,10 +164,6 @@ pub(super) fn context(
         state.last_observed_ms = Some(elapsed_ms);
         state.had_intermediate_changes = intermediate;
     }
-}
-
-pub(super) fn interrupted() {
-    boundary(Reason::Interrupted);
 }
 
 pub(super) fn boundary(reason: Reason) {

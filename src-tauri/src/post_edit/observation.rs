@@ -4,7 +4,6 @@ use super::diff::{self, NetEdits};
 use super::range::{RangeError, RangeTracker, Snapshot};
 
 const STABLE_FOR: Duration = Duration::from_millis(800);
-const DIFF_BUDGET: Duration = Duration::from_millis(10);
 const MAX_READS: usize = 90;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +18,8 @@ pub enum EndReason {
     DataCleared,
     ReadFailed,
     BudgetExceeded,
+    SessionCancelled,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,10 +39,13 @@ pub struct ObservationResult {
     pub had_intermediate_changes: bool,
     pub last_valid_at: Option<Instant>,
     pub read_count: usize,
+    /// Two consistent samples spanning STABLE_FOR, with no newer unresolved input.
+    pub stable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleError {
+    CompositionActive,
     StaleGeneration,
     OutOfOrder,
     Range(RangeError),
@@ -58,6 +62,8 @@ pub struct Observation {
     stable_since: Instant,
     had_intermediate_changes: bool,
     reads: usize,
+    unresolved: bool,
+    composition: super::platform::CompositionState,
 }
 
 impl Observation {
@@ -70,6 +76,8 @@ impl Observation {
             stable_since: baseline_at,
             had_intermediate_changes: false,
             reads: 0,
+            unresolved: false,
+            composition: super::platform::CompositionState::Unknown,
         }
     }
 
@@ -89,11 +97,22 @@ impl Observation {
             return Err(SampleError::ReadBudgetExceeded);
         }
         self.reads += 1;
-        let slice = self.tracker.slice(snapshot).map_err(SampleError::Range)?;
+        let slice = match self.tracker.slice(snapshot) {
+            Ok(slice) => slice,
+            Err(error) => {
+                if !matches!(error, RangeError::FieldCleared | RangeError::TargetChanged) {
+                    self.unresolved = true;
+                }
+                return Err(SampleError::Range(error));
+            }
+        };
+        if self.last != slice || self.unresolved {
+            self.stable_since = read_at;
+        }
+        self.unresolved = false;
         if self.last != slice {
             self.last.clear();
             self.last.push_str(slice);
-            self.stable_since = read_at;
             self.had_intermediate_changes = true;
         }
         self.last_valid_at = Some(read_at);
@@ -104,6 +123,50 @@ impl Observation {
         self.stable_since + STABLE_FOR
     }
 
+    /// Composition or an unmappable sample breaks the evidence of stability.
+    pub fn unresolved_input(&mut self) {
+        self.unresolved = true;
+    }
+
+    pub fn is_stable(&self) -> bool {
+        !self.unresolved && self.last_valid_at.is_some_and(|at| at >= self.stable_at())
+    }
+
+    pub fn composition(&self) -> super::platform::CompositionState {
+        self.composition
+    }
+
+    pub fn sample_read(
+        &mut self,
+        generation: u64,
+        snapshot: &super::platform::OwnedSnapshot,
+    ) -> Result<(), SampleError> {
+        if generation != self.generation {
+            return Err(SampleError::StaleGeneration);
+        }
+        if self
+            .last_valid_at
+            .is_some_and(|last| snapshot.read_at < last)
+        {
+            return Err(SampleError::OutOfOrder);
+        }
+        if snapshot.composition == super::platform::CompositionState::Active {
+            self.unresolved_input();
+            return Err(SampleError::CompositionActive);
+        }
+        self.sample(
+            generation,
+            &Snapshot {
+                target: snapshot.target,
+                text: &snapshot.text,
+                selection_utf16: snapshot.selection_utf16.clone(),
+            },
+            snapshot.read_at,
+        )?;
+        self.composition = snapshot.composition;
+        Ok(())
+    }
+
     pub fn text_pair(&self) -> (&str, &str) {
         (&self.tracker.baseline, &self.last)
     }
@@ -111,7 +174,7 @@ impl Observation {
     /// Cached evidence is useful on send, loss of focus, and the next input.
     /// A partial count is never promoted to a valid terminal comparison.
     pub fn progress(&self, reason: EndReason) -> ObservationResult {
-        let edits = diff::analyze(&self.tracker.baseline, &self.last, DIFF_BUDGET).ok();
+        let edits = diff::analyze(&self.tracker.baseline, &self.last).ok();
         ObservationResult {
             status: ObservationStatus::Partial,
             reason,
@@ -119,7 +182,33 @@ impl Observation {
             had_intermediate_changes: self.had_intermediate_changes,
             last_valid_at: self.last_valid_at,
             read_count: self.reads,
+            stable: self.is_stable(),
         }
+    }
+
+    pub fn finish(&self, reason: EndReason) -> ObservationResult {
+        let mut result = self.progress(reason);
+        if matches!(
+            reason,
+            EndReason::SessionCancelled
+                | EndReason::Interrupted
+                | EndReason::SettingsDisabled
+                | EndReason::DataCleared
+        ) {
+            result.edits = None;
+            result.stable = false;
+        } else if reason != EndReason::NextInjection && result.stable {
+            if let Some(edits) = result.edits {
+                result.status = if edits.insertions + edits.deletions + edits.substitutions == 0 {
+                    ObservationStatus::ObservedUnchanged
+                } else {
+                    ObservationStatus::ObservedEdited
+                };
+            } else {
+                result.reason = EndReason::BudgetExceeded;
+            }
+        }
+        result
     }
 
     pub fn close(
@@ -130,9 +219,16 @@ impl Observation {
     ) -> ObservationResult {
         let mut result = self.progress(reason);
         if generation != self.generation
-            || matches!(reason, EndReason::SettingsDisabled | EndReason::DataCleared)
+            || matches!(
+                reason,
+                EndReason::SettingsDisabled
+                    | EndReason::DataCleared
+                    | EndReason::SessionCancelled
+                    | EndReason::Interrupted
+            )
         {
             result.edits = None;
+            result.stable = false;
             return result;
         }
         if reason == EndReason::NextInjection {
@@ -157,20 +253,7 @@ impl Observation {
             result.read_count = self.reads;
             return result;
         }
-        result = self.progress(reason);
-        if at < self.stable_at() {
-            return result;
-        }
-        if let Some(edits) = result.edits {
-            result.status = if edits.insertions + edits.deletions + edits.substitutions == 0 {
-                ObservationStatus::ObservedUnchanged
-            } else {
-                ObservationStatus::ObservedEdited
-            };
-        } else {
-            result.reason = EndReason::BudgetExceeded;
-        }
-        result
+        self.finish(reason)
     }
 }
 

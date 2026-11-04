@@ -73,6 +73,10 @@ pub struct Record {
     pub deletions: Option<usize>,
     pub substitutions: Option<usize>,
     pub had_intermediate_changes: bool,
+    #[serde(default)]
+    pub stable: bool,
+    #[serde(default)]
+    pub composition: super::platform::CompositionState,
 }
 
 #[derive(Serialize)]
@@ -197,7 +201,9 @@ fn cleanup(conn: &Connection) -> Result<(), StorageError> {
 }
 
 fn insert(conn: &Connection, record: &Record) -> Result<bool, StorageError> {
-    if record.original_text == record.edited_text
+    if !record.stable
+        || record.composition == super::platform::CompositionState::Active
+        || record.original_text == record.edited_text
         || record.timestamp < timestamp(Utc::now() - Duration::days(RETENTION_DAYS))
     {
         return Ok(false);
@@ -275,13 +281,35 @@ fn delete(conn: &Connection, kind: &str, id: &str) -> Result<(), StorageError> {
 pub fn delete_source(conn: &Connection, id: &str) -> Result<(), StorageError> {
     delete(conn, "source", id)
 }
-pub fn delete_record(id: &str) -> Result<(), StorageError> {
+pub fn delete_record(id: &str, source: Option<&str>) -> Result<(), StorageError> {
     storage::with_db(|conn| {
         let tx = conn.unchecked_transaction().map_err(sql)?;
-        delete(&tx, "record", id)?;
+        delete_comparison(&tx, id, source)?;
         tx.commit().map_err(sql)
     })?;
     changed();
+    Ok(())
+}
+
+fn delete_comparison(
+    conn: &Connection,
+    id: &str,
+    source: Option<&str>,
+) -> Result<(), StorageError> {
+    let stored_source: Option<String> = conn
+        .query_row(
+            "SELECT source_id FROM post_edit_record WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
+    delete(conn, "record", id)?;
+    // The UI also supplies the dictation ID: its displayed injection may have
+    // been replaced by a newer final before the delete command reaches SQLite.
+    if let Some(source) = source.or(stored_source.as_deref()) {
+        delete_source(conn, source)?;
+    }
     Ok(())
 }
 pub fn clear() -> Result<(), StorageError> {
@@ -329,6 +357,8 @@ mod tests {
             deletions: Some(0),
             substitutions: Some(2),
             had_intermediate_changes: true,
+            stable: true,
+            composition: super::super::platform::CompositionState::Unknown,
         }
     }
     fn db() -> Connection {
@@ -423,5 +453,56 @@ mod tests {
             })
             .unwrap();
         assert_eq!((count, id), (1, latest.id));
+    }
+
+    #[test]
+    fn deleting_a_comparison_blocks_later_attempts_for_the_same_dictation() {
+        let conn = db();
+        let first = record();
+        assert!(insert(&conn, &first).unwrap());
+        delete_comparison(&conn, &first.id, None).unwrap();
+        let mut retry = first.clone();
+        retry.id = "newer-final".into();
+        retry.timestamp = timestamp(Utc::now() + Duration::seconds(1));
+        assert!(!insert(&conn, &retry).unwrap());
+    }
+
+    #[test]
+    fn unstable_or_composing_text_is_not_saved_and_legacy_stability_is_unknown() {
+        let conn = db();
+        let mut record = record();
+        record.stable = false;
+        assert!(!insert(&conn, &record).unwrap());
+        record.stable = true;
+        record.composition = super::super::platform::CompositionState::Active;
+        assert!(!insert(&conn, &record).unwrap());
+        let mut legacy = serde_json::to_value(&record).unwrap();
+        legacy.as_object_mut().unwrap().remove("stable");
+        legacy.as_object_mut().unwrap().remove("composition");
+        let loaded: Record = serde_json::from_value(legacy).unwrap();
+        assert!(!loaded.stable);
+        assert_eq!(
+            loaded.composition,
+            super::super::platform::CompositionState::Unknown
+        );
+    }
+
+    #[test]
+    fn delete_from_an_old_view_also_removes_the_replaced_injection() {
+        let conn = db();
+        let first = record();
+        assert!(insert(&conn, &first).unwrap());
+        let mut newer = first.clone();
+        newer.id = "newer-final".into();
+        newer.timestamp = timestamp(Utc::now() + Duration::seconds(1));
+        assert!(insert(&conn, &newer).unwrap());
+        delete_comparison(&conn, &first.id, Some(&first.record_id)).unwrap();
+        assert!(!insert(&conn, &newer).unwrap());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM post_edit_record", [], |r| r
+                .get::<_, usize>(0))
+                .unwrap(),
+            0
+        );
     }
 }

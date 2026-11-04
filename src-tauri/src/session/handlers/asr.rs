@@ -595,9 +595,7 @@ impl SessionController {
                     Ok(receipt) => {
                         log::debug!("Injection dispatch {}: {:?}", receipt.injection_id, receipt.outcome);
                         #[cfg(any(target_os = "macos", target_os = "windows"))]
-                        if let Ok(pending) = post_edit_rx.try_recv() {
-                            pending.dispatched(receipt, final_text.clone());
-                        }
+                        crate::post_edit::coordinator::finish_dispatch(post_edit_attempt, receipt, final_text.clone(), post_edit_rx.try_recv().ok());
                     },
                     Err(err) => {
                         log::warn!("Injection worker failed: {}", err);

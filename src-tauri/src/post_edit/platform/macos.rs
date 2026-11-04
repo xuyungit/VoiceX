@@ -328,6 +328,10 @@ impl NativeReader {
         }
         same_focus(*pid, element)?;
         check_control(element)?;
+        let composition_before = composition_state(element)?;
+        if composition_before == super::CompositionState::Active {
+            return Err(ReadError::CompositionActive);
+        }
         let count_value = attribute(element, "AXNumberOfCharacters")?;
         if unsafe { CFGetTypeID(count_value.as_CFTypeRef()) } != CFNumber::type_id() {
             return Err(ReadError::Unsupported);
@@ -407,6 +411,10 @@ impl NativeReader {
         }
         same_focus(*pid, element)?;
         check_control(element)?;
+        let composition_after = composition_state(element)?;
+        if composition_after == super::CompositionState::Active {
+            return Err(ReadError::CompositionActive);
+        }
         let mut process_id = 0;
         status(unsafe { AXUIElementGetPid(element.0, &mut process_id) })?;
         if process_id <= 0 {
@@ -419,7 +427,34 @@ impl NativeReader {
             selection_utf16: range.location as usize..(range.location + range.length) as usize,
             read_at: Instant::now(),
             event_driven: self.observer.as_ref().is_some_and(|s| s.text_supported),
+            composition: if composition_before == composition_after {
+                composition_before
+            } else {
+                super::CompositionState::Unknown
+            },
         })
+    }
+}
+
+fn composition_state(element: &Element) -> Result<super::CompositionState, ReadError> {
+    // AXWebConstants.h: non-null means provisional text, successful null means
+    // no marked text. Unsupported/NoValue does not prove IME inactivity.
+    let name = CFString::new("AXTextInputMarkedTextMarkerRange");
+    let mut value = std::ptr::null();
+    let code =
+        unsafe { AXUIElementCopyAttributeValue(element.0, name.as_concrete_TypeRef(), &mut value) };
+    let active = !value.is_null();
+    if active {
+        unsafe { CFRelease(value) };
+    }
+    match code {
+        AX_SUCCESS => Ok(if active {
+            super::CompositionState::Active
+        } else {
+            super::CompositionState::Inactive
+        }),
+        -25205 | -25212 => Ok(super::CompositionState::Unknown),
+        code => status(code).map(|_| super::CompositionState::Unknown),
     }
 }
 

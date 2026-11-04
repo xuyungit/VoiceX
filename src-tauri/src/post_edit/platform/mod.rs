@@ -34,8 +34,18 @@ pub enum ReadError {
     TooLarge,
     Native(i32),
     WorkerBusy,
-    TimedOut,
+    TimedOut { invalidated_generation: u64 },
+    CompositionActive,
     StaleGeneration,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompositionState {
+    #[default]
+    Unknown,
+    Inactive,
+    Active,
 }
 
 #[derive(Debug)]
@@ -46,6 +56,7 @@ pub struct OwnedSnapshot {
     pub selection_utf16: Range<usize>,
     pub read_at: Instant,
     pub event_driven: bool,
+    pub composition: CompositionState,
 }
 
 pub const TEXT_CHANGED: u8 = 1;
@@ -320,7 +331,9 @@ impl ObserverWorker {
                 } else {
                     return Err(ReadError::StaleGeneration);
                 }
-                return Err(ReadError::TimedOut);
+                return Err(ReadError::TimedOut {
+                    invalidated_generation: generation.wrapping_add(1),
+                });
             }
         };
         if self.generation.load(Ordering::SeqCst) != generation {
@@ -350,6 +363,7 @@ mod tests {
                 selection_utf16: 0..0,
                 read_at: Instant::now(),
                 event_driven: false,
+                composition: CompositionState::Unknown,
             })
         }
         fn read(&mut self, _: u64) -> Result<OwnedSnapshot, ReadError> {
@@ -376,7 +390,10 @@ mod tests {
         let other = Arc::clone(&worker);
         let call = std::thread::spawn(move || other.capture(0, 1, Duration::from_millis(50)));
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(call.join().unwrap(), Err(ReadError::TimedOut)));
+        assert!(matches!(
+            call.join().unwrap(),
+            Err(ReadError::TimedOut { .. })
+        ));
         assert!(matches!(
             worker.capture(1, 1, Duration::from_millis(20)),
             Err(ReadError::WorkerBusy)

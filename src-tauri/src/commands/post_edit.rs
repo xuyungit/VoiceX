@@ -28,8 +28,8 @@ pub fn get_post_edit_records(limit: u32, offset: u32) -> Result<RecordPage, Stri
 }
 
 #[tauri::command]
-pub fn delete_post_edit_record(id: String) -> Result<(), String> {
-    records::delete_record(&id).map_err(|e| e.to_string())
+pub fn delete_post_edit_record(id: String, record_id: Option<String>) -> Result<(), String> {
+    records::delete_record(&id, record_id.as_deref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

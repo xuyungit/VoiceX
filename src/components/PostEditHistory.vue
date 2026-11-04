@@ -98,7 +98,7 @@ function remove(record?: PostEditRecord) {
     onPositiveClick: async () => {
       busy.value = true
       try {
-        if (record) await invoke('delete_post_edit_record', { id: record.id })
+        if (record) await invoke('delete_post_edit_record', { id: record.id, recordId: record.recordId })
         else await invoke('clear_post_edit_records')
         await load()
       } catch (e) { message.error(String(e)) }
@@ -172,7 +172,8 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
           </div>
         </div>
         <footer class="record-footer">
-          <span v-if="!record.complete" class="partial-note">{{ t('postEdit.partialNote', { time: time(record.lastObservedAt), reason: t(`input.postEditReason.${record.endReason}`) }) }}</span>
+          <span v-if="!record.stable" class="partial-note">{{ t('postEdit.stabilityUnknown') }}</span>
+          <span v-else-if="!record.complete" class="partial-note">{{ t('postEdit.partialNote', { time: time(record.lastObservedAt), reason: t(`input.postEditReason.${record.endReason}`) }) }}</span>
           <span v-else class="observed-note">{{ t('postEdit.observedNote', { time: time(record.lastObservedAt) }) }}</span>
           <NButton v-if="isLong(record)" text size="tiny" @click="toggle(record.id)">
             {{ t(expanded.has(record.id) ? 'postEdit.collapse' : 'postEdit.expand') }}

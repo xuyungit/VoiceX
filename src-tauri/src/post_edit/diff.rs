@@ -1,8 +1,8 @@
 use std::ops::Range;
-use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub const ALGORITHM_VERSION: &str = "grapheme-levenshtein-v1";
+// Deterministic work/memory limit. Results never depend on elapsed wall time.
 const MAX_CELLS: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -39,11 +39,8 @@ pub fn track_changes(
     before: &str,
     after: &str,
     range: Range<usize>,
-    budget: Duration,
 ) -> Result<(Vec<Change>, Range<usize>), TrackingError> {
-    let started = Instant::now();
-    let (edits, changes) =
-        compute(before, after, budget).map_err(|_| TrackingError::BudgetExceeded)?;
+    let (edits, changes) = compute(before, after).map_err(|_| TrackingError::BudgetExceeded)?;
     let d = edits.insertions + edits.deletions + edits.substitutions;
     if d == 0 {
         return Ok((changes, range));
@@ -61,9 +58,6 @@ pub fn track_changes(
     };
     let mut costs = vec![infinity; cells];
     for i in 0..=a.len() {
-        if started.elapsed() > budget {
-            return Err(TrackingError::BudgetExceeded);
-        }
         for j in i.saturating_sub(d)..=b.len().min(i + d) {
             let get = |i, j| index(i, j).map_or(infinity, |idx| costs[idx]);
             let cost = if i == 0 {
@@ -83,9 +77,6 @@ pub fn track_changes(
     let mut pending = vec![(a.len(), b.len())];
     visited[index(a.len(), b.len()).unwrap()] = true;
     while let Some((i, j)) = pending.pop() {
-        if started.elapsed() > budget {
-            return Err(TrackingError::BudgetExceeded);
-        }
         for (boundary, original) in [range.start, range.end].into_iter().enumerate() {
             if i == original {
                 if mapped[boundary].is_some_and(|previous| previous != j) {
@@ -121,21 +112,16 @@ pub fn track_changes(
     Ok((changes, mapped[0].unwrap()..mapped[1].unwrap()))
 }
 
-pub fn changes(before: &str, after: &str, budget: Duration) -> Result<Vec<Change>, DiffError> {
-    compute(before, after, budget).map(|(_, changes)| changes)
+pub fn changes(before: &str, after: &str) -> Result<Vec<Change>, DiffError> {
+    compute(before, after).map(|(_, changes)| changes)
 }
 
 /// Unit-cost Levenshtein counts and range mapping use the same edit script.
-pub fn analyze(before: &str, after: &str, budget: Duration) -> Result<NetEdits, DiffError> {
-    compute(before, after, budget).map(|(counts, _)| counts)
+pub fn analyze(before: &str, after: &str) -> Result<NetEdits, DiffError> {
+    compute(before, after).map(|(counts, _)| counts)
 }
 
-fn compute(
-    before: &str,
-    after: &str,
-    budget: Duration,
-) -> Result<(NetEdits, Vec<Change>), DiffError> {
-    let started = Instant::now();
+fn compute(before: &str, after: &str) -> Result<(NetEdits, Vec<Change>), DiffError> {
     let a: Vec<_> = before.graphemes(true).collect();
     let b: Vec<_> = after.graphemes(true).collect();
     if before.encode_utf16().count() > 16_384 || after.encode_utf16().count() > 16_384 {
@@ -167,9 +153,6 @@ fn compute(
         costs[j] = j;
     }
     for i in 1..=a.len() {
-        if started.elapsed() > budget {
-            return Err(DiffError::BudgetExceeded);
-        }
         for j in 1..width {
             costs[i * width + j] = (costs[(i - 1) * width + j - 1]
                 + usize::from(a[i - 1] != b[j - 1]))
@@ -216,9 +199,6 @@ fn compute(
         result.push(change);
     }
     result.reverse();
-    if started.elapsed() > budget {
-        return Err(DiffError::BudgetExceeded);
-    }
     Ok((counts, result))
 }
 
@@ -228,9 +208,8 @@ mod tests {
 
     #[test]
     fn counts_unicode_graphemes_and_net_changes() {
-        let budget = Duration::from_secs(1);
         assert_eq!(
-            analyze("支座返利 👩‍💻", "支座反力 👩‍💻!", budget).unwrap(),
+            analyze("支座返利 👩‍💻", "支座反力 👩‍💻!").unwrap(),
             NetEdits {
                 baseline_graphemes: 6,
                 insertions: 1,
@@ -239,38 +218,48 @@ mod tests {
             }
         );
         assert_eq!(
-            analyze("e\u{301}", "é", budget).unwrap(),
+            analyze("e\u{301}", "é").unwrap(),
             NetEdits {
                 baseline_graphemes: 1,
                 substitutions: 1,
                 ..Default::default()
             }
         );
-        assert_eq!(analyze("相同", "相同", budget).unwrap().substitutions, 0);
+        assert_eq!(analyze("相同", "相同").unwrap().substitutions, 0);
     }
 
     #[test]
     fn rejects_work_over_budget_without_returning_guessed_counts() {
         assert_eq!(
-            analyze(&"a".repeat(1100), &"b".repeat(1100), Duration::from_secs(1)),
+            analyze(&"a".repeat(1100), &"b".repeat(1100)),
             Err(DiffError::BudgetExceeded)
         );
     }
 
     #[test]
     fn boundary_mapping_checks_all_optimal_alignments_without_quadratic_field_work() {
-        let budget = Duration::from_secs(1);
         assert_eq!(
-            track_changes("AXX", "AX", 2..3, budget),
+            track_changes("AXX", "AX", 2..3),
             Err(TrackingError::Ambiguous)
         );
         assert_eq!(
-            track_changes("abab", "ab", 2..4, budget),
+            track_changes("abab", "ab", 2..4),
             Err(TrackingError::Ambiguous)
         );
         let before = format!("{}支座返力{}", "a".repeat(4000), "b".repeat(4000));
         let after = before.replace("返力", "反力");
-        let (_, range) = track_changes(&before, &after, 4000..4004, budget).unwrap();
+        let (_, range) = track_changes(&before, &after, 4000..4004).unwrap();
         assert_eq!(range, 4000..4004);
+    }
+
+    #[test]
+    fn range_work_is_bounded_even_when_trimmed_text_analysis_is_small() {
+        let before = "a".repeat(12000);
+        let after = format!("{}{}", "b".repeat(50), "a".repeat(11950));
+        assert_eq!(analyze(&before, &after).unwrap().substitutions, 50);
+        assert_eq!(
+            track_changes(&before, &after, 100..110),
+            Err(TrackingError::BudgetExceeded)
+        );
     }
 }

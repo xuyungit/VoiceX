@@ -1,6 +1,5 @@
 use super::diff;
 use std::ops::Range;
-use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
 const MAX_UTF16_UNITS: usize = 16_384;
@@ -34,7 +33,7 @@ pub struct RangeTracker {
     target: u64,
     pub baseline: String,
     pub evidence: RangeEvidence,
-    previous: String,
+    reference: String,
     range: Range<usize>,
 }
 
@@ -153,15 +152,16 @@ impl RangeTracker {
             target,
             baseline: text[range].to_string(),
             evidence,
-            previous: text.to_string(),
+            reference: text.to_string(),
             range: start..start + length,
         }
     }
 
-    /// Map each change from the previous snapshot, rather than treating the
-    /// entire field between static anchors as this injection. Boundary growth
-    /// is unknown: it can be a correction or unrelated continued writing.
-    pub fn slice<'a>(&mut self, snapshot: &'a Snapshot<'_>) -> Result<&'a str, RangeError> {
+    /// Project the original injection range onto the current field. A sampled
+    /// backspace must not shrink the coordinate frame used for the next sample.
+    /// Net boundary growth remains unknown: correction and continuation cannot
+    /// be distinguished from text alone.
+    pub fn slice<'a>(&self, snapshot: &'a Snapshot<'_>) -> Result<&'a str, RangeError> {
         if snapshot.target != self.target {
             return Err(RangeError::TargetChanged);
         }
@@ -169,16 +169,13 @@ impl RangeTracker {
         if snapshot.text.is_empty() {
             return Err(RangeError::FieldCleared);
         }
-        let (changes, mapped) = diff::track_changes(
-            &self.previous,
-            snapshot.text,
-            self.range.clone(),
-            Duration::from_millis(10),
-        )
-        .map_err(|error| match error {
-            diff::TrackingError::Ambiguous => RangeError::Ambiguous,
-            diff::TrackingError::BudgetExceeded => RangeError::BudgetExceeded,
-        })?;
+        let (changes, mapped) =
+            diff::track_changes(&self.reference, snapshot.text, self.range.clone()).map_err(
+                |error| match error {
+                    diff::TrackingError::Ambiguous => RangeError::Ambiguous,
+                    diff::TrackingError::BudgetExceeded => RangeError::BudgetExceeded,
+                },
+            )?;
         for change in changes {
             let old = &change.before;
             let delta = change.after.len() as isize - old.len() as isize;
@@ -203,9 +200,6 @@ impl RangeTracker {
             .collect();
         let (start, end) = (mapped.start, mapped.end);
         let slice = &snapshot.text[offsets[start]..offsets[end]];
-        self.previous.clear();
-        self.previous.push_str(snapshot.text);
-        self.range = start..end;
         Ok(slice)
     }
 }
@@ -226,7 +220,7 @@ mod tests {
     fn verifies_selection_replacement_and_tracks_only_anchored_text() {
         let before = snap("前旧内容后", 1..4);
         let after = snap("前返利后", 3..3);
-        let mut tracker = RangeTracker::from_before_after(&before, &after, "返利").unwrap();
+        let tracker = RangeTracker::from_before_after(&before, &after, "返利").unwrap();
         assert_eq!(tracker.slice(&snap("前反力后", 3..3)), Ok("反力"));
         assert_eq!(
             tracker.slice(&snap("前返利续写后", 5..5)),
@@ -257,7 +251,7 @@ mod tests {
             RangeTracker::from_post_anchored(&snap("aaa", 2..2), "aa"),
             Err(RangeError::Ambiguous)
         ));
-        let mut tracker =
+        let tracker =
             RangeTracker::from_post_anchored(&snap("prefix hello", 12..12), "hello").unwrap();
         assert_eq!(
             tracker.slice(&snap("prefix hello more", 17..17)),
@@ -289,7 +283,7 @@ mod tests {
             ("", 0..0, "支座返力", "支座反力"),
             ("原文：", 3..3, "原文：支座返力", "原文：支座反力"),
         ] {
-            let mut tracker = RangeTracker::from_before_after(
+            let tracker = RangeTracker::from_before_after(
                 &snap(before, selection),
                 &snap(after, 0..0),
                 "支座返力",
@@ -297,7 +291,7 @@ mod tests {
             .unwrap();
             assert_eq!(tracker.slice(&snap(edited, 0..0)), Ok("支座反力"));
         }
-        let mut tracker = RangeTracker::from_before_after(
+        let tracker = RangeTracker::from_before_after(
             &snap("前后", 1..1),
             &snap("前支座返力后", 5..5),
             "支座返力",
@@ -311,7 +305,7 @@ mod tests {
 
     #[test]
     fn maps_unrelated_prefix_edits_and_rejects_changes_across_the_boundary() {
-        let mut tracker = RangeTracker::from_before_after(
+        let tracker = RangeTracker::from_before_after(
             &snap("前文：后文", 3..3),
             &snap("前文：测试后文", 5..5),
             "测试",
@@ -331,7 +325,7 @@ mod tests {
             ("AX", "AXX", "X", 2..2, "AX"),
             ("ab", "abab", "ab", 2..2, "ab"),
         ] {
-            let mut tracker = RangeTracker::from_before_after(
+            let tracker = RangeTracker::from_before_after(
                 &snap(before, selection),
                 &snap(after, 0..0),
                 injected,
@@ -342,5 +336,18 @@ mod tests {
                 Err(RangeError::Ambiguous)
             );
         }
+    }
+
+    #[test]
+    fn backspace_then_retype_recovers_the_original_injection_boundary() {
+        let tracker =
+            RangeTracker::from_before_after(&snap("", 0..0), &snap("支座返力", 4..4), "支座返力")
+                .unwrap();
+        assert_eq!(tracker.slice(&snap("支座返", 3..3)), Ok("支座返"));
+        assert_eq!(tracker.slice(&snap("支座反力", 4..4)), Ok("支座反力"));
+        assert_eq!(
+            tracker.slice(&snap("支座反力，继续写", 8..8)),
+            Err(RangeError::Ambiguous)
+        );
     }
 }

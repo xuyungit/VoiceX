@@ -55,13 +55,13 @@ fn coordinator() -> Option<Arc<Coordinator>> {
 fn existing() -> Option<&'static Arc<Coordinator>> {
     COORDINATOR.get().and_then(Option::as_ref)
 }
-/// Privacy/cancellation invalidation discards all in-flight native results.
+/// Explicit session cancellation discards in-flight results and text pairs.
 pub fn cancel() {
-    ATTEMPT.fetch_add(1, Ordering::SeqCst);
     if let Some(c) = existing() {
-        c.invalidate();
+        c.invalidate(EndReason::SessionCancelled);
     }
-    diagnostics::interrupted();
+    ATTEMPT.fetch_add(1, Ordering::SeqCst);
+    diagnostics::boundary(Reason::SessionCancelled);
 }
 /// Recording starts immediately; only the observation thread attempts a final read.
 pub fn next_recording() {
@@ -78,17 +78,17 @@ pub fn dispatch_boundary() {
     if let Some(c) = existing() {
         let active = c.active.lock().unwrap().is_some();
         if active {
+            c.invalidate(EndReason::NextInjection);
             ATTEMPT.fetch_add(1, Ordering::SeqCst);
             diagnostics::boundary(Reason::NextInjection);
-            c.invalidate();
         }
     }
 }
 pub fn begin_attempt() -> u64 {
-    let attempt = ATTEMPT.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
     if let Some(c) = existing() {
-        c.invalidate();
+        c.invalidate(EndReason::NextInjection);
     }
+    let attempt = ATTEMPT.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
     diagnostics::publish(attempt, Status::Verifying, Reason::None, None, None);
     attempt
 }
@@ -98,13 +98,28 @@ pub(super) fn attempt_is_current(attempt: u64) -> bool {
 pub fn skipped(attempt: u64, reason: Reason) {
     diagnostics::publish(attempt, Status::Skipped, reason, None, None);
 }
+
+pub fn finish_dispatch(
+    attempt: u64,
+    receipt: InjectionReceipt,
+    injected: String,
+    pending: Option<Pending>,
+) {
+    if receipt.outcome != DispatchOutcome::CommandsPosted {
+        skipped(attempt, Reason::DispatchFailed);
+        return;
+    }
+    if let Some(pending) = pending {
+        pending.dispatched(receipt, injected);
+    }
+}
 impl Coordinator {
-    fn invalidate(&self) {
+    fn invalidate(&self, reason: EndReason) {
         let mut active = self.active.lock().unwrap();
-        self.worker.invalidate();
         if let Some((_, stop)) = active.take() {
-            *stop.lock().unwrap() = Some(EndReason::NextInjection);
+            *stop.lock().unwrap() = Some(reason);
         }
+        self.worker.invalidate();
     }
     fn finished(&self, generation: u64) {
         let mut active = self.active.lock().unwrap();
@@ -198,7 +213,7 @@ impl Pending {
         match std::thread::Builder::new()
             .name("post-edit-session".into())
             .spawn(move || {
-                run(
+                let record = run(
                     &c.worker,
                     generation,
                     attempt,
@@ -207,8 +222,13 @@ impl Pending {
                     receipt,
                     injected,
                     schedule,
-                    capture_ticket,
+                    &SystemClock,
                 );
+                if let (Some(ticket), Some(record)) = (capture_ticket, record) {
+                    if let Err(error) = super::records::save(ticket, &record) {
+                        log::error!("Could not save post-edit record: {error}");
+                    }
+                }
                 c.finished(generation);
             }) {
             Ok(_) => self.handed_off = true,
@@ -229,20 +249,85 @@ fn as_snapshot(s: &OwnedSnapshot) -> Snapshot<'_> {
 fn current(worker: &ObserverWorker, generation: u64, attempt: u64) -> bool {
     diagnostics::enabled() && worker.is_current(generation) && attempt_is_current(attempt)
 }
-fn current_error(worker: &ObserverWorker, generation: u64, attempt: u64, error: ReadError) -> bool {
-    diagnostics::enabled()
-        && attempt_is_current(attempt)
-        && (worker.is_current(generation)
-            || (error == ReadError::TimedOut && worker.is_current(generation.wrapping_add(1))))
+/// The caller never infers a timeout boundary by doing generation arithmetic.
+fn error_generation(worker: &ObserverWorker, generation: u64, error: ReadError) -> Option<u64> {
+    let boundary = match error {
+        ReadError::TimedOut {
+            invalidated_generation,
+        } => invalidated_generation,
+        _ => generation,
+    };
+    worker.is_current(boundary).then_some(boundary)
 }
-fn wait_until(worker: &ObserverWorker, generation: u64, stop: &Stop, deadline: Instant) -> bool {
-    while Instant::now() < deadline && worker.is_current(generation) {
+
+trait SessionClock {
+    fn now(&self) -> Instant;
+    fn wait(&self, events: &super::platform::EventSignal, generation: u64, timeout: Duration)
+        -> u8;
+}
+struct SystemClock;
+impl SessionClock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+    fn wait(
+        &self,
+        events: &super::platform::EventSignal,
+        generation: u64,
+        timeout: Duration,
+    ) -> u8 {
+        events.wait(generation, timeout)
+    }
+}
+
+struct Baseline {
+    observation: Observation,
+    at: Instant,
+    strategy: &'static str,
+    evidence: &'static str,
+    native_reads: usize,
+}
+struct BaselineFailure {
+    status: Status,
+    reason: Reason,
+    code: Option<i32>,
+    generation: u64,
+}
+impl BaselineFailure {
+    fn new(generation: u64, reason: Reason) -> Self {
+        Self {
+            status: Status::BaselineUnavailable,
+            reason,
+            code: None,
+            generation,
+        }
+    }
+    fn read(worker: &ObserverWorker, generation: u64, error: ReadError) -> Self {
+        let (status, reason, code) = error_details(error, false);
+        Self {
+            status,
+            reason,
+            code,
+            generation: error_generation(worker, generation, error).unwrap_or(generation),
+        }
+    }
+}
+
+fn wait_until(
+    worker: &ObserverWorker,
+    generation: u64,
+    stop: &Stop,
+    deadline: Instant,
+    clock: &impl SessionClock,
+) -> bool {
+    while clock.now() < deadline && worker.is_current(generation) {
         if stop.lock().unwrap().is_some() {
             return false;
         }
-        if worker.events.wait(
+        if clock.wait(
+            &worker.events,
             generation,
-            deadline.saturating_duration_since(Instant::now()),
+            deadline.saturating_duration_since(clock.now()),
         ) & (FOCUS_CHANGED | DESTROYED)
             != 0
         {
@@ -251,6 +336,319 @@ fn wait_until(worker: &ObserverWorker, generation: u64, stop: &Stop, deadline: I
     }
     worker.is_current(generation) && stop.lock().unwrap().is_none()
 }
+
+fn establish_baseline(
+    worker: &ObserverWorker,
+    generation: u64,
+    attempt: u64,
+    before: mpsc::Receiver<Result<OwnedSnapshot, ReadError>>,
+    stop: &Stop,
+    receipt: &InjectionReceipt,
+    injected: &str,
+    clock: &impl SessionClock,
+) -> Result<Baseline, BaselineFailure> {
+    let (Some(started), Some(finished), Some(app)) = (
+        receipt.dispatch_started_at,
+        receipt.dispatch_finished_at,
+        receipt.resolved_app.as_ref(),
+    ) else {
+        return Err(BaselineFailure::new(generation, Reason::TargetUnavailable));
+    };
+    let pre = match before.recv_timeout(READ_TIMEOUT) {
+        Ok(Ok(snapshot)) => Some(snapshot),
+        Ok(Err(ReadError::NoValue | ReadError::CompositionActive)) => None,
+        Ok(Err(error)) => return Err(BaselineFailure::read(worker, generation, error)),
+        Err(_) => {
+            return Err(BaselineFailure {
+                status: Status::ReadFailed,
+                reason: Reason::ReadTimeout,
+                code: None,
+                generation,
+            })
+        }
+    };
+    if pre
+        .as_ref()
+        .is_some_and(|pre| pre.process_id != app.process_id)
+    {
+        return Err(BaselineFailure::new(generation, Reason::TargetChanged));
+    }
+    let verified_pre = pre.as_ref().is_some_and(|pre| pre.read_at <= started);
+    let mut native_reads = 1;
+    for delay in [120, 300, 700] {
+        if !wait_until(
+            worker,
+            generation,
+            stop,
+            finished + Duration::from_millis(delay),
+            clock,
+        ) {
+            return Err(BaselineFailure::new(generation, Reason::Interrupted));
+        }
+        native_reads += 1;
+        let read = if pre.is_some() {
+            worker.read(generation, READ_TIMEOUT)
+        } else {
+            worker.capture(generation, app.process_id, READ_TIMEOUT)
+        };
+        let after = match read {
+            Ok(snapshot) => snapshot,
+            Err(ReadError::NoValue | ReadError::CompositionActive) if delay < 700 => continue,
+            Err(error) => return Err(BaselineFailure::read(worker, generation, error)),
+        };
+        if !current(worker, generation, attempt) {
+            return Err(BaselineFailure::new(generation, Reason::Interrupted));
+        }
+        if after.composition == super::platform::CompositionState::Active {
+            continue;
+        }
+        let tracker = if verified_pre {
+            RangeTracker::from_before_after(
+                &as_snapshot(pre.as_ref().unwrap()),
+                &as_snapshot(&after),
+                injected,
+            )
+        } else {
+            RangeTracker::from_post_anchored(&as_snapshot(&after), injected)
+        };
+        if let Ok(tracker) = tracker {
+            let evidence = match tracker.evidence {
+                super::range::RangeEvidence::BeforeAfterVerified => "before_after_verified",
+                _ => "post_anchored",
+            };
+            return Ok(Baseline {
+                observation: Observation::new(generation, tracker, after.read_at),
+                at: after.read_at,
+                strategy: if after.event_driven {
+                    "event_with_checkpoints"
+                } else {
+                    "checkpoint_only"
+                },
+                evidence,
+                native_reads,
+            });
+        }
+    }
+    Err(BaselineFailure::new(
+        generation,
+        Reason::BaselineTransformed,
+    ))
+}
+
+struct Completion {
+    result: ObservationResult,
+    reason: Reason,
+    code: Option<i32>,
+    generation: u64,
+}
+impl Completion {
+    fn cached(observation: &Observation, generation: u64, end: EndReason) -> Self {
+        let result = observation.progress(end);
+        let reason = result_reason(&result);
+        Self {
+            result,
+            reason,
+            code: None,
+            generation,
+        }
+    }
+}
+
+fn observe(
+    worker: &ObserverWorker,
+    generation: u64,
+    attempt: u64,
+    stop: &Stop,
+    baseline: &mut Baseline,
+    schedule: [Duration; 3],
+    clock: &impl SessionClock,
+) -> Completion {
+    let observation = &mut baseline.observation;
+    let end = baseline.at + schedule[2];
+    let mut deadlines = vec![
+        baseline.at + schedule[0],
+        baseline.at + schedule[1],
+        end.checked_sub(Duration::from_millis(800) + READ_TIMEOUT)
+            .unwrap_or(baseline.at),
+        end,
+    ];
+    deadlines.sort();
+    deadlines.dedup();
+    let mut checkpoint = 0;
+    let mut last_read = baseline.at;
+    let mut dirty_due: Option<Instant> = None;
+    let mut settle_due: Option<Instant> = None;
+    loop {
+        let stop_reason = *stop.lock().unwrap();
+        if !current(worker, generation, attempt) {
+            return Completion::cached(
+                observation,
+                generation,
+                stop_reason.unwrap_or(EndReason::Interrupted),
+            );
+        }
+        if matches!(
+            stop_reason,
+            Some(
+                EndReason::SessionCancelled
+                    | EndReason::NextInjection
+                    | EndReason::SettingsDisabled
+                    | EndReason::DataCleared
+            )
+        ) {
+            return Completion::cached(observation, generation, stop_reason.unwrap());
+        }
+        let now = clock.now();
+        let deadline = deadlines[checkpoint]
+            .min(dirty_due.unwrap_or(end))
+            .min(settle_due.unwrap_or(end));
+        if stop_reason.is_none() && now < deadline {
+            let events = clock.wait(
+                &worker.events,
+                generation,
+                deadline.saturating_duration_since(now),
+            );
+            if events & TEXT_CHANGED != 0 {
+                observation.unresolved_input();
+                dirty_due.get_or_insert(clock.now().max(last_read + Duration::from_millis(350)));
+            }
+            if events & (FOCUS_CHANGED | DESTROYED) != 0 {
+                let mut done = Completion::cached(observation, generation, EndReason::FocusLeft);
+                done.reason = if events & DESTROYED != 0 {
+                    Reason::ElementDestroyed
+                } else {
+                    Reason::FocusLeft
+                };
+                return done;
+            }
+            continue;
+        }
+        if baseline.native_reads >= 90 {
+            return Completion::cached(observation, generation, EndReason::BudgetExceeded);
+        }
+        baseline.native_reads += 1;
+        let read = worker.read(generation, READ_TIMEOUT);
+        let stop_reason = *stop.lock().unwrap();
+        if matches!(
+            stop_reason,
+            Some(
+                EndReason::SessionCancelled
+                    | EndReason::NextInjection
+                    | EndReason::SettingsDisabled
+                    | EndReason::DataCleared
+            )
+        ) {
+            return Completion::cached(observation, generation, stop_reason.unwrap());
+        }
+        let snapshot = match read {
+            Ok(snapshot) => snapshot,
+            Err(ReadError::CompositionActive) => {
+                observation.unresolved_input();
+                if stop_reason.is_some() || clock.now() >= end {
+                    let mut done = Completion::cached(
+                        observation,
+                        generation,
+                        stop_reason.unwrap_or(EndReason::Timeout),
+                    );
+                    done.reason = Reason::CompositionActive;
+                    return done;
+                }
+                dirty_due = Some(clock.now() + Duration::from_millis(350));
+                settle_due = None;
+                while checkpoint + 1 < deadlines.len() && deadlines[checkpoint] <= clock.now() {
+                    checkpoint += 1;
+                }
+                continue;
+            }
+            Err(error) => {
+                let mut done = Completion::cached(observation, generation, EndReason::ReadFailed);
+                let (_, reason, code) = error_details(error, true);
+                done.reason = reason;
+                done.code = code;
+                done.generation = error_generation(worker, generation, error).unwrap_or(generation);
+                return done;
+            }
+        };
+        if !current(worker, generation, attempt) {
+            return Completion::cached(
+                observation,
+                generation,
+                stop_reason.unwrap_or(EndReason::Interrupted),
+            );
+        }
+        last_read = snapshot.read_at;
+        let terminal = stop_reason.is_some() || last_read >= end || clock.now() >= end;
+        let sample = observation.sample_read(generation, &snapshot);
+        if let Err(error) = sample {
+            let (reason, retry) = match error {
+                SampleError::CompositionActive => (Reason::CompositionActive, true),
+                SampleError::Range(
+                    super::range::RangeError::Ambiguous
+                    | super::range::RangeError::InvalidSelection,
+                ) => (Reason::RangeAmbiguous, true),
+                SampleError::Range(super::range::RangeError::FieldCleared) => {
+                    (Reason::FieldCleared, false)
+                }
+                SampleError::Range(super::range::RangeError::TargetChanged) => {
+                    (Reason::TargetChanged, false)
+                }
+                SampleError::Range(super::range::RangeError::BudgetExceeded)
+                | SampleError::ReadBudgetExceeded => (Reason::BudgetExceeded, false),
+                _ => (Reason::Interrupted, false),
+            };
+            if retry && !terminal {
+                dirty_due = Some(clock.now().max(last_read) + Duration::from_millis(350));
+                settle_due = None;
+                while checkpoint + 1 < deadlines.len() && deadlines[checkpoint] <= last_read {
+                    checkpoint += 1;
+                }
+                continue;
+            }
+            let end_reason = match reason {
+                Reason::FieldCleared => EndReason::FieldCleared,
+                Reason::TargetChanged => EndReason::TargetChanged,
+                Reason::BudgetExceeded => EndReason::BudgetExceeded,
+                _ => EndReason::ReadFailed,
+            };
+            let mut done = Completion::cached(observation, generation, end_reason);
+            done.reason = reason;
+            if retry {
+                done.result.status = ObservationStatus::Ambiguous;
+            }
+            return done;
+        }
+        if terminal {
+            let result = observation.finish(stop_reason.unwrap_or(EndReason::Timeout));
+            let reason = result_reason(&result);
+            return Completion {
+                result,
+                reason,
+                code: None,
+                generation,
+            };
+        }
+        let result = observation.progress(EndReason::Timeout);
+        diagnostics::publish(attempt, Status::Observing, Reason::None, None, result.edits);
+        diagnostics::context(
+            attempt,
+            baseline.strategy,
+            baseline.evidence,
+            last_read.saturating_duration_since(baseline.at).as_millis() as u64,
+            result.had_intermediate_changes,
+        );
+        dirty_due = None;
+        settle_due = (!observation.is_stable()).then(|| {
+            observation
+                .stable_at()
+                .max(last_read + Duration::from_millis(350))
+                .min(end)
+        });
+        while checkpoint + 1 < deadlines.len() && deadlines[checkpoint] <= last_read {
+            checkpoint += 1;
+        }
+    }
+}
+
 fn run(
     worker: &ObserverWorker,
     generation: u64,
@@ -260,358 +658,68 @@ fn run(
     receipt: InjectionReceipt,
     injected: String,
     schedule: [Duration; 3],
-    capture_ticket: Option<super::records::CaptureTicket>,
-) {
-    // A pre-read timeout invalidates its generation before this thread starts.
-    // Consume that error below so the view cannot remain stuck at Verifying.
+    clock: &impl SessionClock,
+) -> Option<super::records::Record> {
+    // A pre-read's own timeout must still be reported after its generation changed.
     if !diagnostics::enabled() || !attempt_is_current(attempt) {
-        return;
+        return None;
     }
     if receipt.outcome != DispatchOutcome::CommandsPosted {
         skipped(attempt, Reason::DispatchFailed);
-        return;
+        return None;
     }
-    let (Some(started), Some(finished), Some(app)) = (
-        receipt.dispatch_started_at,
-        receipt.dispatch_finished_at,
-        receipt.resolved_app.as_ref(),
-    ) else {
+    let Some(app) = receipt.resolved_app.as_ref() else {
         skipped(attempt, Reason::TargetUnavailable);
-        return;
+        return None;
     };
     if app.remote_bridge {
         skipped(attempt, Reason::RemoteTargetUnsupported);
-        return;
+        return None;
     }
-    // Waiting here is off the injection/HUD/audio path. A late pre-read can
-    // establish the target, but cannot be used as pre-dispatch evidence.
-    let pre = match before.recv_timeout(READ_TIMEOUT) {
-        Ok(Ok(snapshot)) => Some(snapshot),
-        Ok(Err(ReadError::NoValue)) => None,
-        Ok(Err(error)) => {
-            if current_error(worker, generation, attempt, error) {
-                report_read_error(attempt, error, false);
-            }
-            return;
-        }
-        Err(_) => {
-            if current(worker, generation, attempt) {
-                report_read_error(attempt, ReadError::TimedOut, false);
-            }
-            return;
-        }
-    };
-    if pre
-        .as_ref()
-        .is_some_and(|pre| pre.process_id != app.process_id)
-    {
-        skipped(attempt, Reason::TargetChanged);
-        return;
-    }
-    let verified_pre = pre.as_ref().is_some_and(|pre| pre.read_at <= started);
-    let mut baseline = None;
-    let mut native_reads = 1;
-    for delay in [120, 300, 700] {
-        if !wait_until(
-            worker,
-            generation,
-            &stop,
-            finished + Duration::from_millis(delay),
-        ) {
-            if current(worker, generation, attempt) {
-                diagnostics::publish(
-                    attempt,
-                    Status::BaselineUnavailable,
-                    Reason::Interrupted,
-                    None,
-                    None,
-                );
-            }
-            return;
-        }
-        native_reads += 1;
-        let read = if pre.is_some() {
-            worker.read(generation, READ_TIMEOUT)
-        } else {
-            worker.capture(generation, app.process_id, READ_TIMEOUT)
-        };
-        let after = match read {
-            Ok(s) => s,
-            Err(ReadError::NoValue) if delay < 700 => continue,
-            Err(e) => {
-                if current_error(worker, generation, attempt, e) {
-                    report_read_error(attempt, e, false);
-                }
-                return;
-            }
-        };
-        if !current(worker, generation, attempt) {
-            return;
-        }
-        let tracker = if verified_pre {
-            RangeTracker::from_before_after(
-                &as_snapshot(pre.as_ref().unwrap()),
-                &as_snapshot(&after),
-                &injected,
-            )
-        } else {
-            RangeTracker::from_post_anchored(&as_snapshot(&after), &injected)
-        };
-        if let Ok(tracker) = tracker {
-            baseline = Some((tracker, after.read_at, after.event_driven));
-            break;
-        }
-    }
-    let Some((tracker, baseline_at, event_driven)) = baseline else {
-        diagnostics::publish(
-            attempt,
-            Status::BaselineUnavailable,
-            Reason::BaselineTransformed,
-            None,
-            None,
-        );
-        return;
-    };
-    drop(pre);
-    drop(injected);
-    let evidence = match tracker.evidence {
-        super::range::RangeEvidence::BeforeAfterVerified => "before_after_verified",
-        _ => "post_anchored",
-    };
-    let strategy = if event_driven {
-        "event_with_checkpoints"
-    } else {
-        "checkpoint_only"
-    };
-    let mut observation = Observation::new(generation, tracker, baseline_at);
-    diagnostics::publish(attempt, Status::Observing, Reason::None, None, None);
-    diagnostics::context(attempt, strategy, evidence, 0, false);
-    let end = baseline_at + schedule[2];
-    // Reserve a stable comparison before the hard deadline, including for
-    // providers without notifications. Never extend the observation duration.
-    let mut deadlines = vec![
-        baseline_at + schedule[0],
-        baseline_at + schedule[1],
-        end.checked_sub(Duration::from_millis(800) + READ_TIMEOUT)
-            .unwrap_or(baseline_at),
-        end,
-    ];
-    deadlines.sort();
-    deadlines.dedup();
-    let mut checkpoint = 0;
-    let mut last_read = baseline_at;
-    let mut dirty_due: Option<Instant> = None;
-    let mut settle_due: Option<Instant> = None;
-    let (result, reason) = (|| {
-        loop {
-            if !current(worker, generation, attempt) {
-                return (
-                    observation.progress(EndReason::NextInjection),
-                    Reason::NextInjection,
-                );
-            }
-            let stop_reason = *stop.lock().unwrap();
-            let now = Instant::now();
-            let deadline = deadlines[checkpoint]
-                .min(dirty_due.unwrap_or(end))
-                .min(settle_due.unwrap_or(end));
-            if stop_reason.is_none() && now < deadline {
-                let events = worker
-                    .events
-                    .wait(generation, deadline.saturating_duration_since(now));
-                if events & (FOCUS_CHANGED | DESTROYED) != 0 {
-                    let result = observation.progress(EndReason::FocusLeft);
-                    publish_result(
-                        worker,
-                        generation,
-                        attempt,
-                        baseline_at,
-                        strategy,
-                        evidence,
-                        &result,
-                        Some(if events & DESTROYED != 0 {
-                            Reason::ElementDestroyed
-                        } else {
-                            Reason::FocusLeft
-                        }),
-                        None,
-                    );
-                    return (
-                        result,
-                        if events & DESTROYED != 0 {
-                            Reason::ElementDestroyed
-                        } else {
-                            Reason::FocusLeft
-                        },
-                    );
-                }
-                if events & TEXT_CHANGED != 0 {
-                    dirty_due
-                        .get_or_insert(Instant::now().max(last_read + Duration::from_millis(350)));
-                }
-                continue;
-            }
-            if native_reads >= 90 {
-                let result = observation.progress(EndReason::BudgetExceeded);
-                publish_result(
-                    worker,
-                    generation,
-                    attempt,
-                    baseline_at,
-                    strategy,
-                    evidence,
-                    &result,
-                    Some(Reason::BudgetExceeded),
-                    None,
-                );
-                return (result, Reason::BudgetExceeded);
-            }
-            native_reads += 1;
-            let snapshot = match worker.read(generation, READ_TIMEOUT) {
-                Ok(s) => s,
-                Err(error) => {
-                    let result = observation.progress(EndReason::ReadFailed);
-                    let (_, reason, code) = error_details(error, true);
-                    if current_error(worker, generation, attempt, error) {
-                        // Native timeout invalidates its own generation; publish
-                        // its cached result using that invalidation boundary.
-                        let result_generation = if error == ReadError::TimedOut {
-                            generation.wrapping_add(1)
-                        } else {
-                            generation
-                        };
-                        publish_result(
-                            worker,
-                            result_generation,
-                            attempt,
-                            baseline_at,
-                            strategy,
-                            evidence,
-                            &result,
-                            Some(reason),
-                            code,
-                        );
-                    }
-                    return (result, reason);
-                }
-            };
-            if !current(worker, generation, attempt) {
-                return (
-                    observation.progress(EndReason::NextInjection),
-                    Reason::NextInjection,
-                );
-            }
-            last_read = snapshot.read_at;
-            if stop_reason.is_some() || last_read >= end {
-                let result = observation.close(
-                    generation,
-                    stop_reason.unwrap_or(EndReason::Timeout),
-                    Some((&as_snapshot(&snapshot), last_read)),
-                );
-                publish_result(
-                    worker,
-                    generation,
-                    attempt,
-                    baseline_at,
-                    strategy,
-                    evidence,
-                    &result,
-                    None,
-                    None,
-                );
-                let reason = result_reason(&result);
-                return (result, reason);
-            }
-            if let Err(error) = observation.sample(generation, &as_snapshot(&snapshot), last_read) {
-                let (status, reason) = match error {
-                    SampleError::Range(super::range::RangeError::FieldCleared) => {
-                        (ObservationStatus::Partial, Reason::FieldCleared)
-                    }
-                    SampleError::Range(super::range::RangeError::TargetChanged) => {
-                        (ObservationStatus::Partial, Reason::TargetChanged)
-                    }
-                    SampleError::Range(super::range::RangeError::BudgetExceeded)
-                    | SampleError::ReadBudgetExceeded => {
-                        (ObservationStatus::Partial, Reason::BudgetExceeded)
-                    }
-                    _ => (ObservationStatus::Ambiguous, Reason::RangeAmbiguous),
-                };
-                let mut result = observation.progress(EndReason::ReadFailed);
-                result.status = status;
-                publish_result(
-                    worker,
-                    generation,
-                    attempt,
-                    baseline_at,
-                    strategy,
-                    evidence,
-                    &result,
-                    Some(reason),
-                    None,
-                );
-                return (result, reason);
-            }
-            let result = observation.progress(EndReason::Timeout);
-            diagnostics::publish(attempt, Status::Observing, Reason::None, None, result.edits);
-            diagnostics::context(
-                attempt,
-                strategy,
-                evidence,
-                last_read.saturating_duration_since(baseline_at).as_millis() as u64,
-                result.had_intermediate_changes,
-            );
-            dirty_due = None;
-            settle_due = (observation.stable_at() > last_read).then(|| {
-                observation
-                    .stable_at()
-                    .max(last_read + Duration::from_millis(350))
-                    .min(end)
-            });
-            while checkpoint + 1 < deadlines.len() && deadlines[checkpoint] <= last_read {
-                checkpoint += 1;
-            }
-        }
-    })();
-    if let Some(ticket) = capture_ticket {
-        persist(
-            ticket,
-            &receipt,
-            app,
-            finished,
-            &observation,
-            &result,
-            reason,
-            strategy,
-            evidence,
-        );
-    }
-}
-
-fn persist(
-    ticket: super::records::CaptureTicket,
-    receipt: &InjectionReceipt,
-    app: &crate::injector::ResolvedApp,
-    finished: Instant,
-    observation: &Observation,
-    result: &ObservationResult,
-    reason: Reason,
-    strategy: &str,
-    evidence: &str,
-) {
-    if let Some(record) = record_for(
-        receipt,
-        app,
-        finished,
-        observation,
-        result,
-        reason,
-        strategy,
-        evidence,
+    let mut baseline = match establish_baseline(
+        worker, generation, attempt, before, &stop, &receipt, &injected, clock,
     ) {
-        if let Err(error) = super::records::save(ticket, &record) {
-            log::error!("Could not save post-edit record: {error}");
+        Ok(baseline) => baseline,
+        Err(failure) => {
+            if worker.is_current(failure.generation) {
+                diagnostics::publish(attempt, failure.status, failure.reason, failure.code, None);
+            }
+            return None;
         }
-    }
+    };
+    drop(injected);
+    diagnostics::publish(attempt, Status::Observing, Reason::None, None, None);
+    diagnostics::context(attempt, baseline.strategy, baseline.evidence, 0, false);
+    let done = observe(
+        worker,
+        generation,
+        attempt,
+        &stop,
+        &mut baseline,
+        schedule,
+        clock,
+    );
+    publish_result(
+        worker,
+        done.generation,
+        attempt,
+        baseline.at,
+        baseline.strategy,
+        baseline.evidence,
+        &done.result,
+        Some(done.reason),
+        done.code,
+    );
+    record_for(
+        &receipt,
+        app,
+        receipt.dispatch_finished_at.unwrap(),
+        &baseline.observation,
+        &done.result,
+        done.reason,
+        baseline.strategy,
+        baseline.evidence,
+    )
 }
 
 fn record_for(
@@ -626,7 +734,16 @@ fn record_for(
 ) -> Option<super::records::Record> {
     use chrono::{Duration as WallDuration, SecondsFormat, Utc};
     let (original, edited) = observation.text_pair();
-    if original == edited {
+    if original == edited
+        || !result.stable
+        || matches!(
+            result.reason,
+            EndReason::SessionCancelled
+                | EndReason::Interrupted
+                | EndReason::SettingsDisabled
+                | EndReason::DataCleared
+        )
+    {
         return None;
     }
     let at = Utc::now() - WallDuration::from_std(finished.elapsed()).unwrap();
@@ -659,6 +776,8 @@ fn record_for(
         deletions: result.edits.map(|e| e.deletions),
         substitutions: result.edits.map(|e| e.substitutions),
         had_intermediate_changes: result.had_intermediate_changes,
+        stable: result.stable,
+        composition: observation.composition(),
     })
 }
 
@@ -709,6 +828,7 @@ fn result_reason(result: &ObservationResult) -> Reason {
         EndReason::FieldCleared => Reason::FieldCleared,
         EndReason::TargetChanged => Reason::TargetChanged,
         EndReason::BudgetExceeded => Reason::BudgetExceeded,
+        EndReason::SessionCancelled => Reason::SessionCancelled,
         _ => Reason::Interrupted,
     }
 }
@@ -743,7 +863,8 @@ fn error_details(error: ReadError, has_baseline: bool) -> (Status, Reason, Optio
             None,
         ),
         ReadError::TooLarge => (partial, Reason::TooLarge, None),
-        ReadError::TimedOut | ReadError::WorkerBusy => (
+        ReadError::CompositionActive => (partial, Reason::CompositionActive, None),
+        ReadError::TimedOut { .. } | ReadError::WorkerBusy => (
             if has_baseline {
                 Status::Partial
             } else {
@@ -764,6 +885,7 @@ fn error_details(error: ReadError, has_baseline: bool) -> (Status, Reason, Optio
         ReadError::StaleGeneration => (partial, Reason::Interrupted, None),
     }
 }
+#[cfg(test)]
 pub(super) fn report_read_error(attempt: u64, error: ReadError, has_baseline: bool) {
     if error == ReadError::StaleGeneration {
         return;
@@ -774,7 +896,233 @@ pub(super) fn report_read_error(attempt: u64, error: ReadError, has_baseline: bo
 
 #[cfg(test)]
 mod tests {
+    use super::super::platform::{CompositionState, EventSignal, Reader};
     use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Clone)]
+    struct VirtualClock(Arc<Mutex<Instant>>);
+    impl SessionClock for VirtualClock {
+        fn now(&self) -> Instant {
+            *self.0.lock().unwrap()
+        }
+        fn wait(&self, events: &EventSignal, generation: u64, timeout: Duration) -> u8 {
+            let flags = events.wait(generation, Duration::ZERO);
+            if flags == 0 {
+                *self.0.lock().unwrap() += timeout;
+            }
+            flags
+        }
+    }
+    enum Step {
+        Text(&'static str),
+        Composing,
+        Cancel,
+        Reinject,
+    }
+    struct ScriptedReader {
+        clock: VirtualClock,
+        steps: VecDeque<Step>,
+        stop: Stop,
+    }
+    fn snapshot(text: &str, at: Instant) -> OwnedSnapshot {
+        OwnedSnapshot {
+            target: 1,
+            process_id: 1,
+            text: text.into(),
+            selection_utf16: text.encode_utf16().count()..text.encode_utf16().count(),
+            read_at: at,
+            event_driven: false,
+            composition: CompositionState::Inactive,
+        }
+    }
+    impl Reader for ScriptedReader {
+        fn capture(&mut self, _: u64, _: u32) -> Result<OwnedSnapshot, ReadError> {
+            self.read(0)
+        }
+        fn read(&mut self, _: u64) -> Result<OwnedSnapshot, ReadError> {
+            match self
+                .steps
+                .pop_front()
+                .expect("unexpected extra native read")
+            {
+                Step::Text(text) => Ok(snapshot(text, self.clock.now())),
+                Step::Composing => Err(ReadError::CompositionActive),
+                Step::Cancel => {
+                    *self.stop.lock().unwrap() = Some(EndReason::SessionCancelled);
+                    cancel();
+                    Err(ReadError::StaleGeneration)
+                }
+                Step::Reinject => {
+                    *self.stop.lock().unwrap() = Some(EndReason::NextInjection);
+                    ATTEMPT.fetch_add(1, Ordering::SeqCst);
+                    Ok(snapshot("来自新听写的内容", self.clock.now()))
+                }
+            }
+        }
+        fn clear(&mut self) {}
+    }
+    fn receipt(at: Instant) -> InjectionReceipt {
+        InjectionReceipt {
+            session_id: uuid::Uuid::new_v4(),
+            record_id: uuid::Uuid::new_v4(),
+            injection_id: uuid::Uuid::new_v4(),
+            injection_epoch: 1,
+            outcome: DispatchOutcome::CommandsPosted,
+            dispatch_started_at: Some(at),
+            dispatch_finished_at: Some(at),
+            resolved_app: Some(crate::injector::ResolvedApp {
+                process_id: 1,
+                remote_bridge: false,
+                app_name: Some("Fixture".into()),
+            }),
+        }
+    }
+    fn scripted_run(steps: Vec<Step>) -> Option<super::super::records::Record> {
+        let clock = VirtualClock(Arc::new(Mutex::new(Instant::now())));
+        let start = clock.now();
+        let stop = Arc::new(Mutex::new(None));
+        let reader = ScriptedReader {
+            clock: clock.clone(),
+            steps: steps.into(),
+            stop: Arc::clone(&stop),
+        };
+        let worker = ObserverWorker::start_with(move || reader).unwrap();
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(snapshot("", start))).unwrap();
+        let attempt = begin_attempt();
+        run(
+            &worker,
+            0,
+            attempt,
+            rx,
+            stop,
+            receipt(start),
+            "支座返力".into(),
+            [
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+            ],
+            &clock,
+        )
+    }
+    #[test]
+    fn full_session_recovers_after_backspace_ambiguity_and_composition() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        for middle in [Step::Composing, Step::Text("支座返fan")] {
+            let record = scripted_run(vec![
+                Step::Text("支座返力"),
+                Step::Text("支座返"),
+                middle,
+                Step::Text("支座反力"),
+                Step::Text("支座反力"),
+                Step::Text("支座反力"),
+                Step::Text("支座反力"),
+            ])
+            .unwrap();
+            assert_eq!(
+                (record.original_text.as_str(), record.edited_text.as_str()),
+                ("支座返力", "支座反力")
+            );
+            assert!(record.stable && record.complete);
+            assert_eq!(record.end_reason, "timeout");
+        }
+        diagnostics::set_enabled(false);
+    }
+    #[test]
+    fn full_session_never_saves_an_unconfirmed_backspace_or_unresolved_composition() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        assert!(scripted_run(vec![
+            Step::Text("支座返力"),
+            Step::Text("支座返"),
+            Step::Text("")
+        ])
+        .is_none());
+        assert!(scripted_run(vec![
+            Step::Text("支座返力"),
+            Step::Text("支座返"),
+            Step::Text("支座返"),
+            Step::Composing,
+            Step::Composing,
+            Step::Composing,
+            Step::Composing,
+            Step::Composing,
+            Step::Composing,
+            Step::Composing,
+            Step::Composing
+        ])
+        .is_none());
+        diagnostics::set_enabled(false);
+    }
+    #[test]
+    fn full_session_recovers_even_if_the_deleted_state_was_previously_stable() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        let record = scripted_run(vec![
+            Step::Text("支座返力"),
+            Step::Text("支座返"),
+            Step::Text("支座返"),
+            Step::Composing,
+            Step::Text("支座反力"),
+            Step::Text("支座反力"),
+            Step::Text("支座反力"),
+            Step::Text("支座反力"),
+        ])
+        .unwrap();
+        assert_eq!(record.edited_text, "支座反力");
+        assert!(record.stable && record.complete);
+        diagnostics::set_enabled(false);
+    }
+    #[test]
+    fn full_session_discards_cancelled_text_and_reinjection_cannot_enter_the_old_record() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        assert!(scripted_run(vec![
+            Step::Text("支座返力"),
+            Step::Text("支座反力"),
+            Step::Text("支座反力"),
+            Step::Cancel
+        ])
+        .is_none());
+        assert_eq!(diagnostics::snapshot().reason, Reason::SessionCancelled);
+        let record = scripted_run(vec![
+            Step::Text("支座返力"),
+            Step::Text("支座反力"),
+            Step::Text("支座反力"),
+            Step::Reinject,
+        ])
+        .unwrap();
+        assert_eq!(record.edited_text, "支座反力");
+        assert_eq!(record.end_reason, "next_injection");
+        assert!(record.stable && !record.complete);
+        diagnostics::set_enabled(false);
+    }
+
+    #[test]
+    fn failure_before_resolving_a_target_cannot_leave_the_status_verifying() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        let attempt = begin_attempt();
+        let mut failed = receipt(Instant::now());
+        failed.outcome = DispatchOutcome::Failed {
+            code: "modifiers_held",
+        };
+        failed.resolved_app = None;
+        failed.dispatch_started_at = None;
+        failed.dispatch_finished_at = None;
+        finish_dispatch(attempt, failed, "未派发".into(), None);
+        assert_eq!(
+            (
+                diagnostics::snapshot().status,
+                diagnostics::snapshot().reason
+            ),
+            (Status::Skipped, Reason::DispatchFailed)
+        );
+        diagnostics::set_enabled(false);
+    }
     struct Blocked {
         started: mpsc::Sender<()>,
         release: mpsc::Receiver<()>,
@@ -813,6 +1161,9 @@ mod tests {
         observation
             .sample(1, &edited, at + Duration::from_secs(1))
             .unwrap();
+        observation
+            .sample(1, &edited, at + Duration::from_secs(2))
+            .unwrap();
         let app = crate::injector::ResolvedApp {
             process_id: 1,
             remote_bridge: false,
@@ -850,7 +1201,7 @@ mod tests {
         assert!(record.last_observed_at > record.timestamp);
         // A later undo leaves no net pair to persist.
         observation
-            .sample(1, &after, at + Duration::from_secs(2))
+            .sample(1, &after, at + Duration::from_secs(3))
             .unwrap();
         let result = observation.progress(EndReason::Timeout);
         assert!(record_for(
@@ -882,9 +1233,15 @@ mod tests {
         let native = Arc::clone(&worker);
         let call = std::thread::spawn(move || native.capture(0, 1, Duration::from_millis(50)));
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(call.join().unwrap(), Err(ReadError::TimedOut)));
+        assert!(matches!(
+            call.join().unwrap(),
+            Err(ReadError::TimedOut { .. })
+        ));
         let (tx, rx) = mpsc::channel();
-        tx.send(Err(ReadError::TimedOut)).unwrap();
+        tx.send(Err(ReadError::TimedOut {
+            invalidated_generation: 1,
+        }))
+        .unwrap();
         let now = Instant::now();
         run(
             &worker,
@@ -912,9 +1269,30 @@ mod tests {
                 Duration::from_secs(30),
                 Duration::from_secs(60),
             ],
-            None,
+            &SystemClock,
         );
         let status = diagnostics::snapshot();
+        assert_eq!(
+            error_generation(
+                &worker,
+                0,
+                ReadError::TimedOut {
+                    invalidated_generation: 1
+                }
+            ),
+            Some(1)
+        );
+        worker.invalidate();
+        assert_eq!(
+            error_generation(
+                &worker,
+                0,
+                ReadError::TimedOut {
+                    invalidated_generation: 1
+                }
+            ),
+            None
+        );
         release_tx.send(()).unwrap();
         diagnostics::set_enabled(false);
         assert_eq!(

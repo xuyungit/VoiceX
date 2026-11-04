@@ -10,6 +10,7 @@ export type PostEditTestReason =
   | 'pre_read_unavailable' | 'baseline_transformed' | 'dispatch_failed' | 'interrupted'
   | 'field_cleared' | 'range_ambiguous' | 'budget_exceeded' | 'timeout'
   | 'focus_left' | 'next_recording' | 'next_injection' | 'element_destroyed'
+  | 'session_cancelled' | 'composition_active'
 
 export interface PostEditTestSnapshot {
   enabled: boolean
@@ -48,6 +49,8 @@ export interface PostEditRecord {
   deletions: number | null
   substitutions: number | null
   hadIntermediateChanges: boolean
+  stable: boolean
+  composition: 'unknown' | 'inactive' | 'active'
 }
 
 export interface PostEditRecordPage {

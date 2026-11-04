@@ -4,8 +4,9 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationTextPattern,
-    TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start, UIA_EditControlTypeId,
+    CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
+    IUIAutomationTextEditPattern, IUIAutomationTextPattern, TextPatternRangeEndpoint_End,
+    TextPatternRangeEndpoint_Start, UIA_EditControlTypeId, UIA_TextEditPatternId,
     UIA_TextPatternId,
 };
 
@@ -78,6 +79,10 @@ impl NativeReader {
         }
         same_focus(automation, element)?;
         check_control(element)?;
+        let composition_before = composition_state(element);
+        if composition_before == super::CompositionState::Active {
+            return Err(ReadError::CompositionActive);
+        }
         let pattern =
             unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
                 .map_err(native)?;
@@ -129,6 +134,10 @@ impl NativeReader {
         }
         same_focus(automation, element)?;
         check_control(element)?;
+        let composition_after = composition_state(element);
+        if composition_after == super::CompositionState::Active {
+            return Err(ReadError::CompositionActive);
+        }
         Ok(OwnedSnapshot {
             target: *token,
             process_id: unsafe { element.CurrentProcessId() }.map_err(native)? as u32,
@@ -136,6 +145,11 @@ impl NativeReader {
             selection_utf16: start_text.encode_utf16().count()..end_text.encode_utf16().count(),
             read_at: Instant::now(),
             event_driven: false,
+            composition: if composition_before == composition_after {
+                composition_before
+            } else {
+                super::CompositionState::Unknown
+            },
         })
     }
 }
@@ -148,6 +162,29 @@ impl Drop for NativeReader {
         if self.initialized {
             unsafe { CoUninitialize() };
         }
+    }
+}
+
+fn composition_state(element: &IUIAutomationElement) -> super::CompositionState {
+    let Ok(pattern) = (unsafe {
+        element.GetCurrentPatternAs::<IUIAutomationTextEditPattern>(UIA_TextEditPatternId)
+    }) else {
+        return super::CompositionState::Unknown;
+    };
+    // The native contract permits S_OK + null. The generated interface return
+    // type cannot represent that successful no-composition result.
+    let mut raw = std::ptr::null_mut();
+    let result = unsafe { (pattern.vtable().GetActiveComposition)(pattern.as_raw(), &mut raw) };
+    let active = !raw.is_null();
+    if active {
+        drop(unsafe { windows::core::IUnknown::from_raw(raw) });
+    }
+    if result.is_err() {
+        super::CompositionState::Unknown
+    } else if active {
+        super::CompositionState::Active
+    } else {
+        super::CompositionState::Inactive
     }
 }
 
