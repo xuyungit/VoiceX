@@ -39,7 +39,7 @@ const sonioxMaxEndpointDelayMs = computed({
         v-model:value="sonioxApiKey"
         type="password"
         show-password-on="click"
-        placeholder="Enter Soniox API key"
+        :placeholder="t('asr.enterProviderApiKey', { provider: 'Soniox' })"
       />
     </SettingRow>
     <SettingRow :label="t('asr.model')" :help="t('asr.sonioxModelNote')">

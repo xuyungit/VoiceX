@@ -68,7 +68,7 @@ const googleLocationOptions = [
       />
     </SettingRow>
     <SettingRow :label="t('asr.projectId')" :help="t('asr.projectIdNote')">
-      <NInput v-model:value="googleSttProjectId" placeholder="e.g. my-project-123456" />
+      <NInput v-model:value="googleSttProjectId" :placeholder="t('asr.projectIdPlaceholder')" />
     </SettingRow>
     <SettingRow :label="t('asr.location')" :help="t('asr.locationNote')">
       <NSelect

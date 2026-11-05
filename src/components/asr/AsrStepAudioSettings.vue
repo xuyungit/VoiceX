@@ -46,7 +46,7 @@ const stepaudioLanguageOptions = computed(() => [
         v-model:value="stepaudioApiKey"
         type="password"
         show-password-on="click"
-        placeholder="StepFun API key"
+        :placeholder="t('asr.enterProviderApiKey', { provider: 'StepFun' })"
       />
     </SettingRow>
     <SettingRow :label="t('asr.model')" :help="t('asr.stepaudioModelNote', { model: ASR_MODEL_DEFAULTS.stepaudio })">

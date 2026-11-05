@@ -33,7 +33,7 @@ const cohereLanguage = computed({
         v-model:value="cohereApiKey"
         type="password"
         show-password-on="click"
-        placeholder="Enter Cohere API key"
+        :placeholder="t('asr.enterProviderApiKey', { provider: 'Cohere' })"
       />
     </SettingRow>
     <SettingRow :label="t('asr.model')" :help="t('asr.cohereModelNote')">

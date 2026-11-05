@@ -171,9 +171,9 @@ function formatDevice(record: HistoryRecord): string {
 async function togglePlayback(record: HistoryRecord) {
   if (!record.audioPath) {
     dialog.warning({
-      title: '无法播放',
-      content: '缺少录音文件路径，可能未成功保存录音。',
-      positiveText: '知道了'
+      title: t('history.audioMissingTitle'),
+      content: t('history.audioMissing'),
+      positiveText: t('common.ok')
     })
     return
   }
@@ -204,8 +204,8 @@ async function togglePlayback(record: HistoryRecord) {
   } catch (error) {
     console.error('Failed to play audio:', error)
     dialog.error({
-      title: '播放失败',
-      content: '录音文件无法播放，请检查文件是否存在或格式是否受支持。'
+      title: t('history.playbackFailedTitle'),
+      content: t('history.playbackFailed')
     })
     playingId.value = null
     audioPlayer.value = null
@@ -320,18 +320,18 @@ async function openRecordingsFolder() {
   } catch (error) {
     console.error('Failed to open recordings directory:', error)
     dialog.error({
-      title: '打开失败',
-      content: '无法打开录音目录，请稍后重试。'
+      title: t('history.openFolderFailedTitle'),
+      content: t('history.openFolderFailed', { reason: error instanceof Error ? error.message : String(error) })
     })
   }
 }
 
 function confirmDelete(record: HistoryRecord) {
-  dialog.warning({
-    title: '删除历史',
-    content: '确定删除这条记录吗？',
-    positiveText: '删除',
-    negativeText: '取消',
+  dialog.error({
+    title: t('history.deleteTitle'),
+    content: t('history.deleteConfirm'),
+    positiveText: t('common.delete'),
+    negativeText: t('common.cancel'),
     onPositiveClick: () => handleDelete(record)
   })
 }
@@ -564,7 +564,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                 <span class="duration">{{ formatDuration(record.durationMs) }}</span>
                 <span v-if="playingId === record.id" class="pill accent">{{ t('history.playing') }}</span>
                 <div class="action-toolbar">
-                  <NButton quaternary size="small" class="toolbar-button" aria-label="复制" @click="() => handleCopy(record)">
+                  <NButton quaternary size="small" class="toolbar-button" :aria-label="t('common.copy')" @click="() => handleCopy(record)">
                     <template #icon>
                       <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
                         <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
@@ -590,7 +590,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                     quaternary
                     size="small"
                     class="toolbar-button danger"
-                    aria-label="删除"
+                    :aria-label="t('common.delete')"
                     @click="() => confirmDelete(record)"
                   >
                     <template #icon>
@@ -605,7 +605,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                     :options="moreOptions(record)"
                     @select="(key) => handleMoreAction(key, record)"
                   >
-                    <NButton quaternary size="small" class="toolbar-button" aria-label="更多操作">
+                    <NButton quaternary size="small" class="toolbar-button" :aria-label="t('common.moreActions')">
                       <template #icon>
                         <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
                           <path d="M12 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm0 8a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" transform="translate(0 -4)" />

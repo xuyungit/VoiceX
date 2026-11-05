@@ -74,18 +74,18 @@ const forceToSpeechTime = computed({
 <template>
   <SettingsSection :title="t('asr.apiCredentials')">
     <SettingRow label="App key">
-      <NInput v-model:value="asrAppKey" placeholder="Enter app key" />
+      <NInput v-model:value="asrAppKey" :placeholder="t('asr.enterAppKey')" />
     </SettingRow>
     <SettingRow label="Access key">
       <NInput
         v-model:value="asrAccessKey"
         type="password"
         show-password-on="click"
-        placeholder="Enter access key"
+        :placeholder="t('asr.enterAccessKey')"
       />
     </SettingRow>
     <SettingRow label="Resource ID">
-      <NInput v-model:value="asrResourceId" placeholder="Enter resource ID" />
+      <NInput v-model:value="asrResourceId" :placeholder="t('asr.enterResourceId')" />
     </SettingRow>
   </SettingsSection>
 

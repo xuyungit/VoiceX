@@ -14,6 +14,8 @@ const enUS = {
     copy: 'Copy',
     delete: 'Delete',
     cancel: 'Cancel',
+    ok: 'OK',
+    moreActions: 'More actions',
     details: 'Details'
   },
   appearance: {
@@ -158,7 +160,15 @@ const enUS = {
     replayInjectHint: 'Switch back to the target app within a few seconds. Once processing is ready, VoiceX will inject the final text into the current foreground app.',
     devicePrefix: 'Device {id}',
     translateRead: 'Translate & read',
-    sourceText: 'Source text'
+    sourceText: 'Source text',
+    deleteTitle: 'Delete record',
+    deleteConfirm: 'Delete this record? Its text and recording will be removed and cannot be recovered.',
+    audioMissingTitle: 'Cannot play',
+    audioMissing: 'This record has no recording file path; the recording may not have been saved.',
+    playbackFailedTitle: 'Playback failed',
+    playbackFailed: 'The recording could not be played. Check that the file exists and its format is supported.',
+    openFolderFailedTitle: 'Could not open folder',
+    openFolderFailed: 'Could not open the recordings folder: {reason}'
   },
   dictionary: {
     title: 'Hotwords',
@@ -735,6 +745,11 @@ const enUS = {
     endWindowSize: 'End window size (ms)',
     forceToSpeechTime: 'Force to speech time (ms)',
     serviceDefault: 'Service default',
+    enterProviderApiKey: 'Enter {provider} API key',
+    enterAppKey: 'Enter app key',
+    enterAccessKey: 'Enter access key',
+    enterResourceId: 'Enter resource ID',
+    projectIdPlaceholder: 'e.g. my-project-123456',
     providerVolcengine: 'Volcengine Doubao',
     providerGoogle: 'Google Cloud Speech-to-Text V2',
     providerFunAsr: 'Fun-ASR Realtime',

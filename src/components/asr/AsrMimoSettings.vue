@@ -44,7 +44,7 @@ const mimoLanguageOptions = computed(() => [
         v-model:value="mimoApiKey"
         type="password"
         show-password-on="click"
-        placeholder="MiMo API key"
+        :placeholder="t('asr.enterProviderApiKey', { provider: 'MiMo' })"
       />
     </SettingRow>
     <SettingRow :label="t('asr.model')" :help="t('asr.mimoModelNote')">
