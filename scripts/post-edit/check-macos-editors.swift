@@ -5,7 +5,7 @@ import Foundation
 // with a live main run loop, then start a fresh test process for each target.
 // The launcher reads process identity only, never AX controls or draft text.
 let defaults = ["com.anysphere.sand", "com.tencent.workbuddy.mac", "com.deepseek.dsh"]
-let allowed = Set(defaults + ["md.obsidian"])
+let allowed = Set(defaults + ["md.obsidian", "com.apple.mail", "abnerworks.Typora"])
 guard CommandLine.arguments.count >= 2 else {
     fputs("Usage: swift scripts/post-edit/check-macos-editors.swift /absolute/path/to/prebuilt-test-binary [bundle-id ...]\n", stderr)
     exit(2)
@@ -27,7 +27,7 @@ func runChecks() throws -> Int32 {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
     var failed = false
-    emit("Ready: \(targets.joined(separator: " → ")). In each empty editor, type VoiceX test A, wait 3 s, change A to B, wait 3 s. Do not send. For Obsidian, use an empty temporary note in Source mode.")
+    emit("Ready: \(targets.joined(separator: " → ")). In each empty editor, type VoiceX test A, wait 3 s, change A to B, wait 3 s. Do not send. Use temporary notes; for Mail use a new empty draft body with no recipients. For Obsidian, use Source mode.")
     for bundle in targets {
         let deadline = Date(timeIntervalSinceNow: 90)
         emit("waiting for foreground: \(bundle)")
@@ -41,7 +41,7 @@ func runChecks() throws -> Int32 {
         let pid = NSWorkspace.shared.frontmostApplication!.processIdentifier
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = ["post_edit::platform::macos_tests::live_macos_electron_editors", "--exact", "--ignored", "--nocapture", "--test-threads=1"]
+        process.arguments = ["post_edit::platform::macos_tests::live_macos_editors", "--exact", "--ignored", "--nocapture", "--test-threads=1"]
         var environment = ProcessInfo.processInfo.environment
         environment["VOICEX_POST_EDIT_EDITOR_PID"] = String(pid)
         process.environment = environment

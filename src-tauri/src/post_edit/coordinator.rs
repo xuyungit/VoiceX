@@ -331,7 +331,7 @@ fn wait_until(
             &worker.events,
             generation,
             deadline.saturating_duration_since(clock.now()),
-        ) & (FOCUS_CHANGED | DESTROYED)
+        ) & DESTROYED
             != 0
         {
             return false;
@@ -540,14 +540,15 @@ fn observe(
                 observation.text_changed();
                 dirty_due.get_or_insert(clock.now().max(last_read + Duration::from_millis(350)));
             }
-            if events & (FOCUS_CHANGED | DESTROYED) != 0 {
+            if events & DESTROYED != 0 {
                 let mut done = Completion::cached(observation, generation, EndReason::FocusLeft);
-                done.reason = if events & DESTROYED != 0 {
-                    Reason::ElementDestroyed
-                } else {
-                    Reason::FocusLeft
-                };
+                done.reason = Reason::ElementDestroyed;
                 return done;
+            }
+            if events & FOCUS_CHANGED != 0 {
+                // A leaf focus change can stay inside the same editor. The
+                // native reader verifies normalized focus before reading text.
+                dirty_due.get_or_insert(clock.now().max(last_read + Duration::from_millis(350)));
             }
             continue;
         }
@@ -960,6 +961,7 @@ mod tests {
     enum Step {
         Text(&'static str),
         TextThenNotify(&'static str),
+        TextThenFocus(&'static str),
         Composing,
         WindowChanged,
         Cancel,
@@ -994,7 +996,7 @@ mod tests {
                 .or(self.last)
                 .expect("initial field state");
             self.last = Some(match step {
-                Step::TextThenNotify(text) => Step::Text(text),
+                Step::TextThenNotify(text) | Step::TextThenFocus(text) => Step::Text(text),
                 other => other,
             });
             match step {
@@ -1004,6 +1006,13 @@ mod tests {
                         .as_ref()
                         .unwrap()
                         .notify(generation, TEXT_CHANGED);
+                    Ok(snapshot(text, self.clock.now()))
+                }
+                Step::TextThenFocus(text) => {
+                    self.events
+                        .as_ref()
+                        .unwrap()
+                        .notify(generation, FOCUS_CHANGED);
                     Ok(snapshot(text, self.clock.now()))
                 }
                 Step::Composing => Err(ReadError::CompositionActive),
@@ -1155,6 +1164,24 @@ mod tests {
         }
         diagnostics::set_enabled(false);
     }
+    #[test]
+    fn descendant_focus_changes_are_verified_instead_of_ending_the_same_editor() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        for first in [Step::Text("支座返力"), Step::TextThenFocus("支座返力")] {
+            let record = scripted_run(vec![
+                first,
+                Step::TextThenFocus("支座反力"),
+                Step::Text("支座反力"),
+                Step::Text("支座反力"),
+            ])
+            .unwrap();
+            assert_eq!(record.edited_text, "支座反力");
+            assert!(record.stable && record.complete);
+        }
+        diagnostics::set_enabled(false);
+    }
+
     #[test]
     fn stable_correction_survives_clear_with_or_without_a_text_change_notification() {
         let _guard = diagnostics::TEST_LOCK.lock().unwrap();
