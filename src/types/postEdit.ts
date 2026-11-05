@@ -20,7 +20,7 @@ export interface PostEditTestSnapshot {
   insertions: number | null
   deletions: number | null
   substitutions: number | null
-  strategy: 'event_with_checkpoints' | 'checkpoint_only' | null
+  strategy: 'event_with_checkpoints' | 'checkpoint_only' | 'event_with_polling' | 'bounded_polling' | null
   rangeEvidence: 'before_after_verified' | 'post_anchored' | null
   lastObservedMs: number | null
   hadIntermediateChanges: boolean

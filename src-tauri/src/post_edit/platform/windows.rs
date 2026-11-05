@@ -5,24 +5,30 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
-    IUIAutomationTextEditPattern, IUIAutomationTextPattern, TextPatternRangeEndpoint_End,
-    TextPatternRangeEndpoint_Start, UIA_EditControlTypeId, UIA_TextEditPatternId,
-    UIA_TextPatternId,
+    IUIAutomationTextEditPattern, IUIAutomationTextPattern, IUIAutomationTextRange,
+    TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start, TextUnit_Character,
+    UIA_EditControlTypeId, UIA_TextEditPatternId, UIA_TextPatternId,
 };
 
 use super::{OwnedSnapshot, ReadError};
 
-const MAX_UNITS: usize = 16_384;
+use super::window::{EdgeGuards, CONTEXT_UNITS, MAX_UNITS};
 
 pub(super) struct NativeReader {
     automation: Result<IUIAutomation, i32>,
     initialized: bool,
     target: Option<(u64, u64, IUIAutomationElement)>,
+    window: Option<IUIAutomationTextRange>,
+    clipped_edges: (bool, bool),
+    guards: EdgeGuards,
 }
 
 impl NativeReader {
     pub(super) fn clear(&mut self) {
         self.target = None;
+        self.window = None;
+        self.clipped_edges = (false, false);
+        self.guards = EdgeGuards::default();
     }
     pub(super) fn new() -> Self {
         let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
@@ -45,6 +51,9 @@ impl NativeReader {
             automation,
             initialized,
             target: None,
+            window: None,
+            clipped_edges: (false, false),
+            guards: EdgeGuards::default(),
         }
     }
 
@@ -52,8 +61,9 @@ impl NativeReader {
         &mut self,
         generation: u64,
         expected_pid: u32,
+        lookbehind: usize,
     ) -> Result<OwnedSnapshot, ReadError> {
-        self.target = None;
+        self.clear();
         let automation = self
             .automation
             .as_ref()
@@ -63,6 +73,57 @@ impl NativeReader {
             return Err(ReadError::TargetChanged);
         }
         check_control(&element)?;
+        if composition_state(&element) == super::CompositionState::Active {
+            return Err(ReadError::CompositionActive);
+        }
+        let pattern =
+            unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
+                .map_err(native)?;
+        let selections = unsafe { pattern.GetSelection() }.map_err(native)?;
+        if unsafe { selections.Length() }.map_err(native)? != 1 {
+            return Err(ReadError::Unsupported);
+        }
+        let selected = unsafe { selections.GetElement(0) }.map_err(native)?;
+        let window = unsafe { selected.Clone() }.map_err(native)?;
+        let lookbehind = i32::try_from(lookbehind).map_err(|_| ReadError::TooLarge)?;
+        unsafe {
+            window
+                .MoveEndpointByUnit(
+                    TextPatternRangeEndpoint_Start,
+                    TextUnit_Character,
+                    -lookbehind,
+                )
+                .map_err(native)?;
+            window
+                .MoveEndpointByUnit(
+                    TextPatternRangeEndpoint_End,
+                    TextUnit_Character,
+                    CONTEXT_UNITS as i32,
+                )
+                .map_err(native)?;
+        }
+        let document = unsafe { pattern.DocumentRange() }.map_err(native)?;
+        self.clipped_edges = (
+            unsafe {
+                window.CompareEndpoints(
+                    TextPatternRangeEndpoint_Start,
+                    &document,
+                    TextPatternRangeEndpoint_Start,
+                )
+            }
+            .map_err(native)?
+                > 0,
+            unsafe {
+                window.CompareEndpoints(
+                    TextPatternRangeEndpoint_End,
+                    &document,
+                    TextPatternRangeEndpoint_End,
+                )
+            }
+            .map_err(native)?
+                < 0,
+        );
+        self.window = Some(window);
         self.target = Some((generation, super::target_token(), element));
         self.read(generation)
     }
@@ -87,18 +148,76 @@ impl NativeReader {
             unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
                 .map_err(native)?;
         let document = unsafe { pattern.DocumentRange() }.map_err(native)?;
-        // GetText is bounded at the UIA provider; never request an unlimited document.
+        let window = self.window.as_ref().ok_or(ReadError::TargetChanged)?;
+        // Keep true document edges attached, including a degenerate empty
+        // field before injection. Clipped interior edges stay native anchors.
+        unsafe {
+            if !self.clipped_edges.0 {
+                window
+                    .MoveEndpointByRange(
+                        TextPatternRangeEndpoint_Start,
+                        &document,
+                        TextPatternRangeEndpoint_Start,
+                    )
+                    .map_err(native)?;
+            }
+            if !self.clipped_edges.1 {
+                window
+                    .MoveEndpointByRange(
+                        TextPatternRangeEndpoint_End,
+                        &document,
+                        TextPatternRangeEndpoint_End,
+                    )
+                    .map_err(native)?;
+            }
+        }
+        // Read the retained local range, never the whole document or an
+        // unbounded prefix from its beginning. UIA owns range endpoint updates.
         let text = bounded_text(
-            unsafe { document.GetText((MAX_UNITS + 1) as i32) }
+            unsafe { window.GetText((MAX_UNITS + 1) as i32) }
                 .map_err(native)?
                 .to_string(),
         )?;
+        if text.is_empty()
+            && unsafe {
+                document.CompareEndpoints(
+                    TextPatternRangeEndpoint_Start,
+                    &document,
+                    TextPatternRangeEndpoint_End,
+                )
+            }
+            .map_err(native)?
+                != 0
+        {
+            return Err(ReadError::WindowChanged);
+        }
         let selections = unsafe { pattern.GetSelection() }.map_err(native)?;
         if unsafe { selections.Length() }.map_err(native)? != 1 {
             return Err(ReadError::Unsupported);
         }
         let selected = unsafe { selections.GetElement(0) }.map_err(native)?;
-        let prefix_start = unsafe { document.Clone() }.map_err(native)?;
+        if unsafe {
+            selected.CompareEndpoints(
+                TextPatternRangeEndpoint_Start,
+                window,
+                TextPatternRangeEndpoint_Start,
+            )
+        }
+        .map_err(native)?
+            < 0
+            || unsafe {
+                selected.CompareEndpoints(
+                    TextPatternRangeEndpoint_End,
+                    window,
+                    TextPatternRangeEndpoint_End,
+                )
+            }
+            .map_err(native)?
+                > 0
+        {
+            return Err(ReadError::WindowChanged);
+        }
+        let prefix_start = unsafe { window.Clone() }.map_err(native)?;
         unsafe {
             prefix_start.MoveEndpointByRange(
                 TextPatternRangeEndpoint_End,
@@ -107,7 +226,7 @@ impl NativeReader {
             )
         }
         .map_err(native)?;
-        let prefix_end = unsafe { document.Clone() }.map_err(native)?;
+        let prefix_end = unsafe { window.Clone() }.map_err(native)?;
         unsafe {
             prefix_end.MoveEndpointByRange(
                 TextPatternRangeEndpoint_End,
@@ -132,6 +251,8 @@ impl NativeReader {
         {
             return Err(ReadError::TargetChanged);
         }
+        self.guards
+            .check(&text, self.clipped_edges.0, self.clipped_edges.1)?;
         same_focus(automation, element)?;
         check_control(element)?;
         let composition_after = composition_state(element);

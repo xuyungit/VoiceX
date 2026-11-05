@@ -188,7 +188,7 @@ pub fn prepare(attempt: u64, expected_pid: u32) -> Option<Pending> {
 }
 impl Pending {
     pub fn dispatched(self, receipt: InjectionReceipt, injected: String) {
-        self.dispatched_with_schedule(
+        let _ = self.dispatched_with_schedule(
             receipt,
             injected,
             [
@@ -198,15 +198,13 @@ impl Pending {
             ],
         );
     }
-    fn dispatched_with_schedule(
+    pub(super) fn dispatched_with_schedule(
         mut self,
         receipt: InjectionReceipt,
         injected: String,
         schedule: [Duration; 3],
-    ) {
-        let Some(before) = self.before.take() else {
-            return;
-        };
+    ) -> Option<std::thread::JoinHandle<Option<super::records::Record>>> {
+        let before = self.before.take()?;
         let c = Arc::clone(&self.coordinator);
         let (generation, attempt, stop) = (self.generation, self.attempt, Arc::clone(&self.stop));
         let capture_ticket = self.capture_ticket;
@@ -224,17 +222,22 @@ impl Pending {
                     schedule,
                     &SystemClock,
                 );
-                if let (Some(ticket), Some(record)) = (capture_ticket, record) {
-                    if let Err(error) = super::records::save(ticket, &record) {
+                if let (Some(ticket), Some(record)) = (capture_ticket, record.as_ref()) {
+                    if let Err(error) = super::records::save(ticket, record) {
                         log::error!("Could not save post-edit record: {error}");
                     }
                 }
                 c.finished(generation);
+                record
             }) {
-            Ok(_) => self.handed_off = true,
+            Ok(handle) => {
+                self.handed_off = true;
+                Some(handle)
+            }
             Err(error) => {
                 log::warn!("Post-edit session could not start: {error}");
                 diagnostics::publish(attempt, Status::ReadFailed, Reason::NativeError, None, None);
+                None
             }
         }
     }
@@ -356,7 +359,12 @@ fn establish_baseline(
     };
     let pre = match before.recv_timeout(READ_TIMEOUT) {
         Ok(Ok(snapshot)) => Some(snapshot),
-        Ok(Err(ReadError::NoValue | ReadError::CompositionActive)) => None,
+        Ok(Err(
+            ReadError::NoValue
+            | ReadError::CompositionActive
+            | ReadError::TooLarge
+            | ReadError::WindowChanged,
+        )) => None,
         Ok(Err(error)) => return Err(BaselineFailure::read(worker, generation, error)),
         Err(_) => {
             return Err(BaselineFailure {
@@ -389,13 +397,21 @@ fn establish_baseline(
         let read = if pre.is_some() {
             worker.read(generation, READ_TIMEOUT)
         } else {
-            worker.capture(generation, app.process_id, READ_TIMEOUT)
+            worker.capture_for_insertion(
+                generation,
+                app.process_id,
+                injected.encode_utf16().count(),
+                READ_TIMEOUT,
+            )
         };
-        let after = match read {
-            Ok(snapshot) => snapshot,
-            Err(ReadError::NoValue | ReadError::CompositionActive) if delay < 700 => continue,
-            Err(error) => return Err(BaselineFailure::read(worker, generation, error)),
-        };
+        let after =
+            match read {
+                Ok(snapshot) => snapshot,
+                Err(
+                    ReadError::NoValue | ReadError::CompositionActive | ReadError::WindowChanged,
+                ) if delay < 700 => continue,
+                Err(error) => return Err(BaselineFailure::read(worker, generation, error)),
+            };
         if !current(worker, generation, attempt) {
             return Err(BaselineFailure::new(generation, Reason::Interrupted));
         }
@@ -420,9 +436,9 @@ fn establish_baseline(
                 observation: Observation::new(generation, tracker, after.read_at),
                 at: after.read_at,
                 strategy: if after.event_driven {
-                    "event_with_checkpoints"
+                    "event_with_polling"
                 } else {
-                    "checkpoint_only"
+                    "bounded_polling"
                 },
                 evidence,
                 native_reads,
@@ -440,6 +456,16 @@ struct Completion {
     reason: Reason,
     code: Option<i32>,
     generation: u64,
+}
+
+/// Successful subscriptions do not prove that a provider delivers events.
+/// Every control receives independent rereads, with a faster initial window.
+fn poll_interval(elapsed: Duration) -> Duration {
+    if elapsed < Duration::from_secs(10) {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_secs(2)
+    }
 }
 impl Completion {
     fn cached(observation: &Observation, generation: u64, end: EndReason) -> Self {
@@ -476,6 +502,7 @@ fn observe(
     deadlines.dedup();
     let mut checkpoint = 0;
     let mut last_read = baseline.at;
+    let mut poll_due = last_read + poll_interval(Duration::ZERO);
     let mut dirty_due: Option<Instant> = None;
     let mut settle_due: Option<Instant> = None;
     loop {
@@ -500,6 +527,7 @@ fn observe(
         }
         let now = clock.now();
         let deadline = deadlines[checkpoint]
+            .min(poll_due)
             .min(dirty_due.unwrap_or(end))
             .min(settle_due.unwrap_or(end));
         if stop_reason.is_none() && now < deadline {
@@ -509,7 +537,7 @@ fn observe(
                 deadline.saturating_duration_since(now),
             );
             if events & TEXT_CHANGED != 0 {
-                observation.unresolved_input();
+                observation.text_changed();
                 dirty_due.get_or_insert(clock.now().max(last_read + Duration::from_millis(350)));
             }
             if events & (FOCUS_CHANGED | DESTROYED) != 0 {
@@ -542,7 +570,7 @@ fn observe(
         }
         let snapshot = match read {
             Ok(snapshot) => snapshot,
-            Err(ReadError::CompositionActive) => {
+            Err(error @ (ReadError::CompositionActive | ReadError::WindowChanged)) => {
                 observation.unresolved_input();
                 if stop_reason.is_some() || clock.now() >= end {
                     let mut done = Completion::cached(
@@ -550,10 +578,17 @@ fn observe(
                         generation,
                         stop_reason.unwrap_or(EndReason::Timeout),
                     );
-                    done.reason = Reason::CompositionActive;
+                    done.reason = if error == ReadError::WindowChanged {
+                        done.result.status = ObservationStatus::Ambiguous;
+                        Reason::RangeAmbiguous
+                    } else {
+                        Reason::CompositionActive
+                    };
                     return done;
                 }
                 dirty_due = Some(clock.now() + Duration::from_millis(350));
+                poll_due =
+                    clock.now() + poll_interval(clock.now().saturating_duration_since(baseline.at));
                 settle_due = None;
                 while checkpoint + 1 < deadlines.len() && deadlines[checkpoint] <= clock.now() {
                     checkpoint += 1;
@@ -577,6 +612,8 @@ fn observe(
             );
         }
         last_read = snapshot.read_at;
+        poll_due = clock.now().max(last_read)
+            + poll_interval(last_read.saturating_duration_since(baseline.at));
         let terminal = stop_reason.is_some() || last_read >= end || clock.now() >= end;
         let sample = observation.sample_read(generation, &snapshot);
         if let Err(error) = sample {
@@ -681,6 +718,10 @@ fn run(
     ) {
         Ok(baseline) => baseline,
         Err(failure) => {
+            log::info!(
+                "Post-edit baseline unavailable: injection_id={}, pid={}, status={:?}, reason={:?}, native_code={:?}",
+                receipt.injection_id, app.process_id, failure.status, failure.reason, failure.code
+            );
             if worker.is_current(failure.generation) {
                 diagnostics::publish(attempt, failure.status, failure.reason, failure.code, None);
             }
@@ -698,6 +739,11 @@ fn run(
         &mut baseline,
         schedule,
         clock,
+    );
+    log::info!(
+        "Post-edit observation ended: injection_id={}, pid={}, status={:?}, reason={:?}, native_code={:?}, reads={}, confirmed={}",
+        receipt.injection_id, app.process_id, done.result.status, done.reason, done.code,
+        baseline.native_reads, done.result.confirmed.is_some()
     );
     publish_result(
         worker,
@@ -722,7 +768,7 @@ fn run(
     )
 }
 
-fn record_for(
+pub(super) fn record_for(
     receipt: &InjectionReceipt,
     app: &crate::injector::ResolvedApp,
     finished: Instant,
@@ -733,9 +779,10 @@ fn record_for(
     evidence: &str,
 ) -> Option<super::records::Record> {
     use chrono::{Duration as WallDuration, SecondsFormat, Utc};
-    let (original, edited) = observation.text_pair();
+    let original = observation.original_text();
+    let confirmed = result.confirmed.as_ref()?;
+    let edited = confirmed.text.as_str();
     if original == edited
-        || !result.stable
         || matches!(
             result.reason,
             EndReason::SessionCancelled
@@ -747,14 +794,8 @@ fn record_for(
         return None;
     }
     let at = Utc::now() - WallDuration::from_std(finished.elapsed()).unwrap();
-    let last = at
-        + WallDuration::from_std(
-            result
-                .last_valid_at
-                .unwrap_or(finished)
-                .saturating_duration_since(finished),
-        )
-        .unwrap();
+    let last =
+        at + WallDuration::from_std(confirmed.read_at.saturating_duration_since(finished)).unwrap();
     Some(super::records::Record {
         id: receipt.injection_id.to_string(),
         record_id: receipt.record_id.to_string(),
@@ -776,8 +817,8 @@ fn record_for(
         deletions: result.edits.map(|e| e.deletions),
         substitutions: result.edits.map(|e| e.substitutions),
         had_intermediate_changes: result.had_intermediate_changes,
-        stable: result.stable,
-        composition: observation.composition(),
+        stable: true,
+        composition: confirmed.composition,
     })
 }
 
@@ -863,6 +904,7 @@ fn error_details(error: ReadError, has_baseline: bool) -> (Status, Reason, Optio
             None,
         ),
         ReadError::TooLarge => (partial, Reason::TooLarge, None),
+        ReadError::WindowChanged => (Status::Ambiguous, Reason::RangeAmbiguous, None),
         ReadError::CompositionActive => (partial, Reason::CompositionActive, None),
         ReadError::TimedOut { .. } | ReadError::WorkerBusy => (
             if has_baseline {
@@ -914,9 +956,12 @@ mod tests {
             flags
         }
     }
+    #[derive(Clone, Copy)]
     enum Step {
         Text(&'static str),
+        TextThenNotify(&'static str),
         Composing,
+        WindowChanged,
         Cancel,
         Reinject,
     }
@@ -924,6 +969,8 @@ mod tests {
         clock: VirtualClock,
         steps: VecDeque<Step>,
         stop: Stop,
+        events: Option<Arc<EventSignal>>,
+        last: Option<Step>,
     }
     fn snapshot(text: &str, at: Instant) -> OwnedSnapshot {
         OwnedSnapshot {
@@ -937,17 +984,30 @@ mod tests {
         }
     }
     impl Reader for ScriptedReader {
-        fn capture(&mut self, _: u64, _: u32) -> Result<OwnedSnapshot, ReadError> {
+        fn capture(&mut self, _: u64, _: u32, _: usize) -> Result<OwnedSnapshot, ReadError> {
             self.read(0)
         }
-        fn read(&mut self, _: u64) -> Result<OwnedSnapshot, ReadError> {
-            match self
+        fn read(&mut self, generation: u64) -> Result<OwnedSnapshot, ReadError> {
+            let step = self
                 .steps
                 .pop_front()
-                .expect("unexpected extra native read")
-            {
+                .or(self.last)
+                .expect("initial field state");
+            self.last = Some(match step {
+                Step::TextThenNotify(text) => Step::Text(text),
+                other => other,
+            });
+            match step {
                 Step::Text(text) => Ok(snapshot(text, self.clock.now())),
+                Step::TextThenNotify(text) => {
+                    self.events
+                        .as_ref()
+                        .unwrap()
+                        .notify(generation, TEXT_CHANGED);
+                    Ok(snapshot(text, self.clock.now()))
+                }
                 Step::Composing => Err(ReadError::CompositionActive),
+                Step::WindowChanged => Err(ReadError::WindowChanged),
                 Step::Cancel => {
                     *self.stop.lock().unwrap() = Some(EndReason::SessionCancelled);
                     cancel();
@@ -961,6 +1021,9 @@ mod tests {
             }
         }
         fn clear(&mut self) {}
+        fn set_events(&mut self, events: Arc<EventSignal>) {
+            self.events = Some(events);
+        }
     }
     fn receipt(at: Instant) -> InjectionReceipt {
         InjectionReceipt {
@@ -986,6 +1049,8 @@ mod tests {
             clock: clock.clone(),
             steps: steps.into(),
             stop: Arc::clone(&stop),
+            events: None,
+            last: None,
         };
         let worker = ObserverWorker::start_with(move || reader).unwrap();
         let (tx, rx) = mpsc::channel();
@@ -1007,11 +1072,157 @@ mod tests {
             &clock,
         )
     }
+
+    struct SilentReader {
+        clock: VirtualClock,
+        start: Instant,
+        advertises_events: bool,
+        clear_at: Option<Duration>,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Reader for SilentReader {
+        fn capture(&mut self, _: u64, _: u32, _: usize) -> Result<OwnedSnapshot, ReadError> {
+            self.read(0)
+        }
+        fn read(&mut self, _: u64) -> Result<OwnedSnapshot, ReadError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let elapsed = self.clock.now().duration_since(self.start);
+            let text = if self.clear_at.is_some_and(|at| elapsed >= at) {
+                ""
+            } else if elapsed >= Duration::from_secs(2) {
+                "支座反力"
+            } else {
+                "支座返力"
+            };
+            let mut sample = snapshot(text, self.clock.now());
+            sample.event_driven = self.advertises_events;
+            Ok(sample)
+        }
+        fn clear(&mut self) {}
+    }
+    #[test]
+    fn independent_polling_catches_silent_edits_and_send_with_a_bounded_read_count() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        for advertises_events in [false, true] {
+            for clear_at in [None, Some(Duration::from_secs(5))] {
+                let clock = VirtualClock(Arc::new(Mutex::new(Instant::now())));
+                let start = clock.now();
+                let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let reader = SilentReader {
+                    clock: clock.clone(),
+                    start,
+                    advertises_events,
+                    clear_at,
+                    reads: Arc::clone(&reads),
+                };
+                let worker = ObserverWorker::start_with(move || reader).unwrap();
+                let (tx, rx) = mpsc::channel();
+                tx.send(Ok(snapshot("", start))).unwrap();
+                let attempt = begin_attempt();
+                let record = run(
+                    &worker,
+                    0,
+                    attempt,
+                    rx,
+                    Arc::new(Mutex::new(None)),
+                    receipt(start),
+                    "支座返力".into(),
+                    [
+                        Duration::from_secs(10),
+                        Duration::from_secs(30),
+                        Duration::from_secs(60),
+                    ],
+                    &clock,
+                )
+                .unwrap();
+                assert_eq!(record.edited_text, "支座反力");
+                assert_eq!(record.complete, clear_at.is_none());
+                assert_eq!(
+                    record.end_reason,
+                    if clear_at.is_some() {
+                        "field_cleared"
+                    } else {
+                        "timeout"
+                    }
+                );
+                assert!(record.stable);
+                assert!(reads.load(Ordering::SeqCst) <= 45);
+                if clear_at.is_some() {
+                    assert!(clock.now().duration_since(start) < Duration::from_secs(7));
+                }
+            }
+        }
+        diagnostics::set_enabled(false);
+    }
+    #[test]
+    fn stable_correction_survives_clear_with_or_without_a_text_change_notification() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        for confirmation in [Step::Text("支座反力"), Step::TextThenNotify("支座反力")] {
+            let record = scripted_run(vec![
+                Step::Text("支座返力"),
+                Step::Text("支座反力"),
+                confirmation,
+                Step::Text(""),
+            ])
+            .expect("sending must retain the previously confirmed correction");
+            assert_eq!(record.original_text, "支座返力");
+            assert_eq!(record.edited_text, "支座反力");
+            assert_eq!(record.substitutions, Some(1));
+            assert_eq!(record.end_reason, "field_cleared");
+            assert!(record.stable && !record.complete);
+        }
+        diagnostics::set_enabled(false);
+    }
+    #[test]
+    fn clear_cannot_resurrect_a_confirmation_superseded_by_newer_input() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        for newer in [
+            Step::Text("支座反"),
+            Step::Text("支座返fan"),
+            Step::Composing,
+            Step::WindowChanged,
+        ] {
+            assert!(scripted_run(vec![
+                Step::Text("支座返力"),
+                Step::Text("支座反力"),
+                Step::TextThenNotify("支座反力"),
+                newer,
+                Step::Text(""),
+            ])
+            .is_none());
+        }
+        diagnostics::set_enabled(false);
+    }
+    #[test]
+    fn persistent_ambiguity_ends_without_saving_an_old_stable_correction() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        for unresolved in [Step::Text("支座反力继续写"), Step::WindowChanged] {
+            let mut steps = vec![
+                Step::Text("支座返力"),
+                Step::Text("支座反力"),
+                Step::TextThenNotify("支座反力"),
+            ];
+            steps.extend((0..8).map(|_| unresolved));
+            assert!(scripted_run(steps).is_none());
+            let status = diagnostics::snapshot();
+            assert_eq!(status.status, Status::Ambiguous);
+            assert_eq!(status.reason, Reason::RangeAmbiguous);
+        }
+        diagnostics::set_enabled(false);
+    }
     #[test]
     fn full_session_recovers_after_backspace_ambiguity_and_composition() {
         let _guard = diagnostics::TEST_LOCK.lock().unwrap();
         diagnostics::set_enabled(true);
-        for middle in [Step::Composing, Step::Text("支座返fan")] {
+        for middle in [
+            Step::Composing,
+            Step::WindowChanged,
+            Step::Text("支座返fan"),
+        ] {
             let record = scripted_run(vec![
                 Step::Text("支座返力"),
                 Step::Text("支座返"),
@@ -1128,7 +1339,7 @@ mod tests {
         release: mpsc::Receiver<()>,
     }
     impl super::super::platform::Reader for Blocked {
-        fn capture(&mut self, _: u64, _: u32) -> Result<OwnedSnapshot, ReadError> {
+        fn capture(&mut self, _: u64, _: u32, _: usize) -> Result<OwnedSnapshot, ReadError> {
             self.started.send(()).unwrap();
             self.release.recv().unwrap();
             Err(ReadError::NoValue)

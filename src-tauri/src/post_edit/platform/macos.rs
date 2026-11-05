@@ -12,14 +12,14 @@ use core_foundation::runloop::{
     kCFRunLoopDefaultMode, CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopRemoveSource,
     CFRunLoopRunInMode, CFRunLoopSourceRef,
 };
-use core_foundation::string::{CFString, CFStringRef};
+use core_foundation::string::{CFString, CFStringGetCharacters, CFStringRef};
 use objc2::rc::autoreleasepool;
 
+use super::window::ReadWindow;
 use super::{EventSignal, OwnedSnapshot, ReadError, DESTROYED, FOCUS_CHANGED, TEXT_CHANGED};
 
 type ElementRef = crate::selection::macos::ax::AXUIElementRef;
 type ObserverRef = *const c_void;
-const MAX_UNITS: isize = 16_384;
 const AX_SUCCESS: i32 = 0;
 const AX_NO_VALUE: i32 = -25212;
 const AX_DISABLED: i32 = -25211;
@@ -139,6 +139,7 @@ impl Drop for Element {
 
 pub(super) struct NativeReader {
     target: Option<(u64, u64, u32, Element)>,
+    window: Option<ReadWindow>,
     observer: Option<Subscription>,
     events: Arc<EventSignal>,
 }
@@ -267,10 +268,12 @@ impl NativeReader {
     pub(super) fn clear(&mut self) {
         self.observer = None;
         self.target = None;
+        self.window = None;
     }
     pub(super) fn new() -> Self {
         Self {
             target: None,
+            window: None,
             observer: None,
             events: Arc::new(EventSignal::default()),
         }
@@ -291,6 +294,7 @@ impl NativeReader {
         &mut self,
         generation: u64,
         expected_pid: u32,
+        lookbehind: usize,
     ) -> Result<OwnedSnapshot, ReadError> {
         autoreleasepool(|_| {
             self.clear();
@@ -312,15 +316,19 @@ impl NativeReader {
                 Err(error) => return Err(error),
             };
             self.target = Some((generation, super::target_token(), expected_pid, focused));
-            self.read_inner(generation)
+            self.read_inner(generation, lookbehind)
         })
     }
 
     pub(super) fn read(&mut self, generation: u64) -> Result<OwnedSnapshot, ReadError> {
-        autoreleasepool(|_| self.read_inner(generation))
+        autoreleasepool(|_| self.read_inner(generation, super::window::CONTEXT_UNITS))
     }
 
-    fn read_inner(&self, generation: u64) -> Result<OwnedSnapshot, ReadError> {
+    fn read_inner(
+        &mut self,
+        generation: u64,
+        lookbehind: usize,
+    ) -> Result<OwnedSnapshot, ReadError> {
         let (target_generation, token, pid, element) =
             self.target.as_ref().ok_or(ReadError::TargetChanged)?;
         if *target_generation != generation {
@@ -340,8 +348,8 @@ impl NativeReader {
             unsafe { CFNumber::wrap_under_get_rule(count_value.as_CFTypeRef() as CFNumberRef) }
                 .to_i64()
                 .ok_or(ReadError::Unsupported)?;
-        if count < 0 || count > MAX_UNITS as i64 {
-            return Err(ReadError::TooLarge);
+        if count < 0 || count > isize::MAX as i64 {
+            return Err(ReadError::Unsupported);
         }
         let selection = attribute(element, "AXSelectedTextRange")?;
         if unsafe { CFGetTypeID(selection.as_CFTypeRef()) } != unsafe { AXValueGetTypeID() } {
@@ -369,9 +377,22 @@ impl NativeReader {
         {
             return Err(ReadError::Unsupported);
         }
+        let selection = range.location as usize..(range.location + range.length) as usize;
+        if self.window.is_none() {
+            self.window = Some(ReadWindow::new(
+                count as usize,
+                selection.clone(),
+                lookbehind,
+            )?);
+        }
+        let window = self.window.as_mut().unwrap();
+        let mut bounds = window.range(count as usize)?;
+        if selection.start < bounds.start || selection.end > bounds.end {
+            return Err(ReadError::WindowChanged);
+        }
         let requested = CFRange {
-            location: 0,
-            length: count as isize,
+            location: bounds.start as isize,
+            length: bounds.len() as isize,
         };
         let parameter =
             unsafe { AXValueCreate(AX_VALUE_CF_RANGE, &requested as *const _ as *const c_void) };
@@ -404,11 +425,35 @@ impl NativeReader {
         if unsafe { CFGetTypeID(value.as_CFTypeRef()) } != CFString::type_id() {
             return Err(ReadError::Unsupported);
         }
-        let text = unsafe { CFString::wrap_under_get_rule(value.as_CFTypeRef() as CFStringRef) }
-            .to_string();
-        if text.encode_utf16().count() != count as usize {
+        let native_text =
+            unsafe { CFString::wrap_under_get_rule(value.as_CFTypeRef() as CFStringRef) };
+        if native_text.char_len() != bounds.len() as isize {
             return Err(ReadError::Unsupported);
         }
+        let mut units = vec![0u16; bounds.len()];
+        unsafe {
+            CFStringGetCharacters(
+                native_text.as_concrete_TypeRef(),
+                CFRange {
+                    location: 0,
+                    length: units.len() as isize,
+                },
+                units.as_mut_ptr(),
+            );
+        }
+        let text = window.decode(&units, &mut bounds)?;
+        if selection.start < bounds.start || selection.end > bounds.end {
+            return Err(ReadError::WindowChanged);
+        }
+        let after_count = attribute(element, "AXNumberOfCharacters")?;
+        if unsafe { CFGetTypeID(after_count.as_CFTypeRef()) } != CFNumber::type_id()
+            || unsafe { CFNumber::wrap_under_get_rule(after_count.as_CFTypeRef() as CFNumberRef) }
+                .to_i64()
+                != Some(count)
+        {
+            return Err(ReadError::WindowChanged);
+        }
+        window.check(&text)?;
         same_focus(*pid, element)?;
         check_control(element)?;
         let composition_after = composition_state(element)?;
@@ -424,7 +469,7 @@ impl NativeReader {
             target: *token,
             process_id: process_id as u32,
             text,
-            selection_utf16: range.location as usize..(range.location + range.length) as usize,
+            selection_utf16: selection.start - bounds.start..selection.end - bounds.start,
             read_at: Instant::now(),
             event_driven: self.observer.as_ref().is_some_and(|s| s.text_supported),
             composition: if composition_before == composition_after {
@@ -493,13 +538,19 @@ fn string_attribute(element: &Element, name: &str) -> Result<String, ReadError> 
 }
 
 fn focused(pid: u32) -> Result<Element, ReadError> {
-    same_frontmost(pid)?;
+    let frontmost = frontmost_app(pid)?;
     let application = unsafe { AXUIElementCreateApplication(pid as i32) };
     if application.is_null() {
         return Err(ReadError::Unsupported);
     }
     let application = Element(application);
     status(unsafe { AXUIElementSetMessagingTimeout(application.0, 0.1) })?;
+    if has_electron_framework(&frontmost) {
+        // Electron's supported lightweight activation path: querying the app's
+        // role requests native AX APIs. Focus alone can stay an empty proxy.
+        // This does not toggle the full screen-reader mode or scan other fields.
+        string_attribute(&application, "AXRole")?;
+    }
     let value = attribute(&application, "AXFocusedUIElement")?;
     if unsafe { CFGetTypeID(value.as_CFTypeRef()) } != unsafe { AXUIElementGetTypeID() } {
         return Err(ReadError::Unsupported);
@@ -512,13 +563,19 @@ fn focused(pid: u32) -> Result<Element, ReadError> {
 }
 
 fn same_frontmost(pid: u32) -> Result<(), ReadError> {
+    frontmost_app(pid).map(|_| ())
+}
+
+fn frontmost_app(
+    pid: u32,
+) -> Result<objc2::rc::Retained<objc2_app_kit::NSRunningApplication>, ReadError> {
     let current = objc2_app_kit::NSWorkspace::sharedWorkspace()
         .frontmostApplication()
         .ok_or(ReadError::TargetChanged)?;
     if current.processIdentifier() as u32 != pid {
         return Err(ReadError::TargetChanged);
     }
-    Ok(())
+    Ok(current)
 }
 
 fn same_focus(pid: u32, element: &Element) -> Result<(), ReadError> {
@@ -563,24 +620,29 @@ fn check_control(element: &Element) -> Result<(), ReadError> {
 
 /// Chromium's actual web nodes return a nil subrole for ordinary editors and
 /// AXSecureTextField for protected fields. Its incomplete focus proxy does not
-/// carry this contract. Require an explicitly adapted provider, a live node ID,
+/// carry this contract. Require a verified Chromium provider, a live node ID,
 /// and a self-identifying editable ancestor before interpreting nil as absent.
 /// No accessibility flags, focus, selection or clipboard are changed here.
-fn uses_chromium_web_contract(bundle_id: Option<&str>) -> bool {
-    matches!(bundle_id, Some("com.google.Chrome" | "com.openai.codex"))
+fn uses_chromium_web_contract(bundle_id: Option<&str>, electron_framework: bool) -> bool {
+    electron_framework || matches!(bundle_id, Some("com.google.Chrome" | "com.openai.codex"))
+}
+
+fn has_electron_framework(app: &objc2_app_kit::NSRunningApplication) -> bool {
+    app.bundleURL()
+        .and_then(|url| url.path())
+        .is_some_and(|path| {
+            std::path::Path::new(&path.to_string())
+                .join("Contents/Frameworks/Electron Framework.framework")
+                .is_dir()
+        })
 }
 
 fn verified_chromium_web_node(element: &Element) -> Result<bool, ReadError> {
     let mut pid = 0;
     status(unsafe { AXUIElementGetPid(element.0, &mut pid) })?;
-    let app = objc2_app_kit::NSWorkspace::sharedWorkspace()
-        .frontmostApplication()
-        .ok_or(ReadError::TargetChanged)?;
-    if app.processIdentifier() != pid {
-        return Err(ReadError::TargetChanged);
-    }
+    let app = frontmost_app(pid as u32)?;
     let bundle_id = app.bundleIdentifier().map(|id| id.to_string());
-    if !uses_chromium_web_contract(bundle_id.as_deref()) {
+    if !uses_chromium_web_contract(bundle_id.as_deref(), has_electron_framework(&app)) {
         return Ok(false);
     }
     let node = match attribute(element, "ChromeAXNodeId") {
@@ -612,16 +674,25 @@ mod tests {
     use super::uses_chromium_web_contract;
 
     #[test]
-    fn codex_uses_the_explicit_web_node_contract_without_allowing_all_embedded_browsers() {
-        assert!(uses_chromium_web_contract(Some("com.google.Chrome")));
-        assert!(uses_chromium_web_contract(Some("com.openai.codex")));
+    fn chromium_contract_requires_a_known_browser_or_an_installed_electron_framework() {
+        assert!(uses_chromium_web_contract(Some("com.google.Chrome"), false));
+        assert!(uses_chromium_web_contract(Some("com.openai.codex"), false));
         for id in [
             None,
             Some("com.openai.chat"),
             Some("com.microsoft.VSCode"),
             Some("unknown.electron.app"),
         ] {
-            assert!(!uses_chromium_web_contract(id));
+            assert!(!uses_chromium_web_contract(id, false));
+        }
+        for id in [
+            "com.anysphere.sand",
+            "com.tencent.workbuddy.mac",
+            "com.deepseek.dsh",
+            "unknown.electron.app",
+        ] {
+            assert!(!uses_chromium_web_contract(Some(id), false));
+            assert!(uses_chromium_web_contract(Some(id), true));
         }
     }
 }

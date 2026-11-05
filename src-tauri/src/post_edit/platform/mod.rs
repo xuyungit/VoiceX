@@ -16,6 +16,7 @@ fn target_token() -> u64 {
 mod macos;
 #[cfg(all(test, target_os = "macos"))]
 mod macos_tests;
+mod window;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "macos")]
@@ -32,6 +33,7 @@ pub enum ReadError {
     TargetChanged,
     NoValue,
     TooLarge,
+    WindowChanged,
     Native(i32),
     WorkerBusy,
     TimedOut { invalidated_generation: u64 },
@@ -99,7 +101,12 @@ impl EventSignal {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 enum Request {
-    Capture(u64, u32, mpsc::SyncSender<Result<OwnedSnapshot, ReadError>>),
+    Capture(
+        u64,
+        u32,
+        usize,
+        mpsc::SyncSender<Result<OwnedSnapshot, ReadError>>,
+    ),
     Read(u64, mpsc::SyncSender<Result<OwnedSnapshot, ReadError>>),
     Reset(u64),
 }
@@ -116,7 +123,12 @@ pub struct ObserverWorker {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(super) trait Reader {
-    fn capture(&mut self, generation: u64, expected_pid: u32) -> Result<OwnedSnapshot, ReadError>;
+    fn capture(
+        &mut self,
+        generation: u64,
+        expected_pid: u32,
+        lookbehind: usize,
+    ) -> Result<OwnedSnapshot, ReadError>;
     fn read(&mut self, generation: u64) -> Result<OwnedSnapshot, ReadError>;
     fn clear(&mut self);
     fn set_events(&mut self, _events: Arc<EventSignal>) {}
@@ -128,8 +140,13 @@ pub(super) trait Reader {
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 impl Reader for NativeReader {
-    fn capture(&mut self, generation: u64, expected_pid: u32) -> Result<OwnedSnapshot, ReadError> {
-        NativeReader::capture(self, generation, expected_pid)
+    fn capture(
+        &mut self,
+        generation: u64,
+        expected_pid: u32,
+        lookbehind: usize,
+    ) -> Result<OwnedSnapshot, ReadError> {
+        NativeReader::capture(self, generation, expected_pid, lookbehind)
     }
     fn read(&mut self, generation: u64) -> Result<OwnedSnapshot, ReadError> {
         NativeReader::read(self, generation)
@@ -193,7 +210,9 @@ impl ObserverWorker {
                         }
                     };
                     let (id, reply, expected_pid) = match request {
-                        Request::Capture(id, pid, reply) => (id, reply, Some(pid)),
+                        Request::Capture(id, pid, context, reply) => {
+                            (id, reply, Some((pid, context)))
+                        }
                         Request::Read(id, reply) => (id, reply, None),
                         Request::Reset(generation) => {
                             if current.load(Ordering::SeqCst) == generation {
@@ -203,8 +222,8 @@ impl ObserverWorker {
                         }
                     };
                     if current.load(Ordering::SeqCst) == id {
-                        let result = if let Some(pid) = expected_pid {
-                            reader.capture(id, pid)
+                        let result = if let Some((pid, context)) = expected_pid {
+                            reader.capture(id, pid, context)
                         } else {
                             reader.read(id)
                         };
@@ -267,7 +286,27 @@ impl ObserverWorker {
         expected_pid: u32,
         timeout: Duration,
     ) -> Result<OwnedSnapshot, ReadError> {
-        self.request(generation, timeout, Some(expected_pid))
+        self.request(
+            generation,
+            timeout,
+            Some((expected_pid, window::CONTEXT_UNITS)),
+        )
+    }
+
+    /// A post-only baseline must include the entire expected insertion before
+    /// the caret, even when the document is much larger than the read budget.
+    pub fn capture_for_insertion(
+        &self,
+        generation: u64,
+        pid: u32,
+        units: usize,
+        timeout: Duration,
+    ) -> Result<OwnedSnapshot, ReadError> {
+        self.request(
+            generation,
+            timeout,
+            Some((pid, units.saturating_add(window::CONTEXT_UNITS))),
+        )
     }
 
     pub fn read(&self, generation: u64, timeout: Duration) -> Result<OwnedSnapshot, ReadError> {
@@ -278,7 +317,7 @@ impl ObserverWorker {
         &self,
         generation: u64,
         timeout: Duration,
-        expected_pid: Option<u32>,
+        expected_pid: Option<(u32, usize)>,
     ) -> Result<OwnedSnapshot, ReadError> {
         if self.generation.load(Ordering::SeqCst) != generation {
             return Err(ReadError::StaleGeneration);
@@ -291,8 +330,8 @@ impl ObserverWorker {
             return Err(ReadError::WorkerBusy);
         }
         let (reply, receiver) = mpsc::sync_channel(1);
-        let request = if let Some(pid) = expected_pid {
-            Request::Capture(generation, pid, reply)
+        let request = if let Some((pid, context)) = expected_pid {
+            Request::Capture(generation, pid, context, reply)
         } else {
             Request::Read(generation, reply)
         };
@@ -353,7 +392,12 @@ mod tests {
         cleared: mpsc::Sender<()>,
     }
     impl Reader for BlockingReader {
-        fn capture(&mut self, generation: u64, _: u32) -> Result<OwnedSnapshot, ReadError> {
+        fn capture(
+            &mut self,
+            generation: u64,
+            _: u32,
+            _: usize,
+        ) -> Result<OwnedSnapshot, ReadError> {
             self.started.send(()).unwrap();
             self.release.recv().unwrap();
             Ok(OwnedSnapshot {
@@ -502,7 +546,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(20));
             };
             assert_eq!(status.status, Status::Observing);
-            assert_eq!(status.strategy, Some("event_with_checkpoints"));
+            assert_eq!(status.strategy, Some("event_with_polling"));
             diagnostics::set_enabled(false);
             println!("Chrome actual injection, baseline and edit notification: passed");
         }

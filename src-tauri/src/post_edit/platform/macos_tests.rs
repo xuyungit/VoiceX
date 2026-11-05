@@ -6,6 +6,7 @@ use crate::injector::{
 use crate::post_edit::{
     coordinator,
     diagnostics::{self, Reason, Status},
+    records::{self, Record},
 };
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -13,6 +14,8 @@ struct Fixture {
     child: Child,
     input: ChildStdin,
     output: mpsc::Receiver<String>,
+    pending: Option<(String, std::thread::JoinHandle<Option<Record>>)>,
+    db: rusqlite::Connection,
 }
 impl Fixture {
     fn start() -> Self {
@@ -33,10 +36,14 @@ impl Fixture {
             }
         });
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "ready");
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        records::create_schema(&db).unwrap();
         Self {
             child,
             input,
             output: rx,
+            pending: None,
+            db,
         }
     }
     fn send(&mut self, command: &str) {
@@ -61,7 +68,27 @@ impl Fixture {
             base64::engine::general_purpose::STANDARD.encode(text)
         ));
     }
+    fn edit_at(&mut self, text: &str, caret: usize) {
+        use base64::Engine;
+        self.send(&format!(
+            "edit\t{}\t{caret}",
+            base64::engine::general_purpose::STANDARD.encode(text)
+        ));
+    }
     fn inject(&mut self, text: &str, mode: TextInjectionMode) {
+        assert!(
+            self.pending.is_none(),
+            "finish the previous observation first"
+        );
+        // Ordinary injection resolves the foreground app before prepare().
+        // Include that native initialization and verify the fixture owns focus.
+        assert_eq!(
+            objc2_app_kit::NSWorkspace::sharedWorkspace()
+                .frontmostApplication()
+                .unwrap()
+                .processIdentifier() as u32,
+            self.child.id()
+        );
         let attempt = coordinator::begin_attempt();
         let (tx, rx) = mpsc::sync_channel(1);
         let receipt = injector::inject_serialized_with_receipt(
@@ -86,7 +113,21 @@ impl Fixture {
             },
         );
         assert_eq!(receipt.outcome, injector::DispatchOutcome::CommandsPosted);
-        rx.recv().unwrap().dispatched(receipt, text.into());
+        let id = receipt.injection_id.to_string();
+        let handle = rx
+            .recv()
+            .unwrap()
+            .dispatched_with_schedule(
+                receipt,
+                text.into(),
+                [
+                    Duration::from_secs(3),
+                    Duration::from_secs(6),
+                    Duration::from_secs(9),
+                ],
+            )
+            .unwrap();
+        self.pending = Some((id, handle));
         let deadline = Instant::now() + Duration::from_secs(4);
         loop {
             let status = diagnostics::snapshot();
@@ -102,6 +143,30 @@ impl Fixture {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+    fn saved(&mut self) -> Option<Record> {
+        use rusqlite::OptionalExtension;
+        let (id, handle) = self.pending.take().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while !handle.is_finished() {
+            assert!(Instant::now() < deadline, "observation did not finish");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if let Some(record) = handle.join().unwrap() {
+            // Exercise production insertion and deserialize the actual row,
+            // without opening or modifying the user's history database.
+            assert!(records::insert(&self.db, &record).unwrap());
+        }
+        let payload: Option<String> = self
+            .db
+            .query_row(
+                "SELECT payload FROM post_edit_record WHERE id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        payload.map(|p| serde_json::from_str(&p).unwrap())
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -111,7 +176,13 @@ impl Drop for Fixture {
     }
 }
 fn wait(test: impl Fn(&diagnostics::Snapshot) -> bool) -> diagnostics::Snapshot {
-    let end = Instant::now() + Duration::from_secs(4);
+    wait_for(Duration::from_secs(4), test)
+}
+fn wait_for(
+    timeout: Duration,
+    test: impl Fn(&diagnostics::Snapshot) -> bool,
+) -> diagnostics::Snapshot {
+    let end = Instant::now() + timeout;
     loop {
         let s = diagnostics::snapshot();
         if test(&s) {
@@ -121,16 +192,42 @@ fn wait(test: impl Fn(&diagnostics::Snapshot) -> bool) -> diagnostics::Snapshot 
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+fn stable_correction() -> diagnostics::Snapshot {
+    let first = wait(|s| s.substitutions == Some(1));
+    wait(|s| {
+        s.substitutions == Some(1)
+            && s.last_observed_ms.unwrap_or(0) >= first.last_observed_ms.unwrap() + 800
+    })
+}
+fn assert_correction(record: Record, reason: &str, complete: bool) {
+    assert_eq!(record.original_text, "支座返力");
+    assert_eq!(record.edited_text, "支座反力");
+    assert_eq!(record.substitutions, Some(1));
+    assert_eq!(record.end_reason, reason);
+    assert!(record.stable);
+    assert_eq!(record.complete, complete);
+}
 #[test]
 #[ignore = "opens controlled synthetic AppKit fields and requires Accessibility"]
 fn live_macos_session_scenarios() {
+    let _guard = diagnostics::TEST_LOCK.lock().unwrap();
     let mut f = Fixture::start();
     diagnostics::set_enabled(true);
     f.set("plain", "", 0);
+    // The newly launched AppKit fixture lazily initializes its AX endpoint.
+    // Check readiness explicitly before testing the bounded observation reads.
+    let startup = ObserverWorker::start().unwrap();
+    let startup_at = Instant::now();
+    let empty = startup
+        .capture(0, f.child.id(), Duration::from_millis(800))
+        .unwrap();
+    assert!(empty.text.is_empty());
+    println!("synthetic AppKit AX ready after {:?}", startup_at.elapsed());
+    drop(startup);
     f.inject("支座返力", TextInjectionMode::Typing);
     f.edit("支座反力");
-    let s = wait(|s| s.substitutions == Some(1));
-    assert_eq!(s.strategy, Some("event_with_checkpoints"));
+    let s = stable_correction();
+    assert_eq!(s.strategy, Some("event_with_polling"));
     assert!(
         s.last_observed_ms.unwrap() < 3_000,
         "must observe before the 10s checkpoint"
@@ -139,12 +236,13 @@ fn live_macos_session_scenarios() {
     let s = wait(|s| s.reason == Reason::NextRecording);
     assert!(matches!(s.status, Status::ObservedEdited | Status::Partial));
     assert_eq!(s.substitutions, Some(1));
+    assert_correction(f.saved().unwrap(), "next_recording", true);
     println!("empty native field: correction event and next-recording final read passed");
 
     f.set("plain", "原文：", 3);
     f.inject("支座返力", TextInjectionMode::Pasteboard);
     f.edit("原文：支座反力");
-    wait(|s| s.substitutions == Some(1));
+    stable_correction();
     f.send("secure");
     let s = wait(|s| {
         matches!(
@@ -154,6 +252,12 @@ fn live_macos_session_scenarios() {
     });
     assert_eq!(s.status, Status::Partial);
     assert_eq!(s.substitutions, Some(1));
+    let record = f.saved().unwrap();
+    assert_correction(
+        record,
+        serde_json::to_value(s.reason).unwrap().as_str().unwrap(),
+        false,
+    );
     let worker = ObserverWorker::start().unwrap();
     assert!(matches!(
         worker.capture(0, f.child.id(), Duration::from_millis(300)),
@@ -163,26 +267,41 @@ fn live_macos_session_scenarios() {
 
     f.set("search", "前后", 1);
     f.inject("支座返力", TextInjectionMode::Typing);
+    let before_reads = super::macos::BODY_READS.load(Ordering::SeqCst);
     f.edit("前支座反力另外补一句后");
-    let s = wait(|s| s.status == Status::Ambiguous);
+    wait(|_| super::macos::BODY_READS.load(Ordering::SeqCst) >= before_reads + 2);
+    assert_eq!(diagnostics::snapshot().status, Status::Observing);
+    f.edit("前支座反力后");
+    stable_correction();
+    coordinator::next_recording();
+    wait(|s| s.reason == Reason::NextRecording);
+    assert_correction(f.saved().unwrap(), "next_recording", true);
+    println!("temporary ambiguity: recovered and saved the corrected slice");
+
+    f.set("search", "前后", 1);
+    f.inject("支座返力", TextInjectionMode::Typing);
+    f.edit("前支座反力另外补一句后");
+    let s = wait_for(Duration::from_secs(12), |s| s.status == Status::Ambiguous);
     assert_eq!(s.reason, Reason::RangeAmbiguous);
     assert_ne!(s.insertions, Some(5));
-    println!("mixed correction and continuation: rejected as ambiguous");
+    assert!(f.saved().is_none());
+    println!("persistent ambiguity: ended without saving a comparison");
 
     f.set("plain", "", 0);
     f.inject("支座返力", TextInjectionMode::Typing);
     f.edit("支座反力");
-    wait(|s| s.substitutions == Some(1));
+    stable_correction();
     f.edit("");
     let s = wait(|s| s.reason == Reason::FieldCleared);
     assert_eq!(s.status, Status::Partial);
     assert_eq!(s.substitutions, Some(1));
+    assert_correction(f.saved().unwrap(), "field_cleared", false);
     println!("clear after correction: last evidence retained as partial");
 
     f.set("plain", "", 0);
     f.inject("支座返力", TextInjectionMode::Typing);
     f.edit("支座反力");
-    wait(|s| s.substitutions == Some(1));
+    stable_correction();
     injector::inject_serialized_with_guard(
         TextInjectionMode::Typing,
         "重放文字",
@@ -194,11 +313,184 @@ fn live_macos_session_scenarios() {
     let s = wait(|s| s.reason == Reason::NextInjection);
     assert_eq!(s.status, Status::Partial);
     assert_eq!(s.substitutions, Some(1));
+    assert_correction(f.saved().unwrap(), "next_injection", false);
     std::thread::sleep(Duration::from_millis(400));
     assert_eq!(diagnostics::snapshot().reason, Reason::NextInjection);
+    println!("legacy replay boundary and disable: old observation cannot publish late results");
+
+    let prefix = "前".repeat(30_000);
+    let suffix = "后".repeat(30_000);
+    f.set("plain", &format!("{prefix}{suffix}"), 30_000);
+    let probe = ObserverWorker::start().unwrap();
+    let local = probe
+        .capture(0, f.child.id(), Duration::from_millis(300))
+        .unwrap();
+    assert_eq!(local.text.encode_utf16().count(), 4096);
+    assert_eq!(local.selection_utf16, 2048..2048);
+    drop(probe);
+    f.inject("支座返力", TextInjectionMode::Typing);
+    f.edit_at(&format!("{prefix}支座反力{suffix}"), 30_004);
+    stable_correction();
+    coordinator::next_recording();
+    wait(|s| s.reason == Reason::NextRecording);
+    assert_correction(f.saved().unwrap(), "next_recording", true);
+    println!(
+        "60K native document: bounded local read, actual injection and saved correction passed"
+    );
     diagnostics::set_enabled(false);
     assert_eq!(diagnostics::snapshot().status, Status::Disabled);
-    println!("legacy replay boundary and disable: old observation cannot publish late results");
+}
+
+#[test]
+#[ignore = "reads user-prepared synthetic drafts in named Electron apps; requires foreground interaction"]
+fn live_macos_electron_editors() {
+    use crate::post_edit::{
+        observation::{EndReason, Observation},
+        range::{RangeTracker, Snapshot},
+    };
+    const ORIGINAL: &str = "VoiceX test A";
+    const EDITED: &str = "VoiceX test B";
+    let raw = std::env::var("VOICEX_POST_EDIT_EDITOR_PID")
+        .expect("editor PID from the foreground launcher");
+    let db = rusqlite::Connection::open_in_memory().unwrap();
+    records::create_schema(&db).unwrap();
+    let pid: u32 = raw.parse().unwrap();
+    let target =
+        objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid as i32)
+            .expect("running target");
+    let bundle = target.bundleIdentifier().unwrap().to_string();
+    assert!(matches!(
+        bundle.as_str(),
+        "com.anysphere.sand" | "com.tencent.workbuddy.mac" | "com.deepseek.dsh" | "md.obsidian"
+    ));
+    println!("waiting for synthetic original in {bundle}");
+    let worker = ObserverWorker::start().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut attempts = 0;
+    let mut last_state = String::from("target has not been foreground");
+    let baseline = loop {
+        assert!(
+            Instant::now() < deadline,
+            "synthetic original not ready in {bundle}: {attempts} captures; {last_state}"
+        );
+        if objc2_app_kit::NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .is_some_and(|app| app.processIdentifier() as u32 == pid)
+        {
+            attempts += 1;
+            match worker.capture(0, pid, Duration::from_millis(300)) {
+                Ok(snapshot) if snapshot.text.trim_end_matches('\n') == ORIGINAL => break snapshot,
+                Ok(snapshot) => {
+                    last_state = format!(
+                        "read {} UTF-16 units; original_marker={}, edited_marker={}",
+                        snapshot.text.encode_utf16().count(),
+                        snapshot.text.trim_end_matches('\n') == ORIGINAL,
+                        snapshot.text.trim_end_matches('\n') == EDITED,
+                    );
+                }
+                Err(
+                    error @ (ReadError::NoValue
+                    | ReadError::Unsupported
+                    | ReadError::CompositionActive),
+                ) => {
+                    last_state = format!("native read: {error:?}");
+                }
+                Err(error) => panic!("native baseline error for {bundle}: {error:?}"),
+            }
+            if attempts == 1 || attempts % 10 == 0 {
+                println!("{bundle}: {attempts} captures; {last_state}");
+            }
+        }
+        std::thread::sleep(Duration::from_millis(350));
+    };
+    assert!(
+        baseline.event_driven,
+        "missing native text subscription for {bundle}"
+    );
+    let tracker = RangeTracker::from_post_anchored(
+        &Snapshot {
+            target: baseline.target,
+            text: &baseline.text,
+            selection_utf16: baseline.selection_utf16.clone(),
+        },
+        ORIGINAL,
+    )
+    .expect("synthetic original must be anchored at its caret");
+    let mut observation = Observation::new(0, tracker, baseline.read_at);
+    println!("baseline ready in {bundle}; waiting for correction");
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut text_event = false;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "stable correction not observed in {bundle}"
+        );
+        let events = worker.events.wait(0, Duration::from_millis(350));
+        if events & TEXT_CHANGED != 0 {
+            text_event = true;
+            observation.text_changed();
+        }
+        let sample = match worker.read(0, Duration::from_millis(300)) {
+            Ok(sample) => sample,
+            Err(ReadError::CompositionActive) => {
+                observation.unresolved_input();
+                continue;
+            }
+            Err(error) => panic!("native observation error for {bundle}: {error:?}"),
+        };
+        if observation.sample_read(0, &sample).is_err() {
+            continue;
+        }
+        let result = observation.finish(EndReason::Timeout);
+        if result.confirmed.as_ref().is_some_and(|s| s.text == EDITED) {
+            assert!(
+                text_event,
+                "correction read without a text-change notification for {bundle}"
+            );
+            let receipt = injector::InjectionReceipt {
+                session_id: uuid::Uuid::new_v4(),
+                record_id: uuid::Uuid::new_v4(),
+                injection_id: uuid::Uuid::new_v4(),
+                injection_epoch: 1,
+                outcome: injector::DispatchOutcome::CommandsPosted,
+                dispatch_started_at: Some(baseline.read_at),
+                dispatch_finished_at: Some(baseline.read_at),
+                resolved_app: Some(ResolvedApp {
+                    process_id: pid,
+                    remote_bridge: false,
+                    app_name: Some(bundle.clone()),
+                }),
+            };
+            // This validates reader/range/storage with a synthetic identity;
+            // ASR and actual injection dispatch are outside this test.
+            let record = coordinator::record_for(
+                &receipt,
+                receipt.resolved_app.as_ref().unwrap(),
+                baseline.read_at,
+                &observation,
+                &result,
+                Reason::Timeout,
+                "event_with_checkpoints",
+                "post_anchored",
+            )
+            .unwrap();
+            assert!(records::insert(&db, &record).unwrap());
+            let payload: String = db
+                .query_row(
+                    "SELECT payload FROM post_edit_record WHERE id=?1",
+                    [&record.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let stored: Record = serde_json::from_str(&payload).unwrap();
+            assert_eq!(stored.original_text, ORIGINAL);
+            assert_eq!(stored.edited_text, EDITED);
+            assert_eq!(stored.substitutions, Some(1));
+            assert!(stored.stable && stored.complete);
+            println!("{bundle}: native read, text event, stable correction and isolated saved pair passed");
+            break;
+        }
+    }
 }
 
 #[test]

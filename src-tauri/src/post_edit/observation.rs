@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use super::diff::{self, NetEdits};
+use super::platform::CompositionState;
 use super::range::{RangeError, RangeTracker, Snapshot};
 
 const STABLE_FOR: Duration = Duration::from_millis(800);
@@ -31,6 +32,13 @@ pub enum ObservationStatus {
     ReadFailed,
 }
 
+#[derive(Clone, Debug)]
+pub struct ConfirmedSnapshot {
+    pub text: String,
+    pub read_at: Instant,
+    pub composition: CompositionState,
+}
+
 #[derive(Debug)]
 pub struct ObservationResult {
     pub status: ObservationStatus,
@@ -39,8 +47,8 @@ pub struct ObservationResult {
     pub had_intermediate_changes: bool,
     pub last_valid_at: Option<Instant>,
     pub read_count: usize,
-    /// Two consistent samples spanning STABLE_FOR, with no newer unresolved input.
-    pub stable: bool,
+    /// Text, timestamp and IME evidence from the same confirmed sample.
+    pub confirmed: Option<ConfirmedSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +71,7 @@ pub struct Observation {
     had_intermediate_changes: bool,
     reads: usize,
     unresolved: bool,
-    composition: super::platform::CompositionState,
+    confirmed: Option<ConfirmedSnapshot>,
 }
 
 impl Observation {
@@ -77,7 +85,7 @@ impl Observation {
             had_intermediate_changes: false,
             reads: 0,
             unresolved: false,
-            composition: super::platform::CompositionState::Unknown,
+            confirmed: None,
         }
     }
 
@@ -86,6 +94,16 @@ impl Observation {
         generation: u64,
         snapshot: &Snapshot<'_>,
         read_at: Instant,
+    ) -> Result<(), SampleError> {
+        self.sample_with_composition(generation, snapshot, read_at, CompositionState::Unknown)
+    }
+
+    fn sample_with_composition(
+        &mut self,
+        generation: u64,
+        snapshot: &Snapshot<'_>,
+        read_at: Instant,
+        composition: CompositionState,
     ) -> Result<(), SampleError> {
         if generation != self.generation {
             return Err(SampleError::StaleGeneration);
@@ -101,7 +119,7 @@ impl Observation {
             Ok(slice) => slice,
             Err(error) => {
                 if !matches!(error, RangeError::FieldCleared | RangeError::TargetChanged) {
-                    self.unresolved = true;
+                    self.unresolved_input();
                 }
                 return Err(SampleError::Range(error));
             }
@@ -111,11 +129,19 @@ impl Observation {
         }
         self.unresolved = false;
         if self.last != slice {
+            self.confirmed = None;
             self.last.clear();
             self.last.push_str(slice);
             self.had_intermediate_changes = true;
         }
         self.last_valid_at = Some(read_at);
+        if self.is_stable() {
+            self.confirmed = Some(ConfirmedSnapshot {
+                text: self.last.clone(),
+                read_at,
+                composition,
+            });
+        }
         Ok(())
     }
 
@@ -123,17 +149,19 @@ impl Observation {
         self.stable_since + STABLE_FOR
     }
 
-    /// Composition or an unmappable sample breaks the evidence of stability.
+    /// A notification alone does not tell whether this is another edit or send.
+    pub fn text_changed(&mut self) {
+        self.unresolved = true;
+    }
+
+    /// Concrete newer input supersedes the previous confirmed comparison.
     pub fn unresolved_input(&mut self) {
         self.unresolved = true;
+        self.confirmed = None;
     }
 
     pub fn is_stable(&self) -> bool {
         !self.unresolved && self.last_valid_at.is_some_and(|at| at >= self.stable_at())
-    }
-
-    pub fn composition(&self) -> super::platform::CompositionState {
-        self.composition
     }
 
     pub fn sample_read(
@@ -154,7 +182,7 @@ impl Observation {
             self.unresolved_input();
             return Err(SampleError::CompositionActive);
         }
-        self.sample(
+        self.sample_with_composition(
             generation,
             &Snapshot {
                 target: snapshot.target,
@@ -162,27 +190,35 @@ impl Observation {
                 selection_utf16: snapshot.selection_utf16.clone(),
             },
             snapshot.read_at,
-        )?;
-        self.composition = snapshot.composition;
-        Ok(())
+            snapshot.composition,
+        )
     }
 
-    pub fn text_pair(&self) -> (&str, &str) {
-        (&self.tracker.baseline, &self.last)
+    pub fn original_text(&self) -> &str {
+        &self.tracker.baseline
     }
 
     /// Cached evidence is useful on send, loss of focus, and the next input.
     /// A partial count is never promoted to a valid terminal comparison.
     pub fn progress(&self, reason: EndReason) -> ObservationResult {
-        let edits = diff::analyze(&self.tracker.baseline, &self.last).ok();
+        // A clear is a boundary, not an edit to the dictated slice. Retain the
+        // last confirmation across its notification, but never across sampled
+        // newer text, composition or ambiguity.
+        let confirmed = (reason == EndReason::FieldCleared || self.is_stable())
+            .then(|| self.confirmed.clone())
+            .flatten();
+        let text = confirmed
+            .as_ref()
+            .map_or(self.last.as_str(), |s| s.text.as_str());
+        let edits = diff::analyze(&self.tracker.baseline, text).ok();
         ObservationResult {
             status: ObservationStatus::Partial,
             reason,
             edits,
             had_intermediate_changes: self.had_intermediate_changes,
-            last_valid_at: self.last_valid_at,
+            last_valid_at: confirmed.as_ref().map(|s| s.read_at).or(self.last_valid_at),
             read_count: self.reads,
-            stable: self.is_stable(),
+            confirmed,
         }
     }
 
@@ -196,8 +232,10 @@ impl Observation {
                 | EndReason::DataCleared
         ) {
             result.edits = None;
-            result.stable = false;
-        } else if reason != EndReason::NextInjection && result.stable {
+            result.confirmed = None;
+        } else if !matches!(reason, EndReason::NextInjection | EndReason::FieldCleared)
+            && result.confirmed.is_some()
+        {
             if let Some(edits) = result.edits {
                 result.status = if edits.insertions + edits.deletions + edits.substitutions == 0 {
                     ObservationStatus::ObservedUnchanged
@@ -228,7 +266,7 @@ impl Observation {
             )
         {
             result.edits = None;
-            result.stable = false;
+            result.confirmed = None;
             return result;
         }
         if reason == EndReason::NextInjection {
@@ -238,6 +276,7 @@ impl Observation {
             return result;
         };
         if let Err(error) = self.sample(generation, snapshot, at) {
+            result = self.progress(reason);
             match error {
                 SampleError::Range(RangeError::FieldCleared) => {
                     result.reason = EndReason::FieldCleared
@@ -251,6 +290,9 @@ impl Observation {
                 _ => {}
             }
             result.read_count = self.reads;
+            if result.reason == EndReason::FieldCleared {
+                return self.progress(EndReason::FieldCleared);
+            }
             return result;
         }
         self.finish(reason)
@@ -281,6 +323,32 @@ mod tests {
             RangeTracker::from_before_after(&before, &after, "返利").unwrap(),
             now,
         )
+    }
+
+    #[test]
+    fn clear_notification_preserves_the_confirmed_text_time_and_composition_as_partial() {
+        let now = Instant::now();
+        let confirmed_at = now + Duration::from_secs(2);
+        let mut o = observation(now);
+        for at in [now + Duration::from_secs(1), confirmed_at] {
+            o.sample_with_composition(5, &snapshot("前反力后"), at, CompositionState::Inactive)
+                .unwrap();
+        }
+        o.text_changed();
+        assert!(!o.is_stable());
+        assert!(o.progress(EndReason::Timeout).confirmed.is_none());
+        let result = o.close(
+            5,
+            EndReason::Timeout,
+            Some((&snapshot(""), now + Duration::from_secs(3))),
+        );
+        assert_eq!(result.status, ObservationStatus::Partial);
+        assert_eq!(result.reason, EndReason::FieldCleared);
+        assert_eq!(result.last_valid_at, Some(confirmed_at));
+        let confirmed = result.confirmed.unwrap();
+        assert_eq!(confirmed.text, "反力");
+        assert_eq!(confirmed.read_at, confirmed_at);
+        assert_eq!(confirmed.composition, CompositionState::Inactive);
     }
 
     #[test]

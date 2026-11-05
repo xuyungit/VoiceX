@@ -200,7 +200,7 @@ fn cleanup(conn: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-fn insert(conn: &Connection, record: &Record) -> Result<bool, StorageError> {
+pub(super) fn insert(conn: &Connection, record: &Record) -> Result<bool, StorageError> {
     if !record.stable
         || record.composition == super::platform::CompositionState::Active
         || record.original_text == record.edited_text

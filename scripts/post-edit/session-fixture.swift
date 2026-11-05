@@ -40,7 +40,8 @@ func command(_ line: String) {
         active.stringValue = text
         if let editor = active.currentEditor() as? NSTextView {
             editor.string = text
-            editor.setSelectedRange(NSRange(location: text.utf16.count, length: 0))
+            let caret = parts.count > 2 ? Int(parts[2])! : text.utf16.count
+            editor.setSelectedRange(NSRange(location: caret, length: 0))
             editor.didChangeText()
         }
         NSAccessibility.post(element: active, notification: .valueChanged)
