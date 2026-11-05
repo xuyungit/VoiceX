@@ -356,8 +356,7 @@ function close() {
 .hint-section {
   padding: var(--spacing-md);
   border-radius: var(--radius-md);
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  background: rgba(96, 165, 250, 0.08);
+  background: var(--color-accent-light);
   color: var(--color-text-secondary);
   font-size: var(--font-sm);
 }
@@ -365,9 +364,8 @@ function close() {
 .error-section {
   padding: var(--spacing-md);
   border-radius: var(--radius-md);
-  border: 1px solid rgba(248, 113, 113, 0.4);
-  background: rgba(248, 113, 113, 0.08);
-  color: #f87171;
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
+  color: var(--color-error);
   font-size: var(--font-sm);
 }
 
@@ -404,7 +402,6 @@ function close() {
 }
 
 .result-body {
-  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: var(--spacing-md);
   background: var(--color-bg-tertiary);

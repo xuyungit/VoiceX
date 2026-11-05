@@ -24,6 +24,7 @@ use crate::session::SessionController;
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub ui_language: String, // "system" | "zh-CN" | "en-US"
+    pub ui_theme: String,    // "system" | "light" | "dark"
     pub model_defaults_version: u32,
 
     // ASR settings
@@ -432,6 +433,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             ui_language: crate::ui_locale::UI_LANGUAGE_SYSTEM.to_string(),
+            ui_theme: "system".to_string(),
             model_defaults_version: 1,
             asr_provider_type: "volcengine".to_string(),
             asr_app_key: String::new(),

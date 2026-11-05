@@ -1,9 +1,9 @@
 /* Shared settings-page layout used with SettingsSection / SettingRow. */
 
 .settings-page {
-  max-width: 880px;
+  max-width: 720px;
   width: 100%;
-  gap: var(--spacing-lg);
+  gap: var(--spacing-xl);
   padding-bottom: var(--spacing-2xl);
 }
 
@@ -44,6 +44,10 @@
   margin: 4px 0 12px;
 }
 
+.settings-section .section-body > :not(.setting-row):first-child {
+  margin-top: 12px;
+}
+
 .settings-section .section-body > .setting-row + :not(.setting-row) {
   margin-top: 0;
 }
@@ -52,8 +56,7 @@
 .settings-callout {
   padding: 10px 12px;
   border-radius: var(--radius-md);
-  border: 1px solid color-mix(in srgb, var(--color-warning) 28%, var(--color-border));
-  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
   color: color-mix(in srgb, var(--color-warning) 72%, var(--color-text-secondary));
   font-size: var(--font-xs);
   line-height: 1.5;
@@ -61,7 +64,6 @@
 }
 
 .settings-callout.is-error {
-  border-color: color-mix(in srgb, var(--color-error) 30%, var(--color-border));
   background: color-mix(in srgb, var(--color-error) 8%, transparent);
   color: color-mix(in srgb, var(--color-error) 70%, var(--color-text-secondary));
 }
@@ -84,24 +86,25 @@
   padding-top: 0;
 }
 
+.delete-endpoint:hover {
+  color: var(--color-error);
+}
+
 /* Result of a connectivity test (ASR / LLM provider probes). */
 .probe-result {
   display: grid;
   gap: 8px;
   padding: 12px 14px;
   border-radius: var(--radius-md);
-  border: 1px solid var(--color-border);
-  background: color-mix(in srgb, var(--color-bg-primary) 50%, transparent);
+  background: var(--color-bg-tertiary);
   user-select: text;
 }
 
 .probe-result.ok {
-  border-color: color-mix(in srgb, var(--color-success) 30%, var(--color-border));
   background: color-mix(in srgb, var(--color-success) 7%, transparent);
 }
 
 .probe-result.error {
-  border-color: color-mix(in srgb, var(--color-error) 30%, var(--color-border));
   background: color-mix(in srgb, var(--color-error) 7%, transparent);
 }
 

@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { NSwitch } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
+import SettingsSection from '../components/settings/SettingsSection.vue'
+import SettingRow from '../components/settings/SettingRow.vue'
 
 type BuildInfo = {
   version: string
@@ -58,59 +60,35 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="page about-page">
+  <div class="page settings-page">
     <div class="page-header">
       <h1 class="page-title">VoiceX</h1>
     </div>
 
-    <div class="surface-card build-card">
-      <div class="section-title">{{ t('about.buildInfo') }}</div>
-      <div class="build-grid">
-        <div class="build-row">
-          <span class="muted">{{ t('about.version') }}</span>
-          <span>{{ version }}</span>
-        </div>
-        <div class="build-row">
-          <span class="muted">{{ t('about.build') }}</span>
-          <span>{{ profileLabel }}</span>
-        </div>
-        <div class="build-row">
-          <span class="muted">{{ t('about.commit') }}</span>
-          <span>{{ commitLabel }}</span>
-        </div>
-        <div class="build-row">
-          <span class="muted">{{ t('about.built') }}</span>
-          <span>{{ builtAtLabel }}</span>
-        </div>
-      </div>
-    </div>
+    <SettingsSection :title="t('about.buildInfo')">
+      <SettingRow :label="t('about.version')"><span class="build-value">{{ version }}</span></SettingRow>
+      <SettingRow :label="t('about.build')"><span class="build-value">{{ profileLabel }}</span></SettingRow>
+      <SettingRow :label="t('about.commit')"><span class="build-value mono">{{ commitLabel }}</span></SettingRow>
+      <SettingRow :label="t('about.built')"><span class="build-value">{{ builtAtLabel }}</span></SettingRow>
+    </SettingsSection>
 
-    <div class="surface-card support-card">
-      <div class="section-header">
-        <div>
-          <div class="section-title">{{ t('about.diagnostics') }}</div>
-          <div class="section-hint">{{ t('about.diagnosticsHint') }}</div>
-        </div>
+    <SettingsSection :title="t('about.diagnostics')">
+      <SettingRow :label="t('about.showDiagnostics')" :help="t('about.diagnosticsHint')">
         <NSwitch v-model:value="enableDiagnostics" />
-      </div>
-    </div>
+      </SettingRow>
+    </SettingsSection>
   </div>
 </template>
 
 <style scoped>
-.about-page {
-  max-width: 880px;
+.build-value {
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+  user-select: text;
 }
 
-.build-grid {
-  display: grid;
-  gap: var(--spacing-sm);
-  margin-top: var(--spacing-md);
-}
-
-.build-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: var(--font-md);
+.build-value.mono {
+  font-family: var(--font-mono);
+  font-size: var(--font-sm);
 }
 </style>

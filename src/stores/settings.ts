@@ -5,6 +5,7 @@ import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type { UiLanguage } from '../i18n'
+import type { UiTheme } from '../theme'
 import { getDefaultPrompt } from '../utils/llmPrompts'
 import { isMacOS } from '../utils/platform'
 import type { LlmApiModeValue, LlmProviderValue } from '../utils/llmOptions'
@@ -27,6 +28,7 @@ export interface CustomLlmEndpoint {
 
 export interface AppSettings {
     uiLanguage: UiLanguage
+    uiTheme: UiTheme
     modelDefaultsVersion: number
 
     // ASR
@@ -337,6 +339,7 @@ export interface HotwordSyncDiagnostics {
 
 const defaultSettings: AppSettings = {
     uiLanguage: 'system',
+    uiTheme: 'system',
     modelDefaultsVersion: 1,
     asrProviderType: 'volcengine',
     asrAppKey: '',

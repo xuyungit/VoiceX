@@ -143,7 +143,7 @@ function removeRule(id: string) {
 }
 
 .rule-columns {
-  padding: 0 12px;
+  padding: 0;
   font-size: var(--font-xs);
   color: var(--color-text-tertiary);
 }
@@ -154,13 +154,10 @@ function removeRule(id: string) {
 
 .rules-list {
   list-style: none;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--color-bg-primary) 60%, transparent);
 }
 
 .rule-item {
-  padding: 8px 12px;
+  padding: 8px 0;
   transition: opacity var(--transition-fast);
 }
 
@@ -190,7 +187,5 @@ function removeRule(id: string) {
   text-align: center;
   font-size: var(--font-sm);
   color: var(--color-text-tertiary);
-  border: 1px dashed var(--color-border);
-  border-radius: var(--radius-md);
 }
 </style>

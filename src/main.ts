@@ -10,6 +10,7 @@ import { i18n } from './i18n'
 import router from './router'
 import App from './App.vue'
 import './styles/main.css'
+import './theme'
 
 // Create Naive UI with necessary components
 const naive = create({

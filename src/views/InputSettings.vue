@@ -566,9 +566,9 @@ onBeforeUnmount(() => {
     <SettingsSection :title="t('input.hotkeys')">
       <template #extra>
         <ul class="gesture-legend">
-          <li v-for="item in gestureLegend" :key="item.gesture">
-            <span class="gesture-key">{{ item.gesture }}</span>
-            <span>{{ item.action }}</span>
+          <li v-for="item in gestureLegend" :key="item.gesture" class="info-pill">
+            <span class="info-pill-label">{{ item.gesture }}</span>
+            <span class="info-pill-value">{{ item.action }}</span>
           </li>
         </ul>
       </template>
@@ -778,25 +778,8 @@ onBeforeUnmount(() => {
 .gesture-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 14px;
-  list-style: none;
-  font-size: var(--font-xs);
-  color: var(--color-text-tertiary);
-}
-
-.gesture-legend li {
-  display: inline-flex;
-  align-items: center;
   gap: 6px;
-}
-
-.gesture-key {
-  padding: 1px 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-tertiary);
-  color: var(--color-text-secondary);
-  font-weight: 500;
+  list-style: none;
 }
 
 .overrides {
@@ -827,16 +810,13 @@ onBeforeUnmount(() => {
 
 .override-list {
   list-style: none;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--color-bg-primary) 60%, transparent);
 }
 
 .override-item {
   display: flex;
   align-items: center;
   gap: var(--spacing-md);
-  padding: 10px 12px;
+  padding: 10px 0;
 }
 
 .override-item + .override-item {
@@ -893,9 +873,7 @@ onBeforeUnmount(() => {
 }
 
 .overrides-empty {
-  padding: 14px 16px;
-  border-radius: var(--radius-md);
-  border: 1px dashed var(--color-border);
+  padding: 6px 0 4px;
   font-size: var(--font-xs);
   color: var(--color-text-tertiary);
 }

@@ -43,8 +43,8 @@ const { t } = useI18n()
   gap: 6px;
   padding: 0 6px 0 10px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-field-border);
+  background: var(--color-field-bg);
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
@@ -64,12 +64,10 @@ const { t } = useI18n()
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--font-md);
-  font-weight: 500;
   color: var(--color-text-primary);
 }
 
 .hotkey-field.empty .hotkey-value {
-  font-weight: 400;
   color: var(--color-text-tertiary);
 }
 

@@ -13,10 +13,16 @@ const enUS = {
     thisDevice: 'This device',
     copy: 'Copy',
     delete: 'Delete',
+    cancel: 'Cancel',
     details: 'Details'
   },
-  appHeader: {
-    systemResolved: 'System · {language}'
+  appearance: {
+    language: 'Language',
+    languageAuto: 'Auto',
+    theme: 'Appearance',
+    themeSystem: 'Match system',
+    themeLight: 'Light',
+    themeDark: 'Dark'
   },
   pageError: {
     title: 'Unable to display this page',
@@ -48,6 +54,7 @@ const enUS = {
     aiCalls: 'AI correction calls',
     averageDictationSpeed: 'Average input speed',
     hoursMinutes: '{hours} hr {minutes} min',
+    hoursOnly: '{hours} hr',
     minutesOnly: '{minutes} min',
     secondsOnly: '{seconds} sec',
     minutesSeconds: '{minutes} min {seconds} sec',
@@ -96,6 +103,7 @@ const enUS = {
   history: {
     title: 'History',
     retentionPolicy: 'Retention policy',
+    retentionSummary: 'Kept: text {text}, audio {audio}',
     text: 'Text',
     audio: 'Audio',
     openRecordingsFolder: 'Open recordings folder',
@@ -476,7 +484,7 @@ const enUS = {
     customDefaultEndpointName: 'Custom endpoint',
     addCustomEndpoint: '＋ Add custom endpoint…',
     deleteCustomEndpoint: 'Delete this endpoint',
-    deleteCustomEndpointSub: 'Remove the current custom endpoint from the dropdown. This cannot be undone.',
+    deleteCustomEndpointConfirm: 'Delete the endpoint "{name}"? This cannot be undone.',
     customNoEndpointHint: 'No custom endpoint configured yet. Add one to get started.',
     prompts: 'Prompts',
     resetCurrentTab: 'Reset current tab',
@@ -495,10 +503,8 @@ const enUS = {
     apiModeChatCompletions: 'Chat Completions',
     apiModeResponses: 'Responses',
     enterApiKey: 'Enter API key...',
-    providerProbe: 'LLM connectivity test',
+    providerProbeAction: 'Test connection',
     providerProbeNote: 'Sends one real correction request with the current provider and model, then shows response time, test input, and model output.',
-    providerProbeButton: 'Test current model',
-    providerProbeRun: 'Run test',
     providerProbeProvider: 'Provider',
     providerProbeStatus: 'Status',
     providerProbeStatusOk: 'Available',
@@ -760,9 +766,7 @@ const enUS = {
     providerColiReady: 'Local offline ASR (coli)',
     providerColiChecking: 'Local offline ASR (coli) - checking...',
     providerColiUnavailable: 'Local offline ASR (coli) - unavailable',
-    providerProbe: 'Provider connectivity test',
-    providerProbeButton: 'Test current provider',
-    providerProbeRun: 'Run test',
+    providerProbeAction: 'Test recognition',
     providerProbePlayAudio: 'Play test audio',
     providerProbeStopAudio: 'Stop playback',
     providerProbeNote: 'The test runs the full transcription path on a short built-in sample and shows status, recognition time, and recognized text.',
@@ -880,6 +884,7 @@ const enUS = {
     commit: 'Commit',
     built: 'Built',
     diagnostics: 'Diagnostics',
+    showDiagnostics: 'Show diagnostics',
     diagnosticsHint: 'Show hotword sync and ASR provider diagnostics for debugging.'
   },
   hud: {

@@ -101,11 +101,11 @@ onMounted(() => {
       </SettingRow>
 
       <SettingRow :label="t('sync.syncToken')" :help="t('sync.syncTokenNote')">
-        <NInput v-model:value="syncToken" type="text" class="monospace" :placeholder="t('sync.enterToken')" />
+        <NInput v-model:value="syncToken" type="text" :placeholder="t('sync.enterToken')" />
       </SettingRow>
 
       <SettingRow :label="t('sync.sharedSecret')" :help="t('sync.sharedSecretNote')">
-        <NInput v-model:value="syncSharedSecret" type="text" class="monospace" :placeholder="t('sync.enterSharedSecret')" />
+        <NInput v-model:value="syncSharedSecret" type="text" :placeholder="t('sync.enterSharedSecret')" />
       </SettingRow>
 
       <SettingRow :label="t('sync.deviceName')" :help="t('sync.deviceNameNote')">

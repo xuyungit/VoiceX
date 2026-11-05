@@ -48,8 +48,8 @@ function hasContent(nodes: VNode[] | undefined): boolean {
   align-items: center;
   justify-content: space-between;
   gap: var(--spacing-xl);
-  min-height: 52px;
-  padding: 10px 0;
+  min-height: 42px;
+  padding: 6px 0;
 }
 
 .setting-row + .setting-row {
@@ -75,7 +75,6 @@ function hasContent(nodes: VNode[] | undefined): boolean {
   align-items: center;
   gap: 6px;
   font-size: var(--font-md);
-  font-weight: 500;
   color: var(--color-text-primary);
 }
 
@@ -107,8 +106,8 @@ function hasContent(nodes: VNode[] | undefined): boolean {
   align-items: center;
   justify-content: flex-end;
   gap: var(--spacing-sm);
-  width: 320px;
-  max-width: 50%;
+  width: 300px;
+  max-width: 55%;
   flex: 0 0 auto;
 }
 

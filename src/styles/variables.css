@@ -2,35 +2,41 @@
 /* Follows system color scheme - dark theme first */
 
 :root {
-  /* Colors - will be overridden for light theme */
-  --color-bg-primary: #1a1a1a;
-  --color-bg-secondary: #242424;
-  --color-bg-tertiary: #2d2d2d;
-  --color-bg-hover: #363636;
-  --color-bg-active: #404040;
-  
-  --color-text-primary: rgba(255, 255, 255, 0.95);
-  --color-text-secondary: rgba(255, 255, 255, 0.65);
-  --color-text-tertiary: rgba(255, 255, 255, 0.45);
+  /* Colors: dark is the default; [data-theme='light'] below overrides.
+     bg-primary = page, bg-secondary = grouped panel, bg-tertiary = field/chip. */
+  color-scheme: dark;
+  --color-bg-primary: #1b1c1f;
+  --color-bg-secondary: #232428;
+  --color-bg-tertiary: #2b2c31;
+  --color-bg-hover: rgba(255, 255, 255, 0.06);
+  --color-bg-active: rgba(255, 255, 255, 0.1);
+
+  --color-text-primary: rgba(255, 255, 255, 0.92);
+  --color-text-secondary: rgba(255, 255, 255, 0.62);
+  --color-text-tertiary: rgba(255, 255, 255, 0.42);
   --color-text-disabled: rgba(255, 255, 255, 0.25);
-  
-  --color-accent: #3b82f6;
-  --color-accent-hover: #2563eb;
-  --color-accent-light: rgba(59, 130, 246, 0.15);
-  
-  --color-success: #22c55e;
-  --color-warning: #f59e0b;
-  --color-error: #ef4444;
-  
+
+  --color-accent: #4f8cff;
+  --color-accent-hover: #6b9fff;
+  --color-accent-light: rgba(79, 140, 255, 0.15);
+
+  --color-success: #34c759;
+  --color-warning: #f5a524;
+  --color-error: #f87171;
+
   --color-border: rgba(255, 255, 255, 0.08);
   --color-divider: rgba(255, 255, 255, 0.06);
-  
+
+  /* Custom fields that sit beside Naive inputs must look the same. */
+  --color-field-bg: rgba(255, 255, 255, 0.06);
+  --color-field-border: transparent;
+
   /* Sidebar */
-  --sidebar-width: 200px;
-  --sidebar-bg: #161616;
-  --sidebar-item-hover: rgba(255, 255, 255, 0.05);
-  --sidebar-item-active: rgba(59, 130, 246, 0.15);
-  
+  --sidebar-width: 188px;
+  --sidebar-bg: #161719;
+  --sidebar-item-hover: rgba(255, 255, 255, 0.04);
+  --sidebar-item-active: rgba(255, 255, 255, 0.07);
+
   /* Spacing */
   --spacing-xs: 4px;
   --spacing-sm: 8px;
@@ -42,7 +48,7 @@
   /* Border radius */
   --radius-sm: 4px;
   --radius-md: 8px;
-  --radius-lg: 12px;
+  --radius-lg: 10px;
   --radius-xl: 16px;
   
   /* Shadows */
@@ -70,29 +76,39 @@
   --transition-slow: 0.3s ease;
 }
 
-/* Light theme - prepared for future */
-@media (prefers-color-scheme: light) {
-  :root.light-theme {
-    --color-bg-primary: #ffffff;
-    --color-bg-secondary: #f5f5f5;
-    --color-bg-tertiary: #ebebeb;
-    --color-bg-hover: #e0e0e0;
-    --color-bg-active: #d5d5d5;
-    
-    --color-text-primary: rgba(0, 0, 0, 0.9);
-    --color-text-secondary: rgba(0, 0, 0, 0.65);
-    --color-text-tertiary: rgba(0, 0, 0, 0.45);
-    --color-text-disabled: rgba(0, 0, 0, 0.25);
-    
-    --color-border: rgba(0, 0, 0, 0.1);
-    --color-divider: rgba(0, 0, 0, 0.06);
-    
-    --sidebar-bg: #f0f0f0;
-    --sidebar-item-hover: rgba(0, 0, 0, 0.05);
-    --sidebar-item-active: rgba(59, 130, 246, 0.15);
-    
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.1);
-    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
-    --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
-  }
+/* Light theme: set by src/theme.ts from the uiTheme setting or the OS. */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --color-bg-primary: #ffffff;
+  --color-bg-secondary: #f5f5f7;
+  --color-bg-tertiary: #ebebef;
+  --color-bg-hover: rgba(0, 0, 0, 0.04);
+  --color-bg-active: rgba(0, 0, 0, 0.07);
+
+  --color-text-primary: rgba(0, 0, 0, 0.88);
+  --color-text-secondary: rgba(0, 0, 0, 0.6);
+  --color-text-tertiary: rgba(0, 0, 0, 0.44);
+  --color-text-disabled: rgba(0, 0, 0, 0.25);
+
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+  --color-accent-light: rgba(37, 99, 235, 0.1);
+
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-error: #dc2626;
+
+  --color-border: rgba(0, 0, 0, 0.1);
+  --color-divider: rgba(0, 0, 0, 0.07);
+
+  --color-field-bg: #ffffff;
+  --color-field-border: rgb(224, 224, 230);
+
+  --sidebar-bg: #f4f4f6;
+  --sidebar-item-hover: rgba(0, 0, 0, 0.04);
+  --sidebar-item-active: rgba(0, 0, 0, 0.07);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 10px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.12);
 }

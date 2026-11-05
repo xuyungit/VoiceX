@@ -13,10 +13,16 @@ const zhCN = {
     thisDevice: '本机',
     copy: '复制',
     delete: '删除',
+    cancel: '取消',
     details: '查看详情'
   },
-  appHeader: {
-    systemResolved: 'System · {language}'
+  appearance: {
+    language: '语言',
+    languageAuto: '自动',
+    theme: '外观',
+    themeSystem: '跟随系统',
+    themeLight: '浅色',
+    themeDark: '深色'
   },
   pageError: {
     title: '页面无法显示',
@@ -48,6 +54,7 @@ const zhCN = {
     aiCalls: 'AI 纠错次数',
     averageDictationSpeed: '平均输入速度',
     hoursMinutes: '{hours} 小时 {minutes} 分钟',
+    hoursOnly: '{hours} 小时',
     minutesOnly: '{minutes} 分钟',
     secondsOnly: '{seconds} 秒',
     minutesSeconds: '{minutes} 分 {seconds} 秒',
@@ -96,6 +103,7 @@ const zhCN = {
   history: {
     title: '历史',
     retentionPolicy: '历史保留策略',
+    retentionSummary: '保留期：文字 {text}，语音 {audio}',
     text: '文字',
     audio: '语音',
     openRecordingsFolder: '打开录音目录',
@@ -476,7 +484,7 @@ const zhCN = {
     customDefaultEndpointName: '自定义节点',
     addCustomEndpoint: '＋ 添加自定义节点…',
     deleteCustomEndpoint: '删除此节点',
-    deleteCustomEndpointSub: '从下拉菜单中移除当前自定义节点，此操作不可撤销。',
+    deleteCustomEndpointConfirm: '删除节点「{name}」？此操作不可撤销。',
     customNoEndpointHint: '尚未配置任何自定义节点，请先添加一个。',
     prompts: '提示词',
     resetCurrentTab: '重置当前标签',
@@ -495,11 +503,9 @@ const zhCN = {
     apiModeChatCompletions: 'Chat Completions',
     apiModeResponses: 'Responses',
     enterApiKey: '输入 API key...',
-    providerProbe: 'LLM 连通性测试',
+    providerProbeAction: '测试连接',
     providerProbeNote: '使用当前 provider 和模型发送一次真实纠错请求，结果会显示响应时间、测试输入和模型输出。',
-    providerProbeButton: '测试当前模型',
-    providerProbeRun: '开始测试',
-    providerProbeProvider: 'Provider',
+    providerProbeProvider: '服务提供方',
     providerProbeStatus: '状态',
     providerProbeStatusOk: '可用',
     providerProbeStatusFailed: '失败',
@@ -516,8 +522,8 @@ const zhCN = {
   },
   asr: {
     title: 'ASR',
-    provider: 'Provider',
-    asrProvider: 'ASR Provider',
+    provider: '服务提供方',
+    asrProvider: '识别服务',
     warningColiUnavailable: '当前设置仍指向本地 `coli`，但系统没有检测到可用命令。开始录音时本地 ASR 不会工作；请安装或修正 `coli` 路径，或切换回在线 provider。',
     warningQwenLocalUnsupported: '当前设置仍指向 Qwen3-ASR（本地），但 Windows 上不提供该 provider —— 它依赖的 `qwen-asr` CLI 目前只支持 macOS / Linux。在切换到其他 provider 之前，识别都会失败。',
     apiCredentials: 'API 凭证',
@@ -760,9 +766,7 @@ const zhCN = {
     providerColiReady: '本地离线 ASR (coli)',
     providerColiChecking: '本地离线 ASR (coli) - 检查中...',
     providerColiUnavailable: '本地离线 ASR (coli) - 不可用',
-    providerProbe: 'Provider 连通性测试',
-    providerProbeButton: '测试当前 Provider',
-    providerProbeRun: '开始测试',
+    providerProbeAction: '测试识别',
     providerProbePlayAudio: '播放测试语音',
     providerProbeStopAudio: '停止播放',
     providerProbeNote: '会播放内置短句样本并跑完整识别链路，结果展示状态、识别时间和识别文本。',
@@ -880,6 +884,7 @@ const zhCN = {
     commit: '提交',
     built: '构建时间',
     diagnostics: '诊断信息',
+    showDiagnostics: '显示诊断信息',
     diagnosticsHint: '显示热词同步和 ASR 供应商诊断信息，仅用于调试。'
   },
   hud: {

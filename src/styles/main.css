@@ -20,9 +20,7 @@ body {
     font-family: var(--font-sans);
     font-size: var(--font-md);
     color: var(--color-text-primary);
-    background: radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.04), transparent 35%),
-        radial-gradient(circle at 80% 0%, rgba(59, 130, 246, 0.06), transparent 25%),
-        var(--color-bg-primary);
+    background: var(--color-bg-primary);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     user-select: none;
@@ -176,12 +174,11 @@ body::webkit-scrollbar {
     color: var(--color-text-tertiary);
 }
 
+/* The one container level: a quiet panel, no border or shadow. Never nest these. */
 .surface-card {
     background: var(--color-bg-secondary);
-    border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
-    box-shadow: var(--shadow-sm);
-    padding: var(--spacing-lg);
+    padding: var(--spacing-md) 14px;
 }
 
 .surface-card.tight {
@@ -196,13 +193,11 @@ body::webkit-scrollbar {
     margin-bottom: var(--spacing-md);
 }
 
-/* Section heading used by every page (settings sections, Overview, History, About). */
+/* Section heading used by every page; sits above its panel, not inside it. */
 .section-title {
-    font-size: var(--font-xs);
+    font-size: var(--font-md);
     font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--color-text-tertiary);
+    color: var(--color-text-primary);
 }
 
 .section-hint {
@@ -214,12 +209,11 @@ body::webkit-scrollbar {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px;
+    padding: 2px 8px;
     border-radius: 999px;
     background: var(--color-bg-tertiary);
     font-size: var(--font-xs);
     color: var(--color-text-secondary);
-    border: 1px solid var(--color-border);
 }
 
 .pill.accent {
@@ -229,15 +223,40 @@ body::webkit-scrollbar {
 }
 
 .pill.success {
-    background: rgba(34, 197, 94, 0.12);
+    background: color-mix(in srgb, var(--color-success) 14%, transparent);
     color: var(--color-success);
-    border-color: rgba(34, 197, 94, 0.4);
+}
+
+/* Label + value read-out, e.g. "ASR 服务 Gemini" or "单击 免按说话". */
+.info-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 24px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: var(--color-bg-secondary);
+    font-size: var(--font-sm);
+    white-space: nowrap;
+}
+
+.info-pill-label {
+    color: var(--color-text-tertiary);
+}
+
+.info-pill-value {
+    color: var(--color-text-primary);
+    font-weight: 500;
+}
+
+.info-pill-value.off {
+    color: var(--color-text-tertiary);
 }
 
 .tag {
     display: inline-flex;
     align-items: center;
-    padding: 4px 8px;
+    padding: 1px 7px;
     border-radius: var(--radius-sm);
     background: var(--color-bg-tertiary);
     color: var(--color-text-secondary);
@@ -298,42 +317,6 @@ body::webkit-scrollbar {
 .form-caption {
     font-size: var(--font-xs);
     color: var(--color-text-tertiary);
-}
-
-.list-card {
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
-    background: var(--color-bg-secondary);
-    overflow: hidden;
-}
-
-.list-row {
-    display: grid;
-    grid-template-columns: 90px 1fr auto;
-    gap: var(--spacing-md);
-    align-items: flex-start;
-    padding: var(--spacing-md) var(--spacing-lg);
-    border-bottom: 1px solid var(--color-divider);
-}
-
-.list-row:last-child {
-    border-bottom: none;
-}
-
-.list-meta {
-    color: var(--color-text-tertiary);
-    font-size: var(--font-xs);
-}
-
-.list-text {
-    font-size: var(--font-md);
-    line-height: 1.5;
-}
-
-.list-actions {
-    display: flex;
-    gap: var(--spacing-xs);
-    align-items: center;
 }
 
 .hotkey-chip {

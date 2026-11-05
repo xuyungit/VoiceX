@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NButton, NSelect } from 'naive-ui'
+import { NButton, NSelect, NTooltip } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import type { LocalAsrStatus } from '../types/asr'
@@ -22,6 +22,7 @@ import AsrQwenLocalSettings from '../components/asr/AsrQwenLocalSettings.vue'
 import AsrColiSettings from '../components/asr/AsrColiSettings.vue'
 import SettingsSection from '../components/settings/SettingsSection.vue'
 import SettingRow from '../components/settings/SettingRow.vue'
+import ProbeStatus from '../components/settings/ProbeStatus.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -184,6 +185,15 @@ const sonioxFaultModeOptions = computed(() => [
   { label: t('asr.sonioxDebugFaultFinalTimeout'), value: 'final_timeout' }
 ])
 
+const probeLabel = computed(() => {
+  const result = providerProbeResult.value
+  if (!result || !result.ok) return t('asr.providerProbeStatusFailed')
+  const verdict = t('asr.providerProbeStatusOk')
+  return result.recognitionTimeMs !== null ? `${verdict} · ${result.recognitionTimeMs} ms` : verdict
+})
+
+const probeErrorMessage = computed(() => providerProbeError.value || providerProbeResult.value?.errorMessage || '')
+
 async function runProviderProbe() {
   providerProbeLoading.value = true
   providerProbeError.value = ''
@@ -327,6 +337,33 @@ async function clearSonioxDebugOverrides() {
 
     <!-- Provider Selection -->
     <SettingsSection :title="t('asr.provider')">
+      <template #extra>
+        <NButton quaternary size="small" :loading="probeAudioLoading" @click="toggleProbeAudioPlayback">
+          {{ isProbeAudioPlaying ? t('asr.providerProbeStopAudio') : t('asr.providerProbePlayAudio') }}
+        </NButton>
+        <ProbeStatus
+          v-if="(providerProbeResult || providerProbeError) && !providerProbeLoading"
+          :tone="providerProbeResult?.ok ? 'ok' : 'error'"
+          :label="probeLabel"
+        >
+          <template v-if="providerProbeResult?.ok" #default>
+            <div class="probe-detail-label">{{ t('asr.providerProbeTranscript') }}</div>
+            <div class="probe-detail-text">{{ providerProbeResult.recognitionResult || t('asr.providerProbeTranscriptEmpty') }}</div>
+          </template>
+        </ProbeStatus>
+        <NTooltip :delay="400" style="max-width: 280px">
+          <template #trigger>
+            <NButton :loading="providerProbeLoading" type="primary" secondary size="small" @click="runProviderProbe">
+              {{ t('asr.providerProbeAction') }}
+            </NButton>
+          </template>
+          {{ t('asr.providerProbeNote') }}
+        </NTooltip>
+      </template>
+
+      <div v-if="probeErrorMessage && !providerProbeLoading" class="settings-callout is-error">
+        {{ probeErrorMessage }}
+      </div>
       <SettingRow :label="t('asr.asrProvider')">
         <NSelect
           v-model:value="asrProviderType"
@@ -434,51 +471,6 @@ async function clearSonioxDebugOverrides() {
       </div>
     </SettingsSection>
 
-    <SettingsSection :title="t('asr.providerProbe')">
-      <SettingRow :label="t('asr.providerProbeButton')" :help="t('asr.providerProbeNote')">
-        <div class="control-group">
-          <NButton
-            :loading="probeAudioLoading"
-            size="small"
-            @click="toggleProbeAudioPlayback"
-          >
-            {{ isProbeAudioPlaying ? t('asr.providerProbeStopAudio') : t('asr.providerProbePlayAudio') }}
-          </NButton>
-          <NButton
-            :loading="providerProbeLoading"
-            type="primary"
-            secondary
-            size="small"
-            @click="runProviderProbe"
-          >
-            {{ t('asr.providerProbeRun') }}
-          </NButton>
-        </div>
-      </SettingRow>
-
-      <div v-if="providerProbeResult" class="probe-result" :class="{ ok: providerProbeResult.ok, error: !providerProbeResult.ok }">
-        <div class="probe-line">
-          <span>{{ t('asr.providerProbeStatus') }}</span>
-          <strong>{{ providerProbeResult.ok ? t('asr.providerProbeStatusOk') : t('asr.providerProbeStatusFailed') }}</strong>
-        </div>
-        <div v-if="providerProbeResult.recognitionTimeMs !== null" class="probe-line">
-          <span>{{ t('asr.providerProbeLatency') }}</span>
-          <strong>{{ providerProbeResult.recognitionTimeMs }} ms</strong>
-        </div>
-        <div class="probe-result-label">{{ t('asr.providerProbeTranscript') }}</div>
-        <div class="probe-message">
-          {{ providerProbeResult.recognitionResult || t('asr.providerProbeTranscriptEmpty') }}
-        </div>
-      </div>
-
-      <div v-if="providerProbeResult?.errorMessage" class="settings-callout is-error">
-        {{ providerProbeResult.errorMessage }}
-      </div>
-
-      <div v-if="providerProbeError" class="settings-callout is-error">
-        {{ providerProbeError }}
-      </div>
-    </SettingsSection>
   </div>
 </template>
 

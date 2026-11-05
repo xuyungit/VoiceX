@@ -1,11 +1,52 @@
 <script setup lang="ts">
 import { useRouter, useRoute } from 'vue-router'
-import { computed } from 'vue'
+import { computed, h } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { NDropdown, NTooltip } from 'naive-ui'
+import LanguageSwitcher from './LanguageSwitcher.vue'
+import { useSettingsStore } from '../stores/settings'
+import type { UiTheme } from '../theme'
+import type { UiLanguage } from '../i18n'
 
 const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
+const settingsStore = useSettingsStore()
+
+// Material icons: brightness_auto-ish half circle, light_mode, dark_mode.
+const THEME_ICONS: Record<UiTheme, string> = {
+  system: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18V4a8 8 0 0 1 0 16z',
+  light: 'M12 7a5 5 0 1 0 0 10 5 5 0 0 0 0-10zM2 13h2a1 1 0 0 0 0-2H2a1 1 0 0 0 0 2zm18 0h2a1 1 0 0 0 0-2h-2a1 1 0 0 0 0 2zM11 2v2a1 1 0 0 0 2 0V2a1 1 0 0 0-2 0zm0 18v2a1 1 0 0 0 2 0v-2a1 1 0 0 0-2 0zM5.99 4.58a1 1 0 0 0-1.41 1.41l1.06 1.06a1 1 0 0 0 1.41-1.41L5.99 4.58zm12.37 12.37a1 1 0 0 0-1.41 1.41l1.06 1.06a1 1 0 0 0 1.41-1.41l-1.06-1.06zm1.06-10.96a1 1 0 0 0-1.41-1.41l-1.06 1.06a1 1 0 0 0 1.41 1.41l1.06-1.06zM7.05 18.36a1 1 0 0 0-1.41-1.41l-1.06 1.06a1 1 0 0 0 1.41 1.41l1.06-1.06z',
+  dark: 'M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.39 5.39 0 0 1-4.4 2.26 5.4 5.4 0 0 1-3.14-9.8c-.44-.06-.9-.1-1.36-.1z',
+}
+
+function themeIcon(theme: UiTheme) {
+  return () => h('svg', { viewBox: '0 0 24 24', fill: 'currentColor', width: 16, height: 16 }, [h('path', { d: THEME_ICONS[theme] })])
+}
+
+const themeLabels = computed<Record<UiTheme, string>>(() => ({
+  system: t('appearance.themeSystem'),
+  light: t('appearance.themeLight'),
+  dark: t('appearance.themeDark'),
+}))
+
+const themeOptions = computed(() =>
+  (['system', 'light', 'dark'] as UiTheme[]).map((key) => ({
+    key,
+    label: themeLabels.value[key],
+    icon: themeIcon(key),
+  }))
+)
+
+const currentTheme = computed(() => settingsStore.settings.uiTheme)
+
+function setTheme(key: string | number) {
+  settingsStore.updateSetting('uiTheme', key as UiTheme)
+}
+
+function setLanguage(value: UiLanguage) {
+  settingsStore.updateSetting('uiLanguage', value)
+}
 
 interface NavItem {
   path: string
@@ -121,34 +162,55 @@ function navigateTo(path: string) {
       </button>
       </template>
     </div>
+
+    <div class="sidebar-footer">
+      <LanguageSwitcher :model-value="settingsStore.settings.uiLanguage" @update:model-value="setLanguage" />
+      <NDropdown trigger="click" placement="top-end" :options="themeOptions" :value="currentTheme" @select="setTheme">
+        <span>
+          <NTooltip placement="top" :delay="400">
+            <template #trigger>
+              <button type="button" class="theme-button" :aria-label="`${t('appearance.theme')}: ${themeLabels[currentTheme]}`">
+                <svg viewBox="0 0 24 24" fill="currentColor"><path :d="THEME_ICONS[currentTheme]" /></svg>
+              </button>
+            </template>
+            {{ t('appearance.theme') }}: {{ themeLabels[currentTheme] }}
+          </NTooltip>
+        </span>
+      </NDropdown>
+    </div>
   </nav>
 </template>
 
 <style scoped>
 .sidebar {
   width: var(--sidebar-width);
+  flex-shrink: 0;
   height: 100%;
   background-color: var(--sidebar-bg);
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-divider);
 }
 
 .sidebar-header {
   display: flex;
   align-items: center;
-  gap: var(--spacing-sm);
-  padding: var(--spacing-lg);
-  padding-top: 40px; /* Space for window controls */
+  gap: 8px;
+  padding: 32px 18px 16px;
 }
 
 .app-icon {
-  width: 28px;
-  height: 28px;
+  width: 20px;
+  height: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--color-accent);
+}
+
+.app-icon svg {
+  width: 20px;
+  height: 20px;
 }
 
 .app-name {
@@ -159,20 +221,22 @@ function navigateTo(path: string) {
 
 .nav-items {
   flex: 1;
-  padding: var(--spacing-sm);
+  padding: 0 10px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
+  overflow-y: auto;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
-  gap: var(--spacing-md);
-  padding: var(--spacing-md) var(--spacing-lg);
-  border-radius: var(--radius-md);
+  gap: 10px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
   color: var(--color-text-secondary);
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), color var(--transition-fast);
   text-align: left;
   width: 100%;
 }
@@ -184,12 +248,16 @@ function navigateTo(path: string) {
 
 .nav-item.active {
   background-color: var(--sidebar-item-active);
+  color: var(--color-text-primary);
+}
+
+.nav-item.active .nav-icon {
   color: var(--color-accent);
 }
 
 .nav-icon {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -197,8 +265,8 @@ function navigateTo(path: string) {
 }
 
 .nav-icon svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
 .nav-label {
@@ -206,17 +274,43 @@ function navigateTo(path: string) {
 }
 
 .nav-group-label {
-  font-size: var(--font-xs);
+  font-size: var(--font-sm);
   color: var(--color-text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: var(--spacing-md) var(--spacing-lg) var(--spacing-xs);
-  margin-top: var(--spacing-sm);
+  padding: 14px 10px 4px;
 }
 
 .nav-divider {
   height: 1px;
-  background: var(--color-border);
-  margin: var(--spacing-sm) var(--spacing-lg);
+  background: var(--color-divider);
+  margin: 8px 10px;
+}
+
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px 12px;
+}
+
+.theme-button {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: var(--color-text-tertiary);
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.theme-button:hover {
+  background: var(--sidebar-item-hover);
+  color: var(--color-text-primary);
+}
+
+.theme-button svg {
+  width: 16px;
+  height: 16px;
 }
 </style>

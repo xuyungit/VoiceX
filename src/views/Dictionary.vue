@@ -75,7 +75,7 @@ function handleKeydown(e: KeyboardEvent) {
 
 <style scoped>
 .dictionary-page {
-  max-width: 1000px;
+  max-width: 720px;
 }
 
 .title-row {
@@ -103,7 +103,6 @@ function handleKeydown(e: KeyboardEvent) {
   align-items: center;
   padding: var(--spacing-md);
   background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   min-height: 48px;
   cursor: text;
@@ -115,8 +114,7 @@ function handleKeydown(e: KeyboardEvent) {
   gap: var(--spacing-xs);
   padding: 4px 8px 4px 12px;
   background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   font-size: var(--font-md);
   color: var(--color-text-primary);
   line-height: 1.4;

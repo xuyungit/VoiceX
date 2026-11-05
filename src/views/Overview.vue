@@ -7,7 +7,7 @@ import { formatHotkey } from '../utils/hotkey'
 
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 
 const hotkeyDisplay = computed(() => {
   const config = settingsStore.settings.hotkeyConfig
@@ -55,7 +55,9 @@ const formatDuration = (durationMs: number) => {
   const hours = Math.floor(minutes / 60)
   const remaining = minutes % 60
   if (hours > 0) {
-    return t('overview.hoursMinutes', { hours, minutes: remaining })
+    return remaining === 0
+      ? t('overview.hoursOnly', { hours })
+      : t('overview.hoursMinutes', { hours, minutes: remaining })
   }
   return t('overview.minutesOnly', { minutes: remaining })
 }
@@ -70,10 +72,19 @@ const formatShortDuration = (durationMs: number) => {
   return t('overview.secondsOnly', { seconds })
 }
 
-const formatCharacters = (count: number) => {
-  if (count >= 1000) return `${(count / 1000).toFixed(1)}K`
-  return count.toString()
-}
+// Large totals in the reader's own short form: 124.4万 / 1.24M / 898.6K.
+// "morePrecision" keeps one decimal or three significant digits, whichever says more.
+const formatCharacters = (count: number) =>
+  new Intl.NumberFormat(locale.value, {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+    maximumSignificantDigits: 3,
+    roundingPriority: 'morePrecision',
+  } as Intl.NumberFormatOptions).format(count)
+
+const formatCount = (count: number) => new Intl.NumberFormat(locale.value).format(count)
+
+const formatSpeed = (value: number) => t('overview.charactersPerMinute', { value: formatCount(value) })
 
 const totalDuration = computed(() => formatDuration(historyStore.stats.totalDurationMs || 0))
 const localDuration = computed(() => formatDuration(historyStore.localStats.totalDurationMs || 0))
@@ -117,6 +128,58 @@ const localReadDuration = computed(() => formatReadingDuration(localTts.value.du
 const readCharacters = computed(() => formatCharacters(tts.value.characters || 0))
 const localReadCharacters = computed(() => formatCharacters(localTts.value.characters || 0))
 
+interface Stat {
+  label: string
+  total: string
+  local: string
+}
+
+const dictationHeadline = computed<Stat[]>(() => [
+  { label: t('overview.totalCharacters'), total: totalCharacters.value, local: localCharacters.value },
+  { label: t('overview.totalDictationTime'), total: totalDuration.value, local: localDuration.value },
+])
+
+const dictationDetails = computed<Stat[]>(() => [
+  { label: t('overview.averageDictationSpeed'), total: formatSpeed(averageSpeed.value), local: formatSpeed(localAverageSpeed.value) },
+  { label: t('overview.averageRecordingLength'), total: avgRecordingLength.value, local: localAvgRecordingLength.value },
+  { label: t('overview.recordingCount'), total: formatCount(recordingCount.value), local: formatCount(localRecordingCount.value) },
+  { label: t('overview.aiCalls'), total: formatCount(aiCalls.value), local: formatCount(localAiCalls.value) },
+])
+
+const readingHeadline = computed<Stat[]>(() => [
+  { label: t('overview.readCharacters'), total: readCharacters.value, local: localReadCharacters.value },
+  { label: t('overview.readDuration'), total: readDuration.value, local: localReadDuration.value },
+])
+
+const readingDetails = computed<Stat[]>(() => [
+  { label: t('overview.plainReadCount'), total: formatCount(tts.value.readCount || 0), local: formatCount(localTts.value.readCount || 0) },
+  { label: t('overview.translateReadCount'), total: formatCount(tts.value.translateCount || 0), local: formatCount(localTts.value.translateCount || 0) },
+  { label: t('overview.readAiCalls'), total: formatCount(tts.value.llmCount || 0), local: formatCount(localTts.value.llmCount || 0) },
+])
+
+const statSections = computed(() => [
+  { title: t('overview.dictationSection'), headline: dictationHeadline.value, details: dictationDetails.value },
+  { title: t('overview.readingSection'), headline: readingHeadline.value, details: readingDetails.value },
+])
+
+// "103 小时 5 分钟" -> numbers at full size, units smaller.
+function valueParts(value: string) {
+  return value
+    .split(/(\d[\d.,]*)/)
+    .filter(part => part !== '')
+    .map(part => ({ text: part, unit: !/^\d/.test(part) }))
+}
+
+// In the narrow detail columns "This device 194 chars/min" wraps; the unit is
+// already on the line above, so drop it when both values share it.
+function localWithoutSharedUnit(local: string, total: string) {
+  const unit = (value: string) => value.match(/[^\d.,]+$/)?.[0] ?? ''
+  const suffix = unit(total)
+  return suffix && unit(local) === suffix && /^[\d.,]+\s*$/.test(local.slice(0, -suffix.length) + ' ')
+    ? local.slice(0, -suffix.length).trim()
+    : local
+}
+
 onMounted(async () => {
   await historyStore.loadStats()
 })
@@ -135,172 +198,43 @@ onMounted(async () => {
     </div>
 
     <div class="status-bar">
-      <div class="status-pill">
-        <span class="pill-label">{{ t('overview.asrProvider') }}</span>
-        <span class="pill-value">{{ asrDisplay }}</span>
+      <div class="info-pill">
+        <span class="info-pill-label">{{ t('overview.asrProvider') }}</span>
+        <span class="info-pill-value">{{ asrDisplay }}</span>
       </div>
-      <div class="status-pill">
-        <span class="pill-label">{{ t('overview.llmCorrection') }}</span>
-        <span class="pill-value" :class="{ 'pill-off': !settingsStore.settings.enableLlmCorrection }">{{ llmDisplay }}</span>
+      <div class="info-pill">
+        <span class="info-pill-label">{{ t('overview.llmCorrection') }}</span>
+        <span class="info-pill-value" :class="{ off: !settingsStore.settings.enableLlmCorrection }">{{ llmDisplay }}</span>
       </div>
-      <div class="status-pill">
-        <span class="pill-label">{{ t('overview.syncStatus') }}</span>
-        <span class="pill-value" :class="{ 'pill-off': !settingsStore.settings.syncEnabled }">{{ syncDisplay }}</span>
-      </div>
-    </div>
-
-    <h2 class="section-title">{{ t('overview.dictationSection') }}</h2>
-
-    <div class="stats-grid">
-      <!-- Row 1: Total input characters | Total dictation time -->
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <span class="glyph">Aa</span>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ totalCharacters }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localCharacters }}</div>
-          <div class="stat-label">{{ t('overview.totalCharacters') }}</div>
-        </div>
-      </div>
-
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13h-1v6l5 3 .5-.84-4.5-2.66Z" />
-          </svg>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ totalDuration }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localDuration }}</div>
-          <div class="stat-label">{{ t('overview.totalDictationTime') }}</div>
-        </div>
-      </div>
-
-      <!-- Row 2: Average input speed | Average recording length -->
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M11 21h-1l2-7H7l8-10h1l-2 8h5Z" />
-          </svg>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ t('overview.charactersPerMinute', { value: averageSpeed }) }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ t('overview.charactersPerMinute', { value: localAverageSpeed }) }}</div>
-          <div class="stat-label">{{ t('overview.averageDictationSpeed') }}</div>
-        </div>
-      </div>
-
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61 1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42A8.962 8.962 0 0 0 12 4c-4.97 0-9 4.03-9 9s4.03 9 9 9 9-4.03 9-9c0-2.12-.74-4.07-1.97-5.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z" />
-          </svg>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ avgRecordingLength }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localAvgRecordingLength }}</div>
-          <div class="stat-label">{{ t('overview.averageRecordingLength') }}</div>
-        </div>
-      </div>
-
-      <!-- Row 3: Recording count | AI correction count -->
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
-          </svg>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ recordingCount.toLocaleString() }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localRecordingCount.toLocaleString() }}</div>
-          <div class="stat-label">{{ t('overview.recordingCount') }}</div>
-        </div>
-      </div>
-
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 2a1 1 0 0 0-.92.6l-3 7a1 1 0 0 0 1.84.8L10.38 9h3.24l.46 1.4a1 1 0 0 0 1.92-.6l-3-7A1 1 0 0 0 12 2Zm7.66 11.11-2.78-.93a1 1 0 0 0-.64 1.9l1.38.46-1.88 2.64-1.37-.46a1 1 0 1 0-.64 1.9l2.78.92a1 1 0 0 0 1.1-.38l2.5-3.5a1 1 0 0 0-.45-1.55ZM8.1 14.2l-1.38.46-1.88-2.64 1.37-.46a1 1 0 1 0-.64-1.9l-2.78.92a1 1 0 0 0-.45 1.56l2.5 3.5a1 1 0 0 0 1.1.38l2.78-.93a1 1 0 0 0-.64-1.9Z" />
-          </svg>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ aiCalls }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localAiCalls }}</div>
-          <div class="stat-label">{{ t('overview.aiCalls') }}</div>
-        </div>
+      <div class="info-pill">
+        <span class="info-pill-label">{{ t('overview.syncStatus') }}</span>
+        <span class="info-pill-value" :class="{ off: !settingsStore.settings.syncEnabled }">{{ syncDisplay }}</span>
       </div>
     </div>
 
-    <h2 class="section-title">{{ t('overview.readingSection') }}</h2>
-
-    <div class="stats-grid">
-      <!-- Row 1: Plain reads | Translated reads -->
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.47 4.47 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06a9 9 0 0 0 0-17.54z" />
-          </svg>
+    <section v-for="section in statSections" :key="section.title" class="stat-section">
+      <h2 class="section-title">{{ section.title }}</h2>
+      <div class="surface-card stat-panel">
+        <div class="stat-row headline">
+          <div v-for="stat in section.headline" :key="stat.label" class="stat">
+            <div class="stat-label">{{ stat.label }}</div>
+            <div class="stat-value">
+              <span v-for="(part, i) in valueParts(stat.total)" :key="i" :class="{ unit: part.unit }">{{ part.text }}</span>
+            </div>
+            <div v-if="stat.local !== stat.total" class="stat-local">{{ t('overview.thisDevice') }} {{ stat.local }}</div>
+          </div>
         </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ (tts.readCount || 0).toLocaleString() }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ (localTts.readCount || 0).toLocaleString() }}</div>
-          <div class="stat-label">{{ t('overview.plainReadCount') }}</div>
-        </div>
-      </div>
-
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z" />
-          </svg>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ (tts.translateCount || 0).toLocaleString() }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ (localTts.translateCount || 0).toLocaleString() }}</div>
-          <div class="stat-label">{{ t('overview.translateReadCount') }}</div>
+        <div class="stat-row details" :style="{ '--columns': section.details.length }">
+          <div v-for="stat in section.details" :key="stat.label" class="stat">
+            <div class="stat-label">{{ stat.label }}</div>
+            <div class="stat-value">
+              <span v-for="(part, i) in valueParts(stat.total)" :key="i" :class="{ unit: part.unit }">{{ part.text }}</span>
+            </div>
+            <div v-if="stat.local !== stat.total" class="stat-local">{{ t('overview.thisDevice') }} {{ localWithoutSharedUnit(stat.local, stat.total) }}</div>
+          </div>
         </div>
       </div>
-
-      <!-- Row 2: Characters read | Reading time -->
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <span class="glyph">Aa</span>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ readCharacters }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localReadCharacters }}</div>
-          <div class="stat-label">{{ t('overview.readCharacters') }}</div>
-        </div>
-      </div>
-
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13h-1v6l5 3 .5-.84-4.5-2.66Z" />
-          </svg>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ readDuration }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ localReadDuration }}</div>
-          <div class="stat-label">{{ t('overview.readDuration') }}</div>
-        </div>
-      </div>
-
-      <!-- Row 3: AI calls made by reading -->
-      <div class="surface-card stat-card">
-        <div class="stat-icon">
-          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-            <path d="M12 2a1 1 0 0 0-.92.6l-3 7a1 1 0 0 0 1.84.8L10.38 9h3.24l.46 1.4a1 1 0 0 0 1.92-.6l-3-7A1 1 0 0 0 12 2Zm7.66 11.11-2.78-.93a1 1 0 0 0-.64 1.9l1.38.46-1.88 2.64-1.37-.46a1 1 0 1 0-.64 1.9l2.78.92a1 1 0 0 0 1.1-.38l2.5-3.5a1 1 0 0 0-.45-1.55ZM8.1 14.2l-1.38.46-1.88-2.64 1.37-.46a1 1 0 1 0-.64-1.9l-2.78.92a1 1 0 0 0-.45 1.56l2.5 3.5a1 1 0 0 0 1.1.38l2.78-.93a1 1 0 0 0-.64-1.9Z" />
-          </svg>
-        </div>
-        <div class="stat-content">
-          <div class="stat-value">{{ (tts.llmCount || 0).toLocaleString() }}</div>
-          <div class="stat-subvalue">{{ t('overview.thisDevice') }}: {{ (localTts.llmCount || 0).toLocaleString() }}</div>
-          <div class="stat-label">{{ t('overview.readAiCalls') }}</div>
-        </div>
-      </div>
-    </div>
+    </section>
   </div>
 </template>
 
@@ -330,89 +264,99 @@ onMounted(async () => {
 .status-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
 }
 
-.status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border-radius: 20px;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-  font-size: var(--font-sm);
+.overview-page {
+  max-width: 760px;
 }
 
-.pill-label {
-  color: var(--color-text-tertiary);
-}
-
-.pill-value {
-  color: var(--color-text-primary);
-  font-weight: 600;
-}
-
-.pill-off {
-  color: var(--color-text-tertiary);
-}
-
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: var(--spacing-lg);
-}
-
-.stat-card {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-md);
-  padding: var(--spacing-lg) var(--spacing-xl);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-}
-
-.stat-icon {
-  width: 38px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--color-text-secondary);
-  flex-shrink: 0;
-}
-
-.stat-icon svg {
-  width: 22px;
-  height: 22px;
-}
-
-.glyph {
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-.stat-content {
+.stat-section {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
+  container-type: inline-size;
 }
 
-.stat-value {
-  font-size: 22px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
+.stat-section .section-title {
+  padding: 0 2px;
 }
 
-.stat-subvalue {
-  font-size: var(--font-xs);
-  color: var(--color-text-secondary);
+.stat-panel {
+  padding: 0;
+}
+
+.stat-row {
+  display: grid;
+  gap: 16px;
+  padding: 16px 18px;
+}
+
+.stat-row.headline {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.stat-row.details {
+  grid-template-columns: repeat(var(--columns), minmax(0, 1fr));
+  border-top: 1px solid var(--color-divider);
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .stat-label {
+  font-size: var(--font-sm);
+  color: var(--color-text-secondary);
+}
+
+.stat-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.headline .stat-value {
+  margin-top: 2px;
+  font-size: 28px;
+  line-height: 1.2;
+}
+
+.details .stat-value {
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.stat-value .unit {
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  letter-spacing: 0;
+}
+
+.headline .stat-value .unit {
+  font-size: var(--font-lg);
+}
+
+.details .stat-value .unit {
+  font-size: var(--font-sm);
+}
+
+.stat-local {
+  font-size: var(--font-sm);
   color: var(--color-text-tertiary);
-  font-size: var(--font-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Narrow windows: detail stats wrap to two columns. */
+@container (max-width: 520px) {
+  .stat-row.details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

@@ -1,31 +1,54 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { NConfigProvider, darkTheme, NMessageProvider, NDialogProvider, type GlobalThemeOverrides } from 'naive-ui'
 import { listen } from '@tauri-apps/api/event'
 import Sidebar from './components/Sidebar.vue'
-import LanguageSwitcher from './components/LanguageSwitcher.vue'
 import PageErrorBoundary from './components/PageErrorBoundary.vue'
 import type { ResolvedLocale, UiLanguage } from './i18n'
+import { applyUiTheme, isDark } from './theme'
 import { resolveLocale, setLocale } from './i18n'
 import { useSettingsStore } from './stores/settings'
 import { useHistoryStore } from './stores/history'
 import { useSyncStore, type SyncStateResponse } from './stores/sync'
 
 // Naive UI derives hover/alpha shades from these values, so they must be literal colors
-// (not CSS variables). Keep them in sync with --color-accent and --font-* in styles/variables.css.
-const themeOverrides: GlobalThemeOverrides = {
+// (not CSS variables). Keep them in sync with styles/variables.css.
+const sharedCommon: GlobalThemeOverrides['common'] = {
+  fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif",
+  fontFamilyMono: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+  fontSize: '13px',
+  fontSizeSmall: '13px',
+  fontSizeMedium: '13px',
+  borderRadius: '6px',
+}
+
+const darkOverrides: GlobalThemeOverrides = {
   common: {
-    primaryColor: '#3b82f6',
-    primaryColorHover: '#60a5fa',
-    primaryColorPressed: '#2563eb',
-    primaryColorSuppl: '#60a5fa',
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif",
-    fontFamilyMono: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
-    fontSize: '13px',
-    fontSizeSmall: '13px',
-    fontSizeMedium: '13px',
+    ...sharedCommon,
+    primaryColor: '#4f8cff',
+    primaryColorHover: '#6b9fff',
+    primaryColorPressed: '#3b7cf0',
+    primaryColorSuppl: '#6b9fff',
+    bodyColor: '#1b1c1f',
+    cardColor: '#232428',
+    modalColor: '#232428',
+    popoverColor: '#2b2c31',
+    inputColor: 'rgba(255, 255, 255, 0.06)',
   },
 }
+
+const lightOverrides: GlobalThemeOverrides = {
+  common: {
+    ...sharedCommon,
+    primaryColor: '#2563eb',
+    primaryColorHover: '#3b82f6',
+    primaryColorPressed: '#1d4ed8',
+    primaryColorSuppl: '#3b82f6',
+  },
+}
+
+const naiveTheme = computed(() => (isDark.value ? darkTheme : null))
+const themeOverrides = computed(() => (isDark.value ? darkOverrides : lightOverrides))
 import { usePostEditStore } from './stores/postEdit'
 import { getDefaultPrompt, isBuiltInDefaultPrompt } from './utils/llmPrompts'
 
@@ -39,7 +62,6 @@ let unlistenSync: (() => void) | null = null
 let unlistenLocale: (() => void) | null = null
 let historyRefreshTimer: number | null = null
 let historyRefreshQueued = false
-const resolvedLocale = ref<ResolvedLocale>('en-US')
 
 const SYNC_GATED_STATUSES = new Set(['connecting', 'syncing', 'reconnecting'])
 
@@ -78,7 +100,6 @@ function onSyncStatusChanged(nextStatus: string | null) {
 
 async function applyUiLanguage(preference: UiLanguage) {
   const locale = await resolveLocale(preference)
-  resolvedLocale.value = locale
   setLocale(locale)
   syncDefaultPrompts(locale)
 }
@@ -109,7 +130,10 @@ onMounted(async () => {
     syncStore.loadState(),
     postEditStore.load()
   ])
-  await applyUiLanguage(settingsStore.settings.uiLanguage)
+  await Promise.all([
+    applyUiLanguage(settingsStore.settings.uiLanguage),
+    applyUiTheme(settingsStore.settings.uiTheme),
+  ])
   // Online hotword sync disabled — inline hotwords via dictionary are sufficient.
   // settingsStore.startHotwordSyncScheduler()
 
@@ -126,7 +150,6 @@ onMounted(async () => {
   unlistenLocale = await listen<{ locale?: ResolvedLocale }>('ui:locale-changed', (event) => {
     const nextLocale = event.payload?.locale
     if (nextLocale === 'zh-CN' || nextLocale === 'en-US') {
-      resolvedLocale.value = nextLocale
       setLocale(nextLocale)
     }
   })
@@ -139,9 +162,12 @@ watch(
   }
 )
 
-function updateUiLanguage(value: UiLanguage) {
-  settingsStore.updateSetting('uiLanguage', value)
-}
+watch(
+  () => settingsStore.settings.uiTheme,
+  (value) => {
+    applyUiTheme(value)
+  }
+)
 
 onBeforeUnmount(() => {
   if (unlistenHistory) {
@@ -165,24 +191,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <NConfigProvider :theme="darkTheme" :theme-overrides="themeOverrides">
+  <NConfigProvider :theme="naiveTheme" :theme-overrides="themeOverrides">
     <NMessageProvider>
       <NDialogProvider>
         <div class="app-container">
           <Sidebar />
           <main class="main-content">
-            <div class="content-header drag-region">
-              <div class="header-shell">
-                <div class="header-spacer"></div>
-                <div class="header-actions no-drag">
-                  <LanguageSwitcher
-                    :model-value="settingsStore.settings.uiLanguage"
-                    :resolved-locale="resolvedLocale"
-                    @update:model-value="updateUiLanguage"
-                  />
-                </div>
-              </div>
-            </div>
             <div class="content-body">
               <div class="page-shell">
                 <router-view v-slot="{ Component, route }">
@@ -219,65 +233,14 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.content-header {
-  height: 56px;
-  flex-shrink: 0;
-  border-bottom: 1px solid var(--color-divider);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent),
-    rgba(16, 18, 22, 0.72);
-  backdrop-filter: blur(14px);
-}
-
-.header-shell {
-  max-width: 1120px;
-  height: 100%;
-  margin: 0 auto;
-  padding: 0 var(--spacing-xl);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--spacing-lg);
-}
-
-.header-spacer {
-  flex: 1;
-  min-width: 140px;
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-}
-
 .content-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  height: calc(100vh - 56px);
-  padding: 0 var(--spacing-xl) var(--spacing-xl);
+  padding: 36px 32px 32px;
 }
 
 .page-shell {
-  max-width: 1120px;
-  margin: 0 auto;
-  padding: var(--spacing-sm) 0 var(--spacing-2xl);
+  max-width: 1080px;
 }
-
-@media (max-width: 960px) {
-  .content-header {
-    height: 52px;
-  }
-
-  .header-shell {
-    padding: 0 var(--spacing-md);
-  }
-
-  .content-body {
-    height: calc(100vh - 52px);
-    padding: 0 var(--spacing-md) var(--spacing-lg);
-  }
-}
-
-
 </style>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NInput, NAutoComplete, NSwitch, NButton, NSelect, NTabs, NTabPane } from 'naive-ui'
+import { NInput, NAutoComplete, NSwitch, NButton, NSelect, NTabs, NTabPane, NTooltip, useDialog } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ResolvedLocale } from '../i18n'
 import { useSettingsStore, type AppSettings, type CustomLlmEndpoint } from '../stores/settings'
@@ -16,6 +16,8 @@ import {
 } from '../utils/llmOptions'
 import SettingsSection from '../components/settings/SettingsSection.vue'
 import SettingRow from '../components/settings/SettingRow.vue'
+import ProbeStatus from '../components/settings/ProbeStatus.vue'
+import { diffChars } from '../utils/textDiff'
 
 const settingsStore = useSettingsStore()
 const { t, locale } = useI18n()
@@ -294,6 +296,20 @@ function addCustomEndpoint() {
   settingsStore.updateSetting('llmActiveCustomEndpointId', id)
 }
 
+const dialog = useDialog()
+
+function confirmDeleteActiveCustomEndpoint() {
+  const endpoint = activeCustomEndpoint.value
+  if (!endpoint) return
+  dialog.error({
+    title: t('llm.deleteCustomEndpoint'),
+    content: t('llm.deleteCustomEndpointConfirm', { name: endpoint.name }),
+    positiveText: t('common.delete'),
+    negativeText: t('common.cancel'),
+    onPositiveClick: deleteActiveCustomEndpoint,
+  })
+}
+
 function deleteActiveCustomEndpoint() {
   const endpoints = settingsStore.settings.llmCustomEndpoints
   const index = endpoints.findIndex((endpoint) => endpoint.id === activeCustomEndpoint.value?.id)
@@ -427,6 +443,28 @@ async function runLlmProviderProbe() {
     llmProbeLoading.value = false
   }
 }
+
+// Verdict for the label beside the test button: green when the model made the
+// expected correction, amber when it answered without it, red when it failed.
+const probeTone = computed(() => {
+  const result = llmProbeResult.value
+  if (!result || !result.ok) return 'error'
+  return result.expectedMatch ? 'ok' : 'warn'
+})
+
+const probeLabel = computed(() => {
+  const result = llmProbeResult.value
+  if (!result || !result.ok) return t('llm.providerProbeStatusFailed')
+  const verdict = result.expectedMatch ? t('llm.providerProbeStatusOk') : t('llm.providerProbeCorrectionUnchecked')
+  return result.responseTimeMs !== null ? `${verdict} · ${result.responseTimeMs} ms` : verdict
+})
+
+const probeErrorMessage = computed(() => llmProbeError.value || llmProbeResult.value?.errorMessage || '')
+
+const probeDiff = computed(() => {
+  const result = llmProbeResult.value
+  return result?.responseText ? diffChars(result.requestText, result.responseText) : null
+})
 </script>
 
 <template>
@@ -448,8 +486,55 @@ async function runLlmProviderProbe() {
     </SettingsSection>
 
     <SettingsSection :title="t('llm.provider')" :help="t('llm.aiCorrectionSub')">
+      <template #extra>
+        <ProbeStatus v-if="(llmProbeResult || llmProbeError) && !llmProbeLoading" :tone="probeTone" :label="probeLabel">
+          <template v-if="llmProbeResult?.requestText" #default>
+            <div class="probe-detail-label">{{ t('llm.providerProbeInput') }}</div>
+            <div class="probe-detail-text">
+              <template v-if="probeDiff">
+                <component :is="part.changed ? 'del' : 'span'" v-for="(part, i) in probeDiff.before" :key="i">{{ part.text }}</component>
+              </template>
+              <template v-else>{{ llmProbeResult.requestText }}</template>
+            </div>
+            <div class="probe-detail-label">{{ t('llm.providerProbeOutput') }}</div>
+            <div class="probe-detail-text">
+              <template v-if="probeDiff">
+                <component :is="part.changed ? 'ins' : 'span'" v-for="(part, i) in probeDiff.after" :key="i">{{ part.text }}</component>
+              </template>
+              <template v-else>{{ t('llm.providerProbeOutputEmpty') }}</template>
+            </div>
+          </template>
+        </ProbeStatus>
+        <NTooltip :delay="400" style="max-width: 280px">
+          <template #trigger>
+            <NButton :loading="llmProbeLoading" size="small" secondary type="primary" @click="runLlmProviderProbe">
+              {{ t('llm.providerProbeAction') }}
+            </NButton>
+          </template>
+          {{ t('llm.providerProbeNote') }}
+        </NTooltip>
+      </template>
+
+      <div v-if="probeErrorMessage && !llmProbeLoading" class="settings-callout is-error">
+        {{ probeErrorMessage }}
+      </div>
+
       <SettingRow :label="t('llm.provider')">
-        <NSelect v-model:value="selectedProviderKey" :options="providerOptions" />
+        <div class="control-group">
+          <NSelect v-model:value="selectedProviderKey" :options="providerOptions" />
+          <NTooltip v-if="isCustom && activeCustomEndpoint" :delay="400">
+            <template #trigger>
+              <NButton quaternary size="small" class="icon-button delete-endpoint" :aria-label="t('llm.deleteCustomEndpoint')" @click="confirmDeleteActiveCustomEndpoint">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                    <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" />
+                  </svg>
+                </template>
+              </NButton>
+            </template>
+            {{ t('llm.deleteCustomEndpoint') }}
+          </NTooltip>
+        </div>
       </SettingRow>
 
       <!-- Volcengine Settings -->
@@ -679,61 +764,10 @@ async function runLlmProviderProbe() {
             class="mono"
           />
         </SettingRow>
-        <SettingRow :label="t('llm.deleteCustomEndpoint')" :help="t('llm.deleteCustomEndpointSub')">
-          <NButton type="error" secondary size="small" @click="deleteActiveCustomEndpoint">
-            {{ t('llm.deleteCustomEndpoint') }}
-          </NButton>
-        </SettingRow>
         </template>
       </template>
 
-    </SettingsSection>
 
-    <SettingsSection :title="t('llm.providerProbe')">
-      <SettingRow :label="t('llm.providerProbeButton')" :help="t('llm.providerProbeNote')">
-        <NButton
-          :loading="llmProbeLoading"
-          type="primary"
-          secondary
-          size="small"
-          @click="runLlmProviderProbe"
-        >
-          {{ t('llm.providerProbeRun') }}
-        </NButton>
-      </SettingRow>
-
-      <div v-if="llmProbeResult" class="probe-result" :class="{ ok: llmProbeResult.ok, error: !llmProbeResult.ok }">
-        <div class="probe-line">
-          <span>{{ t('llm.providerProbeProvider') }}</span>
-          <strong>{{ llmProbeResult.provider }}</strong>
-        </div>
-        <div class="probe-line">
-          <span>{{ t('llm.providerProbeStatus') }}</span>
-          <strong>{{ llmProbeResult.ok ? t('llm.providerProbeStatusOk') : t('llm.providerProbeStatusFailed') }}</strong>
-        </div>
-        <div v-if="llmProbeResult.responseTimeMs !== null" class="probe-line">
-          <span>{{ t('llm.providerProbeLatency') }}</span>
-          <strong>{{ llmProbeResult.responseTimeMs }} ms</strong>
-        </div>
-        <div v-if="llmProbeResult.ok" class="probe-line">
-          <span>{{ t('llm.providerProbeCorrectionCheck') }}</span>
-          <strong>{{ llmProbeResult.expectedMatch ? t('llm.providerProbeCorrectionOk') : t('llm.providerProbeCorrectionUnchecked') }}</strong>
-        </div>
-        <div class="probe-result-label">{{ t('llm.providerProbeInput') }}</div>
-        <div class="probe-message">{{ llmProbeResult.requestText }}</div>
-        <div class="probe-result-label">{{ t('llm.providerProbeOutput') }}</div>
-        <div class="probe-message">
-          {{ llmProbeResult.responseText || t('llm.providerProbeOutputEmpty') }}
-        </div>
-      </div>
-
-      <div v-if="llmProbeResult?.errorMessage" class="settings-callout is-error">
-        {{ llmProbeResult.errorMessage }}
-      </div>
-
-      <div v-if="llmProbeError" class="settings-callout is-error">
-        {{ llmProbeError }}
-      </div>
     </SettingsSection>
 
     <SettingsSection :title="t('llm.prompts')" :help="t('llm.promptHint')">

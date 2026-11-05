@@ -191,7 +191,6 @@ onBeforeUnmount(cancelTranslation)
 .text-body,
 .translation-error {
   padding: var(--spacing-md);
-  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-bg-tertiary);
   white-space: pre-wrap;

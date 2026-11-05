@@ -8,7 +8,7 @@ defineProps<{
 </script>
 
 <template>
-  <section class="surface-card settings-section">
+  <section class="settings-section">
     <header class="section-head">
       <h2 class="section-title section-name">
         <span>{{ title }}</span>
@@ -18,7 +18,7 @@ defineProps<{
         <slot name="extra" />
       </div>
     </header>
-    <div class="section-body">
+    <div class="surface-card section-body">
       <slot />
     </div>
   </section>
@@ -26,7 +26,6 @@ defineProps<{
 
 <style scoped>
 .settings-section {
-  padding: var(--spacing-lg) var(--spacing-xl) 6px;
   container-type: inline-size;
 }
 
@@ -36,7 +35,8 @@ defineProps<{
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--spacing-sm) var(--spacing-lg);
-  padding-bottom: 6px;
+  min-height: 28px;
+  padding: 0 2px 6px;
 }
 
 .section-name {
@@ -49,5 +49,10 @@ defineProps<{
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
+}
+
+.section-body {
+  padding-top: 0;
+  padding-bottom: 0;
 }
 </style>

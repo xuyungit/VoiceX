@@ -1288,7 +1288,6 @@ onBeforeUnmount(() => {
   padding: 12px 14px;
   border-radius: var(--radius-md);
   background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
   font-family: var(--font-mono);
   font-size: var(--font-xs);
   line-height: 1.55;

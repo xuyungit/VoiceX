@@ -36,5 +36,5 @@ function updateValue(value: string) {
 .model-select { flex: 1 1 auto; min-width: 0; width: 100%; }
 .model-note, .model-warning { margin-top: 6px; font-size: 12px; line-height: 1.5; }
 .model-note { color: var(--color-text-secondary); }
-.model-warning { color: #e88080; }
+.model-warning { color: var(--color-error); }
 </style>

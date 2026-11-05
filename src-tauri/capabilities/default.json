@@ -8,6 +8,7 @@
   ],
   "permissions": [
     "core:default",
+    "core:window:allow-set-theme",
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-emit",

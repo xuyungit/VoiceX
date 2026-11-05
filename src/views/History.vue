@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NButton, NTabs, NTabPane, NSpin, NEmpty, NSelect, NModal, NDropdown, NTooltip, useDialog, useMessage, type DropdownOption } from 'naive-ui'
+import { NButton, NTabs, NTabPane, NSpin, NEmpty, NSelect, NModal, NDropdown, NTooltip, NPopover, useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useHistoryStore, finalText, type HistoryRecord } from '../stores/history'
 import { usePostEditStore } from '../stores/postEdit'
@@ -47,6 +47,15 @@ const audioRetention = computed({
   get: () => settingsStore.settings.audioRetentionDays,
   set: (v: number) => settingsStore.updateSetting('audioRetentionDays', v)
 })
+
+function retentionLabel(days: number) {
+  return retentionOptions.value.find(option => option.value === days)?.label ?? t('common.days', { count: days })
+}
+
+const retentionSummary = computed(() => t('history.retentionSummary', {
+  text: retentionLabel(textRetention.value),
+  audio: retentionLabel(audioRetention.value),
+}))
 
 const groupedRecords = computed(() => {
   const buckets: { label: string; records: HistoryRecord[] }[] = []
@@ -464,23 +473,32 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
 <template>
   <div class="page history-page">
-    <div class="page-header">
+    <div class="page-header history-header">
       <h1 class="page-title">{{ t('history.title') }}</h1>
-    </div>
-
-    <NTabs v-model:value="activeTab" type="line" animated class="history-tabs" :class="{ single: !postEditStore.enabled }">
-      <NTabPane name="dictations" :tab="t('postEdit.allDictations')">
-    <div class="surface-card retention-card">
-      <div class="retention-title section-title">{{ t('history.retentionPolicy') }}</div>
-      <div class="retention-fields">
-        <div class="retention-field">
-          <span class="retention-label">{{ t('history.text') }}</span>
-          <NSelect v-model:value="textRetention" :options="retentionOptions" size="small" class="retention-select" :aria-label="t('history.text')" />
-        </div>
-        <div class="retention-field">
-          <span class="retention-label">{{ t('history.audio') }}</span>
-          <NSelect v-model:value="audioRetention" :options="retentionOptions" size="small" class="retention-select" :aria-label="t('history.audio')" />
-        </div>
+      <div class="header-tools">
+        <NPopover trigger="click" placement="bottom-end" :show-arrow="false">
+          <template #trigger>
+            <NButton quaternary size="small" class="retention-button">
+              <template #icon>
+                <svg viewBox="0 0 24 24" fill="currentColor" width="15" height="15">
+                  <path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z" />
+                </svg>
+              </template>
+              {{ retentionSummary }}
+            </NButton>
+          </template>
+          <div class="retention-popover">
+            <div class="retention-popover-title">{{ t('history.retentionPolicy') }}</div>
+            <label class="retention-field">
+              <span class="retention-label">{{ t('history.text') }}</span>
+              <NSelect v-model:value="textRetention" :options="retentionOptions" size="small" class="retention-select" :aria-label="t('history.text')" />
+            </label>
+            <label class="retention-field">
+              <span class="retention-label">{{ t('history.audio') }}</span>
+              <NSelect v-model:value="audioRetention" :options="retentionOptions" size="small" class="retention-select" :aria-label="t('history.audio')" />
+            </label>
+          </div>
+        </NPopover>
         <NTooltip>
           <template #trigger>
             <NButton quaternary size="small" class="open-folder" :aria-label="t('history.openRecordingsFolder')" @click="openRecordingsFolder">
@@ -496,6 +514,8 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
       </div>
     </div>
 
+    <NTabs v-model:value="activeTab" type="line" class="history-tabs" :class="{ single: !postEditStore.enabled }">
+      <NTabPane name="dictations" :tab="t('postEdit.allDictations')">
     <div v-if="historyStore.isLoading && historyStore.records.length === 0" class="loading-container">
       <NSpin size="medium" />
     </div>
@@ -504,10 +524,10 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
       <NEmpty :description="t('history.empty')" />
     </div>
 
-    <div v-else class="surface-card list-wrapper">
+    <div v-else class="list-wrapper">
       <template v-for="group in groupedRecords" :key="group.label">
+        <div class="date-group">
         <div class="date-header">{{ group.label }}</div>
-        <div class="list-card">
           <div
             v-for="record in group.records"
             :key="record.id"
@@ -541,7 +561,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                 </span>
               </div>
               <div class="list-actions">
-                <span class="list-meta duration-chip">{{ formatDuration(record.durationMs) }}</span>
+                <span class="duration">{{ formatDuration(record.durationMs) }}</span>
                 <span v-if="playingId === record.id" class="pill accent">{{ t('history.playing') }}</span>
                 <div class="action-toolbar">
                   <NButton quaternary size="small" class="toolbar-button" aria-label="复制" @click="() => handleCopy(record)">
@@ -551,7 +571,6 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                       </svg>
                     </template>
                   </NButton>
-                  <div class="toolbar-divider" aria-hidden="true" />
                   <NButton
                     quaternary
                     size="small"
@@ -567,12 +586,10 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                       </svg>
                     </template>
                   </NButton>
-                  <div class="toolbar-divider" aria-hidden="true" />
                   <NButton
                     quaternary
                     size="small"
-                    type="error"
-                    class="toolbar-button"
+                    class="toolbar-button danger"
                     aria-label="删除"
                     @click="() => confirmDelete(record)"
                   >
@@ -582,7 +599,6 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                       </svg>
                     </template>
                   </NButton>
-                  <div class="toolbar-divider" aria-hidden="true" />
                   <NDropdown
                     trigger="click"
                     placement="bottom-end"
@@ -765,53 +781,57 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 </template>
 
 <style scoped>
-.history-tabs { min-width: 0; }
-.history-tabs :deep(.n-tab-pane) { padding-top: 18px; }
-/* Only the dictation list is left when edit tracking is off: no tab bar. */
-.history-tabs.single :deep(.n-tabs-nav) { display: none; }
-.history-tabs.single :deep(.n-tab-pane) { padding-top: 0; }
-.retention-card {
-  display: flex;
-  flex-wrap: wrap;
+.history-header {
+  flex-direction: row;
   align-items: center;
   justify-content: space-between;
-  gap: var(--spacing-sm) var(--spacing-xl);
-  margin-bottom: 20px;
-  padding: var(--spacing-md) var(--spacing-lg);
+  gap: var(--spacing-md);
 }
 
-.retention-title {
-  white-space: nowrap;
-}
-
-.retention-fields {
+.header-tools {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
-  gap: var(--spacing-sm) var(--spacing-lg);
+  gap: 2px;
+  min-width: 0;
+}
+
+.retention-button {
+  color: var(--color-text-secondary);
+}
+
+.retention-popover {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: 4px 2px;
+}
+
+.retention-popover-title {
+  font-weight: 600;
+  margin-bottom: 2px;
 }
 
 .retention-field {
   display: flex;
   align-items: center;
-  gap: var(--spacing-sm);
+  justify-content: space-between;
+  gap: var(--spacing-lg);
 }
 
-/* Matches the dropdown's value text so the two read as one line. */
 .retention-label {
-  font-size: 14px;
   color: var(--color-text-secondary);
   white-space: nowrap;
 }
 
 .retention-select {
-  width: 112px;
+  width: 120px;
 }
 
-.open-folder {
-  min-width: 32px;
-}
+.history-tabs { min-width: 0; }
+.history-tabs :deep(.n-tab-pane) { padding-top: 8px; }
+/* Only the dictation list is left when edit tracking is off: no tab bar. */
+.history-tabs.single :deep(.n-tabs-nav) { display: none; }
+.history-tabs.single :deep(.n-tab-pane) { padding-top: 0; }
 
 .loading-container,
 .empty-container {
@@ -821,42 +841,49 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   padding: var(--spacing-2xl);
 }
 
+/* A plain list: no panels, records separated by a hairline. */
 .list-wrapper {
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-lg);
+  gap: var(--spacing-md);
+  margin: 0 -10px;
 }
 
 .date-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 10px 4px;
   font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--color-text-secondary);
-}
-
-.list-card {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  background: var(--color-bg-tertiary);
-}
-
-.device-meta {
-  font-size: var(--font-xs);
   color: var(--color-text-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  background: var(--color-bg-primary);
 }
 
 .list-row {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-sm);
-  align-items: stretch;
+  gap: 4px;
+  padding: 10px 10px 12px;
+  border-radius: var(--radius-md);
 }
 
-.list-row:nth-child(odd) {
-  background: rgba(255, 255, 255, 0.01);
+.list-row + .list-row::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 10px;
+  right: 10px;
+  border-top: 1px solid var(--color-divider);
+}
+
+.list-row:hover {
+  background: var(--color-bg-hover);
+}
+
+.list-row:hover::before,
+.list-row:hover + .list-row::before {
+  border-color: transparent;
 }
 
 .row-header {
@@ -865,20 +892,30 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   justify-content: space-between;
   gap: var(--spacing-md);
   width: 100%;
+  min-height: 26px;
 }
 
 .row-meta {
   display: flex;
   align-items: center;
-  gap: var(--spacing-sm);
+  gap: 10px;
   min-width: 0;
   flex: 1;
   flex-wrap: wrap;
+  font-size: var(--font-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 .row-time {
   color: var(--color-text-secondary);
   white-space: nowrap;
+}
+
+.device-meta {
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .row-tag {
@@ -887,7 +924,10 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
 .list-text {
   min-width: 0;
+  font-size: var(--font-lg);
+  line-height: 1.65;
   overflow-wrap: anywhere;
+  user-select: text;
 }
 
 .list-text.failed {
@@ -896,7 +936,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
 .failure-note {
   font-size: var(--font-sm);
-  color: color-mix(in srgb, var(--color-error) 62%, var(--color-text-primary));
+  color: var(--color-error);
   overflow-wrap: anywhere;
 }
 
@@ -909,45 +949,44 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   margin-left: auto;
 }
 
+.duration {
+  font-size: var(--font-sm);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Actions stay out of the way until the row is hovered or focused. */
 .action-toolbar {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  padding: 4px;
-  border-radius: calc(var(--radius-lg) + 2px);
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-secondary);
-  box-shadow: var(--shadow-sm);
+  gap: 0;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.list-row:hover .action-toolbar,
+.list-row:focus-within .action-toolbar {
+  opacity: 1;
 }
 
 .toolbar-button {
-  min-width: 32px;
+  width: 28px;
+  padding: 0;
+  color: var(--color-text-secondary);
 }
 
-.toolbar-divider {
-  width: 1px;
-  height: 18px;
-  background: var(--color-divider);
-}
-
-.duration-chip {
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-secondary);
-}
-
-.mode-tag {
-  border: 1px solid var(--color-border);
+.toolbar-button.danger:hover {
+  color: var(--color-error);
 }
 
 .mode-tag.translate {
-  border-color: rgba(134, 239, 172, 0.5);
-  color: rgba(134, 239, 172, 0.95);
+  background: var(--color-accent-light);
+  color: var(--color-accent);
 }
 
 .failed-tag {
-  border-color: color-mix(in srgb, var(--color-error) 35%, transparent);
-  color: color-mix(in srgb, var(--color-error) 62%, var(--color-text-primary));
+  background: color-mix(in srgb, var(--color-error) 14%, transparent);
+  color: var(--color-error);
 }
 
 .load-error {
@@ -970,11 +1009,8 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   flex-direction: column;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0.008)),
-    var(--color-bg-tertiary);
+  background: var(--color-bg-tertiary);
 }
 
 .detail-summary-row {
@@ -986,7 +1022,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
 .detail-summary-models {
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid var(--color-divider);
 }
 
 .detail-item {
@@ -1038,12 +1074,11 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 }
 
 .no-correction-tag {
-  border-color: rgba(163, 230, 53, 0.35);
-  color: #a3e635;
+  background: color-mix(in srgb, var(--color-success) 14%, transparent);
+  color: var(--color-success);
 }
 
 .detail-body {
-  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: var(--spacing-md);
   background: var(--color-bg-tertiary);
@@ -1057,7 +1092,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 }
 
 .failed-detail {
-  color: #fda4af;
+  color: var(--color-error);
 }
 
 @media (max-width: 640px) {
