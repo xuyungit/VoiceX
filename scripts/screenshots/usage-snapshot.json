@@ -1,0 +1,36 @@
+{
+  "capturedOn": "2026-11-05",
+  "total": {
+    "totalDurationMs": 371118102,
+    "totalCharacters": 1245688,
+    "llmCorrectionCount": 15339,
+    "totalRecordingCount": 18118,
+    "tts": {
+      "readCount": 922,
+      "translateCount": 212,
+      "characters": 1154462,
+      "durationMs": 179263681,
+      "llmCount": 1123
+    }
+  },
+  "local": {
+    "totalDurationMs": 277776639,
+    "totalCharacters": 900459,
+    "llmCorrectionCount": 11097,
+    "totalRecordingCount": 11598,
+    "tts": {
+      "readCount": 915,
+      "translateCount": 212,
+      "characters": 1153206,
+      "durationMs": 179164807,
+      "llmCount": 1122
+    }
+  },
+  "settings": {
+    "asrProviderType": "gemini",
+    "llmProviderType": "custom",
+    "enableLlmCorrection": 1,
+    "syncEnabled": 1,
+    "hotkeyConfig": "60|0|0"
+  }
+}

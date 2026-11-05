@@ -3,26 +3,37 @@
 English | [中文](./README.md)
 
 <p align="center">
-  <img src="assets/screenshots/en/main-window.png" alt="VoiceX Main Window" width="720" />
+  <img src="assets/screenshots/en/main-window.png" alt="VoiceX light Overview with real dictation and reading statistics" width="880" />
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/en/hud-window.png" alt="VoiceX HUD Window" width="480" />
+  <img src="assets/screenshots/en/hud-window.png" alt="VoiceX live dictation HUD with demo text" width="256" />
 </p>
 
 VoiceX is a cross-platform voice workspace for your desktop: dictate, translate, and listen in any app. The dictation pipeline is: record audio, provide real-time feedback, recognize speech, optionally correct or translate the result, inject text into the active application, and save or sync the history. In the other direction, it reads selected text aloud, optionally translating it first. The dictation workflow is similar to other modern voice input tools, but VoiceX still makes its own product choices and trade-offs.
 
+Screenshots were refreshed on 2026-11-05 and captured from the current frontend. Overview shows real cumulative usage statistics; history text, device names, and other settings use demo data, with no personal dictations or API keys.
+
 ## Highlights
 
 - **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
+- **Light and dark themes, compact settings** — choose light, dark, or system appearance. The sidebar groups navigation, settings use compact rows with inline help, and connection test results appear beside the action.
 - **Multiple ASR backends** — switch between fourteen cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
 - **Read and translate-and-read** — select text in any application and one hotkey reads it aloud; another has an LLM translate it first and reads the translation. The HUD captions each sentence, and the clipboard is read when nothing is selected. Uses the system voice (macOS only) or any of the cloud TTS providers, on macOS and Windows.
 - **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
 - **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status, and on macOS it follows the active Space when triggered from another desktop.
 - **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
 - **Smart text injection** — recognized text is pasted into the active app via clipboard (with automatic backup/restore) or simulated typing, with per-app overrides for apps that need a different injection strategy.
-- **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with audio playback, re-transcription, and replay injection testing; the Overview counts reading alongside dictation.
+- **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with inline editing of the final text, audio playback, re-transcription, and replay injection testing; the Overview counts reading alongside dictation.
 - **Cross-device sync** — a self-hosted sync server keeps history in sync across your machines.
+
+## Interface Preview
+
+Switch language and appearance at the bottom of the sidebar. History groups dictations by date, with copy, edit, and delete buttons appearing on hover or keyboard focus and additional actions in a menu.
+
+<p align="center">
+  <img src="assets/screenshots/en/history-dark.png" alt="VoiceX dark History with demo dictations grouped by date" width="880" />
+</p>
 
 ## Interaction Modes
 
@@ -35,6 +46,10 @@ VoiceX maps three distinct intents to a single configurable hotkey:
 | **Double-tap** | Translate | Like hands-free, but the result is translated to English via LLM (opt-in). |
 
 Hold threshold and double-tap window are configurable. Press **Escape** at any time to cancel and discard.
+
+<p align="center">
+  <img src="assets/screenshots/en/input-settings.png" alt="VoiceX Input settings with hotkeys, gesture timing, and microphone options" width="880" />
+</p>
 
 **Mute while recording** (optional, off by default): enabled under Input → Microphone, it mutes the default system output while dictation records and restores it afterwards. Only the mute switch changes — volume is untouched and players keep playing — so music no longer leaks into the microphone. A device that was already muted is never touched, one you unmute mid-recording stays unmuted, and an output device selected mid-recording is muted too and restored at the end. Devices still waiting to be restored are recorded on this machine (never synced) and restored when they reconnect or on the next launch. Output devices that cannot be muted by software (HDMI and multi-output devices on macOS) are flagged on the settings page. The Windows side has not yet been tried on a real machine.
 
@@ -65,7 +80,7 @@ from the tray menu. Tray reading on Windows still needs testing on a real machin
 > be read unless VoiceX runs elevated too.
 
 <p align="center">
-  <img src="assets/screenshots/en/reading-settings.png" alt="VoiceX Reading settings" width="720" />
+  <img src="assets/screenshots/en/reading-settings.png" alt="VoiceX Reading settings with hotkeys, speech engine, and voice selection" width="880" />
 </p>
 
 | | Detail |
@@ -137,6 +152,12 @@ working in places we cannot reach such as the login window.
   target application and error codes, never the text itself.
 
 ## ASR Backends
+
+Choose a provider and model and adjust recognition parameters on the ASR page. Providers share a compact settings layout, with parameter descriptions available through the adjacent help icons.
+
+<p align="center">
+  <img src="assets/screenshots/en/asr-settings.png" alt="VoiceX ASR settings with a demo Soniox configuration and inline help" width="880" />
+</p>
 
 | Provider | Type | Notes |
 |---|---|---|
@@ -249,6 +270,7 @@ Features:
 ## History & Statistics
 
 - Full history grouped by date, with per-record audio playback, copy, and detail view.
+- Edit the final text directly in an entry. Changed entries carry an “Edited” badge, and the previous output remains available in the detail view.
 - Side-by-side comparison of original ASR output vs. LLM-corrected text.
 - Translate an entry's final text into English, compare it with the source, and copy the result without creating a new history entry.
 - Re-transcribe any saved recording with a different ASR backend and optional LLM correction to compare providers on the same audio; replay the final text into the current app to test the full end-to-end flow.
@@ -262,6 +284,7 @@ Features:
 
 - Full `zh-CN` and `en-US` coverage across the main UI, HUD overlay, tray menu, and default prompt templates.
 - System / Chinese / English interface switcher, with automatic OS locale fallback when `system` is selected.
+- Light, dark, and system appearance options at the bottom of the sidebar.
 - Localized history, settings, diagnostics, and provider descriptions, so the bilingual experience is consistent end to end.
 
 ## Cross-Device Sync
