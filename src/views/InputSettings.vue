@@ -8,7 +8,6 @@ import { useSettingsStore, type AppSettings } from '../stores/settings'
 import { usePostEditStore } from '../stores/postEdit'
 import { formatHotkey } from '../utils/hotkey'
 import type { OutputMuteStatus } from '../utils/outputMute'
-import PostEditModeSelect from '../components/PostEditModeSelect.vue'
 import type { PostEditTestSnapshot } from '../types/postEdit'
 import {
   exceedsRecordingHardLimit,
@@ -45,6 +44,12 @@ const postEditTest = ref<PostEditTestSnapshot | null>(null)
 const postEditTestError = ref<string | null>(null)
 let postEditTestTimer: ReturnType<typeof setInterval> | null = null
 let postEditTestRequest = 0
+// Observation internals help when adapting apps; users only see the switch.
+const showPostEditDiagnostics = import.meta.env.DEV
+const postEditEnabled = computed({
+  get: () => postEditStore.enabled,
+  set: (value: boolean) => { void postEditStore.setEnabled(value) }
+})
 
 async function refreshPostEditTest() {
   const request = ++postEditTestRequest
@@ -59,7 +64,7 @@ async function refreshPostEditTest() {
   }
 }
 
-watch(() => postEditStore.settings?.mode, () => { void refreshPostEditTest() })
+watch(() => postEditStore.settings?.mode, () => { if (showPostEditDiagnostics) void refreshPostEditTest() })
 
 const loadingRecentTargetApps = ref(false)
 let unlistenRecentTargetApps: UnlistenFn | null = null
@@ -487,10 +492,13 @@ function getAppBadgeLabel(appName: string) {
 }
 
 onMounted(async () => {
-  void refreshPostEditTest()
-  postEditTestTimer = setInterval(() => {
-    if (postEditStore.settings?.mode !== 'off' && !document.hidden) void refreshPostEditTest()
-  }, 1000)
+  void postEditStore.load()
+  if (showPostEditDiagnostics) {
+    void refreshPostEditTest()
+    postEditTestTimer = setInterval(() => {
+      if (postEditStore.enabled && !document.hidden) void refreshPostEditTest()
+    }, 1000)
+  }
   const unlistenMute = await listen<OutputMuteStatus>('audio:output-mute-status', event => {
     if (event.payload.revision < (outputMuteStatus.value?.revision ?? 0)) return
     outputMuteStatus.value = event.payload
@@ -678,9 +686,10 @@ onBeforeUnmount(() => {
       <div class="field-list">
         <div class="field-row">
           <div class="field-text">
-            <div class="field-label">{{ t('input.postEditTestTitle') }}</div>
-            <div class="field-note">{{ t('input.postEditTestPrivacy') }}</div>
-            <div class="field-note">{{ t('input.postEditTestLimit') }}</div>
+            <div class="field-label">{{ t('input.postEditSwitch') }}</div>
+            <div class="field-note">{{ t('input.postEditSwitchNote') }}</div>
+            <div v-if="postEditStore.error" class="field-note limit-hint">{{ postEditStore.error }}</div>
+            <template v-if="showPostEditDiagnostics">
             <div v-if="postEditTest?.enabled" class="field-note">
               {{ t(`input.postEditStatus.${postEditTest.status}`) }}
               <template v-if="postEditTest.reason !== 'none'"> · {{ t(`input.postEditReason.${postEditTest.reason}`) }}</template>
@@ -697,8 +706,9 @@ onBeforeUnmount(() => {
               }) }}
             </div>
             <div v-if="postEditTestError" class="field-note limit-hint">{{ t('input.postEditError', { message: postEditTestError }) }}</div>
+            </template>
           </div>
-          <PostEditModeSelect />
+          <NSwitch v-model:value="postEditEnabled" :loading="postEditStore.saving" :disabled="!postEditStore.settings" />
         </div>
         <div class="field-row">
           <div class="field-text">

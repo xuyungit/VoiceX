@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { invoke } from '@tauri-apps/api/core'
 import type { PostEditMode, PostEditSettings } from '../types/postEdit'
@@ -37,5 +37,8 @@ export const usePostEditStore = defineStore('post-edit', () => {
     }
   }
 
-  return { settings, saving, error, load, setMode }
+  const enabled = computed(() => settings.value?.mode === 'records')
+  const setEnabled = (value: boolean) => setMode(value ? 'records' : 'off')
+
+  return { settings, saving, error, enabled, load, setMode, setEnabled }
 })

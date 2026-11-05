@@ -10,7 +10,7 @@ pub fn get_post_edit_test_status() -> Result<(), String> {
     Err("unsupported platform".into())
 }
 
-use crate::post_edit::records::{self, Mode, RecordPage, Settings};
+use crate::post_edit::records::{self, FinalText, Mode, RecordPage, Settings};
 
 #[tauri::command]
 pub fn get_post_edit_settings() -> Settings {
@@ -32,7 +32,9 @@ pub fn delete_post_edit_record(id: String, record_id: Option<String>) -> Result<
     records::delete_record(&id, record_id.as_deref()).map_err(|e| e.to_string())
 }
 
+
+/// Sets a dictation's final text; used by both history views.
 #[tauri::command]
-pub fn clear_post_edit_records() -> Result<(), String> {
-    records::clear().map_err(|e| e.to_string())
+pub fn set_history_final_text(record_id: String, text: String) -> Result<FinalText, String> {
+    records::set_final_text(&record_id, &text).map_err(|e| e.to_string())
 }

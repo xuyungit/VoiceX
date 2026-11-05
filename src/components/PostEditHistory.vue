@@ -4,11 +4,12 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { NButton, NEmpty, NSpin, useDialog, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import { usePostEditStore } from '../stores/postEdit'
+import { useHistoryStore } from '../stores/history'
 import type { PostEditRecord, PostEditRecordPage } from '../types/postEdit'
-import PostEditModeSelect from './PostEditModeSelect.vue'
+import InlineTextEditor from './InlineTextEditor.vue'
+import LoadMoreSentinel from './LoadMoreSentinel.vue'
 
-const store = usePostEditStore()
+const historyStore = useHistoryStore()
 const { t, locale } = useI18n()
 const dialog = useDialog()
 const message = useMessage()
@@ -19,6 +20,8 @@ const saveError = ref<string | null>(null)
 const hasMore = ref(false)
 const expanded = ref(new Set<string>())
 const busy = ref(false)
+const editingId = ref<string | null>(null)
+const savingEdit = ref(false)
 const pageSize = 20
 let disposed = false
 let request = 0
@@ -90,16 +93,27 @@ function isLong(record: PostEditRecord) {
     || record.originalText.split('\n').length > 4 || record.editedText.split('\n').length > 4
 }
 
-function remove(record?: PostEditRecord) {
+async function saveEdit(record: PostEditRecord, text: string) {
+  savingEdit.value = true
+  try {
+    await historyStore.setFinalText(record.recordId, text)
+    editingId.value = null
+  } catch (e) {
+    message.error(t('postEdit.saveFailed', { reason: String(e) }))
+  } finally {
+    savingEdit.value = false
+  }
+}
+
+function remove(record: PostEditRecord) {
   dialog.warning({
-    title: t(record ? 'postEdit.deleteTitle' : 'postEdit.clearTitle'),
-    content: t(record ? 'postEdit.deleteHint' : 'postEdit.clearHint'),
+    title: t('postEdit.deleteTitle'),
+    content: t('postEdit.deleteHint'),
     positiveText: t('common.delete'), negativeText: t('postEdit.cancel'),
     onPositiveClick: async () => {
       busy.value = true
       try {
-        if (record) await invoke('delete_post_edit_record', { id: record.id, recordId: record.recordId })
-        else await invoke('clear_post_edit_records')
+        await invoke('delete_post_edit_record', { id: record.id, recordId: record.recordId })
         await load()
       } catch (e) { message.error(String(e)) }
       finally { busy.value = false }
@@ -110,7 +124,7 @@ function remove(record?: PostEditRecord) {
 onMounted(async () => {
   // Subscribe first so a record completed while loading is not missed.
   try {
-    const stop = await listen('post-edit:updated', () => { void load(); void store.load() })
+    const stop = await listen('post-edit:updated', () => { void load() })
     if (disposed) { stop(); return }
     unlisten = stop
   } catch (e) { message.error(String(e)) }
@@ -121,18 +135,6 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
 
 <template>
   <section class="post-edit-history" :aria-label="t('postEdit.tab')">
-    <div class="records-toolbar">
-      <div class="records-intro">
-        <h2>{{ t('postEdit.heading') }}</h2>
-        <p>{{ t('postEdit.privacy') }}</p>
-      </div>
-      <PostEditModeSelect />
-    </div>
-    <div class="records-caption">
-      <span>{{ t('postEdit.scope') }}</span>
-      <NButton v-if="records.length" quaternary size="small" :disabled="busy" @click="remove()">{{ t('postEdit.clear') }}</NButton>
-    </div>
-
     <div v-if="error" class="records-error" role="alert">
       <span>{{ t('postEdit.loadError') }} {{ error }}</span>
       <NButton size="small" @click="load()">{{ t('postEdit.retry') }}</NButton>
@@ -141,12 +143,7 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
     <div v-if="loading && !records.length" class="records-empty"><NSpin /></div>
     <div v-else-if="!records.length && !error" class="records-empty">
       <NEmpty :description="t('postEdit.empty')">
-        <template #extra>
-          <p class="empty-hint">{{ t(store.settings?.mode === 'records' ? 'postEdit.emptyEnabled' : 'postEdit.emptyDisabled') }}</p>
-          <NButton v-if="store.settings && store.settings.mode !== 'records'" type="primary" :loading="store.saving" @click="store.setMode('records')">
-            {{ t('postEdit.enable') }}
-          </NButton>
-        </template>
+        <template #extra><p class="empty-hint">{{ t('postEdit.emptyHint') }}</p></template>
       </NEmpty>
     </div>
 
@@ -156,72 +153,70 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
         <header class="record-meta">
           <div class="meta-main">
             <time :datetime="record.timestamp">{{ time(record.timestamp) }}</time>
-            <span class="app-name">{{ record.appName || t('postEdit.unknownApp') }}</span>
-            <span class="record-status" :class="{ partial: !record.complete }">{{ t(record.complete ? 'postEdit.observed' : 'postEdit.partial') }}</span>
+            <span v-if="record.appName" class="app-name">{{ record.appName }}</span>
           </div>
           <NButton quaternary size="tiny" :disabled="busy" @click="remove(record)">{{ t('common.delete') }}</NButton>
         </header>
-        <div class="text-pair" :class="{ expanded: expanded.has(record.id), collapsible: isLong(record) }">
+        <div class="text-pair" :class="{ expanded: expanded.has(record.id) || editingId === record.id, collapsible: isLong(record) }">
           <div class="text-column original">
             <div class="text-label"><span>{{ t('postEdit.original') }}</span><NButton text size="tiny" @click="copy(record.originalText)">{{ t('postEdit.copy') }}</NButton></div>
             <p class="record-text">{{ record.originalText }}</p>
           </div>
           <div class="text-column edited">
-            <div class="text-label"><span>{{ t(record.complete ? 'postEdit.edited' : 'postEdit.lastRead') }}</span><NButton text size="tiny" @click="copy(record.editedText)">{{ t('postEdit.copy') }}</NButton></div>
-            <p class="record-text">{{ record.editedText }}</p>
+            <div class="text-label">
+              <span>{{ t('postEdit.edited') }}</span>
+              <span v-if="editingId !== record.id" class="label-actions">
+                <NButton text size="tiny" @click="editingId = record.id">{{ t('postEdit.edit') }}</NButton>
+                <NButton text size="tiny" @click="copy(record.editedText)">{{ t('postEdit.copy') }}</NButton>
+              </span>
+            </div>
+            <InlineTextEditor
+              v-if="editingId === record.id"
+              :text="record.editedText"
+              :original="record.originalText"
+              :saving="savingEdit"
+              @save="text => saveEdit(record, text)"
+              @cancel="editingId = null"
+            />
+            <p v-else class="record-text">{{ record.editedText }}</p>
           </div>
         </div>
-        <footer class="record-footer">
-          <div class="record-notes">
-          <span v-if="!record.stable" class="partial-note">{{ t('postEdit.stabilityUnknown') }}</span>
-          <span v-else-if="!record.complete" class="partial-note">{{ t('postEdit.partialNote', { time: time(record.lastObservedAt), reason: t(`input.postEditReason.${record.endReason}`) }) }}</span>
-          <span v-else class="observed-note">{{ t('postEdit.observedNote', { time: time(record.lastObservedAt) }) }}</span>
-          <span v-if="record.hasNewerUnconfirmedInput" class="partial-note">{{ t('postEdit.newerUnconfirmed') }}</span>
-          <span v-if="record.stable && record.composition === 'unknown'" class="partial-note">{{ t('postEdit.compositionUnknown') }}</span>
-          </div>
-          <NButton v-if="isLong(record)" text size="tiny" @click="toggle(record.id)">
+        <footer v-if="isLong(record) && editingId !== record.id" class="record-footer">
+          <NButton text size="tiny" @click="toggle(record.id)">
             {{ t(expanded.has(record.id) ? 'postEdit.collapse' : 'postEdit.expand') }}
           </NButton>
         </footer>
       </article>
     </div>
-    <div v-if="hasMore" class="records-more"><NButton quaternary :loading="loading" @click="load(true)">{{ t('common.loadMore') }}</NButton></div>
+    <LoadMoreSentinel v-if="hasMore && !error" :loading="loading" @load="load(true)" />
   </section>
 </template>
 
 <style scoped>
 .post-edit-history { min-width: 0; }
-.records-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 14px 0 18px; }
-.records-intro h2 { font-size: 16px; font-weight: 600; margin: 0 0 7px; }
-.records-intro p, .records-caption { font-size: var(--font-xs); color: var(--color-text-tertiary); line-height: 1.7; margin: 0; }
-.records-caption { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 18px; border-bottom: 1px solid var(--color-border); }
 .records-empty { display: flex; align-items: center; justify-content: center; min-height: 280px; padding: 32px; }
-.empty-hint { max-width: 420px; margin: 0 auto 18px; font-size: var(--font-sm); color: var(--color-text-tertiary); line-height: 1.8; }
+.empty-hint { max-width: 420px; margin: 0 auto; font-size: var(--font-sm); color: var(--color-text-tertiary); line-height: 1.8; }
 .records-error { display: flex; gap: 16px; justify-content: space-between; align-items: center; padding: 16px 0; color: var(--color-error); overflow-wrap: anywhere; }
-.record-group { margin-top: 24px; }
-.record-date { margin: 0 0 10px; font-size: var(--font-xs); font-weight: 600; color: var(--color-text-tertiary); }
-.edit-record { padding: 18px 0 16px; border-bottom: 1px solid var(--color-border); }
-.record-meta, .meta-main, .record-footer { display: flex; align-items: center; gap: 12px; }
-.record-meta { justify-content: space-between; margin-bottom: 14px; }
-.meta-main { min-width: 0; flex-wrap: wrap; }
+.record-group { margin-top: 20px; }
+.record-group:first-of-type { margin-top: 4px; }
+.record-date { margin: 0 0 6px; font-size: var(--font-xs); font-weight: 600; color: var(--color-text-tertiary); }
+.edit-record { padding: 16px 0; border-bottom: 1px solid var(--color-border); }
+.record-meta, .meta-main { display: flex; align-items: center; gap: 12px; }
+.record-meta { justify-content: space-between; margin-bottom: 12px; }
+.meta-main { min-width: 0; }
 .record-meta time { font-size: var(--font-sm); font-variant-numeric: tabular-nums; font-weight: 600; }
-.app-name { color: var(--color-text-secondary); font-size: var(--font-xs); max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.record-status { color: var(--color-accent); font-size: 11px; border-left: 1px solid var(--color-border); padding-left: 12px; }
-.record-status.partial { color: var(--color-text-tertiary); }
+.app-name { color: var(--color-text-tertiary); font-size: var(--font-xs); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .text-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; }
 .text-column { min-width: 0; }
 .text-column.edited { padding-left: 22px; border-left: 2px solid var(--color-accent); }
-.text-label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: var(--font-xs); color: var(--color-text-tertiary); }
+.text-label { display: flex; align-items: center; justify-content: space-between; min-height: 20px; margin-bottom: 8px; font-size: var(--font-xs); color: var(--color-text-tertiary); }
+.label-actions { display: inline-flex; gap: 12px; }
 .record-text { font-size: 14px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
 .original .record-text { color: var(--color-text-secondary); }
 .text-pair.collapsible:not(.expanded) .record-text { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
-.record-footer { justify-content: space-between; gap: 16px; margin-top: 15px; font-size: 11px; line-height: 1.7; color: var(--color-text-tertiary); }
-.record-notes { display: flex; flex-direction: column; gap: 3px; }
-.records-more { text-align: center; padding: 20px; }
+.record-footer { display: flex; justify-content: flex-end; margin-top: 10px; }
 @media (max-width: 760px) {
-  .records-toolbar { align-items: flex-start; flex-direction: column; gap: 14px; }
   .text-pair { grid-template-columns: minmax(0, 1fr); gap: 18px; }
   .text-column.edited { padding-left: 12px; }
-  .records-caption { align-items: flex-start; }
 }
 </style>

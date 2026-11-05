@@ -1,22 +1,34 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NButton, NTabs, NTabPane, NSpin, NEmpty, NSelect, NModal, NDropdown, useDialog, type DropdownOption } from 'naive-ui'
+import { NButton, NTabs, NTabPane, NSpin, NEmpty, NSelect, NModal, NDropdown, NTooltip, useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import { useHistoryStore, type HistoryRecord } from '../stores/history'
+import { useHistoryStore, finalText, type HistoryRecord } from '../stores/history'
+import { usePostEditStore } from '../stores/postEdit'
 import { useSyncStore } from '../stores/sync'
 import { useSettingsStore } from '../stores/settings'
 import { trimTrailingPunctuation } from '../utils/text'
 import ReTranscribeDialog from '../components/ReTranscribeDialog.vue'
 import HistoryTranslationDialog from '../components/HistoryTranslationDialog.vue'
 import PostEditHistory from '../components/PostEditHistory.vue'
+import InlineTextEditor from '../components/InlineTextEditor.vue'
+import LoadMoreSentinel from '../components/LoadMoreSentinel.vue'
 
 const activeTab = ref('dictations')
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
 const syncStore = useSyncStore()
+const postEditStore = usePostEditStore()
 const dialog = useDialog()
+const message = useMessage()
 const { t, locale } = useI18n()
+const editingId = ref<string | null>(null)
+const savingEdit = ref(false)
+
+// The edit records tab belongs to the post-edit switch in Input settings.
+watch(() => postEditStore.enabled, enabled => {
+  if (!enabled && activeTab.value === 'edits') activeTab.value = 'dictations'
+})
 
 const retentionOptions = computed(() => [
   { label: t('common.forever'), value: 0 },
@@ -74,7 +86,8 @@ const objectUrl = ref<string | null>(null)
 onMounted(async () => {
   await Promise.all([
     settingsStore.loadSettings(),
-    historyStore.loadHistory(true)
+    historyStore.loadHistory(true),
+    postEditStore.load()
   ])
 })
 
@@ -88,7 +101,23 @@ function loadMore() {
 
 async function handleCopy(record: HistoryRecord) {
   if (!hasRecordText(record)) return
-  await historyStore.copyText(record.text)
+  await historyStore.copyText(finalText(record))
+}
+
+function canEdit(record: HistoryRecord) {
+  return !isFailedRecord(record) && hasRecordText(record)
+}
+
+async function saveEdit(record: HistoryRecord, text: string) {
+  savingEdit.value = true
+  try {
+    await historyStore.setFinalText(record.id, text)
+    editingId.value = null
+  } catch (error) {
+    message.error(t('postEdit.saveFailed', { reason: String(error) }))
+  } finally {
+    savingEdit.value = false
+  }
 }
 
 async function handleDelete(record: HistoryRecord) {
@@ -216,7 +245,7 @@ function hasRecordText(record: HistoryRecord): boolean {
 
 function displayText(record: HistoryRecord): string {
   if (hasRecordText(record)) {
-    return record.text
+    return finalText(record)
   }
   if (isFailedRecord(record)) {
     return t('history.failedPlaceholder')
@@ -437,40 +466,33 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   <div class="page history-page">
     <div class="page-header">
       <h1 class="page-title">{{ t('history.title') }}</h1>
-      <div v-if="activeTab === 'dictations'" class="page-subtitle">
-        <span class="subtitle-item">
-          <span class="subtitle-label">{{ t('history.textRetention') }}</span>
-          <span class="pill">{{ textRetention === 0 ? t('common.forever') : t('common.days', { count: textRetention }) }}</span>
-        </span>
-        <span class="subtitle-item">
-          <span class="subtitle-label">{{ t('history.audioRetention') }}</span>
-          <span class="pill">{{ audioRetention === 0 ? t('common.forever') : t('common.days', { count: audioRetention }) }}</span>
-        </span>
-      </div>
     </div>
 
     <NTabs v-model:value="activeTab" type="line" animated class="history-tabs" :theme-overrides="{ tabTextColorActiveLine: 'var(--color-accent)', tabTextColorHoverLine: 'var(--color-accent-hover)', barColor: 'var(--color-accent)' }">
       <NTabPane name="dictations" :tab="t('postEdit.allDictations')">
     <div class="surface-card retention-card">
-      <div class="retention-title">
-        <div class="section-title">{{ t('history.retentionPolicy') }}</div>
-        <div class="section-hint">{{ t('history.retentionPolicyHint') }}</div>
-      </div>
-      <div class="retention-body">
-        <div class="retention-fields">
-          <div class="retention-field">
-            <div class="retention-label">{{ t('history.text') }}</div>
-            <NSelect v-model:value="textRetention" :options="retentionOptions" size="small" class="retention-select" />
-          </div>
-          <div class="retention-field">
-            <div class="retention-label">{{ t('history.audio') }}</div>
-            <NSelect v-model:value="audioRetention" :options="retentionOptions" size="small" class="retention-select" />
-          </div>
-          <NButton size="small" quaternary class="open-folder" @click="openRecordingsFolder">
-            {{ t('history.openRecordingsFolder') }}
-          </NButton>
+      <div class="retention-title section-title">{{ t('history.retentionPolicy') }}</div>
+      <div class="retention-fields">
+        <div class="retention-field">
+          <span class="retention-label">{{ t('history.text') }}</span>
+          <NSelect v-model:value="textRetention" :options="retentionOptions" size="small" class="retention-select" :aria-label="t('history.text')" />
         </div>
-        <div class="retention-hint">{{ t('history.autoCleanupHint') }}</div>
+        <div class="retention-field">
+          <span class="retention-label">{{ t('history.audio') }}</span>
+          <NSelect v-model:value="audioRetention" :options="retentionOptions" size="small" class="retention-select" :aria-label="t('history.audio')" />
+        </div>
+        <NTooltip>
+          <template #trigger>
+            <NButton quaternary size="small" class="open-folder" :aria-label="t('history.openRecordingsFolder')" @click="openRecordingsFolder">
+              <template #icon>
+                <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                  <path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z" />
+                </svg>
+              </template>
+            </NButton>
+          </template>
+          {{ t('history.openRecordingsFolder') }}
+        </NTooltip>
       </div>
     </div>
 
@@ -508,6 +530,9 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                 >
                   {{ compareTagLabel(record) }}
                 </span>
+                <span v-if="record.editedText !== null" class="tag row-tag">
+                  {{ t('postEdit.editedTag') }}
+                </span>
                 <span
                   v-if="isFailedRecord(record)"
                   class="tag row-tag failed-tag"
@@ -523,6 +548,22 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                     <template #icon>
                       <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
                         <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
+                      </svg>
+                    </template>
+                  </NButton>
+                  <div class="toolbar-divider" aria-hidden="true" />
+                  <NButton
+                    quaternary
+                    size="small"
+                    class="toolbar-button"
+                    :aria-label="t('postEdit.edit')"
+                    :title="t('postEdit.edit')"
+                    :disabled="!canEdit(record) || editingId === record.id"
+                    @click="editingId = record.id"
+                  >
+                    <template #icon>
+                      <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                        <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" />
                       </svg>
                     </template>
                   </NButton>
@@ -559,7 +600,15 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                 </div>
               </div>
             </div>
-            <div class="list-text" :class="{ failed: isFailedRecord(record) }">
+            <InlineTextEditor
+              v-if="editingId === record.id"
+              :text="finalText(record)"
+              :original="record.text"
+              :saving="savingEdit"
+              @save="text => saveEdit(record, text)"
+              @cancel="editingId = null"
+            />
+            <div v-else class="list-text" :class="{ failed: isFailedRecord(record) }">
               {{ displayText(record) }}
             </div>
             <div v-if="isFailedRecord(record)" class="failure-note">
@@ -569,19 +618,15 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
         </div>
       </template>
 
-      <div v-if="historyStore.hasMore" class="load-more">
-        <NButton
-          :loading="historyStore.isLoading"
-          @click="loadMore"
-          quaternary
-        >
-          {{ t('common.loadMore') }}
-        </NButton>
+      <div v-if="historyStore.loadError" class="load-error" role="alert">
+        <span>{{ t('history.loadError', { reason: historyStore.loadError }) }}</span>
+        <NButton size="small" :loading="historyStore.isLoading" @click="loadMore">{{ t('postEdit.retry') }}</NButton>
       </div>
+      <LoadMoreSentinel v-else-if="historyStore.hasMore" :loading="historyStore.isLoading" @load="loadMore" />
     </div>
 
       </NTabPane>
-      <NTabPane name="edits" :tab="t('postEdit.tab')" display-directive="show:lazy">
+      <NTabPane v-if="postEditStore.enabled" name="edits" :tab="t('postEdit.tab')" display-directive="show:lazy">
         <PostEditHistory />
       </NTabPane>
     </NTabs>
@@ -641,7 +686,11 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
           <div class="detail-header">
             <div class="detail-title">
               {{ t('history.finalText') }}
-              <span v-if="showNoCorrectionTag(detailRecord)" class="tag detail-tag no-correction-tag">
+              <span v-if="detailRecord.editedText !== null" class="tag detail-tag">
+                {{ t('postEdit.editedTag') }}
+              </span>
+              <!-- Describes the LLM step, so it sits on whichever section shows its output. -->
+              <span v-else-if="showNoCorrectionTag(detailRecord)" class="tag detail-tag no-correction-tag">
                 {{ t('history.noCorrection') }}
               </span>
               <span v-if="isFailedRecord(detailRecord)" class="tag detail-tag failed-tag">
@@ -655,6 +704,21 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
           <div class="detail-body" :class="{ failed: isFailedRecord(detailRecord) }">
             {{ displayText(detailRecord) }}
           </div>
+        </div>
+
+        <div v-if="detailRecord.editedText !== null" class="detail-section">
+          <div class="detail-header">
+            <div class="detail-title">
+              {{ t('postEdit.beforeEdit') }}
+              <span v-if="showNoCorrectionTag(detailRecord)" class="tag detail-tag no-correction-tag">
+                {{ t('history.noCorrection') }}
+              </span>
+            </div>
+            <NButton quaternary size="tiny" @click="historyStore.copyText(detailRecord.text)">
+              {{ t('common.copy') }}
+            </NButton>
+          </div>
+          <div class="detail-body muted">{{ detailRecord.text }}</div>
         </div>
 
         <div v-if="isFailedRecord(detailRecord)" class="detail-section">
@@ -703,65 +767,47 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 <style scoped>
 .history-tabs { min-width: 0; }
 .history-tabs :deep(.n-tab-pane) { padding-top: 18px; }
-.retention-card { margin-bottom: 20px; }
 .retention-card {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--spacing-xl);
+  gap: var(--spacing-sm) var(--spacing-xl);
+  margin-bottom: 20px;
   padding: var(--spacing-md) var(--spacing-lg);
 }
 
 .retention-title {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.retention-body {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-  flex: 1;
+  white-space: nowrap;
 }
 
 .retention-fields {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--spacing-md);
   justify-content: flex-end;
-  flex-wrap: nowrap;
+  gap: var(--spacing-sm) var(--spacing-lg);
 }
 
 .retention-field {
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
-  flex-shrink: 0;
 }
 
+/* Matches the dropdown's value text so the two read as one line. */
 .retention-label {
-  font-size: var(--font-sm);
+  font-size: 14px;
   color: var(--color-text-secondary);
   white-space: nowrap;
-  flex-shrink: 0;
 }
 
 .retention-select {
-  width: 140px;
-}
-
-.retention-hint {
-  font-size: var(--font-xs);
-  color: var(--color-text-tertiary);
-  text-align: right;
+  width: 112px;
 }
 
 .open-folder {
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-tertiary);
-  white-space: nowrap;
+  min-width: 32px;
 }
 
 .loading-container,
@@ -901,10 +947,13 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   color: color-mix(in srgb, var(--color-error) 62%, var(--color-text-primary));
 }
 
-.load-more {
+.load-error {
   display: flex;
-  justify-content: center;
-  padding: var(--spacing-lg);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  color: var(--color-error);
+  overflow-wrap: anywhere;
 }
 
 .detail-panel {

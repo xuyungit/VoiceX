@@ -3,7 +3,7 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { NButton, NModal, NSpin, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import type { HistoryRecord } from '../stores/history'
+import { finalText, type HistoryRecord } from '../stores/history'
 
 const props = defineProps<{
   show: boolean
@@ -70,7 +70,7 @@ async function startTranslation() {
 
   try {
     const translated = await invoke<TranslationResult>('translate_history_text', {
-      text: props.record.text,
+      text: finalText(props.record),
       requestId
     })
     if (activeRequestId === requestId) result.value = translated
@@ -121,7 +121,7 @@ onBeforeUnmount(cancelTranslation)
     <div class="translation-panel">
       <section class="text-section">
         <h3 class="section-title">{{ t('history.sourceText') }}</h3>
-        <div class="text-body source-body" tabindex="0">{{ record?.text }}</div>
+        <div class="text-body source-body" tabindex="0">{{ record ? finalText(record) : '' }}</div>
       </section>
 
       <section class="text-section">

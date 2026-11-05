@@ -26,7 +26,7 @@ export interface PostEditTestSnapshot {
   hadIntermediateChanges: boolean
 }
 
-export type PostEditMode = 'off' | 'metrics_only' | 'records'
+export type PostEditMode = 'off' | 'records'
 
 export interface PostEditSettings {
   mode: PostEditMode
@@ -52,6 +52,7 @@ export interface PostEditRecord {
   stable: boolean
   hasNewerUnconfirmedInput: boolean
   composition: 'unknown' | 'inactive' | 'active'
+  source: 'observed' | 'manual'
 }
 
 export interface PostEditRecordPage {

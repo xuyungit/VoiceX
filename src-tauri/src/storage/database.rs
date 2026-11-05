@@ -128,6 +128,9 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     ensure_column(&conn, "history_record", "error_message", "TEXT")?;
     ensure_column(&conn, "history_record", "asr_model_name", "TEXT")?;
     ensure_column(&conn, "history_record", "llm_model_name", "TEXT")?;
+    ensure_column(&conn, "history_record", "edited_text", "TEXT")?;
+    ensure_column(&conn, "history_record", "edit_source", "TEXT")?;
+    ensure_column(&conn, "history_record", "edited_at", "TEXT")?;
     ensure_column(&conn, "sync_state", "current_server_id", "TEXT")?;
     ensure_column(&conn, "sync_state", "current_account_id", "TEXT")?;
     ensure_column(&conn, "sync_server_state", "usage_seq", "INTEGER DEFAULT 0")?;
@@ -335,6 +338,10 @@ pub struct HistoryRecord {
     pub source_device_name: Option<String>,
     pub asr_model_name: Option<String>,
     pub llm_model_name: Option<String>,
+    /// The user's final version when it differs from `text`, which stays the
+    /// output VoiceX produced. Local only: never part of the sync payload.
+    #[serde(default)]
+    pub edited_text: Option<String>,
 }
 
 fn map_history_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> {
@@ -355,6 +362,7 @@ fn map_history_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRe
         source_device_name: row.get(13)?,
         asr_model_name: row.get(14)?,
         llm_model_name: row.get(15)?,
+        edited_text: row.get(16)?,
     })
 }
 
@@ -425,7 +433,7 @@ pub struct UsageStats {
 pub fn get_history(limit: u32, offset: u32) -> Result<Vec<HistoryRecord>, StorageError> {
     with_db(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
+            "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text
              FROM history_record h
              LEFT JOIN device_registry d ON d.device_id = h.source_device_id
              ORDER BY h.timestamp DESC 
@@ -453,7 +461,7 @@ pub fn get_history_since(
     }
     with_db(|conn| {
         let mut stmt = conn.prepare(
-            "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
+            "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text
              FROM history_record h
              LEFT JOIN device_registry d ON d.device_id = h.source_device_id
              WHERE h.timestamp > ?3
@@ -496,7 +504,7 @@ pub fn get_history_for_device_since(
         let records = if let Some(value) = since_value.as_deref() {
             let mut stmt = conn
                 .prepare(
-                    "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
+                    "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text
                      FROM history_record h
                      LEFT JOIN device_registry d ON d.device_id = h.source_device_id
                      WHERE h.timestamp > ?3 AND (h.source_device_id = ?4 OR h.source_device_id IS NULL OR h.source_device_id = '')
@@ -515,7 +523,7 @@ pub fn get_history_for_device_since(
         } else {
             let mut stmt = conn
                 .prepare(
-                    "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name
+                    "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text
                      FROM history_record h
                      LEFT JOIN device_registry d ON d.device_id = h.source_device_id
                      WHERE (h.source_device_id = ?3 OR h.source_device_id IS NULL OR h.source_device_id = '')
@@ -1580,6 +1588,12 @@ pub enum StorageError {
     #[error("Failed to serialize data: {0}")]
     SerializeFailed(String),
 
+    #[error("Not found: {0}")]
+    NotFound(String),
+
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("Failed to parse stored data: {0}")]
     DeserializeFailed(String),
 
@@ -1635,6 +1649,7 @@ mod tests {
             source_device_name: None,
             asr_model_name: None,
             llm_model_name: None,
+            edited_text: None,
         }
     }
 

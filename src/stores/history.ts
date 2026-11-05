@@ -19,7 +19,12 @@ export interface HistoryRecord {
     sourceDeviceName: string | null
     asrModelName: string | null
     llmModelName: string | null
+    /** The user's final version when it differs from `text` (VoiceX output). */
+    editedText: string | null
 }
+
+/** The text a dictation ended up as: the user's edit, else VoiceX's output. */
+export const finalText = (record: HistoryRecord) => record.editedText ?? record.text
 
 export interface TtsCounters {
     readCount: number
@@ -62,6 +67,7 @@ export const useHistoryStore = defineStore('history', () => {
         tts: emptyTtsCounters()
     })
     const isLoading = ref(false)
+    const loadError = ref<string | null>(null)
     const hasMore = ref(true)
     const pageSize = 20
 
@@ -147,8 +153,10 @@ export const useHistoryStore = defineStore('history', () => {
             }
 
             hasMore.value = result.length === pageSize
+            loadError.value = null
         } catch (error) {
             console.error('Failed to load history:', error)
+            loadError.value = String(error)
         } finally {
             isLoading.value = false
         }
@@ -162,6 +170,13 @@ export const useHistoryStore = defineStore('history', () => {
         } catch (error) {
             console.error('Failed to delete record:', error)
         }
+    }
+
+    /** Saves a dictation's final text; returns once the change is stored. */
+    async function setFinalText(id: string, text: string) {
+        const result = await invoke<{ editedText: string | null }>('set_history_final_text', { recordId: id, text })
+        const record = records.value.find(r => r.id === id)
+        if (record) record.editedText = result.editedText
     }
 
     async function copyText(text: string) {
@@ -181,6 +196,7 @@ export const useHistoryStore = defineStore('history', () => {
         stats,
         localStats,
         isLoading,
+        loadError,
         hasMore,
         recordsByDate,
         formattedStats,
@@ -188,6 +204,7 @@ export const useHistoryStore = defineStore('history', () => {
         loadStats,
         loadHistory,
         deleteRecord,
+        setFinalText,
         copyText,
         hasOriginal
     }

@@ -730,6 +730,7 @@ fn apply_server_event(
                 source_device_name: None,
                 asr_model_name: record.asr_model_name,
                 llm_model_name: record.llm_model_name,
+                edited_text: None,
             };
 
             let inserted = storage::insert_history_record_with_stats(&local_record, false)

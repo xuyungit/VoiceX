@@ -121,6 +121,7 @@ impl HistoryService {
             source_device_name: None,
             asr_model_name,
             llm_model_name,
+            edited_text: None,
         };
 
         let behavior = Self::behavior_for_mode(&record.mode, &settings);
@@ -169,6 +170,7 @@ impl HistoryService {
             source_device_name: None,
             asr_model_name,
             llm_model_name: None,
+            edited_text: None,
         };
 
         let _ = self.persist_record(record, Self::local_failure_behavior(&settings), app_handle);

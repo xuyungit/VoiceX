@@ -830,6 +830,7 @@ pub(super) fn record_for(
         has_newer_unconfirmed_input: result.has_newer_unconfirmed_input,
         stable: true,
         composition: confirmed.composition,
+        source: super::records::Source::Observed,
     })
 }
 
