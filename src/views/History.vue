@@ -468,7 +468,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
       <h1 class="page-title">{{ t('history.title') }}</h1>
     </div>
 
-    <NTabs v-model:value="activeTab" type="line" animated class="history-tabs" :theme-overrides="{ tabTextColorActiveLine: 'var(--color-accent)', tabTextColorHoverLine: 'var(--color-accent-hover)', barColor: 'var(--color-accent)' }">
+    <NTabs v-model:value="activeTab" type="line" animated class="history-tabs" :class="{ single: !postEditStore.enabled }" :theme-overrides="{ tabTextColorActiveLine: 'var(--color-accent)', tabTextColorHoverLine: 'var(--color-accent-hover)', barColor: 'var(--color-accent)' }">
       <NTabPane name="dictations" :tab="t('postEdit.allDictations')">
     <div class="surface-card retention-card">
       <div class="retention-title section-title">{{ t('history.retentionPolicy') }}</div>
@@ -767,6 +767,9 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 <style scoped>
 .history-tabs { min-width: 0; }
 .history-tabs :deep(.n-tab-pane) { padding-top: 18px; }
+/* Only the dictation list is left when edit tracking is off: no tab bar. */
+.history-tabs.single :deep(.n-tabs-nav) { display: none; }
+.history-tabs.single :deep(.n-tab-pane) { padding-top: 0; }
 .retention-card {
   display: flex;
   flex-wrap: wrap;

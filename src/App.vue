@@ -10,11 +10,14 @@ import { resolveLocale, setLocale } from './i18n'
 import { useSettingsStore } from './stores/settings'
 import { useHistoryStore } from './stores/history'
 import { useSyncStore, type SyncStateResponse } from './stores/sync'
+import { usePostEditStore } from './stores/postEdit'
 import { getDefaultPrompt, isBuiltInDefaultPrompt } from './utils/llmPrompts'
 
 const settingsStore = useSettingsStore()
 const historyStore = useHistoryStore()
 const syncStore = useSyncStore()
+// Loaded up front so History shows its tab bar on first render when enabled.
+const postEditStore = usePostEditStore()
 let unlistenHistory: (() => void) | null = null
 let unlistenSync: (() => void) | null = null
 let unlistenLocale: (() => void) | null = null
@@ -87,7 +90,8 @@ onMounted(async () => {
   await Promise.all([
     settingsStore.loadSettings(),
     historyStore.loadStats(),
-    syncStore.loadState()
+    syncStore.loadState(),
+    postEditStore.load()
   ])
   await applyUiLanguage(settingsStore.settings.uiLanguage)
   // Online hotword sync disabled — inline hotwords via dictionary are sufficient.
