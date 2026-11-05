@@ -4,6 +4,8 @@ import AsrModelSelect from './AsrModelSelect.vue'
 import { NInput } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -25,41 +27,22 @@ const cohereLanguage = computed({
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.cohereConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.cohereConfigurationSub') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.apiCredentials') }}</div>
-          <div class="field-note">{{ t('asr.cohereApiKeyNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="cohereApiKey"
-          type="password"
-          show-password-on="click"
-          placeholder="Enter Cohere API key"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.model') }}</div>
-          <div class="field-note">{{ t('asr.cohereModelNote') }}</div>
-        </div>
-        <AsrModelSelect v-model:value="cohereModel" provider="cohere" mode="batch" class="field-control" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.languageHint') }}</div>
-          <div class="field-note">{{ t('asr.cohereLanguageNote') }}</div>
-        </div>
-        <NInput v-model:value="cohereLanguage" placeholder="zh" class="field-control" />
-      </div>
-    </div>
-  </div>
+  <SettingsSection :title="t('asr.cohereConfiguration')" :help="t('asr.cohereConfigurationSub')">
+    <SettingRow :label="t('asr.apiCredentials')" :help="t('asr.cohereApiKeyNote')">
+      <NInput
+        v-model:value="cohereApiKey"
+        type="password"
+        show-password-on="click"
+        placeholder="Enter Cohere API key"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.model')" :help="t('asr.cohereModelNote')">
+      <AsrModelSelect v-model:value="cohereModel" provider="cohere" mode="batch" />
+    </SettingRow>
+    <SettingRow :label="t('asr.languageHint')" :help="t('asr.cohereLanguageNote')">
+      <NInput v-model:value="cohereLanguage" placeholder="zh" />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>

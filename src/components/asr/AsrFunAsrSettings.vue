@@ -5,6 +5,8 @@ import AsrModelSelect from './AsrModelSelect.vue'
 import { NInput, NSelect, NTag, NAlert } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -52,102 +54,61 @@ const endpointOptions = computed(() => [
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.funasrConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.funasrConfigurationSub') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.apiCredentials') }}</div>
-          <div class="field-note">{{ t('asr.funasrApiKeyNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="funasrApiKey"
-          type="password"
-          show-password-on="click"
-          placeholder="sk-..."
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.endpoint') }}</div>
-          <div class="field-note">{{ t('asr.funasrEndpointNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="funasrWsUrl"
-          :options="endpointOptions"
-          filterable
-          tag
+  <SettingsSection :title="t('asr.funasrConfiguration')" :help="t('asr.funasrConfigurationSub')">
+    <SettingRow :label="t('asr.apiCredentials')" :help="t('asr.funasrApiKeyNote')">
+      <NInput
+        v-model:value="funasrApiKey"
+        type="password"
+        show-password-on="click"
+        placeholder="sk-..."
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.endpoint')" :help="t('asr.funasrEndpointNote')">
+      <NSelect
+        v-model:value="funasrWsUrl"
+        :options="endpointOptions"
+        filterable
+        tag
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.model')" :help="t('asr.funasrModelNote')">
+      <AsrModelSelect v-model:value="funasrModel" provider="funasr" mode="realtime" />
+    </SettingRow>
+    <SettingRow v-if="currentModel" :label="t('asr.funasrCapabilityLabel')" :help="t('asr.funasrCapabilityNote')">
+      <div class="capability-tags">
+        <NTag
+          :type="currentModel.supportsContext ? 'success' : 'default'"
           size="small"
-          class="field-control"
-        />
+          :bordered="false"
+        >
+          {{ t('asr.funasrCapabilityContext') }}: {{ currentModel.supportsContext ? t('asr.funasrSupported') : t('asr.funasrNotSupported') }}
+        </NTag>
+        <NTag
+          :type="currentModel.supportsHotword ? 'success' : 'default'"
+          size="small"
+          :bordered="false"
+        >
+          {{ t('asr.funasrCapabilityHotword') }}: {{ currentModel.supportsHotword ? t('asr.funasrSupported') : t('asr.funasrNotSupported') }}
+        </NTag>
       </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.model') }}</div>
-          <div class="field-note">{{ t('asr.funasrModelNote') }}</div>
-        </div>
-        <AsrModelSelect v-model:value="funasrModel" provider="funasr" mode="realtime" class="field-control" />
-      </div>
-      <div v-if="currentModel" class="field-row capability-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.funasrCapabilityLabel') }}</div>
-          <div class="field-note">{{ t('asr.funasrCapabilityNote') }}</div>
-        </div>
-        <div class="capability-tags">
-          <NTag
-            :type="currentModel.supportsContext ? 'success' : 'default'"
-            size="small"
-            :bordered="false"
-          >
-            {{ t('asr.funasrCapabilityContext') }}: {{ currentModel.supportsContext ? t('asr.funasrSupported') : t('asr.funasrNotSupported') }}
-          </NTag>
-          <NTag
-            :type="currentModel.supportsHotword ? 'success' : 'default'"
-            size="small"
-            :bordered="false"
-          >
-            {{ t('asr.funasrCapabilityHotword') }}: {{ currentModel.supportsHotword ? t('asr.funasrSupported') : t('asr.funasrNotSupported') }}
-          </NTag>
-        </div>
-      </div>
-      <NAlert
-        v-if="contextUnsupportedWarning"
-        type="warning"
-        :title="t('asr.funasrContextUnsupportedTitle')"
-        class="field-alert"
-      >
-        {{ t('asr.funasrContextUnsupportedBody') }}
-      </NAlert>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.languageHint') }}</div>
-          <div class="field-note">{{ t('asr.funasrLanguageNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="funasrLanguage"
-          :placeholder="t('asr.leaveEmptyToAuto')"
-          class="field-control"
-        />
-      </div>
-    </div>
-  </div>
+    </SettingRow>
+    <NAlert
+      v-if="contextUnsupportedWarning"
+      type="warning"
+      :title="t('asr.funasrContextUnsupportedTitle')"
+    >
+      {{ t('asr.funasrContextUnsupportedBody') }}
+    </NAlert>
+    <SettingRow :label="t('asr.languageHint')" :help="t('asr.funasrLanguageNote')">
+      <NInput
+        v-model:value="funasrLanguage"
+        :placeholder="t('asr.leaveEmptyToAuto')"
+      />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>
 @import '../../styles/asr-settings.css';
-
-.capability-row .capability-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
-.field-alert {
-  margin: 4px 0;
-}
 </style>

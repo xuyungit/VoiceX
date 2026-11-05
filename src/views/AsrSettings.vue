@@ -20,6 +20,8 @@ import AsrStepAudioSettings from '../components/asr/AsrStepAudioSettings.vue'
 import AsrMimoSettings from '../components/asr/AsrMimoSettings.vue'
 import AsrQwenLocalSettings from '../components/asr/AsrQwenLocalSettings.vue'
 import AsrColiSettings from '../components/asr/AsrColiSettings.vue'
+import SettingsSection from '../components/settings/SettingsSection.vue'
+import SettingRow from '../components/settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -318,37 +320,27 @@ async function clearSonioxDebugOverrides() {
 </script>
 
 <template>
-  <div class="page settings-page asr-page">
+  <div class="page settings-page">
     <div class="page-header">
       <h1 class="page-title">{{ t('asr.title') }}</h1>
     </div>
 
     <!-- Provider Selection -->
-    <div class="surface-card asr-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('asr.provider') }}</div>
-        <div class="card-sub">{{ t('asr.providerSub') }}</div>
+    <SettingsSection :title="t('asr.provider')">
+      <SettingRow :label="t('asr.asrProvider')">
+        <NSelect
+          v-model:value="asrProviderType"
+          :options="providerOptions"
+          size="small"
+        />
+      </SettingRow>
+      <div v-if="showColiUnavailableWarning" class="settings-callout">
+        {{ t('asr.warningColiUnavailable') }}
       </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.asrProvider') }}</div>
-          </div>
-          <NSelect
-            v-model:value="asrProviderType"
-            :options="providerOptions"
-            size="small"
-            class="field-control"
-          />
-        </div>
-        <div v-if="showColiUnavailableWarning" class="warning-box">
-          {{ t('asr.warningColiUnavailable') }}
-        </div>
-        <div v-if="showQwenLocalUnsupportedWarning" class="warning-box">
-          {{ t('asr.warningQwenLocalUnsupported') }}
-        </div>
+      <div v-if="showQwenLocalUnsupportedWarning" class="settings-callout">
+        {{ t('asr.warningQwenLocalUnsupported') }}
       </div>
-    </div>
+    </SettingsSection>
 
     <!-- Provider-specific configuration -->
     <AsrVolcengineSettings v-if="isVolcengine" />
@@ -371,218 +363,136 @@ async function clearSonioxDebugOverrides() {
       @refresh="refreshColiStatus"
     />
 
-    <div v-if="isSoniox && diagnosticsEnabled" class="surface-card asr-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('asr.sonioxDebugTitle') }}</div>
-        <div class="card-sub">{{ t('asr.sonioxDebugSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row align-start">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.sonioxDebugMockServer') }}</div>
-            <div class="field-note">{{ t('asr.sonioxDebugMockServerNote') }}</div>
-          </div>
-          <div class="debug-actions">
-            <NSelect
-              v-model:value="sonioxMockScenario"
-              :options="sonioxMockScenarioOptions"
-              size="small"
-              class="field-control debug-select"
-            />
-            <NButton
-              :loading="sonioxDebugLoading"
-              size="small"
-              @click="startSonioxMockServer"
-            >
-              {{ t('asr.sonioxDebugStartMock') }}
-            </NButton>
-            <NButton
-              :loading="sonioxDebugLoading"
-              size="small"
-              @click="stopSonioxMockServer"
-            >
-              {{ t('asr.sonioxDebugStopMock') }}
-            </NButton>
-          </div>
+    <SettingsSection v-if="isSoniox && diagnosticsEnabled" :title="t('asr.sonioxDebugTitle')" :help="t('asr.sonioxDebugSub')">
+      <SettingRow stacked :label="t('asr.sonioxDebugMockServer')" :help="t('asr.sonioxDebugMockServerNote')">
+        <div class="debug-actions">
+          <NSelect
+            v-model:value="sonioxMockScenario"
+            :options="sonioxMockScenarioOptions"
+            size="small"
+            class="debug-select"
+          />
+          <NButton
+            :loading="sonioxDebugLoading"
+            size="small"
+            @click="startSonioxMockServer"
+          >
+            {{ t('asr.sonioxDebugStartMock') }}
+          </NButton>
+          <NButton
+            :loading="sonioxDebugLoading"
+            size="small"
+            @click="stopSonioxMockServer"
+          >
+            {{ t('asr.sonioxDebugStopMock') }}
+          </NButton>
         </div>
+      </SettingRow>
 
-        <div class="field-row align-start">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.sonioxDebugFaultMode') }}</div>
-            <div class="field-note">{{ t('asr.sonioxDebugFaultModeNote') }}</div>
-          </div>
-          <div class="debug-actions">
-            <NSelect
-              v-model:value="sonioxFaultMode"
-              :options="sonioxFaultModeOptions"
-              size="small"
-              class="field-control debug-select"
-            />
-            <NButton
-              :loading="sonioxDebugLoading"
-              size="small"
-              @click="applySonioxFaultMode"
-            >
-              {{ t('asr.sonioxDebugApplyFault') }}
-            </NButton>
-            <NButton
-              :loading="sonioxDebugLoading"
-              size="small"
-              @click="clearSonioxDebugOverrides"
-            >
-              {{ t('asr.sonioxDebugClear') }}
-            </NButton>
-          </div>
+      <SettingRow stacked :label="t('asr.sonioxDebugFaultMode')" :help="t('asr.sonioxDebugFaultModeNote')">
+        <div class="debug-actions">
+          <NSelect
+            v-model:value="sonioxFaultMode"
+            :options="sonioxFaultModeOptions"
+            size="small"
+            class="debug-select"
+          />
+          <NButton
+            :loading="sonioxDebugLoading"
+            size="small"
+            @click="applySonioxFaultMode"
+          >
+            {{ t('asr.sonioxDebugApplyFault') }}
+          </NButton>
+          <NButton
+            :loading="sonioxDebugLoading"
+            size="small"
+            @click="clearSonioxDebugOverrides"
+          >
+            {{ t('asr.sonioxDebugClear') }}
+          </NButton>
         </div>
+      </SettingRow>
 
-        <div v-if="sonioxDebugStatus" class="probe-result" :class="{ ok: sonioxDebugStatus.mockRunning || !!sonioxDebugStatus.faultMode }">
-          <div class="probe-line">
-            <span>{{ t('asr.sonioxDebugActiveMock') }}</span>
-            <strong>{{ sonioxDebugStatus.mockScenario || t('asr.sonioxDebugInactive') }}</strong>
-          </div>
-          <div class="probe-line">
-            <span>{{ t('asr.sonioxDebugMockUrl') }}</span>
-            <strong>{{ sonioxDebugStatus.mockUrl || t('asr.sonioxDebugInactive') }}</strong>
-          </div>
-          <div class="probe-line">
-            <span>{{ t('asr.sonioxDebugActiveFault') }}</span>
-            <strong>{{ sonioxDebugStatus.faultMode || t('asr.sonioxDebugInactive') }}</strong>
-          </div>
+      <div v-if="sonioxDebugStatus" class="probe-result" :class="{ ok: sonioxDebugStatus.mockRunning || !!sonioxDebugStatus.faultMode }">
+        <div class="probe-line">
+          <span>{{ t('asr.sonioxDebugActiveMock') }}</span>
+          <strong>{{ sonioxDebugStatus.mockScenario || t('asr.sonioxDebugInactive') }}</strong>
         </div>
-
-        <div v-if="sonioxDebugError" class="warning-box">
-          {{ sonioxDebugError }}
+        <div class="probe-line">
+          <span>{{ t('asr.sonioxDebugMockUrl') }}</span>
+          <strong>{{ sonioxDebugStatus.mockUrl || t('asr.sonioxDebugInactive') }}</strong>
+        </div>
+        <div class="probe-line">
+          <span>{{ t('asr.sonioxDebugActiveFault') }}</span>
+          <strong>{{ sonioxDebugStatus.faultMode || t('asr.sonioxDebugInactive') }}</strong>
         </div>
       </div>
-    </div>
 
-    <div class="surface-card asr-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('asr.providerProbe') }}</div>
-        <div class="card-sub">{{ t('asr.providerProbeSub') }}</div>
+      <div v-if="sonioxDebugError" class="settings-callout is-error">
+        {{ sonioxDebugError }}
       </div>
-      <div class="field-list">
-        <div class="field-row align-start">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.providerProbeButton') }}</div>
-            <div class="field-note">{{ t('asr.providerProbeNote') }}</div>
-          </div>
-          <div class="probe-actions">
-            <NButton
-              :loading="probeAudioLoading"
-              size="small"
-              @click="toggleProbeAudioPlayback"
-            >
-              {{ isProbeAudioPlaying ? t('asr.providerProbeStopAudio') : t('asr.providerProbePlayAudio') }}
-            </NButton>
-            <NButton
-              :loading="providerProbeLoading"
-              type="primary"
-              secondary
-              size="small"
-              @click="runProviderProbe"
-            >
-              {{ t('asr.providerProbeButton') }}
-            </NButton>
-          </div>
-        </div>
+    </SettingsSection>
 
-        <div v-if="providerProbeResult" class="probe-result" :class="{ ok: providerProbeResult.ok, error: !providerProbeResult.ok }">
-          <div class="probe-line">
-            <span>{{ t('asr.providerProbeStatus') }}</span>
-            <strong>{{ providerProbeResult.ok ? t('asr.providerProbeStatusOk') : t('asr.providerProbeStatusFailed') }}</strong>
-          </div>
-          <div v-if="providerProbeResult.recognitionTimeMs !== null" class="probe-line">
-            <span>{{ t('asr.providerProbeLatency') }}</span>
-            <strong>{{ providerProbeResult.recognitionTimeMs }} ms</strong>
-          </div>
-          <div class="probe-result-label">{{ t('asr.providerProbeTranscript') }}</div>
-          <div class="probe-message">
-            {{ providerProbeResult.recognitionResult || t('asr.providerProbeTranscriptEmpty') }}
-          </div>
+    <SettingsSection :title="t('asr.providerProbe')">
+      <SettingRow :label="t('asr.providerProbeButton')" :help="t('asr.providerProbeNote')">
+        <div class="control-group">
+          <NButton
+            :loading="probeAudioLoading"
+            size="small"
+            @click="toggleProbeAudioPlayback"
+          >
+            {{ isProbeAudioPlaying ? t('asr.providerProbeStopAudio') : t('asr.providerProbePlayAudio') }}
+          </NButton>
+          <NButton
+            :loading="providerProbeLoading"
+            type="primary"
+            secondary
+            size="small"
+            @click="runProviderProbe"
+          >
+            {{ t('asr.providerProbeRun') }}
+          </NButton>
         </div>
+      </SettingRow>
 
-        <div v-if="providerProbeResult?.errorMessage" class="warning-box">
-          {{ providerProbeResult.errorMessage }}
+      <div v-if="providerProbeResult" class="probe-result" :class="{ ok: providerProbeResult.ok, error: !providerProbeResult.ok }">
+        <div class="probe-line">
+          <span>{{ t('asr.providerProbeStatus') }}</span>
+          <strong>{{ providerProbeResult.ok ? t('asr.providerProbeStatusOk') : t('asr.providerProbeStatusFailed') }}</strong>
         </div>
-
-        <div v-if="providerProbeError" class="warning-box">
-          {{ providerProbeError }}
+        <div v-if="providerProbeResult.recognitionTimeMs !== null" class="probe-line">
+          <span>{{ t('asr.providerProbeLatency') }}</span>
+          <strong>{{ providerProbeResult.recognitionTimeMs }} ms</strong>
+        </div>
+        <div class="probe-result-label">{{ t('asr.providerProbeTranscript') }}</div>
+        <div class="probe-message">
+          {{ providerProbeResult.recognitionResult || t('asr.providerProbeTranscriptEmpty') }}
         </div>
       </div>
-    </div>
+
+      <div v-if="providerProbeResult?.errorMessage" class="settings-callout is-error">
+        {{ providerProbeResult.errorMessage }}
+      </div>
+
+      <div v-if="providerProbeError" class="settings-callout is-error">
+        {{ providerProbeError }}
+      </div>
+    </SettingsSection>
   </div>
 </template>
 
 <style scoped>
 @import '../styles/asr-settings.css';
 
-.settings-page {
-  width: 100%;
-  max-width: 1120px;
-  padding-bottom: var(--spacing-2xl);
-}
-
-.probe-result {
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
-  display: grid;
-  gap: 8px;
-}
-
-.probe-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .debug-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
   flex-wrap: wrap;
+  gap: 8px;
 }
 
 .debug-select {
-  min-width: 240px;
-}
-
-.probe-result.ok {
-  border-color: rgba(74, 222, 128, 0.28);
-  background: rgba(74, 222, 128, 0.08);
-}
-
-.probe-result.error {
-  border-color: rgba(248, 113, 113, 0.28);
-  background: rgba(248, 113, 113, 0.08);
-}
-
-.probe-line {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.probe-line strong {
-  color: var(--text-primary);
-  text-align: right;
-  word-break: break-all;
-}
-
-.probe-result-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.probe-message {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--text-primary);
-  word-break: break-word;
+  width: 240px;
 }
 </style>

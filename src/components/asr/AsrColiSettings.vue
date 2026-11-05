@@ -9,6 +9,8 @@ import {
   buildColiRecognitionModeOptions,
   normalizeColiPostRecordingRefine,
 } from '../../utils/providerOptions'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 defineProps<{
   coliStatus: LocalAsrStatus | null
@@ -63,132 +65,91 @@ const batchRefineDisabled = computed(() => coliRecognitionMode.value === 'batch'
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.localColiConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.localColiConfigurationSub') }}</div>
+  <SettingsSection :title="t('asr.localColiConfiguration')" :help="t('asr.localColiConfigurationSub')">
+    <SettingRow :label="t('asr.detectionStatus')">
+      <template #status>
+        <div>
+          {{ coliStatusError || coliStatus?.message || t('asr.checkingLocalColi') }}
+        </div>
+      </template>
+      <div
+        class="status-pill"
+        :class="{
+          online: coliStatus?.available,
+          offline: !coliStatusLoading && !coliStatus?.available
+        }"
+      >
+        {{ coliStatusLoading ? t('asr.checking') : coliStatus?.available ? t('asr.detected') : t('asr.notFound') }}
+      </div>
+    </SettingRow>
+    <SettingRow :label="t('asr.commandPath')" :help="t('asr.commandPathNote')">
+      <div class="control-group">
+        <NInput
+          v-model:value="coliCommandPath"
+          :placeholder="t('asr.leaveEmptyToAuto')"
+        />
+        <NButton secondary size="small" @click="emit('refresh')">
+          {{ t('asr.refresh') }}
+        </NButton>
+      </div>
+    </SettingRow>
+    <SettingRow :label="t('asr.resolvedPath')" :help="t('asr.resolvedPathNote')">
+      <div class="field-value mono">
+        {{ coliStatus?.resolvedPath || '—' }}
+      </div>
+    </SettingRow>
+    <SettingRow :label="t('asr.modelCache')" :help="t('asr.modelCacheNote')">
+      <div class="field-value mono">
+        {{ coliStatus?.modelsDir || '—' }}
+      </div>
+    </SettingRow>
+    <SettingRow :label="t('asr.recognitionMode')" :help="t('asr.coliRecognitionModeNote')">
+      <NSelect
+        v-model:value="coliRecognitionMode"
+        :options="coliRecognitionModeOptions"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow v-if="coliRecognitionMode === 'realtime'" :label="t('asr.enableVad')" :help="t('asr.enableVadNote')">
+      <NCheckbox v-model:checked="coliUseVad" />
+    </SettingRow>
+    <div v-if="coliRecognitionMode === 'realtime' && !coliUseVad" class="settings-callout">
+      {{ t('asr.warningVadOff') }}
     </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.detectionStatus') }}</div>
-          <div class="field-note">
-            {{ coliStatusError || coliStatus?.message || t('asr.checkingLocalColi') }}
-          </div>
-        </div>
-        <div
-          class="status-pill"
-          :class="{
-            online: coliStatus?.available,
-            offline: !coliStatusLoading && !coliStatus?.available
-          }"
-        >
-          {{ coliStatusLoading ? t('asr.checking') : coliStatus?.available ? t('asr.detected') : t('asr.notFound') }}
-        </div>
+    <SettingRow v-if="coliRecognitionMode === 'realtime' && !coliUseVad" :label="t('asr.streamingInterval')" :help="t('asr.streamingIntervalNote')">
+      <NInputNumber
+        v-model:value="coliAsrIntervalMs"
+        :min="200"
+        :max="5000"
+        :step="100"
+        class="compact"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.postRecordingRefine')" :help="t('asr.coliPostRecordingRefineNote')">
+      <NSelect
+        v-model:value="coliFinalRefinementMode"
+        :options="coliRefinementOptions"
+        :disabled="batchRefineDisabled"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.installedModels')" :help="t('asr.installedModelsNote')">
+      <div class="pill-group">
+        <span class="mini-pill" :class="{ ready: coliStatus?.sensevoiceInstalled }">
+          {{ coliStatus?.sensevoiceInstalled ? t('asr.senseVoiceReady') : t('asr.senseVoicePending') }}
+        </span>
+        <span class="mini-pill" :class="{ ready: coliStatus?.whisperInstalled }">
+          {{ coliStatus?.whisperInstalled ? t('asr.whisperReady') : t('asr.whisperPending') }}
+        </span>
+        <span class="mini-pill" :class="{ ready: coliStatus?.vadInstalled }">
+          {{ coliStatus?.vadInstalled ? t('asr.sileroReady') : t('asr.sileroPending') }}
+        </span>
+        <span class="mini-pill" :class="{ ready: coliStatus?.ffmpegAvailable }">
+          {{ coliStatus?.ffmpegAvailable ? t('asr.ffmpegReady') : t('asr.ffmpegMissing') }}
+        </span>
       </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.commandPath') }}</div>
-          <div class="field-note">{{ t('asr.commandPathNote') }}</div>
-        </div>
-        <div class="field-control action-control">
-          <NInput
-            v-model:value="coliCommandPath"
-            :placeholder="t('asr.leaveEmptyToAuto')"
-          />
-          <NButton secondary size="small" @click="emit('refresh')">
-            {{ t('asr.refresh') }}
-          </NButton>
-        </div>
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.resolvedPath') }}</div>
-          <div class="field-note">{{ t('asr.resolvedPathNote') }}</div>
-        </div>
-        <div class="field-value mono">
-          {{ coliStatus?.resolvedPath || '—' }}
-        </div>
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.modelCache') }}</div>
-          <div class="field-note">{{ t('asr.modelCacheNote') }}</div>
-        </div>
-        <div class="field-value mono">
-          {{ coliStatus?.modelsDir || '—' }}
-        </div>
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.recognitionMode') }}</div>
-          <div class="field-note">{{ t('asr.coliRecognitionModeNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="coliRecognitionMode"
-          :options="coliRecognitionModeOptions"
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div v-if="coliRecognitionMode === 'realtime'" class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.enableVad') }}</div>
-          <div class="field-note">{{ t('asr.enableVadNote') }}</div>
-        </div>
-        <NCheckbox v-model:checked="coliUseVad" />
-      </div>
-      <div v-if="coliRecognitionMode === 'realtime' && !coliUseVad" class="warning-box">
-        {{ t('asr.warningVadOff') }}
-      </div>
-      <div v-if="coliRecognitionMode === 'realtime' && !coliUseVad" class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.streamingInterval') }}</div>
-          <div class="field-note">{{ t('asr.streamingIntervalNote') }}</div>
-        </div>
-        <NInputNumber
-          v-model:value="coliAsrIntervalMs"
-          :min="200"
-          :max="5000"
-          :step="100"
-          class="field-control short"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.postRecordingRefine') }}</div>
-          <div class="field-note">{{ t('asr.coliPostRecordingRefineNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="coliFinalRefinementMode"
-          :options="coliRefinementOptions"
-          :disabled="batchRefineDisabled"
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.installedModels') }}</div>
-          <div class="field-note">{{ t('asr.installedModelsNote') }}</div>
-        </div>
-        <div class="pill-group">
-          <span class="mini-pill" :class="{ ready: coliStatus?.sensevoiceInstalled }">
-            {{ coliStatus?.sensevoiceInstalled ? t('asr.senseVoiceReady') : t('asr.senseVoicePending') }}
-          </span>
-          <span class="mini-pill" :class="{ ready: coliStatus?.whisperInstalled }">
-            {{ coliStatus?.whisperInstalled ? t('asr.whisperReady') : t('asr.whisperPending') }}
-          </span>
-          <span class="mini-pill" :class="{ ready: coliStatus?.vadInstalled }">
-            {{ coliStatus?.vadInstalled ? t('asr.sileroReady') : t('asr.sileroPending') }}
-          </span>
-          <span class="mini-pill" :class="{ ready: coliStatus?.ffmpegAvailable }">
-            {{ coliStatus?.ffmpegAvailable ? t('asr.ffmpegReady') : t('asr.ffmpegMissing') }}
-          </span>
-        </div>
-      </div>
-    </div>
-  </div>
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>

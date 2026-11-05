@@ -5,6 +5,8 @@ import AsrModelSelect from './AsrModelSelect.vue'
 import { NInput, NInputNumber } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -31,58 +33,37 @@ const sonioxMaxEndpointDelayMs = computed({
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.sonioxConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.sonioxConfigurationSub') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.apiCredentials') }}</div>
-          <div class="field-note">{{ t('asr.sonioxApiKeyNote') }}</div>
+  <SettingsSection :title="t('asr.sonioxConfiguration')" :help="t('asr.sonioxConfigurationSub')">
+    <SettingRow :label="t('asr.apiCredentials')" :help="t('asr.sonioxApiKeyNote')">
+      <NInput
+        v-model:value="sonioxApiKey"
+        type="password"
+        show-password-on="click"
+        placeholder="Enter Soniox API key"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.model')" :help="t('asr.sonioxModelNote')">
+      <AsrModelSelect v-model:value="sonioxModel" provider="soniox" mode="realtime" />
+    </SettingRow>
+    <SettingRow :label="t('asr.languageHint')" :help="t('asr.sonioxLanguageNote')">
+      <NInput v-model:value="sonioxLanguage" placeholder="zh, en" />
+    </SettingRow>
+    <SettingRow :label="t('asr.sonioxMaxEndpointDelay')" :help="t('asr.sonioxMaxEndpointDelayNote')">
+      <template #status>
+        <div v-if="!isValidSonioxEndpointDelay(sonioxMaxEndpointDelayMs)" class="is-warning" role="alert">
+          {{ t('asr.sonioxMaxEndpointDelayInvalid', { value: sonioxMaxEndpointDelayMs }) }}
         </div>
-        <NInput
-          v-model:value="sonioxApiKey"
-          type="password"
-          show-password-on="click"
-          placeholder="Enter Soniox API key"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.model') }}</div>
-          <div class="field-note">{{ t('asr.sonioxModelNote') }}</div>
-        </div>
-        <AsrModelSelect v-model:value="sonioxModel" provider="soniox" mode="realtime" class="field-control" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.languageHint') }}</div>
-          <div class="field-note">{{ t('asr.sonioxLanguageNote') }}</div>
-        </div>
-        <NInput v-model:value="sonioxLanguage" placeholder="zh, en" class="field-control" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.sonioxMaxEndpointDelay') }}</div>
-          <div class="field-note">{{ t('asr.sonioxMaxEndpointDelayNote') }}</div>
-          <div v-if="!isValidSonioxEndpointDelay(sonioxMaxEndpointDelayMs)" class="field-note" role="alert">
-            {{ t('asr.sonioxMaxEndpointDelayInvalid', { value: sonioxMaxEndpointDelayMs }) }}
-          </div>
-        </div>
-        <NInputNumber
-          v-model:value="sonioxMaxEndpointDelayMs"
-          :validator="isValidSonioxEndpointDelay"
-          :status="isValidSonioxEndpointDelay(sonioxMaxEndpointDelayMs) ? undefined : 'error'"
-          :placeholder="t('asr.serviceDefault')"
-          class="field-control short"
-          clearable
-        />
-      </div>
-    </div>
-  </div>
+      </template>
+      <NInputNumber
+        v-model:value="sonioxMaxEndpointDelayMs"
+        :validator="isValidSonioxEndpointDelay"
+        :status="isValidSonioxEndpointDelay(sonioxMaxEndpointDelayMs) ? undefined : 'error'"
+        :placeholder="t('asr.serviceDefault')"
+        class="compact"
+        clearable
+      />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>

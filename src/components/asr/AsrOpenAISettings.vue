@@ -10,6 +10,8 @@ import {
   buildOpenAiRecognitionModeOptions,
   normalizeBatchCapablePostRecordingRefine,
 } from '../../utils/providerOptions'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -94,105 +96,59 @@ const openaiPostRecordingRefineOptions = computed(() => buildOpenAiPostRecording
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.openaiConfiguration') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.apiCredentials') }}</div>
-        </div>
-        <NInput
-          v-model:value="openaiAsrApiKey"
-          type="password"
-          show-password-on="click"
-          placeholder="sk-..."
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.recognitionMode') }}</div>
-        </div>
-        <NSelect
-          v-model:value="openaiAsrMode"
-          :options="openaiModeOptions"
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t(openaiAsrMode === 'realtime' ? 'asr.openaiRealtimeModel' : 'asr.openaiBatchModel') }}</div>
-          <div v-if="committedRealtime" class="field-note">{{ t('asr.openaiCommittedRealtimeNote') }}</div>
-        </div>
-        <AsrModelSelect v-model:value="openaiAsrModel" provider="openai" :mode="openaiAsrMode" class="field-control" />
-      </div>
-      <div v-if="showDelay" class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.openaiDelay') }}</div>
-          <div class="field-note">{{ t('asr.openaiDelayShortNote') }}</div>
-        </div>
-        <NSelect v-model:value="openaiAsrDelay" :options="openaiDelayOptions" size="small" class="field-control" />
-      </div>
-      <div v-if="openaiAsrMode === 'realtime'" class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.postRecordingRefine') }}</div>
-          <div class="field-note">{{ t('asr.openaiRefineShortNote') }}</div>
-        </div>
-        <NSelect v-model:value="openaiAsrPostRecordingRefine" :options="openaiPostRecordingRefineOptions" size="small" class="field-control" />
-      </div>
-      <div v-if="openaiAsrMode === 'realtime' && openaiAsrPostRecordingRefine === 'batch_refine'" class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.refineModel') }}</div>
-        </div>
-        <AsrModelSelect v-model:value="openaiAsrRefineModel" provider="openai" mode="batch" class="field-control" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.endpoint') }}</div>
-        </div>
-        <NInput
-          v-model:value="openaiAsrBaseUrl"
-          placeholder="https://api.openai.com/v1"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.languageHint') }}</div>
-          <div class="field-note">{{ t('asr.openaiLanguageShortNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="openaiAsrLanguage"
-          placeholder="zh, en"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row align-start">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.prompt') }}</div>
-          <div class="field-note">{{ t('asr.openaiPromptShortNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="openaiAsrPrompt"
-          type="textarea"
-          :autosize="{ minRows: 3, maxRows: 6 }"
-          class="field-control"
-        />
-      </div>
-    </div>
-  </div>
+  <SettingsSection :title="t('asr.openaiConfiguration')">
+    <SettingRow :label="t('asr.apiCredentials')">
+      <NInput
+        v-model:value="openaiAsrApiKey"
+        type="password"
+        show-password-on="click"
+        placeholder="sk-..."
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.recognitionMode')">
+      <NSelect
+        v-model:value="openaiAsrMode"
+        :options="openaiModeOptions"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow :label="t(openaiAsrMode === 'realtime' ? 'asr.openaiRealtimeModel' : 'asr.openaiBatchModel')">
+      <template #status>
+        <div v-if="committedRealtime">{{ t('asr.openaiCommittedRealtimeNote') }}</div>
+      </template>
+      <AsrModelSelect v-model:value="openaiAsrModel" provider="openai" :mode="openaiAsrMode" />
+    </SettingRow>
+    <SettingRow v-if="showDelay" :label="t('asr.openaiDelay')" :help="t('asr.openaiDelayShortNote')">
+      <NSelect v-model:value="openaiAsrDelay" :options="openaiDelayOptions" size="small" />
+    </SettingRow>
+    <SettingRow v-if="openaiAsrMode === 'realtime'" :label="t('asr.postRecordingRefine')" :help="t('asr.openaiRefineShortNote')">
+      <NSelect v-model:value="openaiAsrPostRecordingRefine" :options="openaiPostRecordingRefineOptions" size="small" />
+    </SettingRow>
+    <SettingRow v-if="openaiAsrMode === 'realtime' && openaiAsrPostRecordingRefine === 'batch_refine'" :label="t('asr.refineModel')">
+      <AsrModelSelect v-model:value="openaiAsrRefineModel" provider="openai" mode="batch" />
+    </SettingRow>
+    <SettingRow :label="t('asr.endpoint')">
+      <NInput
+        v-model:value="openaiAsrBaseUrl"
+        placeholder="https://api.openai.com/v1"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.languageHint')" :help="t('asr.openaiLanguageShortNote')">
+      <NInput
+        v-model:value="openaiAsrLanguage"
+        placeholder="zh, en"
+      />
+    </SettingRow>
+    <SettingRow stacked :label="t('asr.prompt')" :help="t('asr.openaiPromptShortNote')">
+      <NInput
+        v-model:value="openaiAsrPrompt"
+        type="textarea"
+        :autosize="{ minRows: 3, maxRows: 6 }"
+      />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>
 @import '../../styles/asr-settings.css';
-.asr-card { container-type: inline-size; }
-.field-control { flex: 0 1 420px; min-width: 0; }
-.field-text { min-width: 0; }
-@container (max-width: 560px) {
-  .field-row { flex-direction: column; align-items: stretch; gap: 6px; }
-  .field-control { flex: auto; width: 100%; }
-}
 </style>

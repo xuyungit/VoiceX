@@ -6,6 +6,8 @@ import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
 import { buildBatchCapableRecognitionModeOptions, buildPostRecordingBatchRefineOptions, normalizeBatchCapablePostRecordingRefine } from '../../utils/providerOptions'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -66,66 +68,35 @@ const geminiLanguageOptions = computed(() => [
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.geminiConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.geminiConfigurationSub') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.apiCredentials') }}</div>
-          <div class="field-note">{{ t('asr.geminiApiKeyNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="geminiApiKey"
-          type="password"
-          show-password-on="click"
-          placeholder="AIza..."
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.recognitionMode') }}</div>
-        </div>
-        <NSelect v-model:value="recognitionMode" :options="modeOptions" size="small" class="field-control" />
-      </div>
-      <div v-if="recognitionMode === 'realtime'" class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.openaiRealtimeModel') }}</div>
-          <div class="field-note">{{ t(liveModelNote) }}</div>
-        </div>
-        <AsrModelSelect v-model:value="geminiLiveModel" provider="gemini-live" mode="realtime" class="field-control" />
-      </div>
-      <div v-if="recognitionMode === 'realtime'" class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.postRecordingRefine') }}</div>
-          <div class="field-note">{{ t('asr.geminiRefineNote') }}</div>
-        </div>
-        <NSelect v-model:value="postRecordingRefine" :options="refineOptions" size="small" class="field-control" />
-      </div>
-      <div v-if="recognitionMode === 'batch' || postRecordingRefine === 'batch_refine'" class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t(recognitionMode === 'batch' ? 'asr.openaiBatchModel' : 'asr.refineModel') }}</div>
-          <div class="field-note">{{ t(batchModelNote) }}</div>
-        </div>
-        <AsrModelSelect v-model:value="geminiModel" provider="gemini" mode="batch" class="field-control" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.languageHint') }}</div>
-          <div class="field-note">{{ t(languageNote) }}</div>
-        </div>
-        <NSelect
-          v-model:value="geminiLanguage"
-          :options="geminiLanguageOptions"
-          size="small"
-          class="field-control"
-        />
-      </div>
-    </div>
-  </div>
+  <SettingsSection :title="t('asr.geminiConfiguration')">
+    <SettingRow :label="t('asr.apiCredentials')" :help="t('asr.geminiApiKeyNote')">
+      <NInput
+        v-model:value="geminiApiKey"
+        type="password"
+        show-password-on="click"
+        placeholder="AIza..."
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.recognitionMode')">
+      <NSelect v-model:value="recognitionMode" :options="modeOptions" size="small" />
+    </SettingRow>
+    <SettingRow v-if="recognitionMode === 'realtime'" :label="t('asr.openaiRealtimeModel')" :help="t(liveModelNote)">
+      <AsrModelSelect v-model:value="geminiLiveModel" provider="gemini-live" mode="realtime" />
+    </SettingRow>
+    <SettingRow v-if="recognitionMode === 'realtime'" :label="t('asr.postRecordingRefine')" :help="t('asr.geminiRefineNote')">
+      <NSelect v-model:value="postRecordingRefine" :options="refineOptions" size="small" />
+    </SettingRow>
+    <SettingRow v-if="recognitionMode === 'batch' || postRecordingRefine === 'batch_refine'" :label="t(recognitionMode === 'batch' ? 'asr.openaiBatchModel' : 'asr.refineModel')" :help="t(batchModelNote)">
+      <AsrModelSelect v-model:value="geminiModel" provider="gemini" mode="batch" />
+    </SettingRow>
+    <SettingRow :label="t('asr.languageHint')" :help="t(languageNote)">
+      <NSelect
+        v-model:value="geminiLanguage"
+        :options="geminiLanguageOptions"
+        size="small"
+      />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>

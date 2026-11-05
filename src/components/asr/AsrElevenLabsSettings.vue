@@ -9,6 +9,8 @@ import {
   buildElevenLabsRecognitionModeOptions,
   normalizeBatchCapablePostRecordingRefine
 } from '../../utils/providerOptions'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -69,84 +71,46 @@ const batchRefineDisabled = computed(() => elevenlabsRecognitionMode.value === '
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.elevenlabsConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.elevenlabsConfigurationSub') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.apiCredentials') }}</div>
-          <div class="field-note">{{ t('asr.elevenlabsApiKeyNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="elevenlabsApiKey"
-          type="password"
-          show-password-on="click"
-          placeholder="sk_..."
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.recognitionMode') }}</div>
-          <div class="field-note">{{ t('asr.elevenlabsRecognitionModeNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="elevenlabsRecognitionMode"
-          :options="recognitionModeOptions"
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.postRecordingRefine') }}</div>
-          <div class="field-note">{{ t('asr.elevenlabsPostRecordingRefineNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="elevenlabsPostRecordingRefine"
-          :options="postRecordingRefineOptions"
-          :disabled="batchRefineDisabled"
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.elevenlabsRealtimeModel') }}</div>
-          <div class="field-note">{{ t('asr.elevenlabsRealtimeModelNote') }}</div>
-        </div>
-        <AsrModelSelect v-model:value="elevenlabsRealtimeModel" provider="elevenlabs" mode="realtime" class="field-control" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.elevenlabsBatchModel') }}</div>
-          <div class="field-note">{{ t('asr.elevenlabsBatchModelNote') }}</div>
-        </div>
-        <AsrModelSelect v-model:value="elevenlabsBatchModel" provider="elevenlabs" mode="batch" class="field-control" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.languageHint') }}</div>
-          <div class="field-note">{{ t('asr.elevenlabsLanguageNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="elevenlabsLanguage"
-          :placeholder="t('asr.elevenlabsLanguagePlaceholder')"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.elevenlabsEnableKeyterms') }}</div>
-          <div class="field-note">{{ t('asr.elevenlabsEnableKeytermsNote') }}</div>
-        </div>
-        <NCheckbox v-model:checked="elevenlabsEnableKeyterms" />
-      </div>
-    </div>
-  </div>
+  <SettingsSection :title="t('asr.elevenlabsConfiguration')" :help="t('asr.elevenlabsConfigurationSub')">
+    <SettingRow :label="t('asr.apiCredentials')" :help="t('asr.elevenlabsApiKeyNote')">
+      <NInput
+        v-model:value="elevenlabsApiKey"
+        type="password"
+        show-password-on="click"
+        placeholder="sk_..."
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.recognitionMode')" :help="t('asr.elevenlabsRecognitionModeNote')">
+      <NSelect
+        v-model:value="elevenlabsRecognitionMode"
+        :options="recognitionModeOptions"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.postRecordingRefine')" :help="t('asr.elevenlabsPostRecordingRefineNote')">
+      <NSelect
+        v-model:value="elevenlabsPostRecordingRefine"
+        :options="postRecordingRefineOptions"
+        :disabled="batchRefineDisabled"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.elevenlabsRealtimeModel')" :help="t('asr.elevenlabsRealtimeModelNote')">
+      <AsrModelSelect v-model:value="elevenlabsRealtimeModel" provider="elevenlabs" mode="realtime" />
+    </SettingRow>
+    <SettingRow :label="t('asr.elevenlabsBatchModel')" :help="t('asr.elevenlabsBatchModelNote')">
+      <AsrModelSelect v-model:value="elevenlabsBatchModel" provider="elevenlabs" mode="batch" />
+    </SettingRow>
+    <SettingRow :label="t('asr.languageHint')" :help="t('asr.elevenlabsLanguageNote')">
+      <NInput
+        v-model:value="elevenlabsLanguage"
+        :placeholder="t('asr.elevenlabsLanguagePlaceholder')"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.elevenlabsEnableKeyterms')" :help="t('asr.elevenlabsEnableKeytermsNote')">
+      <NCheckbox v-model:checked="elevenlabsEnableKeyterms" />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>

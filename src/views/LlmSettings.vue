@@ -14,6 +14,8 @@ import {
   CUSTOM_ENDPOINT_PREFIX,
   type LlmProviderValue
 } from '../utils/llmOptions'
+import SettingsSection from '../components/settings/SettingsSection.vue'
+import SettingRow from '../components/settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t, locale } = useI18n()
@@ -433,447 +435,312 @@ async function runLlmProviderProbe() {
       <h1 class="page-title">{{ t('llm.title') }}</h1>
     </div>
 
-    <div class="surface-card llm-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('llm.aiCorrection') }}</div>
-        <div class="card-sub">{{ t('llm.aiCorrectionSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('llm.enableAiCorrection') }}</div>
-          </div>
-          <NSwitch v-model:value="enableLlmCorrection" />
-        </div>
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('llm.includeRecentInputHistory') }}</div>
-            <div class="field-sub">{{ t('llm.includeRecentInputHistorySub') }}</div>
-          </div>
-          <NSwitch v-model:value="enableLlmHistoryContext" />
-        </div>
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('llm.enableTranslationMode') }}</div>
-            <div class="field-sub">{{ t('llm.enableTranslationModeSub') }}</div>
-          </div>
-          <NSwitch v-model:value="translationEnabled" />
-        </div>
+    <SettingsSection :title="t('llm.aiCorrection')">
+      <SettingRow :label="t('llm.enableAiCorrection')">
+        <NSwitch v-model:value="enableLlmCorrection" />
+      </SettingRow>
+      <SettingRow :label="t('llm.includeRecentInputHistory')" :help="t('llm.includeRecentInputHistorySub')">
+        <NSwitch v-model:value="enableLlmHistoryContext" />
+      </SettingRow>
+      <SettingRow :label="t('llm.enableTranslationMode')" :help="t('llm.enableTranslationModeSub')">
+        <NSwitch v-model:value="translationEnabled" />
+      </SettingRow>
+    </SettingsSection>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('llm.provider') }}</div>
-            <div class="field-sub">{{ t('llm.providerSub') }}</div>
-          </div>
-          <NSelect
-            v-model:value="selectedProviderKey"
-            :options="providerOptions"
-            class="field-control short"
+    <SettingsSection :title="t('llm.provider')" :help="t('llm.aiCorrectionSub')">
+      <SettingRow :label="t('llm.provider')">
+        <NSelect v-model:value="selectedProviderKey" :options="providerOptions" />
+      </SettingRow>
+
+      <!-- Volcengine Settings -->
+      <template v-if="isVolcengine">
+        <SettingRow :label="t('llm.baseUrl')">
+          <NInput v-model:value="llmVolcengineBaseUrl" />
+        </SettingRow>
+        <SettingRow :label="t('llm.apiKey')">
+          <NInput
+            v-model:value="llmVolcengineApiKey"
+            type="password"
+            show-password-on="click"
+            :placeholder="t('llm.enterApiKey')"
           />
-        </div>
-
-        <!-- Volcengine Settings -->
-        <template v-if="isVolcengine">
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.baseUrl') }}</div>
+        </SettingRow>
+        <SettingRow :label="t('llm.modelName')">
+          <NInput v-model:value="llmVolcengineModel" />
+        </SettingRow>
+        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortSub')">
+          <template #status>
+            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+              {{ reasoningPreviewText }}
+              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
             </div>
-            <NInput v-model:value="llmVolcengineBaseUrl" class="field-control" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.apiKey') }}</div>
-            </div>
-            <NInput
-              v-model:value="llmVolcengineApiKey"
-              type="password"
-              show-password-on="click"
-              :placeholder="t('llm.enterApiKey')"
-              class="field-control"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.modelName') }}</div>
-            </div>
-            <NInput v-model:value="llmVolcengineModel" class="field-control short" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
-              <div class="field-sub">{{ t('llm.reasoningEffortSub') }}</div>
-              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-                {{ reasoningPreviewText }}
-                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-              </div>
-            </div>
-            <NSelect
-              v-model:value="llmVolcengineReasoningEffort"
-              :options="reasoningEffortOptions"
-              class="field-control short"
-            />
-          </div>
-        </template>
-
-        <!-- OpenAI Settings -->
-        <template v-if="isOpenai">
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.baseUrl') }}</div>
-            </div>
-            <NInput v-model:value="llmOpenaiBaseUrl" class="field-control" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.apiKey') }}</div>
-            </div>
-            <NInput
-              v-model:value="llmOpenaiApiKey"
-              type="password"
-              show-password-on="click"
-              placeholder="sk-..."
-              class="field-control"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.modelName') }}</div>
-              <div class="field-sub">{{ t('llm.openaiModelsNote') }}</div>
-              <div v-if="openaiModelsError" class="field-sub">{{ openaiModelsError }}</div>
-            </div>
-            <div class="field-control">
-              <NAutoComplete v-model:value="llmOpenaiModel" :options="openaiModels.map(value => ({ value, label: value }))" />
-              <NButton size="small" :loading="openaiModelsLoading" @click="loadOpenaiModels">{{ t('llm.openaiModelsFetch') }}</NButton>
-            </div>
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
-              <div class="field-sub">{{ t('llm.reasoningEffortOptionalSub') }}</div>
-              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-                {{ reasoningPreviewText }}
-                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-              </div>
-            </div>
-            <NSelect
-              v-model:value="llmOpenaiReasoningEffort"
-              :options="optionalReasoningEffortOptions"
-              class="field-control short"
-            />
-          </div>
-        </template>
-
-        <!-- Qwen Settings -->
-        <template v-if="isQwen">
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.baseUrl') }}</div>
-            </div>
-            <NInput v-model:value="llmQwenBaseUrl" class="field-control" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.apiKey') }}</div>
-            </div>
-            <NInput
-              v-model:value="llmQwenApiKey"
-              type="password"
-              show-password-on="click"
-              placeholder="sk-..."
-              class="field-control"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.modelName') }}</div>
-            </div>
-            <NInput v-model:value="llmQwenModel" class="field-control short" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
-              <div class="field-sub">{{ t('llm.reasoningEffortFixedSub') }}</div>
-              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-                {{ reasoningPreviewText }}
-                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-              </div>
-            </div>
-            <div class="field-control short reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
-          </div>
-        </template>
-
-        <!-- DeepSeek Settings -->
-        <template v-if="isDeepseek">
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.baseUrl') }}</div>
-            </div>
-            <NInput v-model:value="llmDeepseekBaseUrl" class="field-control" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.apiKey') }}</div>
-            </div>
-            <NInput
-              v-model:value="llmDeepseekApiKey"
-              type="password"
-              show-password-on="click"
-              placeholder="sk-..."
-              class="field-control"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.modelName') }}</div>
-            </div>
-            <NInput v-model:value="llmDeepseekModel" class="field-control short" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
-              <div class="field-sub">{{ t('llm.reasoningEffortFixedSub') }}</div>
-              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-                {{ reasoningPreviewText }}
-                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-              </div>
-            </div>
-            <div class="field-control short reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
-          </div>
-        </template>
-
-        <!-- Gemini Settings -->
-        <template v-if="isGemini">
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.baseUrl') }}</div>
-            </div>
-            <NInput v-model:value="llmGeminiBaseUrl" class="field-control" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.apiKey') }}</div>
-            </div>
-            <NInput
-              v-model:value="llmGeminiApiKey"
-              type="password"
-              show-password-on="click"
-              :placeholder="t('llm.enterApiKey')"
-              class="field-control"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.modelName') }}</div>
-            </div>
-            <NInput v-model:value="llmGeminiModel" class="field-control short" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
-              <div class="field-sub">{{ t('llm.reasoningEffortFixedSub') }}</div>
-              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-                {{ reasoningPreviewText }}
-                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-              </div>
-            </div>
-            <div class="field-control short reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
-          </div>
-        </template>
-
-        <!-- Anthropic Settings -->
-        <template v-if="isAnthropic">
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.baseUrl') }}</div>
-            </div>
-            <NInput v-model:value="llmAnthropicBaseUrl" class="field-control" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.apiKey') }}</div>
-            </div>
-            <NInput
-              v-model:value="llmAnthropicApiKey"
-              type="password"
-              show-password-on="click"
-              placeholder="sk-ant-..."
-              class="field-control"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.modelName') }}</div>
-            </div>
-            <NInput v-model:value="llmAnthropicModel" class="field-control short" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
-              <div class="field-sub">{{ t('llm.reasoningEffortFixedSub') }}</div>
-              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-                {{ reasoningPreviewText }}
-                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-              </div>
-            </div>
-            <div class="field-control short reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
-          </div>
-        </template>
-
-        <!-- Custom Settings -->
-        <template v-if="isCustom">
-          <div v-if="!activeCustomEndpoint" class="field-row">
-            <div class="field-text">
-              <div class="field-sub">{{ t('llm.customNoEndpointHint') }}</div>
-            </div>
-            <NButton type="primary" secondary size="small" @click="addCustomEndpoint">
-              {{ t('llm.addCustomEndpoint') }}
-            </NButton>
-          </div>
-          <template v-else>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.customEndpointName') }}</div>
-              <div class="field-sub">{{ t('llm.customEndpointNameSub') }}</div>
-            </div>
-            <NInput v-model:value="llmCustomName" :placeholder="t('llm.customEndpointNamePlaceholder')" class="field-control short" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.baseUrl') }}</div>
-              <div class="field-sub">{{ t('llm.customBaseUrlSub') }}</div>
-            </div>
-            <NInput v-model:value="llmCustomBaseUrl" placeholder="https://your-api.example.com/v1" class="field-control" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.apiKey') }}</div>
-            </div>
-            <NInput
-              v-model:value="llmCustomApiKey"
-              type="password"
-              show-password-on="click"
-              :placeholder="t('llm.enterApiKey')"
-              class="field-control"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.modelName') }}</div>
-            </div>
-            <NInput v-model:value="llmCustomModel" placeholder="your-model-id" class="field-control short" />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.apiMode') }}</div>
-              <div class="field-sub">{{ t('llm.customApiModeSub') }}</div>
-            </div>
-            <NSelect
-              v-model:value="llmCustomApiMode"
-              :options="apiModeOptions"
-              class="field-control short"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.reasoningEffort') }}</div>
-              <div class="field-sub">{{ t('llm.reasoningEffortOptionalSub') }}</div>
-              <div class="field-sub reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-                {{ reasoningPreviewText }}
-                <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-              </div>
-            </div>
-            <NSelect
-              v-model:value="llmCustomReasoningEffort"
-              :options="optionalReasoningEffortOptions"
-              class="field-control short"
-            />
-          </div>
-          <div class="field-row align-start">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.extraBody') }}</div>
-              <div class="field-sub">{{ t('llm.extraBodySub') }}</div>
-              <div v-if="llmCustomExtraBodyError" class="field-error">{{ llmCustomExtraBodyError }}</div>
-            </div>
-            <NInput
-              v-model:value="llmCustomExtraBody"
-              type="textarea"
-              :rows="3"
-              :status="llmCustomExtraBodyError ? 'error' : undefined"
-              :placeholder="t('llm.extraBodyPlaceholder')"
-              class="field-control mono"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('llm.deleteCustomEndpoint') }}</div>
-              <div class="field-sub">{{ t('llm.deleteCustomEndpointSub') }}</div>
-            </div>
-            <NButton type="error" secondary size="small" @click="deleteActiveCustomEndpoint">
-              {{ t('llm.deleteCustomEndpoint') }}
-            </NButton>
-          </div>
           </template>
+          <NSelect
+            v-model:value="llmVolcengineReasoningEffort"
+            :options="reasoningEffortOptions"
+          />
+        </SettingRow>
+      </template>
+
+      <!-- OpenAI Settings -->
+      <template v-if="isOpenai">
+        <SettingRow :label="t('llm.baseUrl')">
+          <NInput v-model:value="llmOpenaiBaseUrl" />
+        </SettingRow>
+        <SettingRow :label="t('llm.apiKey')">
+          <NInput
+            v-model:value="llmOpenaiApiKey"
+            type="password"
+            show-password-on="click"
+            placeholder="sk-..."
+          />
+        </SettingRow>
+        <SettingRow :label="t('llm.modelName')" :help="t('llm.openaiModelsNote')">
+          <template #status>
+            <div v-if="openaiModelsError">{{ openaiModelsError }}</div>
+          </template>
+          <div class="control-group">
+            <NAutoComplete v-model:value="llmOpenaiModel" :options="openaiModels.map(value => ({ value, label: value }))" />
+            <NButton size="small" :loading="openaiModelsLoading" @click="loadOpenaiModels">{{ t('llm.openaiModelsFetch') }}</NButton>
+          </div>
+        </SettingRow>
+        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortOptionalSub')">
+          <template #status>
+            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+              {{ reasoningPreviewText }}
+              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+            </div>
+          </template>
+          <NSelect
+            v-model:value="llmOpenaiReasoningEffort"
+            :options="optionalReasoningEffortOptions"
+          />
+        </SettingRow>
+      </template>
+
+      <!-- Qwen Settings -->
+      <template v-if="isQwen">
+        <SettingRow :label="t('llm.baseUrl')">
+          <NInput v-model:value="llmQwenBaseUrl" />
+        </SettingRow>
+        <SettingRow :label="t('llm.apiKey')">
+          <NInput
+            v-model:value="llmQwenApiKey"
+            type="password"
+            show-password-on="click"
+            placeholder="sk-..."
+          />
+        </SettingRow>
+        <SettingRow :label="t('llm.modelName')">
+          <NInput v-model:value="llmQwenModel" />
+        </SettingRow>
+        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortFixedSub')">
+          <template #status>
+            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+              {{ reasoningPreviewText }}
+              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+            </div>
+          </template>
+          <div class="reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
+        </SettingRow>
+      </template>
+
+      <!-- DeepSeek Settings -->
+      <template v-if="isDeepseek">
+        <SettingRow :label="t('llm.baseUrl')">
+          <NInput v-model:value="llmDeepseekBaseUrl" />
+        </SettingRow>
+        <SettingRow :label="t('llm.apiKey')">
+          <NInput
+            v-model:value="llmDeepseekApiKey"
+            type="password"
+            show-password-on="click"
+            placeholder="sk-..."
+          />
+        </SettingRow>
+        <SettingRow :label="t('llm.modelName')">
+          <NInput v-model:value="llmDeepseekModel" />
+        </SettingRow>
+        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortFixedSub')">
+          <template #status>
+            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+              {{ reasoningPreviewText }}
+              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+            </div>
+          </template>
+          <div class="reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
+        </SettingRow>
+      </template>
+
+      <!-- Gemini Settings -->
+      <template v-if="isGemini">
+        <SettingRow :label="t('llm.baseUrl')">
+          <NInput v-model:value="llmGeminiBaseUrl" />
+        </SettingRow>
+        <SettingRow :label="t('llm.apiKey')">
+          <NInput
+            v-model:value="llmGeminiApiKey"
+            type="password"
+            show-password-on="click"
+            :placeholder="t('llm.enterApiKey')"
+          />
+        </SettingRow>
+        <SettingRow :label="t('llm.modelName')">
+          <NInput v-model:value="llmGeminiModel" />
+        </SettingRow>
+        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortFixedSub')">
+          <template #status>
+            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+              {{ reasoningPreviewText }}
+              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+            </div>
+          </template>
+          <div class="reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
+        </SettingRow>
+      </template>
+
+      <!-- Anthropic Settings -->
+      <template v-if="isAnthropic">
+        <SettingRow :label="t('llm.baseUrl')">
+          <NInput v-model:value="llmAnthropicBaseUrl" />
+        </SettingRow>
+        <SettingRow :label="t('llm.apiKey')">
+          <NInput
+            v-model:value="llmAnthropicApiKey"
+            type="password"
+            show-password-on="click"
+            placeholder="sk-ant-..."
+          />
+        </SettingRow>
+        <SettingRow :label="t('llm.modelName')">
+          <NInput v-model:value="llmAnthropicModel" />
+        </SettingRow>
+        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortFixedSub')">
+          <template #status>
+            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+              {{ reasoningPreviewText }}
+              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+            </div>
+          </template>
+          <div class="reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
+        </SettingRow>
+      </template>
+
+      <!-- Custom Settings -->
+      <template v-if="isCustom">
+        <SettingRow v-if="!activeCustomEndpoint" :label="t('llm.customNoEndpointHint')">
+          <NButton type="primary" secondary size="small" @click="addCustomEndpoint">
+            {{ t('llm.addCustomEndpoint') }}
+          </NButton>
+        </SettingRow>
+        <template v-else>
+        <SettingRow :label="t('llm.customEndpointName')" :help="t('llm.customEndpointNameSub')">
+          <NInput v-model:value="llmCustomName" :placeholder="t('llm.customEndpointNamePlaceholder')" />
+        </SettingRow>
+        <SettingRow :label="t('llm.baseUrl')" :help="t('llm.customBaseUrlSub')">
+          <NInput v-model:value="llmCustomBaseUrl" placeholder="https://your-api.example.com/v1" />
+        </SettingRow>
+        <SettingRow :label="t('llm.apiKey')">
+          <NInput
+            v-model:value="llmCustomApiKey"
+            type="password"
+            show-password-on="click"
+            :placeholder="t('llm.enterApiKey')"
+          />
+        </SettingRow>
+        <SettingRow :label="t('llm.modelName')">
+          <NInput v-model:value="llmCustomModel" placeholder="your-model-id" />
+        </SettingRow>
+        <SettingRow :label="t('llm.apiMode')" :help="t('llm.customApiModeSub')">
+          <NSelect v-model:value="llmCustomApiMode" :options="apiModeOptions" />
+        </SettingRow>
+        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortOptionalSub')">
+          <template #status>
+            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+              {{ reasoningPreviewText }}
+              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+            </div>
+          </template>
+          <NSelect
+            v-model:value="llmCustomReasoningEffort"
+            :options="optionalReasoningEffortOptions"
+          />
+        </SettingRow>
+        <SettingRow stacked :label="t('llm.extraBody')" :help="t('llm.extraBodySub')">
+          <template #status>
+            <div v-if="llmCustomExtraBodyError" class="is-error">{{ llmCustomExtraBodyError }}</div>
+          </template>
+          <NInput
+            v-model:value="llmCustomExtraBody"
+            type="textarea"
+            :rows="3"
+            :status="llmCustomExtraBodyError ? 'error' : undefined"
+            :placeholder="t('llm.extraBodyPlaceholder')"
+            class="mono"
+          />
+        </SettingRow>
+        <SettingRow :label="t('llm.deleteCustomEndpoint')" :help="t('llm.deleteCustomEndpointSub')">
+          <NButton type="error" secondary size="small" @click="deleteActiveCustomEndpoint">
+            {{ t('llm.deleteCustomEndpoint') }}
+          </NButton>
+        </SettingRow>
         </template>
+      </template>
 
-        <div class="field-row align-start">
-          <div class="field-text">
-            <div class="field-label">{{ t('llm.providerProbe') }}</div>
-            <div class="field-sub">{{ t('llm.providerProbeNote') }}</div>
-          </div>
-          <div class="probe-actions">
-            <NButton
-              :loading="llmProbeLoading"
-              type="primary"
-              secondary
-              size="small"
-              @click="runLlmProviderProbe"
-            >
-              {{ t('llm.providerProbeButton') }}
-            </NButton>
-          </div>
+    </SettingsSection>
+
+    <SettingsSection :title="t('llm.providerProbe')">
+      <SettingRow :label="t('llm.providerProbeButton')" :help="t('llm.providerProbeNote')">
+        <NButton
+          :loading="llmProbeLoading"
+          type="primary"
+          secondary
+          size="small"
+          @click="runLlmProviderProbe"
+        >
+          {{ t('llm.providerProbeRun') }}
+        </NButton>
+      </SettingRow>
+
+      <div v-if="llmProbeResult" class="probe-result" :class="{ ok: llmProbeResult.ok, error: !llmProbeResult.ok }">
+        <div class="probe-line">
+          <span>{{ t('llm.providerProbeProvider') }}</span>
+          <strong>{{ llmProbeResult.provider }}</strong>
         </div>
-
-        <div v-if="llmProbeResult" class="probe-result" :class="{ ok: llmProbeResult.ok, error: !llmProbeResult.ok }">
-          <div class="probe-line">
-            <span>{{ t('llm.providerProbeProvider') }}</span>
-            <strong>{{ llmProbeResult.provider }}</strong>
-          </div>
-          <div class="probe-line">
-            <span>{{ t('llm.providerProbeStatus') }}</span>
-            <strong>{{ llmProbeResult.ok ? t('llm.providerProbeStatusOk') : t('llm.providerProbeStatusFailed') }}</strong>
-          </div>
-          <div v-if="llmProbeResult.responseTimeMs !== null" class="probe-line">
-            <span>{{ t('llm.providerProbeLatency') }}</span>
-            <strong>{{ llmProbeResult.responseTimeMs }} ms</strong>
-          </div>
-          <div v-if="llmProbeResult.ok" class="probe-line">
-            <span>{{ t('llm.providerProbeCorrectionCheck') }}</span>
-            <strong>{{ llmProbeResult.expectedMatch ? t('llm.providerProbeCorrectionOk') : t('llm.providerProbeCorrectionUnchecked') }}</strong>
-          </div>
-          <div class="probe-result-label">{{ t('llm.providerProbeInput') }}</div>
-          <div class="probe-message">{{ llmProbeResult.requestText }}</div>
-          <div class="probe-result-label">{{ t('llm.providerProbeOutput') }}</div>
-          <div class="probe-message">
-            {{ llmProbeResult.responseText || t('llm.providerProbeOutputEmpty') }}
-          </div>
+        <div class="probe-line">
+          <span>{{ t('llm.providerProbeStatus') }}</span>
+          <strong>{{ llmProbeResult.ok ? t('llm.providerProbeStatusOk') : t('llm.providerProbeStatusFailed') }}</strong>
         </div>
-
-        <div v-if="llmProbeResult?.errorMessage" class="warning-box">
-          {{ llmProbeResult.errorMessage }}
+        <div v-if="llmProbeResult.responseTimeMs !== null" class="probe-line">
+          <span>{{ t('llm.providerProbeLatency') }}</span>
+          <strong>{{ llmProbeResult.responseTimeMs }} ms</strong>
         </div>
-
-        <div v-if="llmProbeError" class="warning-box">
-          {{ llmProbeError }}
+        <div v-if="llmProbeResult.ok" class="probe-line">
+          <span>{{ t('llm.providerProbeCorrectionCheck') }}</span>
+          <strong>{{ llmProbeResult.expectedMatch ? t('llm.providerProbeCorrectionOk') : t('llm.providerProbeCorrectionUnchecked') }}</strong>
+        </div>
+        <div class="probe-result-label">{{ t('llm.providerProbeInput') }}</div>
+        <div class="probe-message">{{ llmProbeResult.requestText }}</div>
+        <div class="probe-result-label">{{ t('llm.providerProbeOutput') }}</div>
+        <div class="probe-message">
+          {{ llmProbeResult.responseText || t('llm.providerProbeOutputEmpty') }}
         </div>
       </div>
-    </div>
 
-    <div class="surface-card llm-card">
-      <div class="card-header prompt-header">
-        <div class="card-title">{{ t('llm.prompts') }}</div>
+      <div v-if="llmProbeResult?.errorMessage" class="settings-callout is-error">
+        {{ llmProbeResult.errorMessage }}
+      </div>
+
+      <div v-if="llmProbeError" class="settings-callout is-error">
+        {{ llmProbeError }}
+      </div>
+    </SettingsSection>
+
+    <SettingsSection :title="t('llm.prompts')" :help="t('llm.promptHint')">
+      <template #extra>
         <NButton size="small" quaternary @click="resetPrompt">{{ t('llm.resetCurrentTab') }}</NButton>
-      </div>
-      <NTabs v-model:value="activePromptTab" type="line" animated>
+      </template>
+      <NTabs v-model:value="activePromptTab" type="line" animated class="prompt-tabs">
         <NTabPane name="assistant" :tab="t('llm.assistantPrompt')">
           <NInput
             v-model:value="llmPromptTemplate"
@@ -891,83 +758,11 @@ async function runLlmProviderProbe() {
           />
         </NTabPane>
       </NTabs>
-      <div class="card-sub" style="margin-top: var(--spacing-sm);">
-        {{ t('llm.promptHint') }}
-      </div>
-    </div>
+    </SettingsSection>
   </div>
 </template>
 
 <style scoped>
-.settings-page {
-  max-width: 1120px;
-  width: 100%;
-  padding-bottom: var(--spacing-2xl);
-}
-
-.llm-card {
-  padding: var(--spacing-lg) var(--spacing-xl);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-}
-
-.card-header {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: var(--spacing-md);
-}
-
-.card-title {
-  font-size: var(--font-lg);
-  font-weight: 700;
-}
-
-.card-sub {
-  color: var(--color-text-tertiary);
-  font-size: var(--font-xs);
-}
-
-.prompt-header {
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.field-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-md);
-}
-
-.field-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--spacing-lg);
-}
-
-.field-row.align-start {
-  align-items: flex-start;
-}
-
-.field-text {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  flex: 1;
-}
-
-.field-label {
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.field-sub {
-  font-size: var(--font-xs);
-  color: var(--color-text-tertiary);
-}
-
 .reasoning-preview {
   user-select: text;
 }
@@ -978,7 +773,7 @@ async function runLlmProviderProbe() {
 }
 
 .reasoning-preview.warns {
-  color: #9a3412;
+  color: color-mix(in srgb, var(--color-warning) 72%, var(--color-text-secondary));
 }
 
 .reasoning-fixed {
@@ -987,87 +782,12 @@ async function runLlmProviderProbe() {
   text-align: right;
 }
 
-.field-control {
-  width: 420px;
-  max-width: 100%;
-}
-
-.field-control.short {
-  width: 260px;
-}
-
-.field-control.mono :deep(textarea) {
+.mono :deep(textarea) {
   font-family: ui-monospace, monospace;
   font-size: var(--font-xs);
 }
 
-.field-error {
-  font-size: var(--font-xs);
-  color: var(--color-error, #f87171);
-}
-
-.probe-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.probe-result {
-  padding: 12px 14px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
-  display: grid;
-  gap: 8px;
-}
-
-.probe-result.ok {
-  border-color: rgba(74, 222, 128, 0.28);
-  background: rgba(74, 222, 128, 0.08);
-}
-
-.probe-result.error {
-  border-color: rgba(248, 113, 113, 0.28);
-  background: rgba(248, 113, 113, 0.08);
-}
-
-.probe-line {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: var(--font-xs);
-  color: var(--color-text-secondary);
-}
-
-.probe-line strong {
-  color: var(--color-text-primary);
-  text-align: right;
-  word-break: break-word;
-}
-
-.probe-result-label {
-  font-size: var(--font-xs);
-  font-weight: 600;
-  color: var(--color-text-secondary);
-}
-
-.probe-message {
-  font-size: var(--font-xs);
-  line-height: 1.5;
-  color: var(--color-text-primary);
-  word-break: break-word;
-  user-select: text;
-}
-
-.warning-box {
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid color-mix(in srgb, #9a3412 35%, var(--color-border));
-  background: color-mix(in srgb, #9a3412 10%, var(--color-bg-secondary));
-  color: #9a3412;
-  font-size: var(--font-xs);
-  line-height: 1.5;
-  user-select: text;
+.prompt-tabs {
+  margin-bottom: var(--spacing-lg);
 }
 </style>

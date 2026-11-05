@@ -2,13 +2,17 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { NButton, NSelect, NInputNumber, NCheckbox, NSwitch } from 'naive-ui'
+import { NButton, NSelect, NInputNumber, NCheckbox, NSwitch, NTooltip } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore, type AppSettings } from '../stores/settings'
 import { usePostEditStore } from '../stores/postEdit'
 import { formatHotkey } from '../utils/hotkey'
 import type { OutputMuteStatus } from '../utils/outputMute'
 import type { PostEditTestSnapshot } from '../types/postEdit'
+import SettingsSection from '../components/settings/SettingsSection.vue'
+import SettingRow from '../components/settings/SettingRow.vue'
+import HelpTip from '../components/settings/HelpTip.vue'
+import HotkeyField from '../components/settings/HotkeyField.vue'
 import {
   exceedsRecordingHardLimit,
   resolveAsrRecordingHardLimitMinutes
@@ -96,6 +100,20 @@ const translationEnabled = computed({
   get: () => settingsStore.settings.translationEnabled,
   set: (v: boolean) => settingsStore.updateSetting('translationEnabled', v)
 })
+
+// Mirrors can_open_double_tap_window in src-tauri/src/state.rs: the double tap
+// only does something when translation is on and bound to it.
+const doubleTapActive = computed(() =>
+  translationEnabled.value && translationTriggerMode.value === 'double_tap'
+)
+
+const gestureLegend = computed(() => [
+  { gesture: t('input.gestureTap'), action: t('input.actionHandsFree') },
+  { gesture: t('input.gestureHold'), action: t('input.actionPushToTalk') },
+  ...(doubleTapActive.value
+    ? [{ gesture: t('input.gestureDoubleTap'), action: t('input.actionTranslate') }]
+    : [])
+])
 
 const translationTriggerOptions = computed(() => [
   { label: t('input.translationTriggerDoubleTap'), value: 'double_tap' },
@@ -198,13 +216,19 @@ const isRecording = ref(false)
 const recordedKey = ref('')
 const displayHotkey = ref(t('input.clickToRecord'))
 
-interface DeviceOption {
-  label: string
-  value: string
+interface InputDevice {
+  uid: string
+  name: string
   isDefault: boolean
 }
 
-const devices = ref<DeviceOption[]>([])
+const devices = ref<InputDevice[]>([])
+const deviceOptions = computed(() =>
+  devices.value.map((d) => ({
+    label: d.isDefault ? t('input.defaultDevice', { name: d.name }) : d.name,
+    value: d.uid
+  }))
+)
 const selectedDevice = ref<string | null>(null)
 const loadingDevices = ref(false)
 
@@ -280,6 +304,13 @@ const recentUnconfiguredAppRows = computed(() =>
   injectionAppRows.value.filter((app) => app.overrideMode === null).sort(compareAppRows)
 )
 
+const overrideGroups = computed(() =>
+  [
+    { key: 'configured', title: t('input.configuredApps'), rows: configuredInjectionAppRows.value },
+    { key: 'recent', title: t('input.recentApps'), rows: recentUnconfiguredAppRows.value }
+  ].filter((group) => group.rows.length > 0)
+)
+
 watch(
   () => settingsStore.settings.hotkeyConfig,
   (config) => {
@@ -348,18 +379,13 @@ watch(
 async function refreshDevices() {
   loadingDevices.value = true
   try {
-    const result = await invoke<Array<{ uid: string; name: string; isDefault: boolean }>>('get_input_devices')
-    devices.value = result.map((d) => ({
-      label: d.isDefault ? `${d.name}（默认）` : d.name,
-      value: d.uid,
-      isDefault: d.isDefault
-    }))
+    devices.value = await invoke<InputDevice[]>('get_input_devices')
 
     if (devices.value.length > 0) {
       const preferred = settingsStore.settings.inputDeviceUid
-      const fromSettings = devices.value.find((d) => d.value === preferred)
+      const fromSettings = devices.value.find((d) => d.uid === preferred)
       const fallback = devices.value.find((d) => d.isDefault) ?? devices.value[0]
-      selectedDevice.value = (fromSettings ?? fallback).value
+      selectedDevice.value = (fromSettings ?? fallback).uid
     } else {
       selectedDevice.value = null
     }
@@ -537,554 +563,358 @@ onBeforeUnmount(() => {
       <h1 class="page-title">{{ t('input.title') }}</h1>
     </div>
 
-    <div class="surface-card input-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('input.hotkeys') }}</div>
-        <div class="card-sub">{{ t('input.hotkeysSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('input.recordingHotkey') }}</div>
-            <div class="field-note">{{ t('input.recordingHotkeyNote') }}</div>
-          </div>
-          <div class="field-control">
-            <div class="hotkey-display" :class="{ recording: isRecording }">
-              {{ isRecording ? recordedKey : hotkeyDisplay }}
-            </div>
-            <div class="hotkey-actions">
-              <NButton :disabled="isRecording" @click="startRecording" size="small">
-                {{ t('input.record') }}
-              </NButton>
-              <NButton
-                v-if="settingsStore.settings.hotkeyConfig && !isRecording"
-                @click="clearHotkey"
-                quaternary
-                size="small"
-              >
-                {{ t('input.clear') }}
-              </NButton>
-            </div>
-          </div>
-        </div>
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('input.translationTrigger') }}</div>
-            <div class="field-note">{{ t('input.translationTriggerNote') }}</div>
-          </div>
-          <NSelect
-            v-model:value="translationTriggerMode"
-            :options="translationTriggerOptions"
-            size="small"
-            class="field-control"
-            :disabled="!translationEnabled"
-          />
-        </div>
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('input.doubleTapWindow') }}</div>
-            <div class="field-note">{{ t('input.doubleTapWindowNote') }}</div>
-          </div>
-          <div class="field-control">
-            <NInputNumber
-              v-model:value="doubleTapWindowMs"
-              size="small"
-              :min="250"
-              :max="700"
-              :step="10"
-              :show-button="false"
-            />
-            <span class="field-note">{{ doubleTapWindowMs }}ms</span>
-          </div>
-        </div>
-      </div>
-    </div>
+    <SettingsSection :title="t('input.hotkeys')">
+      <template #extra>
+        <ul class="gesture-legend">
+          <li v-for="item in gestureLegend" :key="item.gesture">
+            <span class="gesture-key">{{ item.gesture }}</span>
+            <span>{{ item.action }}</span>
+          </li>
+        </ul>
+      </template>
 
-    <div class="surface-card input-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('input.microphone') }}</div>
-        <div class="card-sub">{{ t('input.microphoneSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('input.inputDevice') }}</div>
-          </div>
-          <div class="field-control">
-            <NSelect
-              v-model:value="selectedDevice"
-              :options="devices"
-              :loading="loadingDevices"
-              :placeholder="t('input.selectInputDevice')"
-              class="device-select"
+      <SettingRow :label="t('input.recordingHotkey')" :help="t('input.recordingHotkeyNote')">
+        <HotkeyField
+          :value="isRecording ? recordedKey : hotkeyDisplay"
+          :recording="isRecording"
+          :empty="!settingsStore.settings.hotkeyConfig"
+          :clearable="!!settingsStore.settings.hotkeyConfig"
+          @clear="clearHotkey"
+        />
+        <NButton :disabled="isRecording" size="small" @click="startRecording">
+          {{ t('input.record') }}
+        </NButton>
+      </SettingRow>
+
+      <SettingRow
+        :label="t('input.translationTrigger')"
+        :help="t('input.translationTriggerNote')"
+        :disabled="!translationEnabled"
+      >
+        <template v-if="!translationEnabled" #status>
+          <span>{{ t('input.translationNeedsLlm') }}</span>
+        </template>
+        <NSelect
+          v-model:value="translationTriggerMode"
+          :options="translationTriggerOptions"
+          size="small"
+          :disabled="!translationEnabled"
+        />
+      </SettingRow>
+
+      <SettingRow
+        :label="t('input.doubleTapWindow')"
+        :help="t('input.doubleTapWindowNote')"
+        :disabled="!doubleTapActive"
+      >
+        <NInputNumber
+          v-model:value="doubleTapWindowMs"
+          class="compact"
+          size="small"
+          :min="250"
+          :max="700"
+          :step="10"
+          :show-button="false"
+          :disabled="!doubleTapActive"
+        >
+          <template #suffix>ms</template>
+        </NInputNumber>
+      </SettingRow>
+    </SettingsSection>
+
+    <SettingsSection :title="t('input.recording')">
+      <SettingRow :label="t('input.inputDevice')">
+        <NSelect
+          v-model:value="selectedDevice"
+          :options="deviceOptions"
+          :loading="loadingDevices"
+          :placeholder="t('input.selectInputDevice')"
+          size="small"
+        />
+        <NTooltip>
+          <template #trigger>
+            <NButton
               size="small"
-            />
-            <NButton @click="refreshDevices" :disabled="loadingDevices" size="small" quaternary>
-              {{ t('input.refreshDevices') }}
+              quaternary
+              class="icon-button"
+              :disabled="loadingDevices"
+              :aria-label="t('input.refreshDevices')"
+              @click="refreshDevices"
+            >
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" :class="{ spinning: loadingDevices }">
+                <path
+                  d="M13.5 8a5.5 5.5 0 1 1-1.61-3.89M13.5 2.5v3h-3"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
             </NButton>
-          </div>
-        </div>
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('input.muteWhileRecording') }}</div>
-            <div class="field-note">{{ t('input.muteWhileRecordingNote') }}</div>
-            <div v-if="outputMuteStatus && 'device' in outputMuteStatus" class="field-note">
-              {{ t('input.muteOutputDevice', { device: outputMuteStatus.device }) }}
-            </div>
-            <div v-if="outputMuteHint" class="field-note limit-hint">{{ outputMuteHint }}</div>
-          </div>
-          <NSwitch v-model:value="muteOutputWhileRecording" />
-        </div>
-      </div>
-    </div>
+          </template>
+          {{ t('input.refreshDevices') }}
+        </NTooltip>
+      </SettingRow>
 
-    <div class="surface-card input-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('input.overlay') }}</div>
-        <div class="card-sub">{{ t('input.overlaySub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('input.translucent') }}</div>
-            <div class="field-note">{{ t('input.translucentNote') }}</div>
-          </div>
-          <NSwitch v-model:value="hudTransparent" />
-        </div>
-      </div>
-    </div>
+      <SettingRow :label="t('input.muteWhileRecording')" :help="t('input.muteWhileRecordingNote')">
+        <template
+          v-if="(muteOutputWhileRecording && outputMuteStatus && 'device' in outputMuteStatus) || outputMuteHint"
+          #status
+        >
+          <span v-if="muteOutputWhileRecording && outputMuteStatus && 'device' in outputMuteStatus">
+            {{ t('input.muteOutputDevice', { device: outputMuteStatus.device }) }}
+          </span>
+          <span v-if="outputMuteHint" class="is-warning">{{ outputMuteHint }}</span>
+        </template>
+        <NSwitch v-model:value="muteOutputWhileRecording" />
+      </SettingRow>
 
-    <div class="surface-card input-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('asr.recognition') }}</div>
-        <div class="card-sub">{{ t('asr.recognitionSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.maxRecordingDuration') }}</div>
-            <div class="field-note">{{ t('asr.maxRecordingDurationNote') }}</div>
-            <div v-if="maxRecordingDurationLimitHint" class="field-note limit-hint">
-              {{ maxRecordingDurationLimitHint }}
-            </div>
-          </div>
-          <NSelect
-            v-model:value="maxRecordingMinutes"
-            :options="maxRecordingOptions"
-            size="small"
-            class="field-control short"
-          />
-        </div>
-      </div>
-    </div>
+      <SettingRow :label="t('asr.maxRecordingDuration')" :help="t('asr.maxRecordingDurationNote')">
+        <template v-if="maxRecordingDurationLimitHint" #status>
+          <span class="is-warning">{{ maxRecordingDurationLimitHint }}</span>
+        </template>
+        <NSelect
+          v-model:value="maxRecordingMinutes"
+          :options="maxRecordingOptions"
+          class="compact"
+          size="small"
+        />
+      </SettingRow>
+    </SettingsSection>
 
-    <div class="surface-card input-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('input.textInjection') }}</div>
-        <div class="card-sub">{{ t('input.textInjectionSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('input.postEditSwitch') }}</div>
-            <div class="field-note">{{ t('input.postEditSwitchNote') }}</div>
-            <div v-if="postEditStore.error" class="field-note limit-hint">{{ postEditStore.error }}</div>
-            <template v-if="showPostEditDiagnostics">
-            <div v-if="postEditTest?.enabled" class="field-note">
+    <SettingsSection :title="t('input.textInjection')">
+      <SettingRow :label="t('input.injectionMode')" :help="t('input.injectionModeNote')">
+        <NSelect v-model:value="textInjectionMode" :options="injectionOptions" size="small" />
+      </SettingRow>
+
+      <SettingRow :label="t('input.postEditSwitch')" :help="t('input.postEditSwitchNote')">
+        <template v-if="postEditStore.error || showPostEditDiagnostics" #status>
+          <span v-if="postEditStore.error" class="is-warning">{{ postEditStore.error }}</span>
+          <template v-if="showPostEditDiagnostics">
+            <span v-if="postEditTest?.enabled">
               {{ t(`input.postEditStatus.${postEditTest.status}`) }}
               <template v-if="postEditTest.reason !== 'none'"> · {{ t(`input.postEditReason.${postEditTest.reason}`) }}</template>
               <template v-if="postEditTest.nativeCode !== null"> ({{ postEditTest.nativeCode }})</template>
-            </div>
-            <div v-if="postEditTest?.insertions !== null && postEditTest?.insertions !== undefined" class="field-note">
+            </span>
+            <span v-if="postEditTest?.insertions !== null && postEditTest?.insertions !== undefined">
               {{ t('input.postEditCounts', { insertions: postEditTest.insertions, deletions: postEditTest.deletions, substitutions: postEditTest.substitutions }) }}
-            </div>
-            <div v-if="postEditTest?.strategy && postEditTest.rangeEvidence" class="field-note">
+            </span>
+            <span v-if="postEditTest?.strategy && postEditTest.rangeEvidence">
               {{ t('input.postEditObservationDetail', {
                 strategy: t(`input.postEditStrategies.${postEditTest.strategy}`),
                 evidence: t(`input.postEditEvidence.${postEditTest.rangeEvidence}`),
                 seconds: ((postEditTest.lastObservedMs ?? 0) / 1000).toFixed(1)
               }) }}
-            </div>
-            <div v-if="postEditTestError" class="field-note limit-hint">{{ t('input.postEditError', { message: postEditTestError }) }}</div>
-            </template>
-          </div>
-          <NSwitch v-model:value="postEditEnabled" :loading="postEditStore.saving" :disabled="!postEditStore.settings" />
-        </div>
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('input.injectionMode') }}</div>
-            <div class="field-note">{{ t('input.injectionModeNote') }}</div>
-          </div>
-          <NSelect
-            v-model:value="textInjectionMode"
-            :options="injectionOptions"
-            size="small"
-            class="field-control"
-          />
+            </span>
+            <span v-if="postEditTestError" class="is-warning">{{ t('input.postEditError', { message: postEditTestError }) }}</span>
+          </template>
+        </template>
+        <NSwitch v-model:value="postEditEnabled" :loading="postEditStore.saving" :disabled="!postEditStore.settings" />
+      </SettingRow>
+
+      <div class="overrides">
+        <div class="overrides-head">
+          <span class="overrides-title">{{ t('input.appOverrides') }}</span>
+          <HelpTip :text="t('input.appOverridesNote')" />
         </div>
 
-        <div class="app-overrides-section">
-          <div class="field-text">
-            <div class="field-label">{{ t('input.appOverrides') }}</div>
-            <div class="field-note">{{ t('input.appOverridesNote') }}</div>
-          </div>
-
-          <div v-if="injectionAppRows.length > 0" class="app-overrides-groups">
-            <div v-if="configuredInjectionAppRows.length > 0" class="app-overrides-group">
-              <div class="app-overrides-group-header">
-                <div class="app-overrides-group-title">{{ t('input.configuredApps') }}</div>
-                <div class="field-note">{{ t('input.configuredAppsNote') }}</div>
-              </div>
-              <div class="app-overrides-list">
-                <div
-                  v-for="app in configuredInjectionAppRows"
-                  :key="app.key"
-                  class="app-override-item"
-                >
-                  <div class="app-override-meta">
-                    <div class="app-override-badge">{{ getAppBadgeLabel(app.appName) }}</div>
-                    <div class="app-override-copy">
-                      <div class="app-override-title-row">
-                        <div class="app-override-name">{{ app.appName }}</div>
-                        <span class="pill app-override-pill">
-                          {{ getInjectionModeLabel(app.overrideMode ?? textInjectionMode) }}
-                        </span>
-                      </div>
-                      <div class="field-note app-override-note">
-                        <span>{{ getAppIdentityLabel(app) }}</span>
-                        <span class="app-override-separator">·</span>
-                        <span>{{ getAppUsageLabel(app) }}</span>
-                      </div>
-                      <NCheckbox
-                        v-if="app.overrideMode === 'pasteboard'"
-                        size="small"
-                        class="app-override-restore"
-                        :checked="app.overrideSkipRestore ?? false"
-                        @update:checked="(checked: boolean) => updateSkipClipboardRestore(app, checked)"
-                      >
-                        {{ t('input.skipClipboardRestore') }}
-                      </NCheckbox>
-                      <div
-                        v-if="app.overrideMode === 'pasteboard' && app.overrideSkipRestore"
-                        class="field-note app-override-restore-note"
-                      >
-                        {{ t('input.skipClipboardRestoreNote') }}
-                      </div>
-                    </div>
+        <template v-if="injectionAppRows.length > 0">
+          <div
+            v-for="group in overrideGroups"
+            :key="group.key"
+            class="override-group"
+          >
+            <div class="override-group-title">{{ group.title }}</div>
+            <ul class="override-list">
+              <li v-for="app in group.rows" :key="app.key" class="override-item">
+                <div class="override-badge">{{ getAppBadgeLabel(app.appName) }}</div>
+                <div class="override-copy">
+                  <div class="override-name">{{ app.appName }}</div>
+                  <div class="override-meta">
+                    {{ getAppIdentityLabel(app) }} · {{ getAppUsageLabel(app) }}
                   </div>
-
-                  <NSelect
-                    :value="app.overrideMode ?? 'default'"
-                    :options="getOverrideOptions()"
-                    size="small"
-                    class="app-override-select"
-                    @update:value="(value) => updateTextInjectionOverride(app, value as TextInjectionOverrideSelectValue)"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div v-if="recentUnconfiguredAppRows.length > 0" class="app-overrides-group">
-              <div class="app-overrides-group-header">
-                <div class="app-overrides-group-title">{{ t('input.recentApps') }}</div>
-                <div class="field-note">{{ t('input.recentAppsNote') }}</div>
-              </div>
-              <div class="app-overrides-list">
-                <div
-                  v-for="app in recentUnconfiguredAppRows"
-                  :key="app.key"
-                  class="app-override-item"
-                >
-                  <div class="app-override-meta">
-                    <div class="app-override-badge">{{ getAppBadgeLabel(app.appName) }}</div>
-                    <div class="app-override-copy">
-                      <div class="app-override-title-row">
-                        <div class="app-override-name">{{ app.appName }}</div>
-                        <span class="pill app-override-pill">
-                          {{ getInjectionModeLabel(textInjectionMode) }}
-                        </span>
-                      </div>
-                      <div class="field-note app-override-note">
-                        <span>{{ getAppIdentityLabel(app) }}</span>
-                        <span class="app-override-separator">·</span>
-                        <span>{{ getAppUsageLabel(app) }}</span>
-                      </div>
-                    </div>
+                  <div v-if="app.overrideMode === 'pasteboard'" class="override-restore">
+                    <NCheckbox
+                      size="small"
+                      :checked="app.overrideSkipRestore ?? false"
+                      @update:checked="(checked: boolean) => updateSkipClipboardRestore(app, checked)"
+                    >
+                      {{ t('input.skipClipboardRestore') }}
+                    </NCheckbox>
+                    <HelpTip :text="t('input.skipClipboardRestoreNote')" />
                   </div>
-
-                  <NSelect
-                    :value="'default'"
-                    :options="getOverrideOptions()"
-                    size="small"
-                    class="app-override-select"
-                    @update:value="(value) => updateTextInjectionOverride(app, value as TextInjectionOverrideSelectValue)"
-                  />
                 </div>
-              </div>
-            </div>
+                <NSelect
+                  :value="app.overrideMode ?? 'default'"
+                  :options="getOverrideOptions()"
+                  size="small"
+                  class="override-select"
+                  @update:value="(value) => updateTextInjectionOverride(app, value as TextInjectionOverrideSelectValue)"
+                />
+              </li>
+            </ul>
           </div>
+        </template>
 
-          <div v-else class="app-overrides-empty">
-            <div class="app-overrides-empty-title">
-              {{ loadingRecentTargetApps ? t('input.loadingRecentApps') : t('input.appOverridesEmpty') }}
-            </div>
-            <div class="field-note">{{ t('input.appOverridesEmptyNote') }}</div>
+        <div v-else class="overrides-empty">
+          <div class="overrides-empty-title">
+            {{ loadingRecentTargetApps ? t('input.loadingRecentApps') : t('input.appOverridesEmpty') }}
           </div>
+          <div>{{ t('input.appOverridesEmptyNote') }}</div>
         </div>
       </div>
-    </div>
+    </SettingsSection>
+
+    <SettingsSection :title="t('input.overlay')" :help="t('input.overlaySub')">
+      <SettingRow :label="t('input.translucent')" :help="t('input.translucentNote')">
+        <NSwitch v-model:value="hudTransparent" />
+      </SettingRow>
+    </SettingsSection>
   </div>
 </template>
 
 <style scoped>
-.settings-page {
-  max-width: 1120px;
-  width: 100%;
-  padding-bottom: var(--spacing-2xl);
-}
-
-.input-card {
-  padding: var(--spacing-lg) var(--spacing-xl);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border);
-}
-
-.card-header {
+.gesture-legend {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: var(--spacing-md);
-}
-
-.card-title {
-  font-size: var(--font-lg);
-  font-weight: 700;
-}
-
-.card-sub {
-  color: var(--color-text-tertiary);
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  list-style: none;
   font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
 }
 
-.field-list {
+.gesture-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.gesture-key {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.overrides {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-md);
+  padding: 14px 0 var(--spacing-lg);
+  border-top: 1px solid var(--color-divider);
 }
 
-.field-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--spacing-lg);
-}
-
-.field-text {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  flex: 1;
-}
-
-.field-label {
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.field-note {
-  font-size: var(--font-xs);
-  color: var(--color-text-tertiary);
-  max-width: 520px;
-}
-
-.field-note.limit-hint {
-  color: color-mix(in srgb, var(--color-warning) 72%, var(--color-text-secondary));
-}
-
-.field-control {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-  width: 420px;
-  max-width: 100%;
-  justify-content: flex-end;
-}
-
-.field-control.short {
-  width: 200px;
-}
-
-.hotkey-display {
-  flex: 1;
-  padding: 6px var(--spacing-lg);
-  background-color: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  font-family: ui-monospace, monospace;
-  font-size: var(--font-md);
-  color: var(--color-text-primary);
-  min-height: 28px;
-  display: flex;
-  align-items: center;
-}
-
-.hotkey-display.recording {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 2px var(--color-accent-light);
-}
-
-.hotkey-actions {
-  display: flex;
-  gap: var(--spacing-sm);
-}
-
-.device-select {
-  flex: 1;
-}
-
-.app-overrides-section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-sm);
-  padding-top: 2px;
-}
-
-.app-overrides-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-.app-overrides-group {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.app-overrides-group-header {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-left: 2px;
-}
-
-.app-overrides-group-title {
-  font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--color-text-secondary);
-}
-
-.app-overrides-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.app-override-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--spacing-lg);
-  padding: 14px 16px;
-  border-radius: var(--radius-lg);
-  border: 1px solid color-mix(in srgb, var(--color-border) 82%, var(--color-accent) 18%);
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--color-bg-tertiary) 82%, transparent), transparent),
-    var(--color-bg-primary);
-}
-
-.app-override-meta {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  flex: 1;
-  min-width: 0;
-}
-
-.app-override-badge {
-  width: 36px;
-  height: 36px;
-  border-radius: 12px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  font-size: var(--font-sm);
-  font-weight: 700;
-  color: var(--color-accent);
-  background: color-mix(in srgb, var(--color-accent-light) 72%, var(--color-bg-tertiary));
-  border: 1px solid color-mix(in srgb, var(--color-accent) 20%, var(--color-border));
-}
-
-.app-override-copy {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.app-override-title-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.app-override-name {
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.app-override-pill {
-  white-space: nowrap;
-}
-
-.app-override-note {
+.overrides-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  font-weight: 500;
 }
 
-.app-override-separator {
+.override-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.override-group-title {
+  font-size: var(--font-xs);
   color: var(--color-text-tertiary);
 }
 
-.app-override-select {
-  width: 240px;
-  flex: 0 0 240px;
+.override-list {
+  list-style: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-bg-primary) 60%, transparent);
 }
 
-.app-override-restore {
+.override-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: 10px 12px;
+}
+
+.override-item + .override-item {
+  border-top: 1px solid var(--color-divider);
+}
+
+.override-badge {
+  align-self: flex-start;
   margin-top: 2px;
-}
-
-.app-override-restore-note {
-  margin-top: 2px;
-}
-
-.app-overrides-empty {
-  padding: 18px;
-  border-radius: var(--radius-lg);
-  border: 1px dashed var(--color-border);
-  background: color-mix(in srgb, var(--color-bg-tertiary) 70%, transparent);
-}
-
-.app-overrides-empty-title {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+  font-size: var(--font-sm);
   font-weight: 600;
-  color: var(--color-text-primary);
-  margin-bottom: 4px;
 }
 
-@media (max-width: 900px) {
-  .app-override-item {
-    flex-direction: column;
-    align-items: flex-start;
+.override-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.override-name {
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.override-meta {
+  font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.override-restore {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.override-select {
+  width: 220px;
+  flex: 0 0 220px;
+}
+
+.overrides-empty {
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--color-border);
+  font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
+}
+
+.overrides-empty-title {
+  margin-bottom: 2px;
+  font-size: var(--font-md);
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 760px) {
+  .override-item {
+    flex-wrap: wrap;
   }
 
-  .app-override-select {
+  .override-select {
     width: 100%;
-    flex: none;
+    flex: 1 1 100%;
   }
 }
 </style>

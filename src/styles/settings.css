@@ -1,0 +1,173 @@
+/* Shared settings-page layout used with SettingsSection / SettingRow. */
+
+.settings-page {
+  max-width: 880px;
+  width: 100%;
+  gap: var(--spacing-lg);
+  padding-bottom: var(--spacing-2xl);
+}
+
+/* Several controls in one row (select + button, input + unit). */
+.control-group {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+  width: 100%;
+  min-width: 0;
+}
+
+/* Text fields and selects fill the space their row leaves them. */
+.setting-control > .n-input,
+.setting-control > .n-select,
+.setting-control > .n-input-number,
+.control-group > .n-input,
+.control-group > .n-select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* A lone switch, checkbox or button needs no reserved column. */
+.setting-row > .setting-control:has(> :only-child:is(.n-switch, .n-checkbox, .n-button)) {
+  width: auto;
+}
+
+/* Short values (numbers, durations) sit right-aligned like switches. */
+.setting-control > .compact,
+.control-group.compact {
+  width: 140px;
+  flex: 0 0 auto;
+}
+
+/* Non-row blocks inside a section (callouts, results, lists). */
+.settings-section .section-body > :not(.setting-row) {
+  margin: 4px 0 12px;
+}
+
+.settings-section .section-body > .setting-row + :not(.setting-row) {
+  margin-top: 0;
+}
+
+/* Callouts that must stay visible: provider problems, failed checks. */
+.settings-callout {
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 28%, var(--color-border));
+  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+  color: color-mix(in srgb, var(--color-warning) 72%, var(--color-text-secondary));
+  font-size: var(--font-xs);
+  line-height: 1.5;
+  user-select: text;
+}
+
+.settings-callout.is-error {
+  border-color: color-mix(in srgb, var(--color-error) 30%, var(--color-border));
+  background: color-mix(in srgb, var(--color-error) 8%, transparent);
+  color: color-mix(in srgb, var(--color-error) 70%, var(--color-text-secondary));
+}
+
+/* Small caption that groups rows inside a section. */
+.settings-subhead {
+  padding: 14px 0 2px;
+  font-size: var(--font-xs);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+}
+
+.settings-section .section-body > .settings-subhead {
+  margin: 0;
+  border-top: 1px solid var(--color-divider);
+}
+
+.settings-section .section-body > .settings-subhead:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+/* Result of a connectivity test (ASR / LLM provider probes). */
+.probe-result {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-bg-primary) 50%, transparent);
+  user-select: text;
+}
+
+.probe-result.ok {
+  border-color: color-mix(in srgb, var(--color-success) 30%, var(--color-border));
+  background: color-mix(in srgb, var(--color-success) 7%, transparent);
+}
+
+.probe-result.error {
+  border-color: color-mix(in srgb, var(--color-error) 30%, var(--color-border));
+  background: color-mix(in srgb, var(--color-error) 7%, transparent);
+}
+
+.probe-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: var(--font-xs);
+  color: var(--color-text-secondary);
+}
+
+.probe-line strong {
+  color: var(--color-text-primary);
+  font-weight: 500;
+  text-align: right;
+  word-break: break-word;
+}
+
+.probe-result-label {
+  font-size: var(--font-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.probe-message {
+  font-size: var(--font-xs);
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  word-break: break-word;
+}
+
+/* Square icon-only button next to a control (refresh lists etc.). */
+.icon-button {
+  padding: 0 7px;
+  color: var(--color-text-secondary);
+}
+
+.spinning {
+  animation: settings-spin 0.8s linear infinite;
+}
+
+@keyframes settings-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Rows whose control is a cluster (hotkey + buttons + switch) get more room. */
+.setting-row.wide-control > .setting-control {
+  width: 420px;
+  max-width: 60%;
+}
+
+/* Narrow windows: wide controls drop under their label instead of squeezing;
+   a lone switch, checkbox or button stays beside it. SettingsSection is the
+   size container. */
+@container (max-width: 560px) {
+  .setting-row:not(.stacked):not(:has(> .setting-control > :only-child:is(.n-switch, .n-checkbox, .n-button))) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--spacing-sm);
+  }
+
+  .setting-row:not(.stacked):not(:has(> .setting-control > :only-child:is(.n-switch, .n-checkbox, .n-button))) > .setting-control {
+    width: 100%;
+    max-width: none;
+  }
+}

@@ -22,6 +22,8 @@ import {
   postRecordingBatchRefineValueFromBoolean,
   resolveQwenRecordingHardLimitMinutes,
 } from '../../utils/providerOptions'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -186,238 +188,137 @@ const showQwenRecordingLimitNotice = computed(() =>
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.qwenRealtimeConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.qwenRealtimeConfigurationSub') }}</div>
+  <SettingsSection :title="t('asr.qwenRealtimeConfiguration')">
+    <h3 class="settings-subhead">{{ t('asr.qwenRecognitionSection') }}</h3>
+    <SettingRow :label="t('asr.recognitionMode')" :help="t('asr.qwenRecognitionModeNote')">
+      <NSelect
+        v-model:value="qwenAsrRecognitionMode"
+        :options="recognitionModeOptions"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow v-if="qwenAsrRecognitionMode === 'realtime'" :label="t('asr.qwenRealtimeModel')" :help="t('asr.modelNote')">
+      <AsrModelSelect v-model:value="qwenAsrModel" provider="qwen" mode="realtime" />
+    </SettingRow>
+    <SettingRow v-if="qwenAsrRecognitionMode === 'realtime'" :label="t('asr.postRecordingRefine')" :help="t('asr.qwenPostRecordingRefineNote')">
+      <NSelect
+        v-model:value="qwenAsrPostRecordingRefine"
+        :options="postRecordingRefineOptions"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow v-if="usesBatchModel" :label="t('asr.qwenBatchModel')" :help="t('asr.qwenBatchModelNote')">
+      <AsrModelSelect v-model:value="qwenAsrBatchModel" provider="qwen" mode="batch" />
+    </SettingRow>
+    <div v-if="showQwenRecordingLimitNotice" class="settings-callout">
+      {{ t('asr.qwenRecordingLimitNotice', {
+        minutes: qwenRecordingHardLimitMinutes ?? QWEN_BATCH_RECORDING_LIMIT_MINUTES
+      }) }}
     </div>
-    <section class="qwen-section" aria-labelledby="qwen-recognition-heading">
-      <h3 id="qwen-recognition-heading" class="qwen-section-title">{{ t('asr.qwenRecognitionSection') }}</h3>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.recognitionMode') }}</div>
-            <div class="field-note">{{ t('asr.qwenRecognitionModeNote') }}</div>
-          </div>
-          <NSelect
-            v-model:value="qwenAsrRecognitionMode"
-            :options="recognitionModeOptions"
-            size="small"
-            class="field-control"
-          />
-        </div>
-        <div v-if="qwenAsrRecognitionMode === 'realtime'" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenRealtimeModel') }}</div>
-            <div class="field-note">{{ t('asr.modelNote') }}</div>
-          </div>
-          <AsrModelSelect v-model:value="qwenAsrModel" provider="qwen" mode="realtime" class="field-control" />
-        </div>
-        <div v-if="qwenAsrRecognitionMode === 'realtime'" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.postRecordingRefine') }}</div>
-            <div class="field-note">{{ t('asr.qwenPostRecordingRefineNote') }}</div>
-          </div>
-          <NSelect
-            v-model:value="qwenAsrPostRecordingRefine"
-            :options="postRecordingRefineOptions"
-            size="small"
-            class="field-control"
-          />
-        </div>
-        <div v-if="usesBatchModel" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenBatchModel') }}</div>
-            <div class="field-note">{{ t('asr.qwenBatchModelNote') }}</div>
-          </div>
-          <AsrModelSelect v-model:value="qwenAsrBatchModel" provider="qwen" mode="batch" class="field-control" />
-        </div>
-        <div v-if="showQwenRecordingLimitNotice" class="notice-box">
-          {{ t('asr.qwenRecordingLimitNotice', {
-            minutes: qwenRecordingHardLimitMinutes ?? QWEN_BATCH_RECORDING_LIMIT_MINUTES
-          }) }}
-        </div>
+    <h3 class="settings-subhead">{{ t('asr.qwenConnectionSection') }}</h3>
+    <SettingRow :label="t('asr.qwenServiceRegion')" :help="t('asr.qwenServiceRegionNote')">
+      <NSelect v-model:value="qwenAsrRegion" :options="qwenRegionOptions" size="small" />
+    </SettingRow>
+    <SettingRow v-if="qwenAsrRegion === 'custom'" :label="t('asr.endpoint')" :help="t('asr.qwenCustomEndpointNote')">
+      <NInput v-model:value="qwenAsrWsUrl" placeholder="wss://..."
+        :status="connection.error === 'endpoint' ? 'error' : undefined" />
+    </SettingRow>
+    <SettingRow v-if="usesQwenAudioFeatures && !connection.workspaceEmbedded" :label="t('asr.qwenWorkspaceId')" :help="t('asr.qwenWorkspaceIdNote')">
+      <NInput
+        v-model:value="qwenAsrWorkspaceId"
+        :placeholder="t('asr.qwenWorkspaceIdPlaceholder')"
+        :status="connection.error === 'workspaceInvalid' ? 'error' : undefined"
+      />
+    </SettingRow>
+    <SettingRow v-if="usesQwenAudioFeatures && connection.workspaceEmbedded" :label="t('asr.qwenWorkspaceId')">
+      <template #status>
+        <span>{{ t('asr.qwenWorkspaceFromEndpoint') }}</span>
+      </template>
+    </SettingRow>
+    <NAlert v-if="connection.error" type="warning">
+      {{ connectionErrorText }}
+    </NAlert>
+    <SettingRow :label="t('asr.apiCredentials')" :help="t('asr.qwenApiKeyNote')">
+      <NInput
+        v-model:value="qwenAsrApiKey"
+        type="password"
+        show-password-on="click"
+        placeholder="sk-..."
+      />
+    </SettingRow>
+    <div v-if="connection.endpoints.length" class="endpoint-preview" aria-live="polite">
+      <div class="endpoint-preview-title">{{ t('asr.qwenResolvedEndpoints') }}</div>
+      <div v-for="endpoint in connection.endpoints" :key="endpoint.mode" class="endpoint-preview-row">
+        <span>{{ t(endpoint.mode === 'realtime' ? 'asr.qwenRealtimeEndpoint' : 'asr.qwenBatchEndpoint') }}</span>
+        <code>{{ endpoint.url }}</code>
       </div>
-    </section>
-
-    <section class="qwen-section" aria-labelledby="qwen-connection-heading">
-      <h3 id="qwen-connection-heading" class="qwen-section-title">{{ t('asr.qwenConnectionSection') }}</h3>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenServiceRegion') }}</div>
-            <div class="field-note">{{ t('asr.qwenServiceRegionNote') }}</div>
-          </div>
-          <NSelect v-model:value="qwenAsrRegion" :options="qwenRegionOptions" size="small" class="field-control" />
-        </div>
-        <div v-if="qwenAsrRegion === 'custom'" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.endpoint') }}</div>
-            <div class="field-note">{{ t('asr.qwenCustomEndpointNote') }}</div>
-          </div>
-          <NInput v-model:value="qwenAsrWsUrl" placeholder="wss://..." class="field-control"
-            :status="connection.error === 'endpoint' ? 'error' : undefined" />
-        </div>
-        <div v-if="usesQwenAudioFeatures && !connection.workspaceEmbedded" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenWorkspaceId') }}</div>
-            <div class="field-note">{{ t('asr.qwenWorkspaceIdNote') }}</div>
-          </div>
-          <NInput
-            v-model:value="qwenAsrWorkspaceId"
-            :placeholder="t('asr.qwenWorkspaceIdPlaceholder')"
-            :status="connection.error === 'workspaceInvalid' ? 'error' : undefined"
-            class="field-control"
-          />
-        </div>
-        <div v-if="usesQwenAudioFeatures && connection.workspaceEmbedded" class="field-note">
-          {{ t('asr.qwenWorkspaceFromEndpoint') }}
-        </div>
-        <NAlert v-if="connection.error" type="warning" class="field-alert">
-          {{ connectionErrorText }}
-        </NAlert>
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.apiCredentials') }}</div>
-            <div class="field-note">{{ t('asr.qwenApiKeyNote') }}</div>
-          </div>
-          <NInput
-            v-model:value="qwenAsrApiKey"
-            type="password"
-            show-password-on="click"
-            placeholder="sk-..."
-            class="field-control"
-          />
-        </div>
-        <div v-if="connection.endpoints.length" class="endpoint-preview" aria-live="polite">
-          <div class="endpoint-preview-title">{{ t('asr.qwenResolvedEndpoints') }}</div>
-          <div v-for="endpoint in connection.endpoints" :key="endpoint.mode" class="endpoint-preview-row">
-            <span>{{ t(endpoint.mode === 'realtime' ? 'asr.qwenRealtimeEndpoint' : 'asr.qwenBatchEndpoint') }}</span>
-            <code>{{ endpoint.url }}</code>
-          </div>
-        </div>
+    </div>
+    <h3 class="settings-subhead">{{ t('asr.qwenOptionsSection') }}</h3>
+    <SettingRow v-if="usesQwenAudioFeatures" :label="t('asr.qwenAudio3Capabilities')" :help="t('asr.qwenAudio3CapabilitiesNote')">
+      <div class="capability-tags">
+        <NTag type="success" size="small" :bordered="false">{{ t('asr.qwenCapabilityInstantHotword') }}</NTag>
+        <NTag type="success" size="small" :bordered="false">{{ t('asr.qwenCapabilityContext') }}</NTag>
       </div>
-    </section>
-
-    <section class="qwen-section" aria-labelledby="qwen-options-heading">
-      <h3 id="qwen-options-heading" class="qwen-section-title">{{ t('asr.qwenOptionsSection') }}</h3>
-      <div class="field-list">
-        <div v-if="usesQwenAudioFeatures" class="field-row capability-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenAudio3Capabilities') }}</div>
-            <div class="field-note">{{ t('asr.qwenAudio3CapabilitiesNote') }}</div>
-          </div>
-          <div class="capability-tags">
-            <NTag type="success" size="small" :bordered="false">{{ t('asr.qwenCapabilityInstantHotword') }}</NTag>
-            <NTag type="success" size="small" :bordered="false">{{ t('asr.qwenCapabilityContext') }}</NTag>
-          </div>
-        </div>
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.languageHint') }}</div>
-            <div class="field-note">{{ t('asr.languageHintNote') }}</div>
-          </div>
-          <NInput
-            v-model:value="qwenAsrLanguage"
-            :placeholder="t('asr.qwenLanguagePlaceholder')"
-            class="field-control"
-          />
-        </div>
-        <div v-if="usesActiveQwenAudioStreaming" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenContextHistory') }}</div>
-            <div class="field-note">{{ t('asr.qwenContextHistoryNote') }}</div>
-          </div>
-          <NSwitch v-model:value="enableAsrContext" />
-        </div>
-        <div v-if="usesQwenAudioFeatures" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenHotwordWeight') }}</div>
-            <div class="field-note">{{ t('asr.qwenHotwordWeightNote') }}</div>
-          </div>
-          <NSelect
-            v-model:value="qwenAsrHotwordWeight"
-            :options="hotwordWeightOptions"
-            size="small"
-            class="field-control"
-          />
-        </div>
-        <div v-if="usesQwenAudioFeatures" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenVocabularyId') }}</div>
-            <div class="field-note">{{ t('asr.qwenVocabularyIdNote') }}</div>
-          </div>
-          <NInput
-            v-model:value="qwenAsrVocabularyId"
-            :placeholder="t('asr.qwenVocabularyIdPlaceholder')"
-            class="field-control"
-          />
-        </div>
-        <NAlert
-          v-if="vocabularyIdOverridden"
-          type="warning"
-          :title="t('asr.qwenVocabularyOverrideTitle')"
-          class="field-alert"
-        >
-          {{ t('asr.qwenVocabularyOverrideBody') }}
-        </NAlert>
-        <div v-if="usesActiveQwenAudioStreaming" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenSemanticPunctuation') }}</div>
-            <div class="field-note">{{ t('asr.qwenSemanticPunctuationNote') }}</div>
-          </div>
-          <NSwitch v-model:value="qwenAsrSemanticPunctuationEnabled" />
-        </div>
-        <div v-if="usesActiveQwenAudioStreaming" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenSentenceSilence') }}</div>
-            <div class="field-note">{{ t('asr.qwenSentenceSilenceNote') }}</div>
-          </div>
-          <NInputNumber
-            v-model:value="qwenAsrMaxSentenceSilenceMs"
-            :min="200"
-            :max="6000"
-            :step="100"
-            size="small"
-            class="field-control"
-          />
-        </div>
-        <div v-if="usesActiveQwenAudioStreaming" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('asr.qwenHeartbeat') }}</div>
-            <div class="field-note">{{ t('asr.qwenHeartbeatNote') }}</div>
-          </div>
-          <NSwitch v-model:value="qwenAsrHeartbeat" />
-        </div>
-      </div>
-    </section>
-  </div>
+    </SettingRow>
+    <SettingRow :label="t('asr.languageHint')" :help="t('asr.languageHintNote')">
+      <NInput
+        v-model:value="qwenAsrLanguage"
+        :placeholder="t('asr.qwenLanguagePlaceholder')"
+      />
+    </SettingRow>
+    <SettingRow v-if="usesActiveQwenAudioStreaming" :label="t('asr.qwenContextHistory')" :help="t('asr.qwenContextHistoryNote')">
+      <NSwitch v-model:value="enableAsrContext" />
+    </SettingRow>
+    <SettingRow v-if="usesQwenAudioFeatures" :label="t('asr.qwenHotwordWeight')" :help="t('asr.qwenHotwordWeightNote')">
+      <NSelect
+        v-model:value="qwenAsrHotwordWeight"
+        :options="hotwordWeightOptions"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow v-if="usesQwenAudioFeatures" :label="t('asr.qwenVocabularyId')" :help="t('asr.qwenVocabularyIdNote')">
+      <NInput
+        v-model:value="qwenAsrVocabularyId"
+        :placeholder="t('asr.qwenVocabularyIdPlaceholder')"
+      />
+    </SettingRow>
+    <NAlert
+      v-if="vocabularyIdOverridden"
+      type="warning"
+      :title="t('asr.qwenVocabularyOverrideTitle')"
+     
+    >
+      {{ t('asr.qwenVocabularyOverrideBody') }}
+    </NAlert>
+    <SettingRow v-if="usesActiveQwenAudioStreaming" :label="t('asr.qwenSemanticPunctuation')" :help="t('asr.qwenSemanticPunctuationNote')">
+      <NSwitch v-model:value="qwenAsrSemanticPunctuationEnabled" />
+    </SettingRow>
+    <SettingRow v-if="usesActiveQwenAudioStreaming" :label="t('asr.qwenSentenceSilence')" :help="t('asr.qwenSentenceSilenceNote')">
+      <NInputNumber
+        v-model:value="qwenAsrMaxSentenceSilenceMs"
+        :min="200"
+        :max="6000"
+        :step="100"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow v-if="usesActiveQwenAudioStreaming" :label="t('asr.qwenHeartbeat')" :help="t('asr.qwenHeartbeatNote')">
+      <NSwitch v-model:value="qwenAsrHeartbeat" />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>
 @import '../../styles/asr-settings.css';
 
-.qwen-section + .qwen-section {
-  margin-top: var(--spacing-xl);
-  padding-top: var(--spacing-lg);
-  border-top: 1px solid var(--color-divider);
-}
-
-.qwen-section-title {
-  margin: 0 0 var(--spacing-md);
-  color: var(--color-text-secondary);
-  font-size: var(--font-sm);
-  font-weight: 600;
-}
-
 .endpoint-preview {
-  padding-top: var(--spacing-sm);
   color: var(--color-text-tertiary);
   font-size: var(--font-xs);
+  user-select: text;
 }
 
 .endpoint-preview-title {
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .endpoint-preview-row {
@@ -435,37 +336,5 @@ const showQwenRecordingLimitNotice = computed(() =>
 .endpoint-preview-row code {
   min-width: 0;
   overflow-wrap: anywhere;
-}
-
-@media (max-width: 760px) {
-  .field-row {
-    flex-direction: column;
-    align-items: stretch;
-    gap: var(--spacing-sm);
-  }
-
-  .field-control {
-    width: 100%;
-  }
-
-  .field-row > .n-switch {
-    align-self: flex-start;
-  }
-
-  .endpoint-preview-row {
-    flex-direction: column;
-    gap: 2px;
-  }
-}
-
-.capability-row .capability-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
-.field-alert {
-  margin: 4px 0;
 }
 </style>

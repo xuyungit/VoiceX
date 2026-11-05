@@ -1,5 +1,6 @@
 /* VoiceX Global Styles */
 @import './variables.css';
+@import './settings.css';
 
 * {
     margin: 0;

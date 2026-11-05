@@ -3,6 +3,8 @@ import { computed } from 'vue'
 import { NInput, NInputNumber, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -56,84 +58,50 @@ const googleLocationOptions = [
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.googleCloudConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.googleCloudConfigurationSub') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row sa-json-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.serviceAccountKey') }}</div>
-          <div class="field-note">{{ t('asr.serviceAccountNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="googleSttApiKey"
-          type="textarea"
-          placeholder='{"type":"service_account","project_id":"...","private_key":"...",...}'
-          :autosize="{ minRows: 3, maxRows: 6 }"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.projectId') }}</div>
-          <div class="field-note">{{ t('asr.projectIdNote') }}</div>
-        </div>
-        <NInput v-model:value="googleSttProjectId" placeholder="e.g. my-project-123456" class="field-control" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.location') }}</div>
-          <div class="field-note">{{ t('asr.locationNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="googleSttLocation"
-          :options="googleLocationOptions"
-          filterable
-          tag
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.language') }}</div>
-          <div class="field-note">{{ t('asr.languageNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="googleSttLanguageCode"
-          placeholder="cmn-Hans-CN, en-US"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.endpointing') }}</div>
-          <div class="field-note">{{ t('asr.endpointingNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="googleSttEndpointing"
-          :options="googleEndpointingOptions"
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.phraseBoost') }}</div>
-          <div class="field-note">{{ t('asr.phraseBoostNote') }}</div>
-        </div>
-        <NInputNumber
-          v-model:value="googleSttPhraseBoost"
-          :min="0"
-          :max="20"
-          :step="1"
-          class="field-control short"
-        />
-      </div>
-    </div>
-  </div>
+  <SettingsSection :title="t('asr.googleCloudConfiguration')" :help="t('asr.googleCloudConfigurationSub')">
+    <SettingRow stacked :label="t('asr.serviceAccountKey')" :help="t('asr.serviceAccountNote')">
+      <NInput
+        v-model:value="googleSttApiKey"
+        type="textarea"
+        placeholder='{"type":"service_account","project_id":"...","private_key":"...",...}'
+        :autosize="{ minRows: 3, maxRows: 6 }"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.projectId')" :help="t('asr.projectIdNote')">
+      <NInput v-model:value="googleSttProjectId" placeholder="e.g. my-project-123456" />
+    </SettingRow>
+    <SettingRow :label="t('asr.location')" :help="t('asr.locationNote')">
+      <NSelect
+        v-model:value="googleSttLocation"
+        :options="googleLocationOptions"
+        filterable
+        tag
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.language')" :help="t('asr.languageNote')">
+      <NInput
+        v-model:value="googleSttLanguageCode"
+        placeholder="cmn-Hans-CN, en-US"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.endpointing')" :help="t('asr.endpointingNote')">
+      <NSelect
+        v-model:value="googleSttEndpointing"
+        :options="googleEndpointingOptions"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.phraseBoost')" :help="t('asr.phraseBoostNote')">
+      <NInputNumber
+        v-model:value="googleSttPhraseBoost"
+        :min="0"
+        :max="20"
+        :step="1"
+        class="compact"
+      />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>

@@ -4,6 +4,8 @@ import AsrModelSelect from './AsrModelSelect.vue'
 import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -36,57 +38,32 @@ const mimoLanguageOptions = computed(() => [
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.mimoConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.mimoConfigurationSub') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.apiCredentials') }}</div>
-          <div class="field-note">{{ t('asr.mimoApiKeyNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="mimoApiKey"
-          type="password"
-          show-password-on="click"
-          placeholder="MiMo API key"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.model') }}</div>
-          <div class="field-note">{{ t('asr.mimoModelNote') }}</div>
-        </div>
-        <AsrModelSelect v-model:value="mimoModel" provider="mimo" mode="batch" class="field-control" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.baseUrl') }}</div>
-          <div class="field-note">{{ t('asr.mimoBaseUrlNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="mimoBaseUrl"
-          placeholder="https://api.xiaomimimo.com/v1"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.languageHint') }}</div>
-          <div class="field-note">{{ t('asr.mimoLanguageNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="mimoLanguage"
-          :options="mimoLanguageOptions"
-          size="small"
-          class="field-control"
-        />
-      </div>
-    </div>
-  </div>
+  <SettingsSection :title="t('asr.mimoConfiguration')" :help="t('asr.mimoConfigurationSub')">
+    <SettingRow :label="t('asr.apiCredentials')" :help="t('asr.mimoApiKeyNote')">
+      <NInput
+        v-model:value="mimoApiKey"
+        type="password"
+        show-password-on="click"
+        placeholder="MiMo API key"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.model')" :help="t('asr.mimoModelNote')">
+      <AsrModelSelect v-model:value="mimoModel" provider="mimo" mode="batch" />
+    </SettingRow>
+    <SettingRow :label="t('asr.baseUrl')" :help="t('asr.mimoBaseUrlNote')">
+      <NInput
+        v-model:value="mimoBaseUrl"
+        placeholder="https://api.xiaomimimo.com/v1"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.languageHint')" :help="t('asr.mimoLanguageNote')">
+      <NSelect
+        v-model:value="mimoLanguage"
+        :options="mimoLanguageOptions"
+        size="small"
+      />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>

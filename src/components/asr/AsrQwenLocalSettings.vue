@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { NButton, NInput, NSelect, NSwitch } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -72,65 +74,42 @@ const languageOptions = computed(() => [
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.qwenLocalConfiguration') }}</div>
-      <div class="card-sub">{{ t('asr.qwenLocalConfigurationSub') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.qwenLocalModelDir') }}</div>
-          <div class="field-note">{{ t('asr.qwenLocalModelDirNote') }}</div>
-        </div>
-        <div class="field-control local-model-control">
-          <NSelect v-model:value="qwenLocalModelDir" :options="modelOptions" :loading="loadingModels"
-            filterable tag size="small" :placeholder="t('asr.localModelSelect')" />
-          <div class="local-model-actions">
-            <NButton size="small" @click="chooseDirectory">{{ t('asr.localModelChoose') }}</NButton>
-            <NButton size="small" :loading="loadingModels" @click="refreshModels">{{ t('asr.localModelRefresh') }}</NButton>
-          </div>
-          <div class="field-note">{{ qwenLocalModelDir }}</div>
-          <div class="field-note">{{ t('asr.localModelVerifyNote') }}</div>
-          <div v-if="selectedModel?.message || modelError" role="alert">{{ selectedModel?.message || modelError }}</div>
-        </div>
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.qwenLocalCommandPath') }}</div>
-          <div class="field-note">{{ t('asr.qwenLocalCommandPathNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="qwenLocalCommandPath"
-          placeholder="qwen-asr"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.qwenLocalLanguage') }}</div>
-          <div class="field-note">{{ t('asr.qwenLocalLanguageNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="qwenLocalLanguage"
-          :options="languageOptions"
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.qwenLocalUseDictionary') }}</div>
-          <div class="field-note">{{ t('asr.qwenLocalUseDictionaryNote') }}</div>
-        </div>
-        <NSwitch v-model:value="qwenLocalUseDictionary" />
-      </div>
-    </div>
-  </div>
+  <SettingsSection :title="t('asr.qwenLocalConfiguration')" :help="t('asr.qwenLocalConfigurationSub')">
+    <SettingRow
+      stacked
+      :label="t('asr.qwenLocalModelDir')"
+      :help="`${t('asr.qwenLocalModelDirNote')} ${t('asr.localModelVerifyNote')}`"
+    >
+      <template #status>
+        <span v-if="localModels.some((model) => model.path === qwenLocalModelDir)" class="model-path">{{ qwenLocalModelDir }}</span>
+        <span v-if="selectedModel?.message || modelError" class="is-warning" role="alert">{{ selectedModel?.message || modelError }}</span>
+      </template>
+      <NSelect v-model:value="qwenLocalModelDir" :options="modelOptions" :loading="loadingModels"
+        filterable tag size="small" :placeholder="t('asr.localModelSelect')" />
+      <NButton size="small" @click="chooseDirectory">{{ t('asr.localModelChoose') }}</NButton>
+      <NButton size="small" :loading="loadingModels" @click="refreshModels">{{ t('asr.localModelRefresh') }}</NButton>
+    </SettingRow>
+    <SettingRow :label="t('asr.qwenLocalCommandPath')" :help="t('asr.qwenLocalCommandPathNote')">
+      <NInput
+        v-model:value="qwenLocalCommandPath"
+        placeholder="qwen-asr"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.qwenLocalLanguage')" :help="t('asr.qwenLocalLanguageNote')">
+      <NSelect
+        v-model:value="qwenLocalLanguage"
+        :options="languageOptions"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.qwenLocalUseDictionary')" :help="t('asr.qwenLocalUseDictionaryNote')">
+      <NSwitch v-model:value="qwenLocalUseDictionary" />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>
-.local-model-control { min-width: 0; display: grid; gap: 6px; }
-.local-model-actions { display: flex; gap: 6px; }
-.field-note { overflow-wrap: anywhere; }
+@import '../../styles/asr-settings.css';
+
+.model-path { overflow-wrap: anywhere; }
 </style>

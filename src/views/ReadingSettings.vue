@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { NButton, NInput, NSelect, NSlider, NSwitch, type SelectOption } from 'naive-ui'
+import { NButton, NInput, NSelect, NSlider, NSwitch, NTooltip, type SelectOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '../stores/settings'
@@ -11,6 +11,10 @@ import { buildLlmProviderOptions } from '../utils/llmOptions'
 import { getDefaultPrompt } from '../utils/llmPrompts'
 import { isMacOS, isWindows } from '../utils/platform'
 import { buildTtsProviderOptions, type TtsProviderValue as ProviderValue } from '../utils/ttsOptions'
+import SettingsSection from '../components/settings/SettingsSection.vue'
+import SettingRow from '../components/settings/SettingRow.vue'
+import HelpTip from '../components/settings/HelpTip.vue'
+import HotkeyField from '../components/settings/HotkeyField.vue'
 
 interface TtsVoiceOption {
   id: string
@@ -770,712 +774,489 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page settings-page reading-page">
+  <div class="page settings-page">
     <div class="page-header">
       <h1 class="page-title">{{ t('reading.title') }}</h1>
     </div>
 
-    <div v-if="!selectionReadingSupported" class="surface-card asr-card">
-      <div class="warning-box">{{ t('reading.unsupportedPlatform') }}</div>
-    </div>
+    <div v-if="!selectionReadingSupported" class="settings-callout">{{ t('reading.unsupportedPlatform') }}</div>
 
     <!-- The feature itself comes first — whether it is on, and which key. Both
          are independent of the engine, which follows as one card together
          with everything that belongs to it. -->
-    <div class="surface-card asr-card">
+    <SettingsSection :title="t('reading.general')" :help="t('reading.generalSub')">
       <!-- Both ways of triggering a read, one row each with its own switch.
            The two keys compete with each other (reading outranks translate)
            and with dictation, so they and their conflict warnings are read
            side by side. What a translate-and-read then does with the text is
            its own card further down. -->
-      <div class="card-header">
-        <div class="card-title">{{ t('reading.general') }}</div>
-        <div class="card-sub">{{ t('reading.generalSub') }}</div>
+      <SettingRow class="wide-control" :label="t('reading.hotkey')" :help="hotkeyNote">
+        <HotkeyField
+          :value="isRecording ? t('reading.pressHotkey') : displayHotkey ?? ''"
+          :recording="isRecording"
+          :clearable="!!settingsStore.settings.ttsHotkeyConfig"
+          @clear="resetHotkey"
+        />
+        <NButton
+          :disabled="isRecording || !ttsEnabled || !selectionReadingSupported"
+          size="small"
+          @click="startRecording"
+        >
+          {{ t('reading.record') }}
+        </NButton>
+        <NSwitch v-model:value="ttsEnabled" :disabled="!selectionReadingSupported" />
+      </SettingRow>
+
+      <div v-if="showConflict" class="settings-callout">
+        {{ t('reading.hotkeyConflict') }}
       </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.hotkey') }}</div>
-            <div class="field-note">{{ hotkeyNote }}</div>
-          </div>
-          <div class="field-control end">
-            <div class="hotkey-display" :class="{ recording: isRecording }">
-              {{ isRecording ? t('reading.pressHotkey') : displayHotkey }}
-            </div>
-            <div class="hotkey-actions">
-              <NButton
-                :disabled="isRecording || !ttsEnabled || !selectionReadingSupported"
-                size="small"
-                @click="startRecording"
-              >
-                {{ t('reading.record') }}
-              </NButton>
-              <NButton
-                :disabled="!settingsStore.settings.ttsHotkeyConfig || isRecording"
-                text
-                size="small"
-                @click="resetHotkey"
-              >
-                {{ t('reading.clear') }}
-              </NButton>
-            </div>
-            <NSwitch v-model:value="ttsEnabled" :disabled="!selectionReadingSupported" size="small" />
-          </div>
-        </div>
 
-        <div v-if="showConflict" class="warning-box">
-          {{ t('reading.hotkeyConflict') }}
-        </div>
+      <SettingRow class="wide-control" :label="t('reading.translateHotkey')" :help="translateHotkeyNote">
+        <HotkeyField
+          :value="isRecordingTranslate ? t('reading.pressHotkey') : displayTranslateHotkey ?? ''"
+          :recording="isRecordingTranslate"
+          :clearable="!!settingsStore.settings.ttsTranslateHotkeyConfig"
+          @clear="resetTranslateHotkey"
+        />
+        <NButton
+          :disabled="isRecordingTranslate || !translateEnabled || !selectionReadingSupported"
+          size="small"
+          @click="startRecordingTranslate"
+        >
+          {{ t('reading.record') }}
+        </NButton>
+        <NSwitch v-model:value="translateEnabled" :disabled="!selectionReadingSupported" />
+      </SettingRow>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.translateHotkey') }}</div>
-            <div class="field-note">{{ translateHotkeyNote }}</div>
-          </div>
-          <div class="field-control end">
-            <div class="hotkey-display" :class="{ recording: isRecordingTranslate }">
-              {{ isRecordingTranslate ? t('reading.pressHotkey') : displayTranslateHotkey }}
-            </div>
-            <div class="hotkey-actions">
-              <NButton
-                :disabled="isRecordingTranslate || !translateEnabled || !selectionReadingSupported"
-                size="small"
-                @click="startRecordingTranslate"
-              >
-                {{ t('reading.record') }}
-              </NButton>
-              <NButton
-                :disabled="!settingsStore.settings.ttsTranslateHotkeyConfig || isRecordingTranslate"
-                text
-                size="small"
-                @click="resetTranslateHotkey"
-              >
-                {{ t('reading.clear') }}
-              </NButton>
-            </div>
-            <NSwitch
-              v-model:value="translateEnabled"
-              :disabled="!selectionReadingSupported"
-              size="small"
-            />
-          </div>
-        </div>
-
-        <div v-if="translateConflict === 'dictation'" class="warning-box">
-          {{ t('reading.translateHotkeyConflictDictation') }}
-        </div>
-        <div v-else-if="translateConflict === 'reading'" class="warning-box">
-          {{ t('reading.translateHotkeyConflictReading') }}
-        </div>
-
-        <!-- Applies to both keys above, so it sits under them rather than in
-             either key's own card. -->
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.clipboardWhenNoSelection') }}</div>
-            <div class="field-note">{{ t('reading.clipboardWhenNoSelectionNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSwitch
-              v-model:value="clipboardWhenNoSelection"
-              :disabled="!selectionReadingSupported"
-              size="small"
-            />
-          </div>
-        </div>
+      <div v-if="translateConflict === 'dictation'" class="settings-callout">
+        {{ t('reading.translateHotkeyConflictDictation') }}
       </div>
-    </div>
-
-    <div class="surface-card asr-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('reading.provider') }}</div>
-        <div class="card-sub">{{ t('reading.providerSub') }}</div>
+      <div v-else-if="translateConflict === 'reading'" class="settings-callout">
+        {{ t('reading.translateHotkeyConflictReading') }}
       </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.ttsProvider') }}</div>
-          </div>
-          <NSelect
-            v-model:value="ttsProviderType"
-            :options="providerOptions"
+
+      <!-- Applies to both keys above, so it sits under them rather than in
+           either key's own card. -->
+      <SettingRow :label="t('reading.clipboardWhenNoSelection')" :help="t('reading.clipboardWhenNoSelectionNote')">
+        <NSwitch
+          v-model:value="clipboardWhenNoSelection"
+          :disabled="!selectionReadingSupported"
+          size="small"
+        />
+      </SettingRow>
+    </SettingsSection>
+
+    <SettingsSection :title="t('reading.provider')" :help="t('reading.providerSub')">
+      <SettingRow :label="t('reading.ttsProvider')">
+        <NSelect
+          v-model:value="ttsProviderType"
+          :options="providerOptions"
+          size="small"
+        />
+      </SettingRow>
+
+      <div v-if="showSystemVoiceUnsupported" class="settings-callout">
+        {{ t('reading.systemVoiceUnsupported') }}
+      </div>
+
+      <SettingRow v-if="isEdge" :label="t('reading.edgeConnection')" :help="t('reading.edgeConnectionNote')">
+      </SettingRow>
+
+      <template v-if="isVolcengine">
+        <SettingRow :label="t('reading.volcApiKey')" :help="t('reading.volcApiKeyNote')">
+          <NInput
+            v-model:value="volcTtsApiKey"
+            type="password"
+            show-password-on="click"
             size="small"
-            class="field-control"
+            :placeholder="t('reading.volcApiKeyPlaceholder')"
           />
-        </div>
+        </SettingRow>
+        <SettingRow :label="t('reading.volcResourceId')" :help="t('reading.volcResourceIdNote')">
+          <NInput
+            v-model:value="volcTtsResourceId"
+            size="small"
+            placeholder="seed-tts-2.0"
+          />
+        </SettingRow>
+      </template>
 
-        <div v-if="showSystemVoiceUnsupported" class="warning-box">
-          {{ t('reading.systemVoiceUnsupported') }}
-        </div>
+      <template v-if="isAliyun">
+        <SettingRow :label="t('reading.aliyunApiKey')" :help="t('reading.aliyunApiKeyNote')">
+          <NInput
+            v-model:value="aliyunTtsApiKey"
+            type="password"
+            show-password-on="click"
+            size="small"
+            placeholder="sk-..."
+          />
+        </SettingRow>
+        <SettingRow :label="t('reading.aliyunModel')" :help="t('reading.aliyunModelNote')">
+          <NSelect
+            v-model:value="aliyunTtsModel"
+            :options="aliyunModelOptions"
+            size="small"
+          />
+        </SettingRow>
+        <SettingRow v-if="aliyunAcceptsInstruction" :label="t('reading.aliyunInstruction')" :help="t('reading.aliyunInstructionNote')">
+          <NInput
+            v-model:value="aliyunTtsInstruction"
+            size="small"
+            :placeholder="t('reading.aliyunInstructionPlaceholder')"
+          />
+        </SettingRow>
+      </template>
 
-        <div v-if="isEdge" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.edgeConnection') }}</div>
-            <div class="field-note">{{ t('reading.edgeConnectionNote') }}</div>
-          </div>
-        </div>
+      <template v-if="isMimo">
+        <SettingRow :label="t('reading.mimoApiKey')" :help="t('reading.mimoApiKeyNote')">
+          <NInput
+            v-model:value="mimoTtsApiKey"
+            type="password"
+            show-password-on="click"
+            size="small"
+            :placeholder="t('reading.mimoApiKeyPlaceholder')"
+          />
+        </SettingRow>
+        <SettingRow :label="t('reading.mimoInstruction')" :help="t('reading.mimoInstructionNote')">
+          <NInput
+            v-model:value="mimoTtsInstruction"
+            size="small"
+            :placeholder="t('reading.mimoInstructionPlaceholder')"
+          />
+        </SettingRow>
+      </template>
 
-        <template v-if="isVolcengine">
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.volcApiKey') }}</div>
-              <div class="field-note">{{ t('reading.volcApiKeyNote') }}</div>
-            </div>
-            <NInput
-              v-model:value="volcTtsApiKey"
-              type="password"
-              show-password-on="click"
-              size="small"
-              class="field-control"
-              :placeholder="t('reading.volcApiKeyPlaceholder')"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.volcResourceId') }}</div>
-              <div class="field-note">{{ t('reading.volcResourceIdNote') }}</div>
-            </div>
-            <NInput
-              v-model:value="volcTtsResourceId"
-              size="small"
-              class="field-control"
-              placeholder="seed-tts-2.0"
-            />
-          </div>
-        </template>
+      <template v-if="isAzure">
+        <SettingRow :label="t('reading.azureApiKey')" :help="t('reading.azureApiKeyNote')">
+          <NInput
+            v-model:value="azureTtsApiKey"
+            type="password"
+            show-password-on="click"
+            size="small"
+            :placeholder="t('reading.azureApiKeyPlaceholder')"
+          />
+        </SettingRow>
+        <SettingRow :label="t('reading.azureRegion')" :help="t('reading.azureRegionNote')">
+          <NInput
+            v-model:value="azureTtsRegion"
+            size="small"
+            placeholder="eastus"
+          />
+        </SettingRow>
+      </template>
 
-        <template v-if="isAliyun">
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.aliyunApiKey') }}</div>
-              <div class="field-note">{{ t('reading.aliyunApiKeyNote') }}</div>
-            </div>
-            <NInput
-              v-model:value="aliyunTtsApiKey"
-              type="password"
-              show-password-on="click"
-              size="small"
-              class="field-control"
-              placeholder="sk-..."
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.aliyunModel') }}</div>
-              <div class="field-note">{{ t('reading.aliyunModelNote') }}</div>
-            </div>
-            <NSelect
-              v-model:value="aliyunTtsModel"
-              :options="aliyunModelOptions"
-              size="small"
-              class="field-control"
-            />
-          </div>
-          <div v-if="aliyunAcceptsInstruction" class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.aliyunInstruction') }}</div>
-              <div class="field-note">{{ t('reading.aliyunInstructionNote') }}</div>
-            </div>
-            <NInput
-              v-model:value="aliyunTtsInstruction"
-              size="small"
-              class="field-control"
-              :placeholder="t('reading.aliyunInstructionPlaceholder')"
-            />
-          </div>
-        </template>
+      <!-- The voice and its delivery parameters sit under the engine that
+           owns them: the list is per engine (per model on Alibaba Cloud),
+           the ids do not carry across, and which sliders exist is the
+           engine's call. They used to be a card of their own two cards
+           further down, which hid that the two pickers move together. -->
+      <!-- Nothing below works without an engine; the warning above says
+           what to do instead. -->
+      <template v-if="!showSystemVoiceUnsupported">
+        <h3 class="settings-subhead">
+          <span>{{ t('reading.voice') }}</span>
+          <HelpTip :text="t('reading.voiceSub')" />
+        </h3>
 
-        <template v-if="isMimo">
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.mimoApiKey') }}</div>
-              <div class="field-note">{{ t('reading.mimoApiKeyNote') }}</div>
-            </div>
-            <NInput
-              v-model:value="mimoTtsApiKey"
-              type="password"
-              show-password-on="click"
-              size="small"
-              class="field-control"
-              :placeholder="t('reading.mimoApiKeyPlaceholder')"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.mimoInstruction') }}</div>
-              <div class="field-note">{{ t('reading.mimoInstructionNote') }}</div>
-            </div>
-            <NInput
-              v-model:value="mimoTtsInstruction"
-              size="small"
-              class="field-control"
-              :placeholder="t('reading.mimoInstructionPlaceholder')"
-            />
-          </div>
-        </template>
-
-        <template v-if="isAzure">
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.azureApiKey') }}</div>
-              <div class="field-note">{{ t('reading.azureApiKeyNote') }}</div>
-            </div>
-            <NInput
-              v-model:value="azureTtsApiKey"
-              type="password"
-              show-password-on="click"
-              size="small"
-              class="field-control"
-              :placeholder="t('reading.azureApiKeyPlaceholder')"
-            />
-          </div>
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.azureRegion') }}</div>
-              <div class="field-note">{{ t('reading.azureRegionNote') }}</div>
-            </div>
-            <NInput
-              v-model:value="azureTtsRegion"
-              size="small"
-              class="field-control"
-              placeholder="eastus"
-            />
-          </div>
-        </template>
-
-        <!-- The voice and its delivery parameters sit under the engine that
-             owns them: the list is per engine (per model on Alibaba Cloud),
-             the ids do not carry across, and which sliders exist is the
-             engine's call. They used to be a card of their own two cards
-             further down, which hid that the two pickers move together. -->
-        <!-- Nothing below works without an engine; the warning above says
-             what to do instead. -->
-        <template v-if="!showSystemVoiceUnsupported">
-          <div class="subsection-header">
-            <div class="subsection-title">{{ t('reading.voice') }}</div>
-            <div class="card-sub">{{ t('reading.voiceSub') }}</div>
-          </div>
-
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.voiceLabel') }}</div>
-              <div class="field-note">{{ voiceNote }}</div>
-            </div>
-            <NInput
-              v-if="customVoiceOnly"
-              v-model:value="ttsVoiceId"
-              size="small"
-              class="field-control"
-              placeholder="cosyvoice-v3.5-flash-vd-..."
-            />
-            <NSelect
-              v-else
-              v-model:value="ttsVoiceId"
-              :options="voiceOptions"
-              :filter="filterVoice"
-              :loading="voicesLoading"
-              :disabled="!systemVoiceSupported && !isCloud"
-              :tag="isCloud"
-              filterable
-              size="small"
-              class="field-control"
-            />
-          </div>
-
-          <div v-if="isEdge" class="field-row">
-            <div class="field-text">
-              <div class="field-note">{{ t('reading.edgeStreamNote') }}</div>
-            </div>
-            <NButton size="small" :loading="voicesLoading" @click="loadVoices()">
-              {{ t('reading.refreshVoices') }}
-            </NButton>
-          </div>
-
-          <div v-if="voicesError" class="warning-box">
-            {{ t('reading.voiceLoadFailed') }} — {{ voicesError }}
-          </div>
-
-          <!-- Which of the three sliders exist is the engine's call; see
-               engineControls for the table. -->
-          <div v-if="engineControls.rate" class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.rate') }}</div>
-            </div>
-            <div class="field-control end">
-              <NSlider
-                v-model:value="rateMultiplier"
-                :min="0.5"
-                :max="2"
-                :step="0.05"
-                :disabled="!systemVoiceSupported && !isCloud"
-                class="slider"
-              />
-              <span class="slider-value">{{ rateMultiplier.toFixed(2) }}x</span>
-            </div>
-          </div>
-
-          <div v-if="engineControls.pitch && !isEdge" class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.pitch') }}</div>
-            </div>
-            <div class="field-control end">
-              <NSlider
-                v-model:value="pitchMultiplier"
-                :min="0.5"
-                :max="2"
-                :step="0.05"
-                :disabled="!systemVoiceSupported"
-                class="slider"
-              />
-              <span class="slider-value">{{ pitchMultiplier.toFixed(2) }}x</span>
-            </div>
-          </div>
-
-          <div v-if="isEdge" class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.pitch') }}</div>
-              <div class="field-note">{{ t('reading.edgePitchNote') }}</div>
-            </div>
-            <div class="field-control end">
-              <NSlider v-model:value="edgePitchHz" :min="-100" :max="100" :step="5" class="slider" />
-              <span class="slider-value">{{ edgePitchHz > 0 ? '+' : '' }}{{ edgePitchHz }} Hz</span>
-            </div>
-          </div>
-
-          <div v-if="engineControls.volume" class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.volume') }}</div>
-              <div v-if="isCloud" class="field-note">{{ t('reading.volumeCloudNote') }}</div>
-            </div>
-            <div class="field-control end">
-              <NSlider
-                v-model:value="volumePercent"
-                :min="0"
-                :max="100"
-                :step="5"
-                :disabled="!systemVoiceSupported && !isCloud"
-                class="slider"
-              />
-              <span class="slider-value">{{ volumePercent }}%</span>
-            </div>
-          </div>
-
-          <div class="field-row">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.preview') }}</div>
-              <div class="field-note">{{ t('reading.previewNote') }}</div>
-            </div>
-            <div class="field-control end">
+        <SettingRow :label="t('reading.voiceLabel')" :help="isEdge ? `${voiceNote} ${t('reading.edgeStreamNote')}` : voiceNote">
+          <NInput
+            v-if="customVoiceOnly"
+            v-model:value="ttsVoiceId"
+            size="small"
+            placeholder="cosyvoice-v3.5-flash-vd-..."
+          />
+          <NSelect
+            v-else
+            v-model:value="ttsVoiceId"
+            :options="voiceOptions"
+            :filter="filterVoice"
+            :loading="voicesLoading"
+            :disabled="!systemVoiceSupported && !isCloud"
+            :tag="isCloud"
+            filterable
+            size="small"
+          />
+          <NTooltip v-if="isEdge">
+            <template #trigger>
               <NButton
-                :loading="previewLoading"
-                :disabled="!systemVoiceSupported && !isCloud"
-                :type="previewSpeaking ? 'default' : 'primary'"
-                secondary
                 size="small"
-                @click="togglePreview"
+                quaternary
+                class="icon-button"
+                :disabled="voicesLoading"
+                :aria-label="t('reading.refreshVoices')"
+                @click="loadVoices()"
               >
-                {{ previewSpeaking ? t('reading.previewStop') : t('reading.preview') }}
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" :class="{ spinning: voicesLoading }">
+                  <path
+                    d="M13.5 8a5.5 5.5 0 1 1-1.61-3.89M13.5 2.5v3h-3"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
               </NButton>
-            </div>
-          </div>
+            </template>
+            {{ t('reading.refreshVoices') }}
+          </NTooltip>
+        </SettingRow>
 
-          <div v-if="previewError" class="warning-box">
-            {{ t('reading.previewFailed') }} — {{ previewError }}
+        <div v-if="voicesError" class="settings-callout is-error">
+          {{ t('reading.voiceLoadFailed') }} — {{ voicesError }}
+        </div>
+
+        <!-- Which of the three sliders exist is the engine's call; see
+             engineControls for the table. -->
+        <SettingRow v-if="engineControls.rate" :label="t('reading.rate')">
+          <div class="control-group">
+            <NSlider
+              v-model:value="rateMultiplier"
+              :min="0.5"
+              :max="2"
+              :step="0.05"
+              :disabled="!systemVoiceSupported && !isCloud"
+              class="slider"
+            />
+            <span class="slider-value">{{ rateMultiplier.toFixed(2) }}x</span>
           </div>
-        </template>
-      </div>
-    </div>
+        </SettingRow>
+
+        <SettingRow v-if="engineControls.pitch && !isEdge" :label="t('reading.pitch')">
+          <div class="control-group">
+            <NSlider
+              v-model:value="pitchMultiplier"
+              :min="0.5"
+              :max="2"
+              :step="0.05"
+              :disabled="!systemVoiceSupported"
+              class="slider"
+            />
+            <span class="slider-value">{{ pitchMultiplier.toFixed(2) }}x</span>
+          </div>
+        </SettingRow>
+
+        <SettingRow v-if="isEdge" :label="t('reading.pitch')" :help="t('reading.edgePitchNote')">
+          <div class="control-group">
+            <NSlider v-model:value="edgePitchHz" :min="-100" :max="100" :step="5" class="slider" />
+            <span class="slider-value">{{ edgePitchHz > 0 ? '+' : '' }}{{ edgePitchHz }} Hz</span>
+          </div>
+        </SettingRow>
+
+        <SettingRow v-if="engineControls.volume" :label="t('reading.volume')" :help="isCloud ? t('reading.volumeCloudNote') : undefined">
+          <div class="control-group">
+            <NSlider
+              v-model:value="volumePercent"
+              :min="0"
+              :max="100"
+              :step="5"
+              :disabled="!systemVoiceSupported && !isCloud"
+              class="slider"
+            />
+            <span class="slider-value">{{ volumePercent }}%</span>
+          </div>
+        </SettingRow>
+
+        <SettingRow :label="t('reading.preview')" :help="t('reading.previewNote')">
+            <NButton
+              :loading="previewLoading"
+              :disabled="!systemVoiceSupported && !isCloud"
+              :type="previewSpeaking ? 'default' : 'primary'"
+              secondary
+              size="small"
+              @click="togglePreview"
+            >
+              {{ previewSpeaking ? t('reading.previewStop') : t('reading.preview') }}
+            </NButton>
+        </SettingRow>
+
+        <div v-if="previewError" class="settings-callout is-error">
+          {{ t('reading.previewFailed') }} — {{ previewError }}
+        </div>
+      </template>
+    </SettingsSection>
 
     <!-- Translate-and-read: what happens to the text between the key and the
          voice. Its switch and hotkey are in the first card next to the plain
          reading key; its LLM and prompt live here, not on the LLM page,
          because nothing but reading ever uses them. -->
-    <div class="surface-card asr-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('reading.translateTitle') }}</div>
-        <div class="card-sub">{{ t('reading.translateSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.sourceLanguage') }}</div>
-            <div class="field-note">{{ t('reading.sourceLanguageNote') }}</div>
-          </div>
-          <NSelect
-            v-model:value="translateSourceLanguage"
-            :options="sourceLanguageOptions"
-            size="small"
-            class="field-control"
-          />
-        </div>
+    <SettingsSection :title="t('reading.translateTitle')" :help="t('reading.translateSub')">
+      <SettingRow :label="t('reading.sourceLanguage')" :help="t('reading.sourceLanguageNote')">
+        <NSelect
+          v-model:value="translateSourceLanguage"
+          :options="sourceLanguageOptions"
+          size="small"
+        />
+      </SettingRow>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.targetLanguage') }}</div>
-            <div class="field-note">{{ t('reading.targetLanguageNote') }}</div>
-          </div>
-          <NSelect
-            v-model:value="translateTargetLanguage"
-            :options="languageOptions"
-            size="small"
-            class="field-control"
-          />
-        </div>
+      <SettingRow :label="t('reading.targetLanguage')" :help="t('reading.targetLanguageNote')">
+        <NSelect
+          v-model:value="translateTargetLanguage"
+          :options="languageOptions"
+          size="small"
+        />
+      </SettingRow>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.llmProvider') }}</div>
-            <div class="field-note">
-              {{ t('reading.llmProviderNote') }}
-              <NButton text size="tiny" class="inline-link" @click="router.push('/llm-settings')">
-                {{ t('reading.llmProviderLink') }}
-              </NButton>
-            </div>
-          </div>
-          <NSelect
-            v-model:value="ttsLlmProviderKey"
-            :options="llmProviderOptions"
-            size="small"
-            class="field-control"
-          />
-        </div>
-
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.translateVoice') }}</div>
-            <div class="field-note">{{ t('reading.translateVoiceNote') }}</div>
-          </div>
-          <NInput
-            v-if="customVoiceOnly"
-            v-model:value="translateVoiceOverride"
-            size="small"
-            class="field-control"
-            :placeholder="t('reading.translateVoiceFollow')"
-          />
-          <NSelect
-            v-else
-            v-model:value="translateVoiceOverride"
-            :options="translateVoiceOptions"
-            :filter="filterVoice"
-            :disabled="!systemVoiceSupported && !isCloud"
-            :tag="isCloud"
-            filterable
-            size="small"
-            class="field-control"
-          />
-        </div>
-        <div v-if="translateVoiceHint" class="notice-box">{{ translateVoiceHint }}</div>
-
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.translateClipboard') }}</div>
-            <div class="field-note">{{ t('reading.translateClipboardNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSwitch v-model:value="translateCopyToClipboard" />
-          </div>
-        </div>
-
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.translateHistory') }}</div>
-            <div class="field-note">{{ t('reading.translateHistoryNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSwitch v-model:value="translateSaveHistory" />
-          </div>
-        </div>
-
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.captions') }}</div>
-            <div class="field-note">{{ t(isEdge ? 'reading.edgeCaptionsNote' : 'reading.captionsNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSwitch v-model:value="captionsEnabled" />
-          </div>
-        </div>
-
-        <div class="prompt-block">
-          <div class="prompt-header">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.translatePrompt') }}</div>
-              <div class="field-note">
-                {{ t('reading.translatePromptNote', { max: TRANSLATE_MAX_CHARS }) }}
-              </div>
-            </div>
-            <NButton size="small" quaternary @click="resetTranslatePrompt">
-              {{ t('reading.resetPrompt') }}
+      <SettingRow :label="t('reading.llmProvider')" :help="t('reading.llmProviderNote')">
+        <template #status>
+          <div>
+            <NButton text size="tiny" class="inline-link" @click="router.push('/llm-settings')">
+              {{ t('reading.llmProviderLink') }}
             </NButton>
           </div>
-          <NInput v-model:value="translatePromptTemplate" type="textarea" :rows="10" />
-        </div>
-      </div>
-    </div>
+        </template>
+        <NSelect
+          v-model:value="ttsLlmProviderKey"
+          :options="llmProviderOptions"
+          size="small"
+        />
+      </SettingRow>
 
-    <div class="surface-card asr-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('reading.preprocessTitle') }}</div>
-        <div class="card-sub">{{ t('reading.preprocessSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.preprocessEnabled') }}</div>
-            <div class="field-note">{{ t('reading.preprocessEnabledNote') }}</div>
-          </div>
-          <div class="field-control end">
-            <NSwitch v-model:value="preprocessEnabled" />
-          </div>
-        </div>
+      <SettingRow :label="t('reading.translateVoice')" :help="t('reading.translateVoiceNote')">
+        <NInput
+          v-if="customVoiceOnly"
+          v-model:value="translateVoiceOverride"
+          size="small"
+          :placeholder="t('reading.translateVoiceFollow')"
+        />
+        <NSelect
+          v-else
+          v-model:value="translateVoiceOverride"
+          :options="translateVoiceOptions"
+          :filter="filterVoice"
+          :disabled="!systemVoiceSupported && !isCloud"
+          :tag="isCloud"
+          filterable
+          size="small"
+        />
+      </SettingRow>
+      <div v-if="translateVoiceHint" class="settings-callout">{{ translateVoiceHint }}</div>
 
-        <div v-if="preprocessEnabled" class="prompt-block">
-          <div class="prompt-header">
-            <div class="field-text">
-              <div class="field-label">{{ t('reading.preprocessPrompt') }}</div>
-            </div>
-            <NButton size="small" quaternary @click="resetPreprocessPrompt">
-              {{ t('reading.resetPrompt') }}
-            </NButton>
-          </div>
-          <NInput v-model:value="preprocessPromptTemplate" type="textarea" :rows="8" />
-        </div>
-      </div>
-    </div>
+      <SettingRow :label="t('reading.translateClipboard')" :help="t('reading.translateClipboardNote')">
+        <NSwitch v-model:value="translateCopyToClipboard" />
+      </SettingRow>
 
-    <div v-if="settingsStore.settings.enableDiagnostics" class="surface-card asr-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('reading.diagnostics') }}</div>
-        <div class="card-sub">{{ t('reading.diagnosticsSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row align-start">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.diagnosticsRun') }}</div>
-            <div class="field-note">{{ t('reading.diagnosticsHint') }}</div>
-          </div>
-          <div class="field-control end">
-            <NButton
-              :loading="diagnoseCountdown > 0"
-              :disabled="diagnoseCountdown > 0"
-              size="small"
-              @click="runDiagnostics"
-            >
-              {{
-                diagnoseCountdown > 0
-                  ? t('reading.diagnosticsCountdown', { seconds: diagnoseCountdown })
-                  : t('reading.diagnosticsRun')
-              }}
-            </NButton>
-            <NButton
-              v-if="diagnoseReport"
-              quaternary
-              size="small"
-              @click="copyDiagnostics"
-            >
-              {{ t('common.copy') }}
-            </NButton>
-          </div>
-        </div>
+      <SettingRow :label="t('reading.translateHistory')" :help="t('reading.translateHistoryNote')">
+        <NSwitch v-model:value="translateSaveHistory" />
+      </SettingRow>
 
-        <pre v-if="diagnoseReport" class="diagnostics-report">{{ diagnoseReport }}</pre>
-        <div v-if="diagnoseError" class="warning-box">{{ diagnoseError }}</div>
-      </div>
-    </div>
+      <SettingRow :label="t('reading.captions')" :help="t(isEdge ? 'reading.edgeCaptionsNote' : 'reading.captionsNote')">
+        <NSwitch v-model:value="captionsEnabled" />
+      </SettingRow>
 
-    <div class="surface-card asr-card">
-      <button class="advanced-toggle" @click="showAdvanced = !showAdvanced">
-        <span class="card-title">{{ t('reading.advanced') }}</span>
-        <span class="advanced-chevron" :class="{ open: showAdvanced }">›</span>
-      </button>
-      <div v-if="showAdvanced" class="field-list advanced-body">
-        <div class="card-sub">{{ t('reading.advancedSub') }}</div>
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('reading.clipboardFallback') }}</div>
-            <div class="field-note">{{ clipboardFallbackNote }}</div>
+      <div class="prompt-block">
+        <div class="prompt-header">
+          <div class="prompt-label">
+            <span>{{ t('reading.translatePrompt') }}</span>
+            <HelpTip :text="t('reading.translatePromptNote', { max: TRANSLATE_MAX_CHARS })" />
           </div>
-          <div class="field-control end">
-            <NSwitch v-model:value="clipboardFallback" :disabled="!selectionReadingSupported" />
-          </div>
+          <NButton size="small" quaternary @click="resetTranslatePrompt">
+            {{ t('reading.resetPrompt') }}
+          </NButton>
         </div>
+        <NInput v-model:value="translatePromptTemplate" type="textarea" :rows="10" />
       </div>
-    </div>
+    </SettingsSection>
+
+    <SettingsSection :title="t('reading.preprocessTitle')" :help="t('reading.preprocessSub')">
+      <SettingRow :label="t('reading.preprocessEnabled')" :help="t('reading.preprocessEnabledNote')">
+        <NSwitch v-model:value="preprocessEnabled" />
+      </SettingRow>
+
+      <div v-if="preprocessEnabled" class="prompt-block">
+        <div class="prompt-header">
+          <div class="prompt-label">{{ t('reading.preprocessPrompt') }}</div>
+          <NButton size="small" quaternary @click="resetPreprocessPrompt">
+            {{ t('reading.resetPrompt') }}
+          </NButton>
+        </div>
+        <NInput v-model:value="preprocessPromptTemplate" type="textarea" :rows="8" />
+      </div>
+    </SettingsSection>
+
+    <SettingsSection v-if="settingsStore.settings.enableDiagnostics" :title="t('reading.diagnostics')" :help="t('reading.diagnosticsSub')">
+      <SettingRow :label="t('reading.diagnosticsRun')" :help="t('reading.diagnosticsHint')">
+        <div class="control-group">
+          <NButton
+            :loading="diagnoseCountdown > 0"
+            :disabled="diagnoseCountdown > 0"
+            size="small"
+            @click="runDiagnostics"
+          >
+            {{
+              diagnoseCountdown > 0
+                ? t('reading.diagnosticsCountdown', { seconds: diagnoseCountdown })
+                : t('reading.diagnosticsRun')
+            }}
+          </NButton>
+          <NButton
+            v-if="diagnoseReport"
+            quaternary
+            size="small"
+            @click="copyDiagnostics"
+          >
+            {{ t('common.copy') }}
+          </NButton>
+        </div>
+      </SettingRow>
+
+      <pre v-if="diagnoseReport" class="diagnostics-report">{{ diagnoseReport }}</pre>
+      <div v-if="diagnoseError" class="settings-callout is-error">{{ diagnoseError }}</div>
+    </SettingsSection>
+
+    <SettingsSection :title="t('reading.advanced')" :help="t('reading.advancedSub')">
+      <template #extra>
+        <NButton
+          size="small"
+          quaternary
+          :aria-expanded="showAdvanced"
+          :aria-label="t('reading.advanced')"
+          @click="showAdvanced = !showAdvanced"
+        >
+          <span class="advanced-chevron" :class="{ open: showAdvanced }" aria-hidden="true">›</span>
+        </NButton>
+      </template>
+      <template v-if="showAdvanced">
+        <SettingRow :label="t('reading.clipboardFallback')" :help="clipboardFallbackNote">
+          <NSwitch v-model:value="clipboardFallback" :disabled="!selectionReadingSupported" />
+        </SettingRow>
+      </template>
+    </SettingsSection>
   </div>
 </template>
 
 <style scoped>
-@import '../styles/asr-settings.css';
-
-.settings-page {
-  width: 100%;
-  max-width: 1120px;
-  padding-bottom: var(--spacing-2xl);
-}
-
-.field-control.end {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-  justify-content: flex-end;
-}
-
-/* Sized so a three-modifier combo ("Control + Option + Command + R") stays on
-   one line beside the two buttons and the switch inside the 420px control;
-   a longer combo wraps rather than being clipped. */
-.hotkey-display {
-  flex: 1;
-  padding: 6px var(--spacing-md);
-  background-color: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  font-family: ui-monospace, monospace;
-  font-size: var(--font-sm);
-  color: var(--color-text-primary);
-  min-height: 28px;
-  display: flex;
-  align-items: center;
-}
-
-.hotkey-display.recording {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 2px var(--color-accent-light);
-}
-
-.hotkey-actions {
-  display: flex;
-  gap: var(--spacing-sm);
-}
-
 .prompt-block {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-sm);
+  padding-top: 12px;
+  border-top: 1px solid var(--color-divider);
 }
 
 .prompt-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: var(--spacing-md);
+}
+
+.prompt-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  color: var(--color-text-primary);
 }
 
 .inline-link {
   vertical-align: baseline;
 }
 
-.subsection-header {
+.settings-subhead {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: var(--spacing-sm);
-  padding-top: var(--spacing-lg);
-  border-top: 1px solid var(--color-divider);
-}
-
-.subsection-title {
-  font-size: var(--font-md);
-  font-weight: 600;
+  align-items: center;
+  gap: 6px;
 }
 
 .slider {
@@ -1490,16 +1271,10 @@ onBeforeUnmount(() => {
   font-variant-numeric: tabular-nums;
 }
 
-.advanced-toggle {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-sm);
-  width: 100%;
-  text-align: left;
-  color: var(--color-text-primary);
-}
-
 .advanced-chevron {
+  display: inline-block;
+  font-size: var(--font-lg);
+  line-height: 1;
   color: var(--color-text-tertiary);
   transition: transform var(--transition-fast);
 }
@@ -1508,14 +1283,10 @@ onBeforeUnmount(() => {
   transform: rotate(90deg);
 }
 
-.advanced-body {
-  margin-top: var(--spacing-md);
-}
-
 .diagnostics-report {
   margin: 0;
   padding: 12px 14px;
-  border-radius: 12px;
+  border-radius: var(--radius-md);
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
   font-family: 'SF Mono', 'Menlo', monospace;
@@ -1525,5 +1296,6 @@ onBeforeUnmount(() => {
   max-height: 320px;
   overflow: auto;
   white-space: pre;
+  user-select: text;
 }
 </style>

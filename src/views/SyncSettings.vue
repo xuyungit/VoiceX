@@ -4,6 +4,8 @@ import { NInput, NSwitch, NButton } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import { useSyncStore } from '../stores/sync'
+import SettingsSection from '../components/settings/SettingsSection.vue'
+import SettingRow from '../components/settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const syncStore = useSyncStore()
@@ -89,95 +91,50 @@ onMounted(() => {
       <h1 class="page-title">{{ t('sync.title') }}</h1>
     </div>
 
-    <div class="surface-card sync-card">
-      <div class="card-header">
-        <div class="card-title">{{ t('sync.historySync') }}</div>
-        <div class="card-sub">{{ t('sync.historySyncSub') }}</div>
-      </div>
-      <div class="field-list">
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.enableSync') }}</div>
-            <div class="field-note">{{ t('sync.enableSyncNote') }}</div>
-          </div>
-          <NSwitch v-model:value="syncEnabled" />
-        </div>
+    <SettingsSection :title="t('sync.historySync')" :help="t('sync.historySyncSub')">
+      <SettingRow :label="t('sync.enableSync')" :help="t('sync.enableSyncNote')">
+        <NSwitch v-model:value="syncEnabled" />
+      </SettingRow>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.serverUrl') }}</div>
-            <div class="field-note">{{ t('sync.serverUrlExample') }}</div>
-          </div>
-          <NInput v-model:value="syncServerUrl" class="field-control" placeholder="http://localhost:8787" />
-        </div>
+      <SettingRow :label="t('sync.serverUrl')" :help="t('sync.serverUrlExample')">
+        <NInput v-model:value="syncServerUrl" placeholder="http://localhost:8787" />
+      </SettingRow>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.syncToken') }}</div>
-            <div class="field-note">{{ t('sync.syncTokenNote') }}</div>
-          </div>
-          <NInput v-model:value="syncToken" type="text" class="field-control monospace" :placeholder="t('sync.enterToken')" />
-        </div>
+      <SettingRow :label="t('sync.syncToken')" :help="t('sync.syncTokenNote')">
+        <NInput v-model:value="syncToken" type="text" class="monospace" :placeholder="t('sync.enterToken')" />
+      </SettingRow>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.sharedSecret') }}</div>
-            <div class="field-note">{{ t('sync.sharedSecretNote') }}</div>
-          </div>
-          <NInput v-model:value="syncSharedSecret" type="text" class="field-control monospace" :placeholder="t('sync.enterSharedSecret')" />
-        </div>
+      <SettingRow :label="t('sync.sharedSecret')" :help="t('sync.sharedSecretNote')">
+        <NInput v-model:value="syncSharedSecret" type="text" class="monospace" :placeholder="t('sync.enterSharedSecret')" />
+      </SettingRow>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.deviceName') }}</div>
-            <div class="field-note">{{ t('sync.deviceNameNote') }}</div>
-          </div>
-          <NInput v-model:value="syncDeviceName" class="field-control" :placeholder="t('sync.deviceNamePlaceholder')" />
-        </div>
+      <SettingRow :label="t('sync.deviceName')" :help="t('sync.deviceNameNote')">
+        <NInput v-model:value="syncDeviceName" :placeholder="t('sync.deviceNamePlaceholder')" />
+      </SettingRow>
+    </SettingsSection>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.syncStatus') }}</div>
-          </div>
-          <div :class="statusClass">{{ statusLabel }}</div>
-        </div>
+    <SettingsSection :title="t('sync.syncStatus')">
+      <template #extra>
+        <span :class="statusClass">{{ statusLabel }}</span>
+        <NButton size="small" quaternary @click="syncStore.syncNow">{{ t('sync.syncNow') }}</NButton>
+      </template>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.lastSync') }}</div>
-          </div>
-          <div class="field-value">{{ formatTime(syncStore.state.lastSyncAt) }}</div>
-        </div>
+      <SettingRow v-if="syncStore.state.lastError" :label="t('sync.errorMessage')">
+        <div class="field-value error-text">{{ syncStore.state.lastError }}</div>
+      </SettingRow>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.currentSeq') }}</div>
-          </div>
-          <div class="field-value">{{ syncStore.state.lastSeq }}</div>
-        </div>
+      <SettingRow :label="t('sync.lastSync')">
+        <div class="field-value">{{ formatTime(syncStore.state.lastSyncAt) }}</div>
+      </SettingRow>
 
-        <div v-if="syncStore.state.lastError" class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.errorMessage') }}</div>
-          </div>
-          <div class="field-value error-text">{{ syncStore.state.lastError }}</div>
-        </div>
+      <SettingRow :label="t('sync.currentSeq')">
+        <div class="field-value">{{ syncStore.state.lastSeq }}</div>
+      </SettingRow>
 
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.deviceId') }}</div>
-          </div>
-          <div class="field-value monospace">{{ syncStore.deviceId || '—' }}</div>
-        </div>
-
-        <div class="field-row">
-          <div class="field-text">
-            <div class="field-label">{{ t('sync.manualSync') }}</div>
-          </div>
-          <NButton size="small" quaternary @click="syncStore.syncNow">{{ t('sync.syncNow') }}</NButton>
-        </div>
-      </div>
-    </div>
+      <SettingRow :label="t('sync.deviceId')">
+        <div class="field-value monospace">{{ syncStore.deviceId || '—' }}</div>
+      </SettingRow>
+    </SettingsSection>
   </div>
 </template>
 
@@ -185,64 +142,13 @@ onMounted(() => {
 .field-value {
   color: var(--color-text-secondary);
   font-size: var(--font-sm);
-}
-
-.card-header {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: var(--spacing-md);
-}
-
-.card-title {
-  font-size: var(--font-lg);
-  font-weight: 700;
-}
-
-.card-sub {
-  color: var(--color-text-tertiary);
-  font-size: var(--font-xs);
-}
-
-.field-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-md);
-}
-
-.field-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--spacing-lg);
-}
-
-.field-text {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  flex: 1;
-}
-
-.field-label {
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.field-note {
-  font-size: var(--font-xs);
-  color: var(--color-text-tertiary);
-  max-width: 520px;
-}
-
-.field-control {
-  width: 420px;
-  max-width: 100%;
+  text-align: right;
+  min-width: 0;
+  user-select: text;
 }
 
 .error-text {
-  color: var(--color-error);
-  max-width: 420px;
+  color: color-mix(in srgb, var(--color-error) 75%, var(--color-text-secondary));
   word-break: break-all;
 }
 

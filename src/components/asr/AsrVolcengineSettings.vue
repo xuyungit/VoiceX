@@ -3,6 +3,8 @@ import { computed } from 'vue'
 import { NCheckbox, NInput, NInputNumber, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
+import SettingsSection from '../settings/SettingsSection.vue'
+import SettingRow from '../settings/SettingRow.vue'
 
 const settingsStore = useSettingsStore()
 const { t } = useI18n()
@@ -70,114 +72,64 @@ const forceToSpeechTime = computed({
 </script>
 
 <template>
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.apiCredentials') }}</div>
-      <div class="card-sub">Volcengine 豆包 ASR 服务的访问凭证</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">App Key</div>
-        </div>
-        <NInput v-model:value="asrAppKey" placeholder="Enter App Key" class="field-control" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">Access Key</div>
-        </div>
-        <NInput
-          v-model:value="asrAccessKey"
-          type="password"
-          show-password-on="click"
-          placeholder="Enter Access Key"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">Resource ID</div>
-        </div>
-        <NInput v-model:value="asrResourceId" placeholder="Enter Resource ID" class="field-control" />
-      </div>
-    </div>
-  </div>
+  <SettingsSection :title="t('asr.apiCredentials')">
+    <SettingRow label="App key">
+      <NInput v-model:value="asrAppKey" placeholder="Enter app key" />
+    </SettingRow>
+    <SettingRow label="Access key">
+      <NInput
+        v-model:value="asrAccessKey"
+        type="password"
+        show-password-on="click"
+        placeholder="Enter access key"
+      />
+    </SettingRow>
+    <SettingRow label="Resource ID">
+      <NInput v-model:value="asrResourceId" placeholder="Enter resource ID" />
+    </SettingRow>
+  </SettingsSection>
 
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.recognition') }}</div>
-      <div class="card-sub">{{ t('asr.recognitionSub') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.recognitionMode') }}</div>
-          <div class="field-note">{{ t('asr.volcengineRecognitionModeNote') }}</div>
-        </div>
-        <NSelect
-          v-model:value="recognitionMode"
-          :options="recognitionModeOptions"
-          size="small"
-          class="field-control"
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.enableSemanticSmoothing') }}</div>
-          <div class="field-note">{{ t('asr.enableSemanticSmoothingNote') }}</div>
-        </div>
-        <NCheckbox v-model:checked="enableDdc" />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.webSocketUrl') }}</div>
-          <div class="field-note">{{ t('asr.webSocketUrlNote') }}</div>
-        </div>
-        <NInput
-          v-model:value="asrWsUrl"
-          placeholder="wss://openspeech.bytedance.com/api/v3/..."
-          class="field-control"
-        />
-      </div>
-    </div>
-  </div>
+  <SettingsSection :title="t('asr.recognition')">
+    <SettingRow :label="t('asr.recognitionMode')" :help="t('asr.volcengineRecognitionModeNote')">
+      <NSelect
+        v-model:value="recognitionMode"
+        :options="recognitionModeOptions"
+        size="small"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.enableSemanticSmoothing')" :help="t('asr.enableSemanticSmoothingNote')">
+      <NCheckbox v-model:checked="enableDdc" />
+    </SettingRow>
+    <SettingRow :label="t('asr.webSocketUrl')" :help="t('asr.webSocketUrlNote')">
+      <NInput
+        v-model:value="asrWsUrl"
+        placeholder="wss://openspeech.bytedance.com/api/v3/..."
+      />
+    </SettingRow>
+  </SettingsSection>
 
-  <div class="surface-card asr-card">
-    <div class="card-header">
-      <div class="card-title">{{ t('asr.endpointSettings') }}</div>
-      <div class="card-sub">{{ t('asr.endpointSettingsSub') }}</div>
-    </div>
-    <div class="field-list">
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.endWindowSize') }}</div>
-          <div class="field-note">{{ t('asr.useServiceDefault') }}</div>
-        </div>
-        <NInputNumber
-          v-model:value="endWindowSize"
-          :min="0"
-          :max="5000"
-          :placeholder="t('asr.serviceDefault')"
-          class="field-control short"
-          clearable
-        />
-      </div>
-      <div class="field-row">
-        <div class="field-text">
-          <div class="field-label">{{ t('asr.forceToSpeechTime') }}</div>
-          <div class="field-note">{{ t('asr.useServiceDefault') }}</div>
-        </div>
-        <NInputNumber
-          v-model:value="forceToSpeechTime"
-          :min="0"
-          :max="60000"
-          :placeholder="t('asr.serviceDefault')"
-          class="field-control short"
-          clearable
-        />
-      </div>
-    </div>
-  </div>
+  <SettingsSection :title="t('asr.endpointSettings')" :help="t('asr.endpointSettingsSub')">
+    <SettingRow :label="t('asr.endWindowSize')">
+      <NInputNumber
+        v-model:value="endWindowSize"
+        :min="0"
+        :max="5000"
+        :placeholder="t('asr.serviceDefault')"
+        class="compact"
+        clearable
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.forceToSpeechTime')">
+      <NInputNumber
+        v-model:value="forceToSpeechTime"
+        :min="0"
+        :max="60000"
+        :placeholder="t('asr.serviceDefault')"
+        class="compact"
+        clearable
+      />
+    </SettingRow>
+  </SettingsSection>
 </template>
 
 <style scoped>
