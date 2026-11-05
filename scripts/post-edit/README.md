@@ -45,9 +45,22 @@ VOICEX_POST_EDIT_TEST_BINARY=/absolute/path/to/voicex_lib-... scripts/post-edit/
 
 夹具启动时先检查 AX 端点就绪，准备阶段允许 800 ms；之后观察仍使用生产的 300 ms 读取预算。这项回归验证已就绪的控件，不覆盖冷启动：本机新启动 AppKit 的首次 `AXFocusedUIElement` 查询曾耗时约 400 ms，可能超出生产预算，仍需后续覆盖工作处理。
 
+前台会话回归还输出 `native_read_metric` 和 `native_target_metric`，可另行汇总：
+
+```sh
+VOICEX_POST_EDIT_TEST_BINARY=/absolute/path/to/voicex_lib-... scripts/post-edit/check-macos-sessions.sh > /tmp/voicex-sessions.log 2>&1
+node scripts/post-edit/summarize-reader.mjs /tmp/voicex-sessions.log
+```
+
+资源样本只针对自带 AppKit 测试进程，分别记录静置 1 秒和以 50 ms 间隔读取 20 次后的 CPU 时间与 RSS；这是受控压力样本，不代表生产的每秒／每两秒复核、Electron、冷启动或能耗验收。测试同时断言后续读取没有再次识别框架或完整验证控件能力。生产开启 `RUST_LOG=info,voicex_lib::post_edit=debug` 时记录操作耗时、AX 属性查询数和错误类型，不记录正文。
+
 ### 实际编辑器（Electron / WebKit）
 
 macOS 读取器通过目标应用包内的 `Electron Framework.framework` 识别 Electron，查询应用 `AXRole` 请求原生辅助接口；不切换完整读屏模式。空 subrole 仍须通过真实 Chromium 节点 ID、editable ancestor 自身身份以及密码/编辑能力检查。应用名称本身不构成放行依据。
+
+框架识别、应用接口初始化及控件能力验证只在捕获时进行。后续读取复用应用句柄和已验证的控件能力，每次仍在正文前后检查前台、控件身份、密码属性和已发现的组词接口。焦点直接指向保留的编辑根节点时不遍历父级；内部焦点节点变化时仍验证父级路径。能力缓存随控件、代次结束而释放。
+
+减少重复查询不等于撤销 Electron 首次建立的辅助功能状态；其持续成本仍需在真实应用进程及渲染器中测量，不能从受控 AppKit 耗时推断。
 
 WebKit 编辑控件同样可能返回空 subrole，但没有 Chromium 节点 ID。其通用识别检查标记/范围接口，并实际生成、验证一个不含正文的文本标记。可编辑的 `AXWebArea` 没有普通文本框的数字选区接口，改用文本标记取得选区及局部正文；文档总长度只读元数据，正文及选区前缀都限制在局部窗口内。只读网页不放行。
 
@@ -67,16 +80,23 @@ swift scripts/post-edit/check-macos-editors.swift /absolute/path/to/voicex_lib-.
 
 生产读取器按框架及控件能力识别，不使用这些应用名称作为 Electron 支持名单；这里的名单只限制人工原生测试的读取范围。其他应用可复用同一读取器，但仍需检查焦点、密码属性、正文/光标范围、通知和真实文档行为。
 
-WebKit 标记范围还有独立的后台合成回归，窗口保持后台，不需要输入键盘。它检查短文修改、6 万字正文的局部读取，以及只读和密码控件在请求正文前被拒绝。此测试直接提供合成光标位置，只验证实际 AX 范围读写，不覆盖前台焦点及真实选区的取得：
+WebKit 标记范围的合成回归通过生产读取器取得真实焦点和选区，检查短文修改、6 万字正文的局部读取，以及初始捕获和缓存后的实时检查均在请求正文前拒绝只读和密码控件。只读及密码切换复用同一测试应用进程，避免 libtest 跨应用切换时的前台状态缓存。
+
+AppKit 的输入法接口回归直接在自带 NSTextView 设置、提交合成 marked text，通过生产读取器验证空闲到组词再到提交，断言组词期间不请求正文，提交后恢复读取；它不替代真实中文输入法交互验证。统一入口会构建临时测试应用包，并明确激活合成窗口，需要安排约 10 秒前台验证时段，期间不操作键盘：
 
 ```sh
-swiftc scripts/post-edit/webkit-fixture.swift -o /tmp/voicex-webkit-fixture
-VOICEX_POST_EDIT_WEBKIT_FIXTURE=/tmp/voicex-webkit-fixture cargo test --manifest-path src-tauri/Cargo.toml --lib post_edit::platform::macos_tests::background_webkit_marker_ranges -- --exact --ignored --test-threads=1
+scripts/post-edit/check-macos-text-interfaces.sh
+# 使用已编译的测试二进制：
+VOICEX_POST_EDIT_TEST_BINARY=/absolute/path/to/voicex_lib-... scripts/post-edit/check-macos-text-interfaces.sh
 ```
+
+2026-11-05，本轮前台接口回归均通过：AppKit 1.06 秒，WebKit 1.03 秒。前者验证组词时正文请求数不增加、提交后恢复读取；后者通过生产读取器取得 `AXWebArea` 的真实选区，验证修改、6 万字正文的局部窗口，以及缓存读取与重新捕获均在请求正文前拒绝只读或密码控件。测试仅使用合成文档，真实中文输入法和 Windows UIA 交互仍未验证。
+
+不要把这组测试改成“未激活的后台程序也应可读”：该状态下 AppKit 曾将 `AXWindows` 和子节点序列化为应用自身；测试应用包、签名及等待不能保证消除它。最终入口采用显式前台生命周期，而不是放松读取器的身份、安全或正文检查。早期偶发后台通过不作为稳定接口验收证据。
 
 ### 通用局部读取与定时复核
 
-macOS 以听写前的选区为中心，各保留约 2,048 个 UTF-16 单元上下文，后续固定左端并按文档长度变化更新右端；不会跟随光标重新选取别处的内容。剪裁边缘保存上下文守卫，无法维持边缘一致时跳过样本并继续复核，未恢复则不能保存旧对照。首次窗口边缘会对齐 UTF-16 代理对，正文不做替换或归一化。前读不可用时，后读窗口还会为预期的听写长度保留空间。
+macOS 以听写前的选区为中心，各保留约 2,048 个 UTF-16 单元上下文，后续固定左端并按文档长度变化更新右端；不会跟随光标重新选取别处的内容。剪裁边缘保存上下文守卫，无法维持边缘一致时跳过样本并继续复核，已有稳定证据只作为部分观察保留。首次窗口边缘会对齐 UTF-16 代理对，正文不做替换或归一化。前读不可用时，后读窗口还会为预期的听写长度保留空间。成功但晚于派发的预读也会按听写长度扩大窗口，保留原控件及代次，并重新验证焦点，不只按 PID 重新捕获。
 
 Windows 通过 UIA 选区向两侧扩展有限的 Character 单元，保留原生 TextRange；真正的文档首尾会随文档扩展，内侧截断边缘保留原生锚点并检查上下文。正文及选择前缀都仅从局部范围读取。单次局部文本仍限制为 16,384 个 UTF-16 单元，过大的单次选区、听写或窗口增长可能触达此预算，文档总长度本身不再直接触发拒绝。平台接口必须实际提供相应范围能力；虚拟化编辑器仍需实测。
 
@@ -113,9 +133,10 @@ node scripts/post-edit/history-ui-preview.mjs
 - 用户已确认在 Codex 的修改记录 Tab 看到了原文和修改结果，基础采集、保存、展示闭环有用户实测反馈。
 - 2026-11-05：Grok Bot、WorkBuddy、DeepSeek Harness 已分别通过用户手动 A→B 的原生读取、变化通知、稳定范围和隔离数据库验证；该测试不覆盖真实听写注入或用户历史页。
 - 同日 Obsidian 1.14.4 的临时笔记源码模式通过相同原生回归，复用了通用 Electron 读取器；实时预览、长文档和真实听写派发仍未验证。
-- 同日邮件 16.0 的无收件人临时写信正文、Typora 1.14.15 的即时渲染临时文档分别通过真实前台 A→B 回归，收到修改通知，并正确保存、读回隔离测试记录。WebKit 后台合成范围回归也通过。真实听写注入、历史页、两款应用中的长文档和输入法交互仍未验证。
+- 同日邮件 16.0 的无收件人临时写信正文、Typora 1.14.15 的即时渲染临时文档分别通过真实前台 A→B 回归，收到修改通知，并正确保存、读回隔离测试记录。用户后续确认两款基本功能可工作。早期后台 WebKit 合成回归曾通过，但后续发现未激活控件树不可靠，最终接口回归改为显式前台启动；上述脚本仍不覆盖 ASR、真实历史页、两款应用的长文档或真实输入法交互。
 - 原生 AppKit 及完整 Chrome 语义树已完成受控场景；广泛应用覆盖尚未完成。
 - 已实现大文档局部范围读取，16,384 个 UTF-16 单元限制作用于单次窗口；真实编辑器的长文档、快改快发和长时间资源表现仍需验证。
-- 输入法状态在平台提供能力时检查：macOS 使用 SDK 的 `AXTextInputMarkedTextMarkerRange`，Windows 使用 TextEdit 的 active composition；未知能力不会标为已提交。已知组词期间跳过正文，歧义样本可继续观察。后续一致读取确认稳定后，清空通知不会抹掉这份证据：实际读到空框时，以“部分观察”保存此前确认的文本、时间和输入法状态。若已读到新的修改、组词或歧义内容，旧确认失效，需重新确认稳定。旧记录缺少稳定性证据时在页面标明，不自动改写或删除原记录。
+- 输入法状态在平台提供能力时检查：macOS 探测 AppKit 的 `AXTextInputMarkedRange` 与 WebKit 的 `AXTextInputMarkedTextMarkerRange`，Windows 使用 TextEdit 的 active composition；未知能力不会标为已提交，历史页会提示。已知组词期间跳过正文，歧义样本可继续观察。最近稳定快照独立保留，后续续写、组词、范围失效或预算超限不会抹去它；结果降为部分观察，并保存 `hasNewerUnconfirmedInput`。只有新确认的稳定快照替换它，确认撤销回原文后仍不保存修改记录。取消、关闭和删除的许可规则保持有效。部分观察和输入法未知的记录不构成已验证最终稿或自动学习依据。原文与范围参考不因每个稳定样本重设，避免退格停顿后的重输再次失去范围。旧记录缺少稳定性证据时在页面标明，不自动改写或删除原记录。
 - Windows 目前没有 UIA 文本或焦点订阅，使用同一套有界定时复核与收尾；本轮通过编译检查，实际交互尚未验证，不能推断与 macOS 覆盖相当。
 - 本机截图、原始计时样本和逐次调试记录不纳入提交。
+- 全量默认并行测试仍有原生剪贴板异常及 TTS mock 超时的基线问题，应与本功能回归分别报告。本机代理还曾截获 localhost mock 请求，导致串行也失败；本轮全量通过使用仅对命令生效的 `NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost` 和 `--test-threads=1`。这不代表默认 CI 的测试隔离问题已修复。

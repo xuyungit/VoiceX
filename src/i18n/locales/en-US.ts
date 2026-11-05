@@ -88,6 +88,8 @@ const enUS = {
     partialNote: 'Last read at {time} · {reason}. Later edits may be missing.',
     observedNote: 'Last read at {time}',
     stabilityUnknown: 'Text stability was not verified for this record. Check the original and edited text.',
+    newerUnconfirmed: 'Later input could not be confirmed. This is the earlier stable result, not a verified final version.',
+    compositionUnknown: 'IME commitment could not be verified. Please check the edited text.',
     unknownApp: 'Unknown app',
     copy: 'Copy',
     copied: 'Copied',

@@ -172,9 +172,13 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
           </div>
         </div>
         <footer class="record-footer">
+          <div class="record-notes">
           <span v-if="!record.stable" class="partial-note">{{ t('postEdit.stabilityUnknown') }}</span>
           <span v-else-if="!record.complete" class="partial-note">{{ t('postEdit.partialNote', { time: time(record.lastObservedAt), reason: t(`input.postEditReason.${record.endReason}`) }) }}</span>
           <span v-else class="observed-note">{{ t('postEdit.observedNote', { time: time(record.lastObservedAt) }) }}</span>
+          <span v-if="record.hasNewerUnconfirmedInput" class="partial-note">{{ t('postEdit.newerUnconfirmed') }}</span>
+          <span v-if="record.stable && record.composition === 'unknown'" class="partial-note">{{ t('postEdit.compositionUnknown') }}</span>
+          </div>
           <NButton v-if="isLong(record)" text size="tiny" @click="toggle(record.id)">
             {{ t(expanded.has(record.id) ? 'postEdit.collapse' : 'postEdit.expand') }}
           </NButton>
@@ -212,6 +216,7 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
 .original .record-text { color: var(--color-text-secondary); }
 .text-pair.collapsible:not(.expanded) .record-text { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
 .record-footer { justify-content: space-between; gap: 16px; margin-top: 15px; font-size: 11px; line-height: 1.7; color: var(--color-text-tertiary); }
+.record-notes { display: flex; flex-direction: column; gap: 3px; }
 .records-more { text-align: center; padding: 20px; }
 @media (max-width: 760px) {
   .records-toolbar { align-items: flex-start; flex-direction: column; gap: 14px; }

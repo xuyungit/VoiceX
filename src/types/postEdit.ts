@@ -50,6 +50,7 @@ export interface PostEditRecord {
   substitutions: number | null
   hadIntermediateChanges: boolean
   stable: boolean
+  hasNewerUnconfirmedInput: boolean
   composition: 'unknown' | 'inactive' | 'active'
 }
 

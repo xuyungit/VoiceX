@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,6 +26,64 @@ const AX_DISABLED: i32 = -25211;
 const AX_VALUE_CF_RANGE: u32 = 4;
 #[cfg(test)]
 pub(super) static BODY_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+thread_local! {
+    static ATTRIBUTE_QUERIES: Cell<u64> = const { Cell::new(0) };
+    #[cfg(test)]
+    static FRAMEWORK_CHECKS: Cell<u64> = const { Cell::new(0) };
+    #[cfg(test)]
+    static CAPABILITY_CHECKS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(super) struct ReadMeasurement {
+    pub operation: &'static str,
+    pub attribute_queries: u64,
+    pub elapsed_us: u128,
+    pub framework_checks: u64,
+    pub capability_checks: u64,
+}
+#[cfg(test)]
+static MEASUREMENTS: std::sync::Mutex<Vec<ReadMeasurement>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+pub(super) fn take_measurements() -> Vec<ReadMeasurement> {
+    std::mem::take(&mut *MEASUREMENTS.lock().unwrap())
+}
+
+fn attribute_query() {
+    ATTRIBUTE_QUERIES.with(|count| count.set(count.get() + 1));
+}
+
+fn measure_queries<T>(
+    operation: &'static str,
+    read: impl FnOnce() -> Result<T, ReadError>,
+) -> Result<T, ReadError> {
+    let before = ATTRIBUTE_QUERIES.with(Cell::get);
+    #[cfg(test)]
+    let (framework_before, capabilities_before) = (
+        FRAMEWORK_CHECKS.with(Cell::get),
+        CAPABILITY_CHECKS.with(Cell::get),
+    );
+    let at = Instant::now();
+    let result = read();
+    #[cfg(test)]
+    MEASUREMENTS.lock().unwrap().push(ReadMeasurement {
+        operation,
+        attribute_queries: ATTRIBUTE_QUERIES.with(Cell::get) - before,
+        elapsed_us: at.elapsed().as_micros(),
+        framework_checks: FRAMEWORK_CHECKS.with(Cell::get) - framework_before,
+        capability_checks: CAPABILITY_CHECKS.with(Cell::get) - capabilities_before,
+    });
+    log::debug!(
+        "Post-edit AX operation: operation={}, attribute_queries={}, elapsed_us={}, outcome={:?}",
+        operation,
+        ATTRIBUTE_QUERIES.with(Cell::get) - before,
+        at.elapsed().as_micros(),
+        result.as_ref().map(|_| ()).map_err(|e| *e)
+    );
+    result
+}
 
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -129,68 +188,6 @@ pub(super) fn metadata_probe(pid: u32) -> Result<(), ReadError> {
     Ok(())
 }
 
-#[cfg(test)]
-pub(super) fn fixture_webkit_read(
-    pid: u32,
-    caret: usize,
-    password: bool,
-) -> Result<(String, std::ops::Range<usize>), ReadError> {
-    // Called only with the PID of the test's freshly spawned synthetic fixture.
-    // A supplied caret replaces foreground selection acquisition, so this is
-    // an AX range-I/O test, not evidence about real foreground focus behavior.
-    let app = Element(unsafe { AXUIElementCreateApplication(pid as i32) });
-    status(unsafe { AXUIElementSetMessagingTimeout(app.0, 0.1) })?;
-    let windows = attribute(&app, "AXWindows")?;
-    let windows: CFArray<CFType> =
-        unsafe { CFArray::wrap_under_get_rule(windows.as_CFTypeRef() as CFArrayRef) };
-    let mut nodes: Vec<Element> = windows
-        .iter()
-        .map(
-            |v| Element(unsafe { core_foundation::base::CFRetain(v.as_CFTypeRef()) } as ElementRef),
-        )
-        .collect();
-    for _ in 0..64 {
-        let Some(node) = nodes.pop() else {
-            break;
-        };
-        status(unsafe { AXUIElementSetMessagingTimeout(node.0, 0.1) })?;
-        let role = string_attribute(&node, "AXRole")?;
-        if (password && role == "AXTextField") || (!password && role == "AXWebArea") {
-            let node = resolve_editable_focus(node, pid)?;
-            check_control(&node)?;
-            let first = attribute(&node, "AXStartTextMarker")?;
-            let last = attribute(&node, "AXEndTextMarker")?;
-            let count = native_index(&parameter_attribute(
-                &node,
-                "AXLengthForTextMarkerRange",
-                marker_range(&node, &first, &last)?.as_CFTypeRef(),
-            )?)?;
-            let marker = parameter_attribute(
-                &node,
-                "AXTextMarkerForIndex",
-                CFNumber::from(caret as i64).as_CFTypeRef(),
-            )?;
-            let selected = marker_range(&node, &marker, &marker)?;
-            let local = read_web_area_selection(
-                &node,
-                &mut None,
-                super::window::CONTEXT_UNITS,
-                count,
-                &selected,
-            )?;
-            return Ok((local.text, local.selection_utf16));
-        }
-        if let Ok(children) = attribute(&node, "AXChildren") {
-            let children: CFArray<CFType> =
-                unsafe { CFArray::wrap_under_get_rule(children.as_CFTypeRef() as CFArrayRef) };
-            nodes.extend(children.iter().map(|v| {
-                Element(unsafe { core_foundation::base::CFRetain(v.as_CFTypeRef()) } as ElementRef)
-            }));
-        }
-    }
-    Err(ReadError::NoValue)
-}
-
 #[link(name = "Carbon", kind = "framework")]
 extern "C" {
     fn IsSecureEventInputEnabled() -> bool;
@@ -206,10 +203,34 @@ impl Drop for Element {
 }
 
 pub(super) struct NativeReader {
-    target: Option<(u64, u64, u32, Element)>,
+    target: Option<Target>,
     window: Option<ReadWindow>,
     observer: Option<Subscription>,
     events: Arc<EventSignal>,
+}
+
+struct Target {
+    generation: u64,
+    token: u64,
+    pid: u32,
+    application: Element,
+    element: Element,
+    kind: TextKind,
+    composition: CompositionReader,
+}
+
+#[derive(Clone, Copy)]
+enum TextKind {
+    Control,
+    WebArea,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompositionReader {
+    NativeRange,
+    WebMarkers,
+    Both,
+    Unknown,
 }
 
 struct Context {
@@ -364,32 +385,71 @@ impl NativeReader {
         expected_pid: u32,
         lookbehind: usize,
     ) -> Result<OwnedSnapshot, ReadError> {
-        autoreleasepool(|_| {
-            self.clear();
-            let focused = focused(expected_pid)?;
-            let mut pid = 0;
-            status(unsafe { AXUIElementGetPid(focused.0, &mut pid) })?;
-            if pid <= 0 || pid as u32 != expected_pid {
-                return Err(ReadError::TargetChanged);
-            }
-            check_control(&focused)?;
-            self.observer = match Subscription::new(
-                expected_pid,
-                &focused,
-                generation,
-                Arc::clone(&self.events),
-            ) {
-                Ok(subscription) if !subscription.registrations.is_empty() => Some(subscription),
-                Ok(_) | Err(ReadError::Native(-25207 | -25208)) => None,
-                Err(error) => return Err(error),
-            };
-            self.target = Some((generation, super::target_token(), expected_pid, focused));
-            self.read_inner(generation, lookbehind)
+        measure_queries("capture", || {
+            autoreleasepool(|_| {
+                self.clear();
+                let (application, chromium) = capture_application(expected_pid)?;
+                let focused =
+                    resolve_editable_focus(focused_raw(&application, expected_pid)?, expected_pid)?;
+                let mut pid = 0;
+                status(unsafe { AXUIElementGetPid(focused.0, &mut pid) })?;
+                if pid <= 0 || pid as u32 != expected_pid {
+                    return Err(ReadError::TargetChanged);
+                }
+                let kind = check_control(&focused, chromium)?;
+                let composition = probe_composition_reader(&focused)?;
+                self.observer = match Subscription::new(
+                    expected_pid,
+                    &focused,
+                    generation,
+                    Arc::clone(&self.events),
+                ) {
+                    Ok(subscription) if !subscription.registrations.is_empty() => {
+                        Some(subscription)
+                    }
+                    Ok(_) | Err(ReadError::Native(-25207 | -25208)) => None,
+                    Err(error) => return Err(error),
+                };
+                self.target = Some(Target {
+                    generation,
+                    token: super::target_token(),
+                    pid: expected_pid,
+                    application,
+                    element: focused,
+                    kind,
+                    composition,
+                });
+                self.read_inner(generation, lookbehind)
+            })
         })
     }
 
     pub(super) fn read(&mut self, generation: u64) -> Result<OwnedSnapshot, ReadError> {
-        autoreleasepool(|_| self.read_inner(generation, super::window::CONTEXT_UNITS))
+        measure_queries("read", || {
+            autoreleasepool(|_| self.read_inner(generation, super::window::CONTEXT_UNITS))
+        })
+    }
+
+    pub(super) fn reframe(
+        &mut self,
+        generation: u64,
+        target: u64,
+        lookbehind: usize,
+    ) -> Result<OwnedSnapshot, ReadError> {
+        measure_queries("reframe", || {
+            autoreleasepool(|_| {
+                let stored = self.target.as_ref().ok_or(ReadError::TargetChanged)?;
+                if stored.generation != generation {
+                    return Err(ReadError::StaleGeneration);
+                }
+                if stored.token != target {
+                    return Err(ReadError::TargetChanged);
+                }
+                self.window = None;
+                // read_inner checks the same retained native element before text.
+                self.read_inner(generation, lookbehind)
+            })
+        })
     }
 
     fn read_inner(
@@ -397,36 +457,30 @@ impl NativeReader {
         generation: u64,
         lookbehind: usize,
     ) -> Result<OwnedSnapshot, ReadError> {
-        let (target_generation, token, pid, element) =
-            self.target.as_ref().ok_or(ReadError::TargetChanged)?;
-        if *target_generation != generation {
+        let target = self.target.as_ref().ok_or(ReadError::TargetChanged)?;
+        if target.generation != generation {
             return Err(ReadError::StaleGeneration);
         }
-        same_focus(*pid, element)?;
-        check_control(element)?;
-        let composition_before = composition_state(element)?;
+        let element = &target.element;
+        same_focus(&target.application, target.pid, element)?;
+        check_live_control(element, target.kind)?;
+        let composition_before = composition_state(element, target.composition)?;
         if composition_before == super::CompositionState::Active {
             return Err(ReadError::CompositionActive);
         }
-        let local = if string_attribute(element, "AXRole")? == "AXWebArea" {
-            read_web_area(element, &mut self.window, lookbehind)?
-        } else {
-            read_text_control(element, &mut self.window, lookbehind)?
+        let local = match target.kind {
+            TextKind::WebArea => read_web_area(element, &mut self.window, lookbehind)?,
+            TextKind::Control => read_text_control(element, &mut self.window, lookbehind)?,
         };
-        same_focus(*pid, element)?;
-        check_control(element)?;
-        let composition_after = composition_state(element)?;
+        same_focus(&target.application, target.pid, element)?;
+        check_live_control(element, target.kind)?;
+        let composition_after = composition_state(element, target.composition)?;
         if composition_after == super::CompositionState::Active {
             return Err(ReadError::CompositionActive);
         }
-        let mut process_id = 0;
-        status(unsafe { AXUIElementGetPid(element.0, &mut process_id) })?;
-        if process_id <= 0 {
-            return Err(ReadError::Unsupported);
-        }
         Ok(OwnedSnapshot {
-            target: *token,
-            process_id: process_id as u32,
+            target: target.token,
+            process_id: target.pid,
             text: local.text,
             selection_utf16: local.selection_utf16,
             read_at: Instant::now(),
@@ -513,6 +567,7 @@ fn read_text_control(
     let mut raw: CFTypeRef = std::ptr::null();
     #[cfg(test)]
     BODY_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    attribute_query();
     let result = unsafe {
         AXUIElementCopyParameterizedAttributeValue(
             element.0,
@@ -709,7 +764,10 @@ fn read_web_area_selection(
     }
     let end = unsafe { CFType::wrap_under_create_rule(end) };
     check_marker_path(element, &start)?;
-    check_marker_path(element, &end)?;
+    let collapsed = unsafe { CFEqual(start.as_CFTypeRef(), end.as_CFTypeRef()) } != 0;
+    if !collapsed {
+        check_marker_path(element, &end)?;
+    }
     let selection = native_index(&parameter_attribute(
         element,
         "AXRelativeIndexForTextMarker",
@@ -748,8 +806,12 @@ fn read_web_area_selection(
     let window_start = marker_at(bounds.start)?;
     let prefix_start = String::from_utf16(&marker_text_units(element, &window_start, &start)?)
         .map_err(|_| ReadError::WindowChanged)?;
-    let prefix_end = String::from_utf16(&marker_text_units(element, &window_start, &end)?)
-        .map_err(|_| ReadError::WindowChanged)?;
+    let prefix_end = if collapsed {
+        prefix_start.clone()
+    } else {
+        String::from_utf16(&marker_text_units(element, &window_start, &end)?)
+            .map_err(|_| ReadError::WindowChanged)?
+    };
     if !text.starts_with(&prefix_start)
         || !text.starts_with(&prefix_end)
         || !prefix_end.starts_with(&prefix_start)
@@ -776,24 +838,113 @@ fn read_web_area_selection(
     })
 }
 
-fn composition_state(element: &Element) -> Result<super::CompositionState, ReadError> {
-    // AXWebConstants.h: non-null means provisional text, successful null means
-    // no marked text. Unsupported/NoValue does not prove IME inactivity.
-    let name = CFString::new("AXTextInputMarkedTextMarkerRange");
+fn probe_composition_reader(element: &Element) -> Result<CompositionReader, ReadError> {
+    let mut supported = [false; 2];
+    for (index, reader) in [
+        CompositionReader::NativeRange,
+        CompositionReader::WebMarkers,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        match read_composition(element, reader) {
+            Ok(_) => supported[index] = true,
+            Err(ReadError::Native(-25205)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(match supported {
+        [true, true] => CompositionReader::Both,
+        [true, false] => CompositionReader::NativeRange,
+        [false, true] => CompositionReader::WebMarkers,
+        [false, false] => CompositionReader::Unknown,
+    })
+}
+
+fn merge_composition(
+    a: super::CompositionState,
+    b: super::CompositionState,
+) -> super::CompositionState {
+    use super::CompositionState::*;
+    match (a, b) {
+        (Active, _) | (_, Active) => Active,
+        (Inactive, _) | (_, Inactive) => Inactive,
+        _ => Unknown,
+    }
+}
+
+fn composition_state(
+    element: &Element,
+    reader: CompositionReader,
+) -> Result<super::CompositionState, ReadError> {
+    match read_composition(element, reader) {
+        Err(ReadError::Native(-25205)) => Ok(super::CompositionState::Unknown),
+        result => result,
+    }
+}
+
+fn marked_range_state(location: isize, length: isize) -> super::CompositionState {
+    if location < 0 || length < 0 || (location == isize::MAX && length != 0) {
+        super::CompositionState::Unknown
+    } else if length == 0 {
+        super::CompositionState::Inactive
+    } else {
+        super::CompositionState::Active
+    }
+}
+
+fn read_composition(
+    element: &Element,
+    reader: CompositionReader,
+) -> Result<super::CompositionState, ReadError> {
+    let name = CFString::new(match reader {
+        CompositionReader::NativeRange => "AXTextInputMarkedRange",
+        CompositionReader::WebMarkers => "AXTextInputMarkedTextMarkerRange",
+        CompositionReader::Both => {
+            return Ok(merge_composition(
+                composition_state(element, CompositionReader::NativeRange)?,
+                composition_state(element, CompositionReader::WebMarkers)?,
+            ))
+        }
+        CompositionReader::Unknown => return Ok(super::CompositionState::Unknown),
+    });
+    attribute_query();
     let mut value = std::ptr::null();
     let code =
         unsafe { AXUIElementCopyAttributeValue(element.0, name.as_concrete_TypeRef(), &mut value) };
-    let active = !value.is_null();
-    if active {
-        unsafe { CFRelease(value) };
-    }
+    let value = (!value.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(value) });
     match code {
-        AX_SUCCESS => Ok(if active {
-            super::CompositionState::Active
-        } else {
-            super::CompositionState::Inactive
-        }),
-        -25205 | -25212 => Ok(super::CompositionState::Unknown),
+        AX_SUCCESS if reader == CompositionReader::WebMarkers => {
+            // AXWebConstants.h explicitly defines a successful null as idle.
+            Ok(if value.is_some() {
+                super::CompositionState::Active
+            } else {
+                super::CompositionState::Inactive
+            })
+        }
+        AX_SUCCESS => {
+            let Some(value) = value else {
+                return Ok(super::CompositionState::Unknown);
+            };
+            if unsafe { CFGetTypeID(value.as_CFTypeRef()) } != unsafe { AXValueGetTypeID() } {
+                return Err(ReadError::Unsupported);
+            }
+            let mut range = CFRange {
+                location: 0,
+                length: 0,
+            };
+            if !unsafe {
+                AXValueGetValue(
+                    value.as_CFTypeRef(),
+                    AX_VALUE_CF_RANGE,
+                    &mut range as *mut _ as *mut c_void,
+                )
+            } {
+                return Err(ReadError::Unsupported);
+            }
+            Ok(marked_range_state(range.location, range.length))
+        }
+        -25212 => Ok(super::CompositionState::Unknown),
         code => status(code).map(|_| super::CompositionState::Unknown),
     }
 }
@@ -808,6 +959,7 @@ fn status(code: i32) -> Result<(), ReadError> {
 }
 
 fn attribute(element: &Element, name: &str) -> Result<CFType, ReadError> {
+    attribute_query();
     let name = CFString::new(name);
     let mut value: CFTypeRef = std::ptr::null();
     let result =
@@ -832,7 +984,7 @@ fn string_attribute(element: &Element, name: &str) -> Result<String, ReadError> 
     Ok(unsafe { CFString::wrap_under_get_rule(value.as_CFTypeRef() as CFStringRef) }.to_string())
 }
 
-fn focused(pid: u32) -> Result<Element, ReadError> {
+fn capture_application(pid: u32) -> Result<(Element, bool), ReadError> {
     let frontmost = frontmost_app(pid)?;
     let application = unsafe { AXUIElementCreateApplication(pid as i32) };
     if application.is_null() {
@@ -840,13 +992,23 @@ fn focused(pid: u32) -> Result<Element, ReadError> {
     }
     let application = Element(application);
     status(unsafe { AXUIElementSetMessagingTimeout(application.0, 0.1) })?;
-    if has_electron_framework(&frontmost) {
+    let electron = has_electron_framework(&frontmost);
+    if electron {
         // Electron's supported lightweight activation path: querying the app's
         // role requests native AX APIs. Focus alone can stay an empty proxy.
         // This does not toggle the full screen-reader mode or scan other fields.
         string_attribute(&application, "AXRole")?;
     }
-    let value = attribute(&application, "AXFocusedUIElement")?;
+    let bundle = frontmost.bundleIdentifier().map(|id| id.to_string());
+    Ok((
+        application,
+        uses_chromium_web_contract(bundle.as_deref(), electron),
+    ))
+}
+
+fn focused_raw(application: &Element, pid: u32) -> Result<Element, ReadError> {
+    same_frontmost(pid)?;
+    let value = attribute(application, "AXFocusedUIElement")?;
     if unsafe { CFGetTypeID(value.as_CFTypeRef()) } != unsafe { AXUIElementGetTypeID() } {
         return Err(ReadError::Unsupported);
     }
@@ -854,16 +1016,23 @@ fn focused(pid: u32) -> Result<Element, ReadError> {
     let element = Element(retained as ElementRef);
     status(unsafe { AXUIElementSetMessagingTimeout(element.0, 0.1) })?;
     same_frontmost(pid)?;
-    resolve_editable_focus(element, pid)
+    Ok(element)
 }
 
-fn reject_protected(element: &Element) -> Result<(), ReadError> {
-    if string_attribute(element, "AXRole")? == "AXSecureTextField" {
+#[cfg(test)]
+fn focused(pid: u32) -> Result<Element, ReadError> {
+    let (application, _) = capture_application(pid)?;
+    resolve_editable_focus(focused_raw(&application, pid)?, pid)
+}
+
+fn reject_protected(element: &Element) -> Result<String, ReadError> {
+    let role = string_attribute(element, "AXRole")?;
+    if role == "AXSecureTextField" {
         return Err(ReadError::SecureInput);
     }
     match string_attribute(element, "AXSubrole") {
         Ok(role) if role == "AXSecureTextField" => Err(ReadError::SecureInput),
-        Ok(_) | Err(ReadError::NoValue | ReadError::Native(-25205)) => Ok(()),
+        Ok(_) | Err(ReadError::NoValue | ReadError::Native(-25205)) => Ok(role),
         Err(error) => Err(error),
     }
 }
@@ -907,15 +1076,23 @@ fn frontmost_app(
     Ok(current)
 }
 
-fn same_focus(pid: u32, element: &Element) -> Result<(), ReadError> {
-    let current = focused(pid)?;
+fn same_focus(application: &Element, pid: u32, element: &Element) -> Result<(), ReadError> {
+    let raw = focused_raw(application, pid)?;
+    // The common case needs no ancestor query or walk. The retained root's
+    // secure role/subrole are checked immediately before/after the body read.
+    if unsafe { CFEqual(element.0 as CFTypeRef, raw.0 as CFTypeRef) } != 0 {
+        return Ok(());
+    }
+    let current = resolve_editable_focus(raw, pid)?;
     if unsafe { CFEqual(element.0 as CFTypeRef, current.0 as CFTypeRef) } == 0 {
         return Err(ReadError::TargetChanged);
     }
     Ok(())
 }
 
-fn check_control(element: &Element) -> Result<(), ReadError> {
+fn check_control(element: &Element, chromium: bool) -> Result<TextKind, ReadError> {
+    #[cfg(test)]
+    CAPABILITY_CHECKS.with(|count| count.set(count.get() + 1));
     if unsafe { IsSecureEventInputEnabled() } {
         return Err(ReadError::SecureInput);
     }
@@ -935,20 +1112,45 @@ fn check_control(element: &Element) -> Result<(), ReadError> {
         Ok(_) | Err(ReadError::Native(-25205)) => {}
         Err(ReadError::NoValue)
             if web_area
-                || verified_chromium_web_node(element)?
+                || (chromium && verified_chromium_web_node(element)?)
                 || verified_webkit_text_node(element)? => {}
         Err(ReadError::NoValue | ReadError::Unsupported) => return Err(ReadError::SecurityUnknown),
         Err(error) => return Err(error),
     }
+    check_editable(element)?;
+    Ok(if web_area {
+        TextKind::WebArea
+    } else {
+        TextKind::Control
+    })
+}
+
+fn check_live_control(element: &Element, kind: TextKind) -> Result<(), ReadError> {
+    if unsafe { IsSecureEventInputEnabled() } {
+        return Err(ReadError::SecureInput);
+    }
+    let role = reject_protected(element)?;
+    if !matches!(
+        (kind, role.as_str()),
+        (TextKind::Control, "AXTextField" | "AXTextArea") | (TextKind::WebArea, "AXWebArea")
+    ) {
+        return Err(ReadError::TargetChanged);
+    }
+    check_editable(element)
+}
+
+fn check_editable(element: &Element) -> Result<(), ReadError> {
     let attribute = CFString::new("AXValue");
     let mut settable = 0u8;
+    attribute_query();
     status(unsafe {
         AXUIElementIsAttributeSettable(element.0, attribute.as_concrete_TypeRef(), &mut settable)
     })?;
     if settable == 0 {
-        return Err(ReadError::Unsupported);
+        Err(ReadError::Unsupported)
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 /// Chromium's actual web nodes return a nil subrole for ordinary editors and
@@ -976,6 +1178,7 @@ fn parameter_attribute(
     name: &str,
     parameter: CFTypeRef,
 ) -> Result<CFType, ReadError> {
+    attribute_query();
     let name = CFString::new(name);
     let mut value: CFTypeRef = std::ptr::null();
     let code = unsafe {
@@ -1002,6 +1205,7 @@ fn parameter_attribute(
 /// AXSecureTextField. Prove the live marker/range contract without app names or
 /// field text. An advertised attribute alone is insufficient.
 fn verified_webkit_text_node(element: &Element) -> Result<bool, ReadError> {
+    attribute_query();
     let mut raw = std::ptr::null();
     let code = unsafe { AXUIElementCopyParameterizedAttributeNames(element.0, &mut raw) };
     if code == -25205 {
@@ -1034,6 +1238,8 @@ fn verified_webkit_text_node(element: &Element) -> Result<bool, ReadError> {
 }
 
 fn has_electron_framework(app: &objc2_app_kit::NSRunningApplication) -> bool {
+    #[cfg(test)]
+    FRAMEWORK_CHECKS.with(|count| count.set(count.get() + 1));
     app.bundleURL()
         .and_then(|url| url.path())
         .is_some_and(|path| {
@@ -1044,13 +1250,6 @@ fn has_electron_framework(app: &objc2_app_kit::NSRunningApplication) -> bool {
 }
 
 fn verified_chromium_web_node(element: &Element) -> Result<bool, ReadError> {
-    let mut pid = 0;
-    status(unsafe { AXUIElementGetPid(element.0, &mut pid) })?;
-    let app = frontmost_app(pid as u32)?;
-    let bundle_id = app.bundleIdentifier().map(|id| id.to_string());
-    if !uses_chromium_web_contract(bundle_id.as_deref(), has_electron_framework(&app)) {
-        return Ok(false);
-    }
     let node = match attribute(element, "ChromeAXNodeId") {
         Ok(node) => node,
         Err(ReadError::NoValue | ReadError::Native(-25205)) => return Ok(false),
@@ -1078,6 +1277,18 @@ fn verified_chromium_web_node(element: &Element) -> Result<bool, ReadError> {
 #[cfg(test)]
 mod tests {
     use super::{uses_chromium_web_contract, webkit_text_contract};
+
+    #[test]
+    fn native_marked_ranges_keep_unknown_separate_from_idle() {
+        use super::super::CompositionState::*;
+        assert_eq!(super::marked_range_state(isize::MAX, 0), Inactive);
+        assert_eq!(super::marked_range_state(2, 5), Active);
+        assert_eq!(super::marked_range_state(-1, 5), Unknown);
+        assert_eq!(super::marked_range_state(isize::MAX, 5), Unknown);
+        assert_eq!(super::merge_composition(Unknown, Unknown), Unknown);
+        assert_eq!(super::merge_composition(Inactive, Unknown), Inactive);
+        assert_eq!(super::merge_composition(Inactive, Active), Active);
+    }
 
     #[test]
     fn webkit_requires_a_valid_marker_and_the_full_range_contract() {

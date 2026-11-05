@@ -76,55 +76,40 @@ impl NativeReader {
         if composition_state(&element) == super::CompositionState::Active {
             return Err(ReadError::CompositionActive);
         }
-        let pattern =
-            unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
-                .map_err(native)?;
-        let selections = unsafe { pattern.GetSelection() }.map_err(native)?;
-        if unsafe { selections.Length() }.map_err(native)? != 1 {
-            return Err(ReadError::Unsupported);
-        }
-        let selected = unsafe { selections.GetElement(0) }.map_err(native)?;
-        let window = unsafe { selected.Clone() }.map_err(native)?;
-        let lookbehind = i32::try_from(lookbehind).map_err(|_| ReadError::TooLarge)?;
-        unsafe {
-            window
-                .MoveEndpointByUnit(
-                    TextPatternRangeEndpoint_Start,
-                    TextUnit_Character,
-                    -lookbehind,
-                )
-                .map_err(native)?;
-            window
-                .MoveEndpointByUnit(
-                    TextPatternRangeEndpoint_End,
-                    TextUnit_Character,
-                    CONTEXT_UNITS as i32,
-                )
-                .map_err(native)?;
-        }
-        let document = unsafe { pattern.DocumentRange() }.map_err(native)?;
-        self.clipped_edges = (
-            unsafe {
-                window.CompareEndpoints(
-                    TextPatternRangeEndpoint_Start,
-                    &document,
-                    TextPatternRangeEndpoint_Start,
-                )
-            }
-            .map_err(native)?
-                > 0,
-            unsafe {
-                window.CompareEndpoints(
-                    TextPatternRangeEndpoint_End,
-                    &document,
-                    TextPatternRangeEndpoint_End,
-                )
-            }
-            .map_err(native)?
-                < 0,
-        );
+        let (window, clipped_edges) = local_window(&element, lookbehind)?;
+        self.clipped_edges = clipped_edges;
         self.window = Some(window);
         self.target = Some((generation, super::target_token(), element));
+        self.read(generation)
+    }
+
+    pub(super) fn reframe(
+        &mut self,
+        generation: u64,
+        target: u64,
+        lookbehind: usize,
+    ) -> Result<OwnedSnapshot, ReadError> {
+        let automation = self
+            .automation
+            .as_ref()
+            .map_err(|e| ReadError::Native(*e))?;
+        let (stored_generation, token, element) =
+            self.target.as_ref().ok_or(ReadError::TargetChanged)?;
+        if *stored_generation != generation {
+            return Err(ReadError::StaleGeneration);
+        }
+        if *token != target {
+            return Err(ReadError::TargetChanged);
+        }
+        same_focus(automation, element)?;
+        check_control(element)?;
+        if composition_state(element) == super::CompositionState::Active {
+            return Err(ReadError::CompositionActive);
+        }
+        let (window, clipped_edges) = local_window(element, lookbehind)?;
+        self.window = Some(window);
+        self.clipped_edges = clipped_edges;
+        self.guards = EdgeGuards::default();
         self.read(generation)
     }
 
@@ -284,6 +269,60 @@ impl Drop for NativeReader {
             unsafe { CoUninitialize() };
         }
     }
+}
+
+fn local_window(
+    element: &IUIAutomationElement,
+    lookbehind: usize,
+) -> Result<(IUIAutomationTextRange, (bool, bool)), ReadError> {
+    let pattern =
+        unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
+            .map_err(native)?;
+    let selections = unsafe { pattern.GetSelection() }.map_err(native)?;
+    if unsafe { selections.Length() }.map_err(native)? != 1 {
+        return Err(ReadError::Unsupported);
+    }
+    let selected = unsafe { selections.GetElement(0) }.map_err(native)?;
+    let window = unsafe { selected.Clone() }.map_err(native)?;
+    let lookbehind = i32::try_from(lookbehind).map_err(|_| ReadError::TooLarge)?;
+    unsafe {
+        window
+            .MoveEndpointByUnit(
+                TextPatternRangeEndpoint_Start,
+                TextUnit_Character,
+                -lookbehind,
+            )
+            .map_err(native)?;
+        window
+            .MoveEndpointByUnit(
+                TextPatternRangeEndpoint_End,
+                TextUnit_Character,
+                CONTEXT_UNITS as i32,
+            )
+            .map_err(native)?;
+    }
+    let document = unsafe { pattern.DocumentRange() }.map_err(native)?;
+    let clipped_edges = (
+        unsafe {
+            window.CompareEndpoints(
+                TextPatternRangeEndpoint_Start,
+                &document,
+                TextPatternRangeEndpoint_Start,
+            )
+        }
+        .map_err(native)?
+            > 0,
+        unsafe {
+            window.CompareEndpoints(
+                TextPatternRangeEndpoint_End,
+                &document,
+                TextPatternRangeEndpoint_End,
+            )
+        }
+        .map_err(native)?
+            < 0,
+    );
+    Ok((window, clipped_edges))
 }
 
 fn composition_state(element: &IUIAutomationElement) -> super::CompositionState {

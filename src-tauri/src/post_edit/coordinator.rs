@@ -394,8 +394,15 @@ fn establish_baseline(
             return Err(BaselineFailure::new(generation, Reason::Interrupted));
         }
         native_reads += 1;
-        let read = if pre.is_some() {
+        let read = if verified_pre {
             worker.read(generation, READ_TIMEOUT)
+        } else if let Some(pre) = pre.as_ref() {
+            worker.reframe_for_insertion(
+                generation,
+                pre.target,
+                injected.encode_utf16().count(),
+                READ_TIMEOUT,
+            )
         } else {
             worker.capture_for_insertion(
                 generation,
@@ -580,7 +587,9 @@ fn observe(
                         stop_reason.unwrap_or(EndReason::Timeout),
                     );
                     done.reason = if error == ReadError::WindowChanged {
-                        done.result.status = ObservationStatus::Ambiguous;
+                        if done.result.confirmed.is_none() {
+                            done.result.status = ObservationStatus::Ambiguous;
+                        }
                         Reason::RangeAmbiguous
                     } else {
                         Reason::CompositionActive
@@ -650,7 +659,7 @@ fn observe(
             };
             let mut done = Completion::cached(observation, generation, end_reason);
             done.reason = reason;
-            if retry {
+            if retry && done.result.confirmed.is_none() {
                 done.result.status = ObservationStatus::Ambiguous;
             }
             return done;
@@ -818,6 +827,7 @@ pub(super) fn record_for(
         deletions: result.edits.map(|e| e.deletions),
         substitutions: result.edits.map(|e| e.substitutions),
         had_intermediate_changes: result.had_intermediate_changes,
+        has_newer_unconfirmed_input: result.has_newer_unconfirmed_input,
         stable: true,
         composition: confirmed.composition,
     })
@@ -1030,6 +1040,15 @@ mod tests {
             }
         }
         fn clear(&mut self) {}
+        fn reframe(
+            &mut self,
+            generation: u64,
+            target: u64,
+            _: usize,
+        ) -> Result<OwnedSnapshot, ReadError> {
+            assert_eq!(target, 1);
+            self.read(generation)
+        }
         fn set_events(&mut self, events: Arc<EventSignal>) {
             self.events = Some(events);
         }
@@ -1082,6 +1101,91 @@ mod tests {
         )
     }
 
+    struct LatePreReader {
+        clock: VirtualClock,
+        injected: String,
+        stored_target: u64,
+        reframes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Reader for LatePreReader {
+        fn capture(&mut self, _: u64, _: u32, _: usize) -> Result<OwnedSnapshot, ReadError> {
+            panic!("a successful pre-read must retain its control identity")
+        }
+        fn read(&mut self, _: u64) -> Result<OwnedSnapshot, ReadError> {
+            panic!("the late pre-read's narrow window must be replaced")
+        }
+        fn reframe(
+            &mut self,
+            _: u64,
+            target: u64,
+            lookbehind: usize,
+        ) -> Result<OwnedSnapshot, ReadError> {
+            assert_eq!(lookbehind, self.injected.encode_utf16().count() + 2048);
+            self.reframes.fetch_add(1, Ordering::SeqCst);
+            if target != self.stored_target {
+                return Err(ReadError::TargetChanged);
+            }
+            let mut after = snapshot(&format!("前{}后", self.injected), self.clock.now());
+            let caret = 1 + self.injected.encode_utf16().count();
+            after.selection_utf16 = caret..caret;
+            Ok(after)
+        }
+        fn clear(&mut self) {}
+    }
+
+    #[test]
+    fn a_successful_but_late_pre_read_expands_in_place_and_rejects_another_control() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        for stored_target in [1, 2] {
+            let start = Instant::now();
+            let clock = VirtualClock(Arc::new(Mutex::new(start + Duration::from_millis(20))));
+            let injected = "声".repeat(3000);
+            let reframes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let reader = LatePreReader {
+                clock: clock.clone(),
+                injected: injected.clone(),
+                stored_target,
+                reframes: Arc::clone(&reframes),
+            };
+            let worker = ObserverWorker::start_with(move || reader).unwrap();
+            let (tx, rx) = mpsc::channel();
+            tx.send(Ok(snapshot(
+                &"声".repeat(2048),
+                start + Duration::from_millis(10),
+            )))
+            .unwrap();
+            let mut receipt = receipt(start);
+            receipt.dispatch_finished_at = Some(clock.now());
+            let attempt = begin_attempt();
+            let result = establish_baseline(
+                &worker,
+                0,
+                attempt,
+                rx,
+                &Arc::new(Mutex::new(None)),
+                &receipt,
+                &injected,
+                &clock,
+            );
+            if stored_target == 1 {
+                let baseline = result.unwrap_or_else(|f| panic!("baseline failed: {:?}", f.reason));
+                assert_eq!(baseline.observation.original_text(), injected);
+                assert_eq!(baseline.evidence, "post_anchored");
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(BaselineFailure {
+                        reason: Reason::TargetChanged,
+                        ..
+                    })
+                ));
+            }
+            assert_eq!(reframes.load(Ordering::SeqCst), 1);
+        }
+        diagnostics::set_enabled(false);
+    }
+
     struct SilentReader {
         clock: VirtualClock,
         start: Instant,
@@ -1108,6 +1212,15 @@ mod tests {
             Ok(sample)
         }
         fn clear(&mut self) {}
+        fn reframe(
+            &mut self,
+            generation: u64,
+            target: u64,
+            _: usize,
+        ) -> Result<OwnedSnapshot, ReadError> {
+            assert_eq!(target, 1);
+            self.read(generation)
+        }
     }
     #[test]
     fn independent_polling_catches_silent_edits_and_send_with_a_bounded_read_count() {
@@ -1203,7 +1316,7 @@ mod tests {
         diagnostics::set_enabled(false);
     }
     #[test]
-    fn clear_cannot_resurrect_a_confirmation_superseded_by_newer_input() {
+    fn newer_input_and_clear_retain_only_the_earlier_stable_evidence_as_partial() {
         let _guard = diagnostics::TEST_LOCK.lock().unwrap();
         diagnostics::set_enabled(true);
         for newer in [
@@ -1212,19 +1325,22 @@ mod tests {
             Step::Composing,
             Step::WindowChanged,
         ] {
-            assert!(scripted_run(vec![
+            let record = scripted_run(vec![
                 Step::Text("支座返力"),
                 Step::Text("支座反力"),
                 Step::TextThenNotify("支座反力"),
                 newer,
                 Step::Text(""),
             ])
-            .is_none());
+            .unwrap();
+            assert_eq!(record.edited_text, "支座反力");
+            assert!(record.stable && !record.complete && record.has_newer_unconfirmed_input);
+            assert_eq!(record.end_reason, "field_cleared");
         }
         diagnostics::set_enabled(false);
     }
     #[test]
-    fn persistent_ambiguity_ends_without_saving_an_old_stable_correction() {
+    fn persistent_ambiguity_preserves_a_stable_correction_as_partial() {
         let _guard = diagnostics::TEST_LOCK.lock().unwrap();
         diagnostics::set_enabled(true);
         for unresolved in [Step::Text("支座反力继续写"), Step::WindowChanged] {
@@ -1234,9 +1350,11 @@ mod tests {
                 Step::TextThenNotify("支座反力"),
             ];
             steps.extend((0..8).map(|_| unresolved));
-            assert!(scripted_run(steps).is_none());
+            let record = scripted_run(steps).unwrap();
+            assert_eq!(record.edited_text, "支座反力");
+            assert!(record.stable && !record.complete && record.has_newer_unconfirmed_input);
             let status = diagnostics::snapshot();
-            assert_eq!(status.status, Status::Ambiguous);
+            assert_eq!(status.status, Status::Partial);
             assert_eq!(status.reason, Reason::RangeAmbiguous);
         }
         diagnostics::set_enabled(false);
@@ -1270,7 +1388,7 @@ mod tests {
         diagnostics::set_enabled(false);
     }
     #[test]
-    fn full_session_never_saves_an_unconfirmed_backspace_or_unresolved_composition() {
+    fn unconfirmed_backspace_is_not_saved_and_stable_deletion_stays_partial_during_ime() {
         let _guard = diagnostics::TEST_LOCK.lock().unwrap();
         diagnostics::set_enabled(true);
         assert!(scripted_run(vec![
@@ -1279,7 +1397,7 @@ mod tests {
             Step::Text("")
         ])
         .is_none());
-        assert!(scripted_run(vec![
+        let record = scripted_run(vec![
             Step::Text("支座返力"),
             Step::Text("支座返"),
             Step::Text("支座返"),
@@ -1290,9 +1408,11 @@ mod tests {
             Step::Composing,
             Step::Composing,
             Step::Composing,
-            Step::Composing
+            Step::Composing,
         ])
-        .is_none());
+        .unwrap();
+        assert_eq!(record.edited_text, "支座返");
+        assert!(record.stable && !record.complete && record.has_newer_unconfirmed_input);
         diagnostics::set_enabled(false);
     }
     #[test]
@@ -1375,6 +1495,9 @@ mod tests {
             Err(ReadError::NoValue)
         }
         fn clear(&mut self) {}
+        fn reframe(&mut self, _: u64, _: u64, _: usize) -> Result<OwnedSnapshot, ReadError> {
+            Err(ReadError::Unsupported)
+        }
     }
     #[test]
     fn record_contains_only_latest_injected_slice_and_keeps_partial_evidence() {
@@ -1437,9 +1560,12 @@ mod tests {
         assert_eq!(record.end_reason, "next_injection");
         assert!(!record.complete);
         assert!(record.last_observed_at > record.timestamp);
-        // A later undo leaves no net pair to persist.
+        // A confirmed undo replaces the earlier correction, leaving no net pair.
         observation
             .sample(1, &after, at + Duration::from_secs(3))
+            .unwrap();
+        observation
+            .sample(1, &after, at + Duration::from_secs(4))
             .unwrap();
         let result = observation.progress(EndReason::Timeout);
         assert!(record_for(

@@ -100,14 +100,19 @@ impl EventSignal {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
+enum ReadTarget {
+    Capture(u32, usize),
+    Retained,
+    Reframe(u64, usize),
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 enum Request {
-    Capture(
+    Read(
         u64,
-        u32,
-        usize,
+        ReadTarget,
         mpsc::SyncSender<Result<OwnedSnapshot, ReadError>>,
     ),
-    Read(u64, mpsc::SyncSender<Result<OwnedSnapshot, ReadError>>),
     Reset(u64),
 }
 
@@ -130,6 +135,12 @@ pub(super) trait Reader {
         lookbehind: usize,
     ) -> Result<OwnedSnapshot, ReadError>;
     fn read(&mut self, generation: u64) -> Result<OwnedSnapshot, ReadError>;
+    fn reframe(
+        &mut self,
+        generation: u64,
+        target: u64,
+        lookbehind: usize,
+    ) -> Result<OwnedSnapshot, ReadError>;
     fn clear(&mut self);
     fn set_events(&mut self, _events: Arc<EventSignal>) {}
     fn pump(&mut self) {}
@@ -150,6 +161,14 @@ impl Reader for NativeReader {
     }
     fn read(&mut self, generation: u64) -> Result<OwnedSnapshot, ReadError> {
         NativeReader::read(self, generation)
+    }
+    fn reframe(
+        &mut self,
+        generation: u64,
+        target: u64,
+        lookbehind: usize,
+    ) -> Result<OwnedSnapshot, ReadError> {
+        NativeReader::reframe(self, generation, target, lookbehind)
     }
     fn clear(&mut self) {
         NativeReader::clear(self);
@@ -209,11 +228,8 @@ impl ObserverWorker {
                             Err(_) => break,
                         }
                     };
-                    let (id, reply, expected_pid) = match request {
-                        Request::Capture(id, pid, context, reply) => {
-                            (id, reply, Some((pid, context)))
-                        }
-                        Request::Read(id, reply) => (id, reply, None),
+                    let (id, target, reply) = match request {
+                        Request::Read(id, target, reply) => (id, target, reply),
                         Request::Reset(generation) => {
                             if current.load(Ordering::SeqCst) == generation {
                                 reader.clear();
@@ -222,11 +238,20 @@ impl ObserverWorker {
                         }
                     };
                     if current.load(Ordering::SeqCst) == id {
-                        let result = if let Some((pid, context)) = expected_pid {
-                            reader.capture(id, pid, context)
-                        } else {
-                            reader.read(id)
+                        let started = Instant::now();
+                        let operation = match target {
+                            ReadTarget::Capture(..) => "capture",
+                            ReadTarget::Retained => "read",
+                            ReadTarget::Reframe(..) => "reframe",
                         };
+                        let result = match target {
+                            ReadTarget::Capture(pid, context) => reader.capture(id, pid, context),
+                            ReadTarget::Retained => reader.read(id),
+                            ReadTarget::Reframe(token, context) => {
+                                reader.reframe(id, token, context)
+                            }
+                        };
+                        log::debug!("Post-edit native operation: generation={}, operation={}, elapsed_us={}, outcome={:?}", id, operation, started.elapsed().as_micros(), result.as_ref().map(|_| ()).map_err(|e| *e));
                         if current.load(Ordering::SeqCst) == id {
                             let _ = reply.try_send(result);
                         } else {
@@ -289,7 +314,7 @@ impl ObserverWorker {
         self.request(
             generation,
             timeout,
-            Some((expected_pid, window::CONTEXT_UNITS)),
+            ReadTarget::Capture(expected_pid, window::CONTEXT_UNITS),
         )
     }
 
@@ -305,19 +330,34 @@ impl ObserverWorker {
         self.request(
             generation,
             timeout,
-            Some((pid, units.saturating_add(window::CONTEXT_UNITS))),
+            ReadTarget::Capture(pid, units.saturating_add(window::CONTEXT_UNITS)),
+        )
+    }
+
+    /// Expand a late pre-read's window without rebinding to another control.
+    pub fn reframe_for_insertion(
+        &self,
+        generation: u64,
+        target: u64,
+        units: usize,
+        timeout: Duration,
+    ) -> Result<OwnedSnapshot, ReadError> {
+        self.request(
+            generation,
+            timeout,
+            ReadTarget::Reframe(target, units.saturating_add(window::CONTEXT_UNITS)),
         )
     }
 
     pub fn read(&self, generation: u64, timeout: Duration) -> Result<OwnedSnapshot, ReadError> {
-        self.request(generation, timeout, None)
+        self.request(generation, timeout, ReadTarget::Retained)
     }
 
     fn request(
         &self,
         generation: u64,
         timeout: Duration,
-        expected_pid: Option<(u32, usize)>,
+        target: ReadTarget,
     ) -> Result<OwnedSnapshot, ReadError> {
         if self.generation.load(Ordering::SeqCst) != generation {
             return Err(ReadError::StaleGeneration);
@@ -330,11 +370,7 @@ impl ObserverWorker {
             return Err(ReadError::WorkerBusy);
         }
         let (reply, receiver) = mpsc::sync_channel(1);
-        let request = if let Some((pid, context)) = expected_pid {
-            Request::Capture(generation, pid, context, reply)
-        } else {
-            Request::Read(generation, reply)
-        };
+        let request = Request::Read(generation, target, reply);
         let deadline = Instant::now() + timeout;
         let mut request = request;
         loop {
@@ -412,6 +448,9 @@ mod tests {
         }
         fn read(&mut self, _: u64) -> Result<OwnedSnapshot, ReadError> {
             Err(ReadError::NoValue)
+        }
+        fn reframe(&mut self, _: u64, _: u64, _: usize) -> Result<OwnedSnapshot, ReadError> {
+            Err(ReadError::Unsupported)
         }
         fn clear(&mut self) {
             let _ = self.cleared.send(());

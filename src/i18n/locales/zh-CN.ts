@@ -88,6 +88,8 @@ const zhCN = {
     partialNote: '最后读取于 {time} · {reason}，后续修改可能未被记录。',
     observedNote: '最后读取于 {time}',
     stabilityUnknown: '此记录未验证文本稳定性，请核对原文和结果。',
+    newerUnconfirmed: '之后检测到未确认的输入；这里保留此前已稳定的结果，不代表最终稿。',
+    compositionUnknown: '未能确认输入法是否已提交，请核对修改结果。',
     unknownApp: '未知应用',
     copy: '复制',
     copied: '已复制',

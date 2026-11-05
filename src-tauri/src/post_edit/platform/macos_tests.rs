@@ -213,10 +213,28 @@ fn assert_correction(record: Record, reason: &str, complete: bool) {
     assert!(record.stable);
     assert_eq!(record.complete, complete);
 }
+
+fn emit_fixture_resources(pid: u32, phase: &str, started: Instant) {
+    let output = Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "cputime=,rss="])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value = String::from_utf8(output.stdout).unwrap();
+    let mut values = value.split_whitespace();
+    println!(
+        "native_target_metric={}",
+        serde_json::json!({
+            "phase": phase, "elapsedUs": started.elapsed().as_micros(),
+            "cpuTime": values.next().unwrap(), "rssKiB": values.next().unwrap().parse::<u64>().unwrap(),
+        })
+    );
+}
 #[test]
 #[ignore = "opens controlled synthetic AppKit fields and requires Accessibility"]
 fn live_macos_session_scenarios() {
     let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+    super::macos::take_measurements();
     let mut f = Fixture::start();
     diagnostics::set_enabled(true);
     f.set("plain", "", 0);
@@ -229,6 +247,19 @@ fn live_macos_session_scenarios() {
         .unwrap();
     assert!(empty.text.is_empty());
     println!("synthetic AppKit AX ready after {:?}", startup_at.elapsed());
+    // Resource samples are emitted raw; summarize-reader.mjs does the analysis.
+    f.set("plain", &"测".repeat(4096), 2048);
+    startup.read(0, Duration::from_millis(300)).unwrap();
+    let measured_at = Instant::now();
+    emit_fixture_resources(f.child.id(), "idle_start", measured_at);
+    std::thread::sleep(Duration::from_secs(1));
+    emit_fixture_resources(f.child.id(), "idle_end", measured_at);
+    for _ in 0..20 {
+        startup.read(0, Duration::from_millis(300)).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    emit_fixture_resources(f.child.id(), "read_end", measured_at);
+    f.set("plain", "", 0);
     drop(startup);
     f.inject("支座返力", TextInjectionMode::Typing);
     f.edit("支座反力");
@@ -345,95 +376,132 @@ fn live_macos_session_scenarios() {
     );
     diagnostics::set_enabled(false);
     assert_eq!(diagnostics::snapshot().status, Status::Disabled);
+    let measurements = super::macos::take_measurements();
+    assert!(measurements.iter().any(|m| m.operation == "read"));
+    for metric in measurements {
+        if metric.operation == "read" || metric.operation == "reframe" {
+            assert_eq!(metric.framework_checks, 0);
+            assert_eq!(metric.capability_checks, 0);
+        }
+        println!(
+            "native_read_metric={}",
+            serde_json::json!({
+                "operation": metric.operation, "attributeQueries": metric.attribute_queries,
+                "elapsedUs": metric.elapsed_us, "frameworkChecks": metric.framework_checks,
+                "capabilityChecks": metric.capability_checks,
+            })
+        );
+    }
 }
 
 #[test]
-#[ignore = "background synthetic WebKit range I/O; supplied caret does not test foreground focus acquisition"]
-fn background_webkit_marker_ranges() {
+#[ignore = "foreground synthetic WebKit reader, selection, editability and password checks"]
+fn live_webkit_marker_ranges() {
     use crate::post_edit::range::{RangeTracker, Snapshot};
     use base64::Engine;
     let _guard = diagnostics::TEST_LOCK.lock().unwrap();
     let path = std::env::var("VOICEX_POST_EDIT_WEBKIT_FIXTURE").expect("compiled WebKit fixture");
-    let read = |pid, caret, password| {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            let result = super::macos::fixture_webkit_read(pid, caret, password);
-            if !matches!(result, Err(ReadError::NoValue)) || Instant::now() >= deadline {
-                break result;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    };
-    {
-        let mut f = Fixture::start_binary(path.clone(), &["editable"]);
-        let (text, selection) = read(f.child.id(), 13, false).unwrap();
-        assert_eq!(text, "VoiceX test A");
-        assert_eq!(selection, 13..13);
-        let tracker = RangeTracker::from_post_anchored(
-            &Snapshot {
-                target: 1,
-                text: &text,
-                selection_utf16: selection,
-            },
-            "VoiceX test A",
-        )
+    let mut f = Fixture::start_binary(path, &["editable"]);
+    let worker = ObserverWorker::start().unwrap();
+    let baseline = worker
+        .capture(0, f.child.id(), Duration::from_millis(800))
         .unwrap();
-        f.send(&format!(
-            "set\t{}\t13",
-            base64::engine::general_purpose::STANDARD.encode("VoiceX test B")
-        ));
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let edited = loop {
-            let (text, selection) = read(f.child.id(), 13, false).unwrap();
-            if text == "VoiceX test B" {
-                break (text, selection);
-            }
-            assert!(Instant::now() < deadline, "WebKit value did not update");
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        assert_eq!(
-            tracker.slice(&Snapshot {
-                target: 1,
-                text: &edited.0,
-                selection_utf16: edited.1
-            }),
-            Ok("VoiceX test B")
-        );
-        let document = format!(
-            "{}VoiceX test A{}",
-            "前".repeat(30_000),
-            "后".repeat(30_000)
-        );
-        f.send(&format!(
-            "set\t{}\t30013",
-            base64::engine::general_purpose::STANDARD.encode(document)
-        ));
-        let (text, selection) = read(f.child.id(), 30_013, false).unwrap();
-        assert!(text.encode_utf16().count() <= 4096);
-        assert!(RangeTracker::from_post_anchored(
-            &Snapshot {
-                target: 1,
-                text: &text,
-                selection_utf16: selection
-            },
-            "VoiceX test A"
-        )
-        .is_ok());
-    }
-    for (mode, password) in [("readonly", false), ("password", true)] {
-        let f = Fixture::start_binary(path.clone(), &[mode]);
+    assert_eq!(
+        super::macos::fixture_role_diagnostic(f.child.id()).unwrap(),
+        "AXWebArea"
+    );
+    assert_eq!(baseline.text, "VoiceX test A");
+    let tracker = RangeTracker::from_post_anchored(
+        &Snapshot {
+            target: baseline.target,
+            text: &baseline.text,
+            selection_utf16: baseline.selection_utf16,
+        },
+        "VoiceX test A",
+    )
+    .unwrap();
+    f.send(&format!(
+        "set\t{}\t13",
+        base64::engine::general_purpose::STANDARD.encode("VoiceX test B")
+    ));
+    let edited = worker.read(0, Duration::from_millis(300)).unwrap();
+    assert_eq!(
+        tracker.slice(&Snapshot {
+            target: edited.target,
+            text: &edited.text,
+            selection_utf16: edited.selection_utf16
+        }),
+        Ok("VoiceX test B")
+    );
+    let document = format!(
+        "{}VoiceX test A{}",
+        "前".repeat(30_000),
+        "后".repeat(30_000)
+    );
+    f.send(&format!(
+        "set\t{}\t30013",
+        base64::engine::general_purpose::STANDARD.encode(document)
+    ));
+    let local = worker
+        .capture(0, f.child.id(), Duration::from_millis(300))
+        .unwrap();
+    assert!(local.text.encode_utf16().count() <= 4096);
+    assert!(RangeTracker::from_post_anchored(
+        &Snapshot {
+            target: local.target,
+            text: &local.text,
+            selection_utf16: local.selection_utf16
+        },
+        "VoiceX test A"
+    )
+    .is_ok());
+    for (mode, expected) in [
+        ("readonly", ReadError::Unsupported),
+        ("password", ReadError::SecureInput),
+    ] {
+        f.send("mode\teditable");
+        worker
+            .capture(0, f.child.id(), Duration::from_millis(300))
+            .unwrap();
+        f.send(&format!("mode\t{mode}"));
         let before = super::macos::BODY_READS.load(Ordering::SeqCst);
-        let result = read(f.child.id(), 0, password);
+        let error = worker.read(0, Duration::from_millis(300)).unwrap_err();
+        assert!(
+            error == expected || error == ReadError::TargetChanged,
+            "cached read after {mode}: {error:?}"
+        );
         assert_eq!(
-            result.err(),
-            Some(if password {
-                ReadError::SecureInput
-            } else {
-                ReadError::Unsupported
-            })
+            worker
+                .capture(0, f.child.id(), Duration::from_millis(300))
+                .unwrap_err(),
+            expected
         );
         assert_eq!(super::macos::BODY_READS.load(Ordering::SeqCst), before);
     }
+}
+
+#[test]
+#[ignore = "foreground synthetic AppKit marked-text states; requires Accessibility"]
+fn live_appkit_marked_text() {
+    let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+    let path = std::env::var("VOICEX_POST_EDIT_IME_FIXTURE").expect("compiled IME fixture");
+    let mut f = Fixture::start_binary(path, &[]);
+    let worker = ObserverWorker::start().unwrap();
+    let initial = worker
+        .capture(0, f.child.id(), Duration::from_millis(800))
+        .unwrap();
+    assert_eq!(initial.composition, super::CompositionState::Inactive);
+    let before = super::macos::BODY_READS.load(Ordering::SeqCst);
+    f.send("mark");
+    assert_eq!(
+        worker.read(0, Duration::from_millis(300)).unwrap_err(),
+        ReadError::CompositionActive
+    );
+    assert_eq!(super::macos::BODY_READS.load(Ordering::SeqCst), before);
+    f.send("commit");
+    let committed = worker.read(0, Duration::from_millis(300)).unwrap();
+    assert_eq!(committed.composition, super::CompositionState::Inactive);
+    assert_eq!(committed.text, "支座反力计算");
 }
 
 #[test]

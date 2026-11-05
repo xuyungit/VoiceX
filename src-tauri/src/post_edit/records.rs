@@ -74,6 +74,8 @@ pub struct Record {
     pub substitutions: Option<usize>,
     pub had_intermediate_changes: bool,
     #[serde(default)]
+    pub has_newer_unconfirmed_input: bool,
+    #[serde(default)]
     pub stable: bool,
     #[serde(default)]
     pub composition: super::platform::CompositionState,
@@ -202,6 +204,7 @@ fn cleanup(conn: &Connection) -> Result<(), StorageError> {
 
 pub(super) fn insert(conn: &Connection, record: &Record) -> Result<bool, StorageError> {
     if !record.stable
+        || (record.complete && record.has_newer_unconfirmed_input)
         || record.composition == super::platform::CompositionState::Active
         || record.original_text == record.edited_text
         || record.timestamp < timestamp(Utc::now() - Duration::days(RETENTION_DAYS))
@@ -357,6 +360,7 @@ mod tests {
             deletions: Some(0),
             substitutions: Some(2),
             had_intermediate_changes: true,
+            has_newer_unconfirmed_input: false,
             stable: true,
             composition: super::super::platform::CompositionState::Unknown,
         }
@@ -479,12 +483,33 @@ mod tests {
         let mut legacy = serde_json::to_value(&record).unwrap();
         legacy.as_object_mut().unwrap().remove("stable");
         legacy.as_object_mut().unwrap().remove("composition");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("hasNewerUnconfirmedInput");
         let loaded: Record = serde_json::from_value(legacy).unwrap();
         assert!(!loaded.stable);
+        assert!(!loaded.has_newer_unconfirmed_input);
         assert_eq!(
             loaded.composition,
             super::super::platform::CompositionState::Unknown
         );
+    }
+
+    #[test]
+    fn newer_unconfirmed_input_is_saved_only_as_partial() {
+        let conn = db();
+        let mut record = record();
+        record.has_newer_unconfirmed_input = true;
+        record.complete = true;
+        assert!(!insert(&conn, &record).unwrap());
+        record.complete = false;
+        assert!(insert(&conn, &record).unwrap());
+        let payload: String = conn
+            .query_row("SELECT payload FROM post_edit_record", [], |r| r.get(0))
+            .unwrap();
+        let loaded: Record = serde_json::from_str(&payload).unwrap();
+        assert!(loaded.has_newer_unconfirmed_input && !loaded.complete);
     }
 
     #[test]

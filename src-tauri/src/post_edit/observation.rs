@@ -47,6 +47,8 @@ pub struct ObservationResult {
     pub had_intermediate_changes: bool,
     pub last_valid_at: Option<Instant>,
     pub read_count: usize,
+    /// Later input was seen or notified after the retained stable evidence.
+    pub has_newer_unconfirmed_input: bool,
     /// Text, timestamp and IME evidence from the same confirmed sample.
     pub confirmed: Option<ConfirmedSnapshot>,
 }
@@ -129,7 +131,6 @@ impl Observation {
         }
         self.unresolved = false;
         if self.last != slice {
-            self.confirmed = None;
             self.last.clear();
             self.last.push_str(slice);
             self.had_intermediate_changes = true;
@@ -154,10 +155,9 @@ impl Observation {
         self.unresolved = true;
     }
 
-    /// Concrete newer input supersedes the previous confirmed comparison.
+    /// A newer sample may be unusable without invalidating earlier evidence.
     pub fn unresolved_input(&mut self) {
         self.unresolved = true;
-        self.confirmed = None;
     }
 
     pub fn is_stable(&self) -> bool {
@@ -201,12 +201,7 @@ impl Observation {
     /// Cached evidence is useful on send, loss of focus, and the next input.
     /// A partial count is never promoted to a valid terminal comparison.
     pub fn progress(&self, reason: EndReason) -> ObservationResult {
-        // A clear is a boundary, not an edit to the dictated slice. Retain the
-        // last confirmation across its notification, but never across sampled
-        // newer text, composition or ambiguity.
-        let confirmed = (reason == EndReason::FieldCleared || self.is_stable())
-            .then(|| self.confirmed.clone())
-            .flatten();
+        let confirmed = self.confirmed.clone();
         let text = confirmed
             .as_ref()
             .map_or(self.last.as_str(), |s| s.text.as_str());
@@ -218,6 +213,7 @@ impl Observation {
             had_intermediate_changes: self.had_intermediate_changes,
             last_valid_at: confirmed.as_ref().map(|s| s.read_at).or(self.last_valid_at),
             read_count: self.reads,
+            has_newer_unconfirmed_input: !self.is_stable(),
             confirmed,
         }
     }
@@ -234,6 +230,7 @@ impl Observation {
             result.edits = None;
             result.confirmed = None;
         } else if !matches!(reason, EndReason::NextInjection | EndReason::FieldCleared)
+            && self.is_stable()
             && result.confirmed.is_some()
         {
             if let Some(edits) = result.edits {
@@ -286,7 +283,9 @@ impl Observation {
                 }
                 SampleError::Range(RangeError::BudgetExceeded)
                 | SampleError::ReadBudgetExceeded => result.reason = EndReason::BudgetExceeded,
-                SampleError::Range(_) => result.status = ObservationStatus::Ambiguous,
+                SampleError::Range(_) if result.confirmed.is_none() => {
+                    result.status = ObservationStatus::Ambiguous
+                }
                 _ => {}
             }
             result.read_count = self.reads;
@@ -336,7 +335,7 @@ mod tests {
         }
         o.text_changed();
         assert!(!o.is_stable());
-        assert!(o.progress(EndReason::Timeout).confirmed.is_none());
+        assert!(o.progress(EndReason::Timeout).has_newer_unconfirmed_input);
         let result = o.close(
             5,
             EndReason::Timeout,
@@ -349,6 +348,56 @@ mod tests {
         assert_eq!(confirmed.text, "反力");
         assert_eq!(confirmed.read_at, confirmed_at);
         assert_eq!(confirmed.composition, CompositionState::Inactive);
+    }
+
+    #[test]
+    fn later_unconfirmed_input_preserves_stable_evidence_without_promoting_it() {
+        let now = Instant::now();
+        for next in ["前反力续写后", "前反后"] {
+            let mut o = observation(now);
+            for seconds in [1, 2] {
+                o.sample(5, &snapshot("前反力后"), now + Duration::from_secs(seconds))
+                    .unwrap();
+            }
+            let _ = o.sample(5, &snapshot(next), now + Duration::from_secs(3));
+            let result = o.finish(EndReason::Timeout);
+            assert_eq!(result.status, ObservationStatus::Partial);
+            assert!(result.has_newer_unconfirmed_input);
+            assert_eq!(result.edits.unwrap().substitutions, 2);
+            let confirmed = result.confirmed.unwrap();
+            assert_eq!(confirmed.text, "反力");
+            assert_eq!(confirmed.read_at, now + Duration::from_secs(2));
+        }
+    }
+
+    #[test]
+    fn external_edits_over_budget_preserve_the_last_stable_slice() {
+        let now = Instant::now();
+        let original = format!("{}支座返力{}", "a".repeat(2048), "z".repeat(2044));
+        let corrected = original.replace("返力", "反力");
+        let tracker = RangeTracker::from_post_anchored(
+            &Snapshot {
+                target: 1,
+                text: &original,
+                selection_utf16: 2052..2052,
+            },
+            "支座返力",
+        )
+        .unwrap();
+        let mut o = Observation::new(5, tracker, now);
+        for seconds in [1, 2] {
+            o.sample(5, &snapshot(&corrected), now + Duration::from_secs(seconds))
+                .unwrap();
+        }
+        let changed = format!("{}{}", "b".repeat(300), &corrected[300..]);
+        assert_eq!(
+            o.sample(5, &snapshot(&changed), now + Duration::from_secs(3)),
+            Err(SampleError::Range(RangeError::BudgetExceeded))
+        );
+        let result = o.finish(EndReason::BudgetExceeded);
+        assert_eq!(result.status, ObservationStatus::Partial);
+        assert!(result.has_newer_unconfirmed_input);
+        assert_eq!(result.confirmed.unwrap().text, "支座反力");
     }
 
     #[test]

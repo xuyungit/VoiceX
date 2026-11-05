@@ -18,7 +18,7 @@ const fixture = `
     lastObservedAt: new Date(now - index * 600000 + 12000).toISOString(),
     appName: 'Codex · 合成样例', originalText: index % 2 ? '把这个返利的时序数据导出。' : '请检查返利的时序数据，导出一份结果。' + (scenario === 'long' ? '这是用于验证长文本展开的合成样例。'.repeat(20) : ''),
     editedText: index % 2 ? '把这个反力的时序数据导出。' : '请检查反力的时序数据，并导出一份结果。' + (scenario === 'long' ? '这是用于验证长文本展开的合成样例。'.repeat(20) : ''),
-    stable: true, composition: 'unknown', complete: index % 2 === 0, endReason: index % 2 ? 'focus_left' : 'timeout',
+    stable: true, composition: index % 3 ? 'inactive' : 'unknown', complete: index % 2 === 0, hasNewerUnconfirmedInput: index % 2 === 1, endReason: index % 2 ? 'focus_left' : 'timeout',
     strategy: 'event_with_checkpoints', rangeEvidence: 'before_after_verified',
     insertions: 0, deletions: 0, substitutions: 2, hadIntermediateChanges: true
   }));
