@@ -468,7 +468,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
       <h1 class="page-title">{{ t('history.title') }}</h1>
     </div>
 
-    <NTabs v-model:value="activeTab" type="line" animated class="history-tabs" :class="{ single: !postEditStore.enabled }" :theme-overrides="{ tabTextColorActiveLine: 'var(--color-accent)', tabTextColorHoverLine: 'var(--color-accent-hover)', barColor: 'var(--color-accent)' }">
+    <NTabs v-model:value="activeTab" type="line" animated class="history-tabs" :class="{ single: !postEditStore.enabled }">
       <NTabPane name="dictations" :tab="t('postEdit.allDictations')">
     <div class="surface-card retention-card">
       <div class="retention-title section-title">{{ t('history.retentionPolicy') }}</div>

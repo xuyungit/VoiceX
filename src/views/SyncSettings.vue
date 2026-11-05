@@ -153,7 +153,7 @@ onMounted(() => {
 }
 
 .monospace {
-  font-family: 'SFMono-Regular', 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-family: var(--font-mono);
   font-size: var(--font-xs);
 }
 </style>

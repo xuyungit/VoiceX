@@ -10,7 +10,7 @@ defineProps<{
 <template>
   <section class="surface-card settings-section">
     <header class="section-head">
-      <h2 class="section-name">
+      <h2 class="section-title section-name">
         <span>{{ title }}</span>
         <HelpTip v-if="help" :text="help" />
       </h2>
@@ -43,11 +43,6 @@ defineProps<{
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: var(--font-xs);
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--color-text-tertiary);
 }
 
 .section-extra {

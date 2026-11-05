@@ -357,15 +357,6 @@ onMounted(async () => {
   color: var(--color-text-tertiary);
 }
 
-.section-title {
-  margin: 0;
-  font-size: var(--font-sm);
-  font-weight: 600;
-  color: var(--color-text-tertiary);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));

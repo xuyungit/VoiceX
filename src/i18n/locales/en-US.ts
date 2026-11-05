@@ -33,7 +33,7 @@ const enUS = {
     inputSettings: 'Input',
     readingSettings: 'Reading',
     sync: 'Sync',
-    postProcessing: 'Processing',
+    postProcessing: 'Text rules',
     about: 'About'
   },
   overview: {
@@ -154,9 +154,7 @@ const enUS = {
   },
   dictionary: {
     title: 'Hotwords',
-    entries: 'Entries',
     entriesCount: '{count} entries',
-    tagTitle: 'Hotword management',
     sectionHint: 'Add proper nouns that are often misrecognized. The ASR engine will prioritize matching them.',
     addPlaceholder: 'Add hotword...',
     inputHint: 'Press Enter to add, click × to remove',
@@ -413,7 +411,7 @@ const enUS = {
     statusPreparing: 'Preparing'
   },
   postProcessing: {
-    title: 'Text post-processing',
+    title: 'Text rules',
     activeRules: '{count} active',
     smartPunctuation: 'Smart punctuation',
     smartPunctuationSub: 'Automatically handle trailing punctuation for short sentences',

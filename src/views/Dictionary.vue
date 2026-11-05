@@ -46,24 +46,15 @@ function handleKeydown(e: KeyboardEvent) {
 <template>
   <div class="page dictionary-page">
     <div class="page-header">
-      <h1 class="page-title">{{ t('dictionary.title') }}</h1>
-      <div class="page-subtitle">
-        <span class="subtitle-item">
-          <span class="subtitle-label">{{ t('dictionary.entries') }}</span>
-          <span class="pill">{{ t('dictionary.entriesCount', { count: entries.length }) }}</span>
-        </span>
+      <div class="title-row">
+        <h1 class="page-title">{{ t('dictionary.title') }}</h1>
+        <span class="entry-count">{{ t('dictionary.entriesCount', { count: entries.length }) }}</span>
       </div>
+      <p class="page-description">{{ t('dictionary.sectionHint') }}</p>
     </div>
 
-    <div class="surface-card">
-      <div class="section-header">
-        <div>
-          <div class="section-title">{{ t('dictionary.tagTitle') }}</div>
-          <div class="section-hint">{{ t('dictionary.sectionHint') }}</div>
-        </div>
-      </div>
-
-      <div class="tags-container">
+    <div class="hotword-editor">
+      <div class="tags-container" @click.self="inputRef?.focus()">
         <span v-for="(entry, index) in entries" :key="entry" class="tag-chip">
           <span class="tag-label">{{ entry }}</span>
           <button class="tag-remove" @click="removeEntry(index)" :aria-label="t('dictionary.removeEntry')">×</button>
@@ -87,16 +78,35 @@ function handleKeydown(e: KeyboardEvent) {
   max-width: 1000px;
 }
 
+.title-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-sm);
+}
+
+.entry-count {
+  font-size: var(--font-sm);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.page-description {
+  margin: 0;
+  font-size: var(--font-sm);
+  color: var(--color-text-secondary);
+}
+
 .tags-container {
   display: flex;
   flex-wrap: wrap;
   gap: var(--spacing-sm);
   align-items: center;
   padding: var(--spacing-md);
-  background: var(--color-bg-primary);
+  background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   min-height: 48px;
+  cursor: text;
 }
 
 .tag-chip {

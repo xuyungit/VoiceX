@@ -255,7 +255,7 @@ import { h } from 'vue'
   border-radius: var(--radius-md);
   padding: var(--spacing-md);
   color: var(--color-text-secondary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-family: var(--font-mono);
   font-size: var(--font-xs);
   line-height: 1.6;
   white-space: pre-wrap;

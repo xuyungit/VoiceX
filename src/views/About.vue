@@ -61,12 +61,6 @@ onMounted(async () => {
   <div class="page about-page">
     <div class="page-header">
       <h1 class="page-title">VoiceX</h1>
-      <div class="page-subtitle">
-        <span class="subtitle-item">
-          <span class="subtitle-label">{{ t('about.version') }}</span>
-          <span class="pill">{{ version }} ({{ profileLabel }})</span>
-        </span>
-      </div>
     </div>
 
     <div class="surface-card build-card">
@@ -105,15 +99,7 @@ onMounted(async () => {
 
 <style scoped>
 .about-page {
-  max-width: 800px;
-}
-
-.build-card {
-  width: 360px;
-}
-
-.support-card {
-  width: 360px;
+  max-width: 880px;
 }
 
 .build-grid {

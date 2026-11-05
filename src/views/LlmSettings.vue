@@ -768,7 +768,7 @@ async function runLlmProviderProbe() {
 }
 
 .reasoning-preview code {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   word-break: break-all;
 }
 
@@ -783,7 +783,7 @@ async function runLlmProviderProbe() {
 }
 
 .mono :deep(textarea) {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: var(--font-xs);
 }
 

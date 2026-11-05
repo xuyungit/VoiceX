@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
-import { NConfigProvider, darkTheme, NMessageProvider, NDialogProvider } from 'naive-ui'
+import { NConfigProvider, darkTheme, NMessageProvider, NDialogProvider, type GlobalThemeOverrides } from 'naive-ui'
 import { listen } from '@tauri-apps/api/event'
 import Sidebar from './components/Sidebar.vue'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
@@ -10,6 +10,22 @@ import { resolveLocale, setLocale } from './i18n'
 import { useSettingsStore } from './stores/settings'
 import { useHistoryStore } from './stores/history'
 import { useSyncStore, type SyncStateResponse } from './stores/sync'
+
+// Naive UI derives hover/alpha shades from these values, so they must be literal colors
+// (not CSS variables). Keep them in sync with --color-accent and --font-* in styles/variables.css.
+const themeOverrides: GlobalThemeOverrides = {
+  common: {
+    primaryColor: '#3b82f6',
+    primaryColorHover: '#60a5fa',
+    primaryColorPressed: '#2563eb',
+    primaryColorSuppl: '#60a5fa',
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif",
+    fontFamilyMono: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+    fontSize: '13px',
+    fontSizeSmall: '13px',
+    fontSizeMedium: '13px',
+  },
+}
 import { usePostEditStore } from './stores/postEdit'
 import { getDefaultPrompt, isBuiltInDefaultPrompt } from './utils/llmPrompts'
 
@@ -149,7 +165,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <NConfigProvider :theme="darkTheme">
+  <NConfigProvider :theme="darkTheme" :theme-overrides="themeOverrides">
     <NMessageProvider>
       <NDialogProvider>
         <div class="app-container">

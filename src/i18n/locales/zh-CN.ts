@@ -33,7 +33,7 @@ const zhCN = {
     inputSettings: '输入',
     readingSettings: '朗读',
     sync: '同步',
-    postProcessing: '后处理',
+    postProcessing: '文本规则',
     about: '关于'
   },
   overview: {
@@ -154,9 +154,7 @@ const zhCN = {
   },
   dictionary: {
     title: '热词',
-    entries: '词条',
     entriesCount: '{count} 项',
-    tagTitle: '热词管理',
     sectionHint: '添加容易被误识别的专有名词，识别引擎会优先匹配。',
     addPlaceholder: '添加热词...',
     inputHint: '回车添加，点 × 移除',
@@ -413,7 +411,7 @@ const zhCN = {
     statusPreparing: '准备中'
   },
   postProcessing: {
-    title: '文本后处理',
+    title: '文本规则',
     activeRules: '{count} 条生效',
     smartPunctuation: '智能标点',
     smartPunctuationSub: '自动处理短句末尾的标点符号',

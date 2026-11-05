@@ -1289,7 +1289,7 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-md);
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
-  font-family: 'SF Mono', 'Menlo', monospace;
+  font-family: var(--font-mono);
   font-size: var(--font-xs);
   line-height: 1.55;
   color: var(--color-text-secondary);
