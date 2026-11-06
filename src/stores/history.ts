@@ -70,6 +70,7 @@ export const useHistoryStore = defineStore('history', () => {
     const loadError = ref<string | null>(null)
     const hasMore = ref(true)
     const pageSize = 20
+    let refreshQueued = false
 
     // Computed: group records by date
     const recordsByDate = computed(() => {
@@ -127,49 +128,57 @@ export const useHistoryStore = defineStore('history', () => {
     }
 
     async function loadHistory(reset = false) {
-        if (isLoading.value) return
+        if (isLoading.value) {
+            if (reset) refreshQueued = true
+            return
+        }
         if (!reset && !hasMore.value) return
 
         try {
             isLoading.value = true
             const offset = reset ? 0 : records.value.length
+            const limit = reset ? Math.max(pageSize, records.value.length) : pageSize
 
             const result = await invoke<HistoryRecord[]>('get_history', {
-                limit: pageSize,
+                limit,
                 offset
             })
 
+            const existing = new Map(records.value.map(record => [record.id, record]))
             // Normalize empty audio paths to null so UI buttons stay enabled only when playable
-            for (const item of result) {
+            const updated = result.map(item => {
                 if (item.audioPath !== null && item.audioPath.trim() === '') {
                     item.audioPath = null
                 }
-            }
+                // Open details hold this object too; keep them current after an observed edit.
+                const record = existing.get(item.id)
+                return record ? Object.assign(record, item) : item
+            })
 
             if (reset) {
-                records.value = result
+                records.value = updated
             } else {
-                records.value.push(...result)
+                records.value.push(...updated)
             }
 
-            hasMore.value = result.length === pageSize
+            hasMore.value = result.length === limit
             loadError.value = null
         } catch (error) {
             console.error('Failed to load history:', error)
             loadError.value = String(error)
         } finally {
             isLoading.value = false
+            if (refreshQueued) {
+                refreshQueued = false
+                await loadHistory(true)
+            }
         }
     }
 
     async function deleteRecord(id: string) {
-        try {
-            await invoke('delete_history_record', { id })
-            records.value = records.value.filter(r => r.id !== id)
-            await loadStats()
-        } catch (error) {
-            console.error('Failed to delete record:', error)
-        }
+        await invoke('delete_history_record', { id })
+        records.value = records.value.filter(r => r.id !== id)
+        await loadStats()
     }
 
     /** Saves a dictation's final text; returns once the change is stored. */
@@ -180,11 +189,7 @@ export const useHistoryStore = defineStore('history', () => {
     }
 
     async function copyText(text: string) {
-        try {
-            await navigator.clipboard.writeText(text)
-        } catch (error) {
-            console.error('Failed to copy text:', error)
-        }
+        await navigator.clipboard.writeText(text)
     }
 
     const hasOriginal = (record: HistoryRecord) => {

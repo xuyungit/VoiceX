@@ -181,7 +181,7 @@ impl HistoryService {
             Ok(records) => records
                 .into_iter()
                 .filter(|r| r.error_code == HISTORY_ERROR_NONE)
-                .map(|r| r.text)
+                .map(|r| r.edited_text.unwrap_or(r.text))
                 .filter(|text| !text.trim().is_empty())
                 .collect(),
             Err(e) => {

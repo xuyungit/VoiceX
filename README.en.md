@@ -248,6 +248,7 @@ Features:
 - **Translation** — translate dictation to English, triggered by double-tap gesture.
 - **Prompt templates** — full control over correction and translation prompts, with `{{DICTIONARY}}` placeholder for hot-word injection.
 - **Connectivity test** — send one real correction request with the active provider and model to inspect latency and output quality.
+- **Recent input context** — optionally send the last five inputs to the current LLM, preferring edited versions. These are context references; they do not guarantee future homophone or acronym corrections and do not automatically learn vocabulary or replacement rules.
 - **Lowest reasoning by default** — short corrections and translations gain nothing from thinking and lose seconds to it. Every provider defaults to "Auto lowest", resolved per provider, host and model into the spelling that vendor honours (for example `thinking: disabled` on Volcengine Ark), and the settings page shows the exact fields that will be sent. Custom endpoints can also merge an **extra request fields** JSON object into the body. There is no fixed output cap, and a reply cut off at the output limit is an error rather than half a result.
 
 ## Dictionary & Hot-Words
@@ -270,7 +271,8 @@ Features:
 ## History & Statistics
 
 - Full history grouped by date, with per-record audio playback, copy, and detail view.
-- Edit the final text directly in an entry. Changed entries carry an “Edited” badge, and the previous output remains available in the detail view.
+- Edit the final text directly in an entry. Changed entries carry an “Edited” badge, the previous output remains available in Details, and copying uses the edited version. Edits stay on this device and are not synced.
+- Enable **Track edits after dictation** under Input to briefly observe changes in supported applications and review both versions in **History → Edits**. Tracking is off by default and records follow the original dictation's retention policy. You can also edit manually, restore the original output, or delete an edit.
 - Side-by-side comparison of original ASR output vs. LLM-corrected text.
 - Translate an entry's final text into English, compare it with the source, and copy the result without creating a new history entry.
 - Re-transcribe any saved recording with a different ASR backend and optional LLM correction to compare providers on the same audio; replay the final text into the current app to test the full end-to-end flow.

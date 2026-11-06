@@ -110,7 +110,16 @@ function loadMore() {
 
 async function handleCopy(record: HistoryRecord) {
   if (!hasRecordText(record)) return
-  await historyStore.copyText(finalText(record))
+  await copyText(finalText(record))
+}
+
+async function copyText(text: string) {
+  try {
+    await historyStore.copyText(text)
+    message.success(t('postEdit.copied'))
+  } catch (error) {
+    message.error(t('history.copyFailed', { reason: String(error) }))
+  }
 }
 
 function canEdit(record: HistoryRecord) {
@@ -133,7 +142,13 @@ async function handleDelete(record: HistoryRecord) {
   if (playingId.value === record.id) {
     stopPlayback()
   }
-  await historyStore.deleteRecord(record.id)
+  try {
+    await historyStore.deleteRecord(record.id)
+    if (detailRecord.value?.id === record.id) closeDetails()
+  } catch (error) {
+    message.error(t('history.deleteFailed', { reason: String(error) }))
+    return false
+  }
 }
 
 function formatTime(timestamp: string): string {
@@ -311,7 +326,7 @@ async function copyOriginal() {
   if (!detailRecord.value) return
   const original = resolvedOriginalText(detailRecord.value)
   if (!original) return
-  await historyStore.copyText(original)
+  await copyText(original)
 }
 
 async function openRecordingsFolder() {
@@ -730,7 +745,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                 {{ t('history.noCorrection') }}
               </span>
             </div>
-            <NButton quaternary size="tiny" @click="historyStore.copyText(detailRecord.text)">
+            <NButton quaternary size="tiny" @click="copyText(detailRecord.text)">
               {{ t('common.copy') }}
             </NButton>
           </div>

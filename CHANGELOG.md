@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.0] - 2026-11-06
+
+### Added
+
+- **Local edit records** — optionally observe changes to dictated text in supported applications and review the original output alongside the last captured stable edit in History → Edits. Tracking is off by default; edits stay on this device and follow the dictation's retention policy.
+- **Edit history entries** — edit the final text directly from either history view, copy the edited result, or restore the original output. Manual edits take precedence over later observations; deleting an edit restores the original output.
+- **Appearance controls** — choose light, dark, or system appearance from the sidebar.
+
+### Changed
+
+- Reworked settings into compact rows with inline help, grouped sidebar navigation, and connection-test status beside the test action. Refreshed Overview, bilingual labels, README content, and screenshots.
+- Both history views load more entries on scroll. Changed dictations carry an edited badge and retain the previous output in Details.
+- Recent-history context now prefers each entry's edited text when available. The LLM option still uses the last five inputs, with no additional model call or automatic learning.
+
+### Fixed
+
+- Preserve stable observed edits through transient input, field clearing, and later unconfirmed changes; reject stale observations and protect manual edits and deleted records.
+- Improved bounded native reads, text-range tracking, long-dictation windows, and supported macOS AppKit, WebKit, and Electron controls, with IME composition safeguards.
+- Keep open history details up to date after edits, preserve the loaded history depth during refresh, and process update notifications received while loading.
+- Show copy success and copy/delete failures in ordinary dictation history.
+
+Automatic observation covers only supported controls within a short observation window; history can always be edited manually. This release stores final edits for review and reuse. Automatic vocabulary learning, correction rules, and writing-style learning remain future work. Windows observation and real IME interaction have not completed hardware acceptance testing.
+
 ## [0.17.5] - 2026-11-04
 
 ### Added
