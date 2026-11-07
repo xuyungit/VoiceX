@@ -200,7 +200,7 @@ Choose an engine and model and adjust its parameters on the **ASR** page; each p
 | StepAudio (StepFun) | After recording | Default `stepaudio-3-asr-max`; recordings up to 30 minutes |
 | Xiaomi MiMo | After recording | `mimo-v2.5-asr` |
 | OpenAI | Cloud realtime / after recording | `gpt-live-transcribe` / `gpt-transcribe`; the dictionary is sent as keywords; multiple languages |
-| ElevenLabs | Cloud realtime / after recording | `scribe_v2_realtime` / `scribe_v2`; optional full-recording refinement after realtime |
+| ElevenLabs | Cloud realtime / after recording | `scribe_v2_realtime` / `scribe_v2`; optional full-recording refinement after realtime; the dictionary is sent only after recording, not during realtime |
 | [Coli](https://www.npmjs.com/package/@marswave/coli) | Local, offline | SenseVoice / Whisper based; installed separately |
 | Qwen3-ASR (Local) | Local, offline | Alibaba's open-weight model, fully offline; see below |
 
@@ -236,7 +236,7 @@ curl -L -C - --retry 8 -o ~/models/qwen3-asr-0.6b/model.safetensors "https://hug
 Worth knowing:
 
 - **Force Language defaults to Chinese; keep it set.** With auto-detect, the model may switch to English output partway through a sentence.
-- **Dictionary biasing is on by default** and clearly helps with proper nouns; up to 60 entries.
+- **The dictionary is on by default** and clearly helps with proper nouns. It is passed in the model's prompt, so it can occasionally over-match; only the first 60 entries are used.
 - Text appears after you release the hotkey, usually within a second for short sentences. Spoken numbers are not converted to digits.
 
 ## LLM
@@ -261,7 +261,7 @@ Optionally have an LLM correct or translate the recognized text. Choose a provid
 
 ## Dictionary and replacement rules
 
-- **Dictionary** — one word per line, used both as recognition hot words and as LLM context.
+- **Dictionary** — one word per line. Speech recognition passes it to an engine as hints only when **Use hotwords / dictionary for this provider** is on for that engine on the ASR page. The switch is saved per engine and is on by default, except for Google Gemini, where it starts off because the model can echo the word list during silence. Cohere, Xiaomi MiMo, and Coli do not take a dictionary. LLM correction uses the dictionary regardless of this switch.
 - **Replacement rules** — exact, contains, or regex rules applied to the text before it is typed; exact matches ignore trailing punctuation.
 - **Short-sentence punctuation** — trailing punctuation is removed from short sentences, with an adjustable length threshold.
 

@@ -90,6 +90,9 @@ async (page) => {
       const bounds = await capturePage.evaluate(() => window.__readmeHudBounds)
       await capturePage.setViewportSize(bounds)
       await capturePage.evaluate(() => document.fonts.ready)
+      // Let the resized frame paint; capturing right away can return a blank,
+      // fully transparent image.
+      await capturePage.waitForTimeout(400)
       if (errors.length) throw new Error(errors.join('\n'))
       await capturePage.screenshot({ path: `assets/screenshots/${lang}/reading-caption.png`, animations: 'disabled', omitBackground: true })
     }

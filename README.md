@@ -200,7 +200,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --tr
 | StepAudio（阶跃星辰） | 录完识别 | 默认 `stepaudio-3-asr-max`；单次录音最长 30 分钟 |
 | 小米 MiMo | 录完识别 | `mimo-v2.5-asr` |
 | OpenAI | 云端实时 / 录完识别 | `gpt-live-transcribe` / `gpt-transcribe`；词典作为关键词传入；支持多语种 |
-| ElevenLabs | 云端实时 / 录完识别 | `scribe_v2_realtime` / `scribe_v2`；可在录音结束后整段精修 |
+| ElevenLabs | 云端实时 / 录完识别 | `scribe_v2_realtime` / `scribe_v2`；可在录音结束后整段精修；词典只在录完识别时传入，实时阶段不使用 |
 | [Coli](https://www.npmjs.com/package/@marswave/coli) | 本地离线 | 基于 SenseVoice / Whisper，需单独安装 |
 | Qwen3-ASR（本地） | 本地离线 | 阿里开源模型，完全离线；见下文 |
 
@@ -236,7 +236,7 @@ curl -L -C - --retry 8 -o ~/models/qwen3-asr-0.6b/model.safetensors "https://hug
 几点说明：
 
 - **强制语种默认中文，建议保持。** 设为自动检测时，模型可能在句子中途切换成英文输出。
-- **词典增强默认开启**，对专有名词帮助明显，最多 60 条。
+- **词典默认开启**，对专有名词帮助明显。词典通过提示词传给模型，偶尔会过度匹配；只使用前 60 条。
 - 松开热键后整段出字，短句通常 1 秒内返回；不会把「一千两百三十」转成「1230」。
 
 ## 大模型（LLM）
@@ -261,7 +261,7 @@ curl -L -C - --retry 8 -o ~/models/qwen3-asr-0.6b/model.safetensors "https://hug
 
 ## 词典与替换规则
 
-- **词典** — 每行一个词，同时作为识别热词和大模型参考。
+- **词典** — 每行一个词。只有在 ASR 页为当前引擎打开「此服务使用热词 / 词典」时，语音识别才会把词典作为提示传给该引擎。开关按引擎分别保存，默认开启；Google Gemini 默认关闭，因为模型可能在静音时复述词表。Cohere、小米 MiMo 和 Coli 不使用词典。大模型纠错使用词典，不受这个开关影响。
 - **替换规则** — 精确、包含或正则匹配，在输入前替换识别结果；精确匹配忽略末尾标点。
 - **短句去标点** — 自动去掉短句末尾的标点，字数阈值可调。
 
