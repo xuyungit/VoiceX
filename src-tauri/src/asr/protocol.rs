@@ -744,14 +744,11 @@ pub fn decode_server_response(payload: &[u8]) -> Option<AsrEvent> {
             return None;
         }
 
-        let definite = item
-            .definite
-            .or_else(|| {
-                item.utterances
-                    .as_ref()
-                    .and_then(|u| u.last().and_then(|u| u.definite))
-            })
-            .unwrap_or(false);
+        // A definite utterance commits its words, nothing more. The result
+        // stays a partial until the last packet (`client.rs`): a sentence that
+        // ends just after the key is released must not start typing ahead of
+        // the final result.
+        let definite = item.definite.unwrap_or(false);
         let prefetch = item.prefetch.unwrap_or(false);
         let committed_len = if definite {
             text.len()
@@ -912,6 +909,7 @@ mod tests {
             {"text":"one","definite":true},{"text":"two","definite":true}]}}"#;
         let event = decode_server_response(payload).unwrap();
         assert_eq!(event.committed_len, event.text.len());
+        assert!(!event.is_final, "only the last packet is final");
     }
 
     #[test]

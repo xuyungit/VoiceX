@@ -517,7 +517,9 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             coli_realtime: settings.coli_realtime,
             chunk_ms: 100,
             enable_nonstream: settings.enable_nonstream,
-            show_utterances: false,
+            // Utterances say which sentences are definite, which the HUD shows
+            // as confirmed while the rest may still change.
+            show_utterances: true,
             enable_accelerate_text: true,
             accelerate_score: Some(3),
             enable_itn: true,
