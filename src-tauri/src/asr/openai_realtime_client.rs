@@ -623,8 +623,9 @@ impl OpenAITranscriptAccumulator {
         }
 
         self.ensure_item_known(&item_id);
-        let entry = self.partials.entry(item_id).or_default();
-        merge_delta_text(entry, delta);
+        // A delta is the next piece of its item, never a repeat of what came
+        // before: "谢谢" then "谢谢" is "谢谢谢谢".
+        self.partials.entry(item_id).or_default().push_str(delta);
         let combined = self.combine(false);
         if combined.is_empty()
             || combined == self.last_emitted_partial
@@ -658,29 +659,29 @@ impl OpenAITranscriptAccumulator {
         Some(combined)
     }
 
-    /// Byte length of the leading completed items in `combine(false)`: an
-    /// item still receiving deltas, and everything after it, may change.
+    /// Byte length of the text in `combine(false)` that will not change.
+    ///
+    /// Deltas only extend their item (`push_delta`), and in practice
+    /// the completed transcript repeats them: measured against
+    /// gpt-live-transcribe, every partial was a prefix of the final. So text
+    /// received stays put, up to and including the first item still open.
+    /// Anything after that item moves when it grows.
     fn committed_len(&self) -> usize {
         let mut len = 0;
         let mut joined = 0;
         for item_id in &self.order {
-            let Some(final_text) = self.finals.get(item_id) else {
-                if self
-                    .partials
-                    .get(item_id)
-                    .is_some_and(|partial| !partial.trim().is_empty())
-                {
-                    break;
-                }
-                continue;
+            let (text, open) = match (self.finals.get(item_id), self.partials.get(item_id)) {
+                (Some(final_text), _) => (final_text.trim(), false),
+                (None, partial) => (partial.map_or("", |text| text.trim()), true),
             };
-            let trimmed = final_text.trim();
-            if trimmed.is_empty() {
-                continue;
+            if !text.is_empty() {
+                // `combine` joins the non-empty parts with one space.
+                len += if joined == 0 { 0 } else { 1 } + text.len();
+                joined += 1;
             }
-            // `combine` joins the non-empty parts with one space.
-            len += if joined == 0 { 0 } else { 1 } + trimmed.len();
-            joined += 1;
+            if open {
+                break;
+            }
         }
         len
     }
@@ -718,36 +719,33 @@ impl OpenAITranscriptAccumulator {
     }
 }
 
-fn merge_delta_text(existing: &mut String, incoming: &str) {
-    if existing.is_empty() {
-        *existing = incoming.to_string();
-        return;
-    }
-    if incoming.starts_with(existing.as_str()) {
-        *existing = incoming.to_string();
-        return;
-    }
-    if existing.ends_with(incoming) {
-        return;
-    }
-    existing.push_str(incoming);
-}
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn only_leading_completed_items_are_committed() {
+    fn received_text_is_committed_through_the_first_open_item() {
         let mut transcript = super::OpenAITranscriptAccumulator::default();
         transcript.register_commit("a".into(), None);
         transcript.register_commit("b".into(), Some("a".into()));
         transcript.push_delta("b".into(), "later");
+        // "a" is still open: "later" moves along as it grows.
         let text = transcript.push_delta("a".into(), "first").unwrap();
-        assert_eq!(transcript.committed_len(), 0);
+        assert_eq!(&text[..transcript.committed_len()], "first");
 
         transcript.complete("a".into(), "First.");
-        let text_after = transcript.push_delta("b".into(), " words").unwrap();
-        assert_eq!(&text_after[..transcript.committed_len()], "First.");
-        assert_ne!(text, text_after);
+        let text = transcript.push_delta("b".into(), " words").unwrap();
+        assert_eq!(text, "First. later words");
+        assert_eq!(transcript.committed_len(), text.len());
+    }
+
+    #[test]
+    fn repeated_deltas_are_kept() {
+        let mut transcript = super::OpenAITranscriptAccumulator::default();
+        transcript.register_commit("a".into(), None);
+        for delta in ["谢谢", "谢谢", "大家", "。哈哈", "哈", "，好", "好", "的"] {
+            transcript.push_delta("a".into(), delta);
+        }
+        assert_eq!(transcript.combine(false), "谢谢谢谢大家。哈哈哈，好好的");
     }
 
     use super::{build_realtime_ws_url, build_session_update_event};
