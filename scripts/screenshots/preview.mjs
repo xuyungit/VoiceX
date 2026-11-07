@@ -62,9 +62,9 @@ function installFixture(usage) {
           const { getDefaultPrompt } = await import('/src/utils/llmPrompts.ts')
           return { ...structuredClone(settings), ttsTranslatePromptTemplate: getDefaultPrompt('ttsTranslate', locale) }
         }
-        case 'save_settings': settings = structuredClone(args.settings); return
+        // Match Tauri's JSON serialization; Vue's reactive proxy cannot be structured-cloned.
+        case 'save_settings': settings = JSON.parse(JSON.stringify(args.settings)); return
         case 'get_resolved_ui_locale': return locale
-        case 'get_usage_stats': return structuredClone(usage.total)
         // Every permission granted unless `perm=missing` asks for the
         // first-launch state the Overview setup card and guide are shown in.
         case 'permissions_status': return params.get('perm') === 'missing'
@@ -72,6 +72,7 @@ function installFixture(usage) {
           : { platform: 'macos', microphone: 'granted', accessibility: 'granted', inputMonitoring: 'granted', hotkeyListenerActive: true }
         case 'permission_guide_info':
           return { kind: params.get('kind') || 'accessibility', appPath: '/Applications/VoiceX.app', isAppBundle: true }
+        case 'get_usage_stats': return structuredClone(usage.total)
         case 'get_local_usage_stats': return structuredClone(usage.local)
         case 'get_history': return structuredClone(history.slice(args.offset, args.offset + args.limit))
         case 'get_post_edit_settings': return { mode: 'off' }
