@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.1] - 2026-11-07
+
+### Added
+
+- **Permission setup** — Overview guides users through missing microphone and system permissions; macOS includes a helper for granting Accessibility and Input Monitoring.
+- **ASR dictionary controls** — enable or disable the user dictionary separately for supported providers.
+- **Reading length limits** — configure separate limits for reading and translate-and-read. Plain reading defaults to unlimited; translate-and-read defaults to 16K characters.
+
+### Changed
+
+- Redesigned the dictation HUD as a dark capsule and refreshed the bilingual README and screenshots.
+- Edit records show changes inline, with a stacked comparison for longer edits.
+
+### Fixed
+
+- Preserve the source language in default reading cleanup prompts.
+- Improved confirmed text display for live dictation, including Doubao and OpenAI; keep the HUD steady while text is being entered.
+
 ## [0.18.0] - 2026-11-06
 
 ### Added
