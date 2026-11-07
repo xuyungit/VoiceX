@@ -187,26 +187,23 @@ onMounted(async () => {
   <div class="page overview-page">
     <div class="page-header">
       <h1 class="page-title">{{ t('overview.title') }}</h1>
-      <div class="status-lines">
-        <div class="meta-line">
-          <span class="meta-label">{{ t('overview.hotkey') }}:</span>
-          <span class="meta-value">{{ hotkeyDisplay }}</span>
+      <div class="status-bar">
+        <div class="info-pill">
+          <span class="info-pill-label">{{ t('overview.hotkey') }}</span>
+          <span class="info-pill-value">{{ hotkeyDisplay }}</span>
         </div>
-      </div>
-    </div>
-
-    <div class="status-bar">
-      <div class="info-pill">
-        <span class="info-pill-label">{{ t('overview.asrProvider') }}</span>
-        <span class="info-pill-value">{{ asrDisplay }}</span>
-      </div>
-      <div class="info-pill">
-        <span class="info-pill-label">{{ t('overview.llmCorrection') }}</span>
-        <span class="info-pill-value" :class="{ off: !settingsStore.settings.enableLlmCorrection }">{{ llmDisplay }}</span>
-      </div>
-      <div class="info-pill">
-        <span class="info-pill-label">{{ t('overview.syncStatus') }}</span>
-        <span class="info-pill-value" :class="{ off: !settingsStore.settings.syncEnabled }">{{ syncDisplay }}</span>
+        <div class="info-pill">
+          <span class="info-pill-label">{{ t('overview.asrProvider') }}</span>
+          <span class="info-pill-value">{{ asrDisplay }}</span>
+        </div>
+        <div class="info-pill">
+          <span class="info-pill-label">{{ t('overview.llmCorrection') }}</span>
+          <span class="info-pill-value" :class="{ off: !settingsStore.settings.enableLlmCorrection }">{{ llmDisplay }}</span>
+        </div>
+        <div class="info-pill">
+          <span class="info-pill-label">{{ t('overview.syncStatus') }}</span>
+          <span class="info-pill-value" :class="{ off: !settingsStore.settings.syncEnabled }">{{ syncDisplay }}</span>
+        </div>
       </div>
     </div>
 
@@ -239,26 +236,14 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+/* Sized so every stat fits the default 900 x 650 window without scrolling. */
+.overview-page {
+  max-width: 760px;
+  gap: 20px;
+}
+
 .page-header {
-  gap: 4px;
-}
-
-.status-lines {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: var(--font-sm);
-  color: var(--color-text-secondary);
-}
-
-.meta-line {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.meta-label {
-  color: var(--color-text-tertiary);
+  gap: 12px;
 }
 
 .status-bar {
@@ -267,14 +252,10 @@ onMounted(async () => {
   gap: 8px;
 }
 
-.overview-page {
-  max-width: 760px;
-}
-
 .stat-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   container-type: inline-size;
 }
 
@@ -289,7 +270,7 @@ onMounted(async () => {
 .stat-row {
   display: grid;
   gap: 16px;
-  padding: 16px 18px;
+  padding: 12px 18px;
 }
 
 .stat-row.headline {
@@ -324,12 +305,12 @@ onMounted(async () => {
 
 .headline .stat-value {
   margin-top: 2px;
-  font-size: 28px;
+  font-size: 24px;
   line-height: 1.2;
 }
 
 .details .stat-value {
-  font-size: 18px;
+  font-size: 17px;
   line-height: 1.3;
 }
 
@@ -340,7 +321,7 @@ onMounted(async () => {
 }
 
 .headline .stat-value .unit {
-  font-size: var(--font-lg);
+  font-size: var(--font-md);
 }
 
 .details .stat-value .unit {
