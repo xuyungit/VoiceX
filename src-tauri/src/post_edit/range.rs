@@ -166,7 +166,9 @@ impl RangeTracker {
             return Err(RangeError::TargetChanged);
         }
         check_size(snapshot.text)?;
-        if snapshot.text.is_empty() {
+        // Rich-text and web inputs report an emptied field as a line break
+        // (e.g. "\n" after a chat app sends and clears its composer).
+        if snapshot.text.trim().is_empty() {
             return Err(RangeError::FieldCleared);
         }
         let (changes, mapped) =
@@ -226,10 +228,12 @@ mod tests {
             tracker.slice(&snap("前返利续写后", 5..5)),
             Err(RangeError::Ambiguous)
         );
-        assert_eq!(
-            tracker.slice(&snap("", 0..0)),
-            Err(RangeError::FieldCleared)
-        );
+        for cleared in ["", "\n", " \n"] {
+            assert_eq!(
+                tracker.slice(&snap(cleared, 0..0)),
+                Err(RangeError::FieldCleared)
+            );
+        }
         assert_eq!(
             tracker.slice(&snap("前反力后前反力后", 3..3)),
             Err(RangeError::Ambiguous)
