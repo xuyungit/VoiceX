@@ -10,7 +10,7 @@ English | [中文](./README.md)
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/en/hud-window.png" alt="VoiceX live dictation HUD with demo text" width="256" />
+  <img src="assets/screenshots/en/hud-window.png" alt="VoiceX live dictation HUD: confirmed words in white, words that may still change in grey (demo text)" width="368" />
 </p>
 
 VoiceX is a cross-platform voice workspace for your desktop: dictate, translate, and listen in any app. Press a hotkey and speak; the recognized text (optionally corrected or translated by an LLM) is typed into the app you are using and kept in your history. In the other direction, it reads selected text aloud, optionally translating it first.
@@ -126,7 +126,7 @@ Press either reading key again, or **Escape**, to stop. You can also choose **Re
 Engines that report progress show each sentence as a large caption:
 
 <p align="center">
-  <img src="assets/screenshots/en/reading-caption.png" alt="VoiceX reading caption with the current sentence in a dark subtitle strip (demo text)" width="880" />
+  <img src="assets/screenshots/en/reading-caption.png" alt="VoiceX reading caption with the current sentence in a dark subtitle strip (demo text)" width="846" />
 </p>
 
 <p align="center">

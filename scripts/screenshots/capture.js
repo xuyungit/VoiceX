@@ -26,6 +26,12 @@ async (page) => {
     // shots show what a first launch shows.
     const WINDOW = { width: 900, height: 650 }
     const THEMES = [['light', ''], ['dark', '-dark']]
+    // The capsule and its shadow (HUD_SHADOW_PAD in window.rs), not the
+    // transparent window around it.
+    const capsuleClip = async () => {
+      const box = await capturePage.locator('#hudCapsule').boundingBox()
+      return { x: box.x - 20, y: box.y - 20, width: box.width + 40, height: box.height + 40 }
+    }
     // Open a main-window route in one theme and wait until it has settled.
     const openPage = async (path, lang, theme) => {
       await capturePage.setViewportSize(WINDOW)
@@ -89,9 +95,13 @@ async (page) => {
       await capturePage.locator('body:not(.hud-loading)').waitFor()
       await capturePage.locator('#textArea').filter({ hasText: 'VoiceX' }).waitFor()
       await capturePage.evaluate(() => document.fonts.ready)
-      await capturePage.waitForTimeout(400)
+      // A steady voice level, so the mini waveform shows bars.
+      for (let i = 0; i < 8; i += 1) {
+        await capturePage.evaluate(() => window.__fixtureEmit('state:audio_level', { level: 0.6 }))
+        await capturePage.waitForTimeout(50)
+      }
       if (errors.length) throw new Error(errors.join('\n'))
-      await capturePage.screenshot({ path: `assets/screenshots/${lang}/hud-window.png`, animations: 'disabled', omitBackground: true })
+      await capturePage.screenshot({ path: `assets/screenshots/${lang}/hud-window.png`, clip: await capsuleClip(), animations: 'disabled', omitBackground: true })
 
       // The drag helper floats beside System Settings in its own transparent
       // window. Match WIDTH / HEIGHT in src-tauri/src/permissions/guide.rs.
@@ -110,7 +120,7 @@ async (page) => {
       await capturePage.evaluate(() => document.fonts.ready)
       await capturePage.waitForTimeout(400)
       if (errors.length) throw new Error(errors.join('\n'))
-      await capturePage.screenshot({ path: `assets/screenshots/${lang}/reading-caption.png`, animations: 'disabled', omitBackground: true })
+      await capturePage.screenshot({ path: `assets/screenshots/${lang}/reading-caption.png`, clip: await capsuleClip(), animations: 'disabled', omitBackground: true })
     }
     console.log('Captured 34 bilingual screenshots; no browser errors.')
   } finally {

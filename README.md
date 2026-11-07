@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/zh/hud-window.png" alt="VoiceX 实时听写 HUD（示例文本）" width="256" />
+  <img src="assets/screenshots/zh/hud-window.png" alt="VoiceX 实时听写 HUD：已确认的文字为白色，仍可能修改的为灰色（示例文本）" width="364" />
 </p>
 
 VoiceX 是一个跨平台的桌面语音工作台，在任意应用里说、译、听：按下热键说话，识别结果（可选经大模型纠错或翻译）直接输入到当前应用，并保存到历史记录；反过来，选中的文字也可以直接读出来，或先翻译再朗读。
@@ -126,7 +126,7 @@ Windows 不需要额外授权。只有当系统关闭了麦克风权限时才会
 支持进度回报的引擎会逐句显示大字幕：
 
 <p align="center">
-  <img src="assets/screenshots/zh/reading-caption.png" alt="VoiceX 朗读字幕：当前句子显示在深色字幕条中（示例文本）" width="880" />
+  <img src="assets/screenshots/zh/reading-caption.png" alt="VoiceX 朗读字幕：当前句子显示在深色字幕条中（示例文本）" width="730" />
 </p>
 
 <p align="center">
