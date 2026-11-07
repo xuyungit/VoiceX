@@ -3,6 +3,31 @@ use crate::{
     state::{ProcessingIntent, RecordingStyle},
 };
 
+/// What the injector can tell of typing a final text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectionOutcome {
+    /// The input calls all went out. Whether the focused control took the
+    /// text is not observable, so this is as close to "typed" as it gets.
+    Dispatched,
+    /// Typing failed, before any input or part-way through: the user does not
+    /// have the whole text where they were typing.
+    Failed,
+    /// Nothing was typed, and nothing went wrong: the injection was cancelled,
+    /// or there was no text.
+    NotAttempted,
+}
+
+impl From<&crate::injector::DispatchOutcome> for InjectionOutcome {
+    fn from(outcome: &crate::injector::DispatchOutcome) -> Self {
+        use crate::injector::DispatchOutcome;
+        match outcome {
+            DispatchOutcome::CommandsPosted => Self::Dispatched,
+            DispatchOutcome::PartialOrUncertain | DispatchOutcome::Failed { .. } => Self::Failed,
+            DispatchOutcome::CancelledBeforeDispatch => Self::NotAttempted,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CancelReason {
     EscapeKey,
@@ -91,5 +116,6 @@ pub enum SessionMessage {
         original_for_history: Option<String>,
         injection_version: u64,
         intent: ProcessingIntent,
+        outcome: InjectionOutcome,
     },
 }

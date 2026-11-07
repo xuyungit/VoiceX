@@ -12,7 +12,7 @@ use crate::{
 
 use super::super::SessionController;
 use crate::logging::preview;
-use crate::session::SessionMessage;
+use crate::session::{InjectionOutcome, SessionMessage};
 
 impl SessionController {
     pub fn handle_asr_event_state(&self, state: &mut AppState, evt: AsrEvent) {
@@ -594,23 +594,31 @@ impl SessionController {
             // Wait for the blocking injection to complete before signalling InjectDone.
             // This prevents a new injection from starting while the previous one is
             // still writing to the clipboard or typing characters.
-            if let Some(handle) = inject_handle {
+            let outcome = if let Some(handle) = inject_handle {
                 match handle.await {
                     Ok(receipt) => {
-                        log::debug!("Injection dispatch {}: {:?}", receipt.injection_id, receipt.outcome);
+                        let outcome = InjectionOutcome::from(&receipt.outcome);
+                        if outcome == InjectionOutcome::Failed {
+                            log::warn!("Injection dispatch {} failed: {:?}", receipt.injection_id, receipt.outcome);
+                        } else {
+                            log::debug!("Injection dispatch {}: {:?}", receipt.injection_id, receipt.outcome);
+                        }
                         #[cfg(any(target_os = "macos", target_os = "windows"))]
                         crate::post_edit::coordinator::finish_dispatch(post_edit_attempt, receipt, final_text.clone(), post_edit_rx.try_recv().ok());
+                        outcome
                     },
                     Err(err) => {
                         log::warn!("Injection worker failed: {}", err);
                         #[cfg(any(target_os = "macos", target_os = "windows"))]
                         crate::post_edit::coordinator::skipped(post_edit_attempt, crate::post_edit::diagnostics::Reason::DispatchFailed);
+                        InjectionOutcome::Failed
                     }
                 }
             } else {
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 crate::post_edit::coordinator::skipped(post_edit_attempt, crate::post_edit::diagnostics::Reason::DispatchFailed);
-            }
+                InjectionOutcome::NotAttempted
+            };
             if cancel_flag.load(std::sync::atomic::Ordering::SeqCst)
                 || controller
                     .injection_epoch
@@ -630,6 +638,7 @@ impl SessionController {
                 original_for_history,
                 injection_version,
                 intent,
+                outcome,
             });
         });
     }

@@ -113,6 +113,9 @@ pub struct AppState {
     pub(crate) text_injection_overrides: Vec<TextInjectionAppOverride>,
     pub(crate) has_final_result: bool,
     pub(crate) final_injected: bool,
+    /// The final text's input went out (`InjectionOutcome::Dispatched`): the
+    /// HUD may confirm it with a check mark.
+    pub(crate) final_typed: bool,
     pub(crate) last_injected_text: String,
     pub(crate) final_version: u64,
     pub(crate) injection_in_progress: bool,
@@ -175,6 +178,7 @@ impl AppState {
             text_injection_overrides: Vec::new(),
             has_final_result: false,
             final_injected: false,
+            final_typed: false,
             last_injected_text: String::new(),
             final_version: 0,
             injection_in_progress: false,
@@ -237,6 +241,7 @@ impl AppState {
                 self.session_target_app = None;
                 self.max_recording_countdown = None;
                 self.final_injected = false;
+                self.final_typed = false;
                 self.has_final_result = false;
                 self.last_injected_text.clear();
                 self.double_tap_upgrade_deadline = None;
@@ -404,6 +409,7 @@ impl AppState {
         self.did_receive_audio = false;
         self.max_recording_countdown = None;
         self.final_injected = false;
+        self.final_typed = false;
         self.has_final_result = false;
         self.last_injected_text.clear();
         self.final_version = 0;

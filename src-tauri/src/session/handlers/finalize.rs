@@ -1,7 +1,10 @@
-use crate::session::ASR_FINAL_WAIT_MS;
+use crate::session::{InjectionOutcome, ASR_FINAL_WAIT_MS};
 use crate::state::{AppState, HotkeySessionState, ProcessingIntent, RecordingStyle};
 
 use super::super::SessionController;
+
+/// Read by the HUD (`hud.ts`, error code messages).
+const INJECTION_FAILED_CODE: &str = "injection_failed";
 impl SessionController {
     pub fn handle_inject_done_state(
         &self,
@@ -15,6 +18,7 @@ impl SessionController {
         original_for_history: Option<String>,
         injection_version: u64,
         intent: ProcessingIntent,
+        outcome: InjectionOutcome,
     ) {
         // If a newer final arrived while this injection was running, redo injection with the latest text.
         if state.final_version > injection_version {
@@ -29,6 +33,7 @@ impl SessionController {
             return;
         }
         state.final_injected = true;
+        state.final_typed = outcome == InjectionOutcome::Dispatched;
         state.injection_in_progress = false;
 
         let resolved_mode = crate::services::history_service::HistoryService::resolve_mode(
@@ -63,9 +68,26 @@ impl SessionController {
 
         state.injection_in_progress = false;
         if state.session_state == HotkeySessionState::Finalizing {
-            // The text is in: confirm it, then leave without lingering.
-            self.confirm_inserted_and_reset_state(state);
+            match outcome {
+                // The text is in: confirm it, then leave without lingering.
+                InjectionOutcome::Dispatched => self.confirm_inserted_and_reset_state(state),
+                // The text is in history either way; say it did not arrive.
+                InjectionOutcome::Failed => self.show_injection_failure(state),
+                InjectionOutcome::NotAttempted => self.hide_hud_and_reset_state(state),
+            }
+        } else if outcome == InjectionOutcome::Failed {
+            log::warn!("Injection failed after its session moved on; nothing to report it on");
         }
+    }
+
+    /// The final text did not reach the app it was meant for. It shows as an
+    /// error for as long as any other, and the HUD names it by a stable code
+    /// so it can say so in the UI language.
+    fn show_injection_failure(&self, state: &mut AppState) {
+        state.terminal_error_message = Some(INJECTION_FAILED_CODE.into());
+        self.cancel_audio_level_task();
+        self.emit_asr_error(INJECTION_FAILED_CODE);
+        self.schedule_error_cleanup();
     }
 
     pub fn on_asr_final_timeout(&self, state: &mut AppState) {
@@ -120,7 +142,7 @@ impl SessionController {
             }
         }
         // Hide the HUD before resetting state so users don't see the placeholder flash.
-        if state.final_injected {
+        if state.final_typed {
             self.confirm_inserted_and_reset_state(state);
         } else {
             self.hide_hud_and_reset_state(state);

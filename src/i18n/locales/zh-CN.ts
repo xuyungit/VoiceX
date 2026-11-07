@@ -982,7 +982,8 @@ const zhCN = {
     readingClipboardEmpty: '读不到选中文字，剪贴板也是空的',
     readingClipboardNotText: '读不到选中文字，剪贴板里也不是文字',
     readingClipboardConcealed: '读不到选中文字，剪贴板里是密码，未朗读',
-    readingClipboardUnavailable: '读不到选中文字，剪贴板也读取失败'
+    readingClipboardUnavailable: '读不到选中文字，剪贴板也读取失败',
+    injectionFailed: '文字未能完整输入，已保存到历史记录'
   }
 }
 

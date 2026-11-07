@@ -172,6 +172,16 @@ impl HudService {
         self.exit_after(HUD_INSERTED_HOLD_MS);
     }
 
+    /// Start the fade `delay_ms` from now, and order the window out once it
+    /// has played.
+    ///
+    /// Every step checks the window generation under its lock and acts while
+    /// still holding it, so a `show()` (which bumps the generation) lands
+    /// either before a step, which then stands down, or after it, and its
+    /// presentation event reaches the page after this exit and cancels it.
+    /// Checking and then acting outside the lock would let a stale exit reach
+    /// the page after the new session's presentation, and leave its capsule
+    /// transparent.
     fn exit_after(&self, delay_ms: u64) {
         let generation = {
             let mut guard = self
@@ -179,29 +189,31 @@ impl HudService {
                 .lock()
                 .expect("HUD window generation mutex poisoned");
             *guard += 1;
+            // An immediate exit is sent before this returns, so it reaches
+            // the page ahead of the state reset the caller emits next: the
+            // page freezes what it shows during the fade.
+            if delay_ms == 0 {
+                let _ = self.app_handle.emit_to("hud", "hud:exit", json!({}));
+            }
             *guard
         };
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
-            let still_current = || {
-                *this
-                    .window_generation
+            let lock = || {
+                this.window_generation
                     .lock()
                     .expect("HUD window generation mutex poisoned")
-                    == generation
             };
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            if !still_current() {
-                return;
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                let guard = lock();
+                if *guard != generation {
+                    return;
+                }
+                let _ = this.app_handle.emit_to("hud", "hud:exit", json!({}));
             }
-            let _ = this.app_handle.emit_to("hud", "hud:exit", json!({}));
             tokio::time::sleep(std::time::Duration::from_millis(HUD_EXIT_MS)).await;
-            // Held across the hide, so a show cannot slip in between the
-            // check and the hide and be hidden by it.
-            let guard = this
-                .window_generation
-                .lock()
-                .expect("HUD window generation mutex poisoned");
+            let guard = lock();
             if *guard == generation {
                 hud::hide_hud(&this.app_handle);
             }

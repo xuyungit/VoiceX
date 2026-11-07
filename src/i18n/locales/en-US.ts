@@ -982,7 +982,8 @@ const enUS = {
     readingClipboardEmpty: 'No readable selection, and the clipboard is empty',
     readingClipboardNotText: 'No readable selection, and the clipboard holds no text',
     readingClipboardConcealed: 'No readable selection; the clipboard holds a password, not read',
-    readingClipboardUnavailable: 'No readable selection, and the clipboard could not be read'
+    readingClipboardUnavailable: 'No readable selection, and the clipboard could not be read',
+    injectionFailed: 'Couldn’t type all of the text; it’s saved in History'
   }
 }
 

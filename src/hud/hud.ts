@@ -322,9 +322,12 @@ function setHudLocale(locale: string | undefined) {
   renderTranscript();
 }
 
-/// Selection failures the user can act on. Anything else falls back to the
-/// generic error text rather than showing a raw code.
-const readingErrorMessages: Record<string, keyof typeof zhCN.hud> = {
+/// Errors reported by a stable code rather than a message: reading's
+/// selection failures the user can act on, and dictation's failed typing.
+/// Anything else is shown as sent.
+const errorCodeMessages: Record<string, keyof typeof zhCN.hud> = {
+  // The final text did not reach the app (session/handlers/finalize.rs).
+  injection_failed: "injectionFailed",
   no_selection: "readingNoSelection",
   permission_denied: "readingPermissionDenied",
   secure_input: "readingSecureInput",
@@ -350,8 +353,8 @@ const readingErrorMessages: Record<string, keyof typeof zhCN.hud> = {
   clipboard_unavailable: "readingClipboardUnavailable",
 };
 
-function readingErrorText() {
-  const key = currentErrorCode ? readingErrorMessages[currentErrorCode] : undefined;
+function errorCodeText() {
+  const key = currentErrorCode ? errorCodeMessages[currentErrorCode] : undefined;
   return key ? t(key) : null;
 }
 
@@ -1152,6 +1155,16 @@ renderTranscript();
 updateIntent("assistant");
 handleAudioLevelUpdate(0);
 
+/// The capsule is fading out (`hud:exit`). The session behind it has already
+/// reset, and what it reports now belongs to no visible capsule: a failed
+/// recording's error would turn back into a waveform as it fades. Those
+/// events are held, the latest of each kind, and applied when the window is
+/// next shown, before its presentation.
+let exiting = false;
+const heldEvents = new Map<string, () => void>();
+/// Events that start or end an exit are never held.
+const EXIT_EVENTS = new Set(["hud:exit", "state:hud_presentation"]);
+
 /// The window has just been shown: bring the capsule in from below. The
 /// class comes off on the next frame, which is the first one painted.
 function enterHud() {
@@ -1169,7 +1182,14 @@ async function initListeners() {
     name: string,
     handler: (event: { payload: T }) => void,
   ) => {
-    const unsub = await listen<T>(name, handler);
+    const unsub = await listen<T>(name, (event) => {
+      if (exiting && !EXIT_EVENTS.has(name)) {
+        heldEvents.delete(name);
+        heldEvents.set(name, () => handler(event));
+        return;
+      }
+      handler(event);
+    });
     unsubs.push(unsub);
   };
 
@@ -1227,7 +1247,7 @@ async function initListeners() {
     currentErrorCode = event.payload?.message ?? null;
     // Reading reports a stable code; dictation reports a human message. Map
     // what we recognise and pass anything else through untouched.
-    handleErrorUpdate(readingErrorText() ?? event.payload?.message);
+    handleErrorUpdate(errorCodeText() ?? event.payload?.message);
   });
 
   await add(
@@ -1282,6 +1302,7 @@ async function initListeners() {
 
   // window.rs orders the window out once the capsule has faded.
   await add("hud:exit", () => {
+    exiting = true;
     document.body.classList.add("hud-exit");
   });
 
@@ -1318,6 +1339,10 @@ async function initListeners() {
     "state:hud_presentation",
     (event: { payload?: { mode?: string } }) => {
       // Sent with every show: a new session starts here.
+      exiting = false;
+      const held = [...heldEvents.values()];
+      heldEvents.clear();
+      held.forEach((apply) => apply());
       const mode = event.payload?.mode;
       hudPresentation =
         mode === "batch" ? "batch" : mode === "caption" ? "caption" : "stream";

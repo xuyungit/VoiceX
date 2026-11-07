@@ -3,7 +3,7 @@
 mod handlers;
 mod message;
 
-pub use message::{CancelReason, SessionMessage};
+pub use message::{CancelReason, InjectionOutcome, SessionMessage};
 
 use std::{
     collections::VecDeque,
@@ -547,6 +547,7 @@ impl SessionController {
                 original_for_history,
                 injection_version,
                 intent,
+                outcome,
             } => self.handle_inject_done_state(
                 state,
                 text,
@@ -558,6 +559,7 @@ impl SessionController {
                 original_for_history,
                 injection_version,
                 intent,
+                outcome,
             ),
         }
     }
@@ -1504,6 +1506,48 @@ mod tests {
 
     fn path_string(path: Option<&std::path::PathBuf>) -> Option<String> {
         path.map(|value| value.to_string_lossy().to_string())
+    }
+
+    #[test]
+    fn only_dispatched_input_is_confirmed_and_failed_input_is_shown() {
+        use crate::injector::DispatchOutcome;
+        for (dispatch, error) in [
+            (DispatchOutcome::CommandsPosted, None),
+            (DispatchOutcome::PartialOrUncertain, Some("injection_failed")),
+            (DispatchOutcome::Failed { code: "clipboard_error" }, Some("injection_failed")),
+            (DispatchOutcome::CancelledBeforeDispatch, None),
+        ] {
+            let controller = SessionController::default();
+            let mut state = AppState::new();
+            state.handle_hotkey_pressed();
+            state.transition_to_finalizing();
+            state.injection_in_progress = true;
+            let injection_version = state.final_version;
+            controller.handle_message(
+                &mut state,
+                SessionMessage::InjectDone {
+                    text: "hello".into(),
+                    corrected: false,
+                    llm_invoked: false,
+                    recording_style: None,
+                    duration_ms: None,
+                    audio_path: None,
+                    original_for_history: None,
+                    injection_version,
+                    intent: crate::state::ProcessingIntent::Assistant,
+                    outcome: InjectionOutcome::from(&dispatch),
+                },
+            );
+            assert_eq!(state.terminal_error_message.as_deref(), error, "{dispatch:?}");
+            // A failure stays on screen until its error display ends; the
+            // others end the session at once.
+            let expected = if error.is_some() {
+                HotkeySessionState::Finalizing
+            } else {
+                HotkeySessionState::Idle
+            };
+            assert_eq!(state.session_state, expected, "{dispatch:?}");
+        }
     }
 
     #[test]
