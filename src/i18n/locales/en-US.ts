@@ -93,6 +93,8 @@ const enUS = {
     unknownApp: 'Unknown app',
     copy: 'Copy',
     copied: 'Copied',
+    copyOriginal: 'Copy original',
+    changesFromOriginal: 'Changes from the original',
     expand: 'Show full text',
     collapse: 'Collapse',
     deleteTitle: 'Delete this edit?',

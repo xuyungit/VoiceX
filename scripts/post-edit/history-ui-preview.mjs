@@ -1,7 +1,7 @@
 // Isolated browser fixture for the actual Vue history page, not a production
 // seed. No requests reach the user's Tauri backend or persisted settings.
 // Run: node scripts/post-edit/history-ui-preview.mjs
-// Open /history?scenario=empty|edited|long|many|error|save-error|off
+// Open /history?scenario=empty|edited|diff|long|many|error|save-error|off
 import { createServer } from 'node:http'
 
 const fixture = `
@@ -22,6 +22,17 @@ const fixture = `
     strategy: 'event_with_checkpoints', rangeEvidence: 'before_after_verified',
     insertions: 0, deletions: 0, substitutions: 2, hadIntermediateChanges: true, source: 'observed'
   }));
+  // Diff display cases: substitution, insertion, mixed-script, a rewrite that
+  // falls back to the stacked layout, and a long text that condenses.
+  if (scenario === 'diff') records = [
+    ['今天开会的记要我已经发到群里了，麻烦帮我看一下有没有问题。', '今天开会的纪要我已经发到群里了，麻烦帮我看一下有没有问题。'],
+    ['我做了一个简单的测试，按照之前的设计，最后五条修改的记录应该做替换，所以你检查一下现在这个功能是不是正常的。', '我做了一个简单的测试，按照之前的设计，最后五条修改的记录应该做替换得到正确的识别：DERP，所以你检查一下现在这个功能是不是正常的。'],
+    ['那你觉得是提示词写得更密一些好，还是这种方式给大语言模型传递的信息不足以让大语言模型决定去纠正其中的某些单词呢？', '那你觉得是提示词写得更好有可能改善，还是这种方式给大语言模型传递的信息不足以让大语言模型决定去纠正其中的某些单词呢？'],
+    ['我们用 cloud code 来写 type script', '我们用 Claude Code 来写 TypeScript'],
+    ['今天天气很好，我们出去走走吧。', '明天可能下雨，记得带伞。'],
+    ['这是一段很长的听写，' + '用于验证折叠后只显示改动附近的上下文。'.repeat(8) + '这里有一个错别子。' + '后面还有更多内容。'.repeat(8), '这是一段很长的听写，' + '用于验证折叠后只显示改动附近的上下文。'.repeat(8) + '这里有一个错别字。' + '后面还有更多内容。'.repeat(8)]
+  ].map(([originalText, editedText], index) => ({ ...records[0], id: 'diff-' + index, recordId: 'diff-source-' + index,
+    timestamp: new Date(now - index * 600000).toISOString(), originalText, editedText }));
   // Dictation rows mirror the pairs: an observed edit is the row's final text.
   let history = records.map(r => ({
     id: r.recordId, timestamp: r.timestamp, text: r.originalText, originalText: r.originalText,

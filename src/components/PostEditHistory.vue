@@ -2,10 +2,12 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { NButton, NEmpty, NSpin, useDialog, useMessage } from 'naive-ui'
+import { NButton, NDropdown, NEmpty, NSpin, useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useHistoryStore } from '../stores/history'
 import type { PostEditRecord, PostEditRecordPage } from '../types/postEdit'
+import { condense, diffText, type TextDiff } from '../utils/textDiff'
+import CorrectionDiff from './CorrectionDiff.vue'
 import InlineTextEditor from './InlineTextEditor.vue'
 import LoadMoreSentinel from './LoadMoreSentinel.vue'
 
@@ -23,6 +25,8 @@ const busy = ref(false)
 const editingId = ref<string | null>(null)
 const savingEdit = ref(false)
 const pageSize = 20
+/** Characters of unchanged text kept around each change in a collapsed record. */
+const COLLAPSED_CONTEXT = 30
 let disposed = false
 let request = 0
 let unlisten: UnlistenFn | undefined
@@ -37,6 +41,32 @@ const groups = computed(() => {
   }
   return result
 })
+
+// Diffs are computed once per loaded record, not on every render.
+const diffs = computed(() => {
+  const result = new Map<string, { diff: TextDiff; collapsible: boolean }>()
+  for (const record of records.value) {
+    const diff = diffText(record.originalText, record.editedText)
+    const collapsible = isLong(record) && condense(diff, COLLAPSED_CONTEXT).some(part => part.kind === 'gap')
+    result.set(record.id, { diff, collapsible })
+  }
+  return result
+})
+
+const moreOptions = computed<DropdownOption[]>(() => [
+  { label: t('postEdit.copyOriginal'), key: 'copy-original' },
+  { label: t('common.delete'), key: 'delete' }
+])
+
+function onMore(key: string | number, record: PostEditRecord) {
+  if (key === 'copy-original') void copy(record.originalText)
+  else if (key === 'delete') remove(record)
+}
+
+function isLong(record: PostEditRecord) {
+  const long = (text: string) => text.length > 180 || text.split('\n').length > 4
+  return long(record.originalText) || long(record.editedText)
+}
 
 function time(at: string) {
   return new Date(at).toLocaleTimeString(locale.value, { hour: '2-digit', minute: '2-digit' })
@@ -86,11 +116,6 @@ function toggle(id: string) {
   if (next.has(id)) next.delete(id)
   else next.add(id)
   expanded.value = next
-}
-
-function isLong(record: PostEditRecord) {
-  return record.originalText.length > 180 || record.editedText.length > 180
-    || record.originalText.split('\n').length > 4 || record.editedText.split('\n').length > 4
 }
 
 async function saveEdit(record: PostEditRecord, text: string) {
@@ -155,37 +180,52 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
             <time :datetime="record.timestamp">{{ time(record.timestamp) }}</time>
             <span v-if="record.appName" class="app-name">{{ record.appName }}</span>
           </div>
-          <NButton quaternary size="tiny" :disabled="busy" @click="remove(record)">{{ t('common.delete') }}</NButton>
+          <div v-if="editingId !== record.id" class="record-actions">
+            <NButton text size="tiny" @click="editingId = record.id">{{ t('postEdit.edit') }}</NButton>
+            <NButton text size="tiny" @click="copy(record.editedText)">{{ t('postEdit.copy') }}</NButton>
+            <NDropdown trigger="click" placement="bottom-end" :options="moreOptions" @select="key => onMore(key, record)">
+              <NButton quaternary size="tiny" class="more-button" :disabled="busy" :aria-label="t('common.moreActions')">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16" aria-hidden="true">
+                    <path d="M6 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4z" />
+                  </svg>
+                </template>
+              </NButton>
+            </NDropdown>
+          </div>
         </header>
-        <div class="text-pair" :class="{ expanded: expanded.has(record.id) || editingId === record.id, collapsible: isLong(record) }">
-          <div class="text-column original">
-            <div class="text-label"><span>{{ t('postEdit.original') }}</span><NButton text size="tiny" @click="copy(record.originalText)">{{ t('postEdit.copy') }}</NButton></div>
-            <p class="record-text">{{ record.originalText }}</p>
-          </div>
-          <div class="text-column edited">
-            <div class="text-label">
-              <span>{{ t('postEdit.edited') }}</span>
-              <span v-if="editingId !== record.id" class="label-actions">
-                <NButton text size="tiny" @click="editingId = record.id">{{ t('postEdit.edit') }}</NButton>
-                <NButton text size="tiny" @click="copy(record.editedText)">{{ t('postEdit.copy') }}</NButton>
-              </span>
+        <InlineTextEditor
+          v-if="editingId === record.id"
+          :text="record.editedText"
+          :original="record.originalText"
+          :saving="savingEdit"
+          @save="text => saveEdit(record, text)"
+          @cancel="editingId = null"
+        >
+          <template #preview="{ draft }">
+            <div v-if="draft !== record.originalText" class="edit-preview">
+              <div class="preview-label">{{ t('postEdit.changesFromOriginal') }}</div>
+              <CorrectionDiff
+                :diff="diffText(record.originalText, draft)"
+                :before-label="t('postEdit.original')"
+                :after-label="t('postEdit.edited')"
+              />
             </div>
-            <InlineTextEditor
-              v-if="editingId === record.id"
-              :text="record.editedText"
-              :original="record.originalText"
-              :saving="savingEdit"
-              @save="text => saveEdit(record, text)"
-              @cancel="editingId = null"
-            />
-            <p v-else class="record-text">{{ record.editedText }}</p>
-          </div>
-        </div>
-        <footer v-if="isLong(record) && editingId !== record.id" class="record-footer">
-          <NButton text size="tiny" @click="toggle(record.id)">
-            {{ t(expanded.has(record.id) ? 'postEdit.collapse' : 'postEdit.expand') }}
-          </NButton>
-        </footer>
+          </template>
+        </InlineTextEditor>
+        <template v-else-if="diffs.get(record.id)">
+          <CorrectionDiff
+            :diff="diffs.get(record.id)!.diff"
+            :before-label="t('postEdit.original')"
+            :after-label="t('postEdit.edited')"
+            :context="diffs.get(record.id)!.collapsible && !expanded.has(record.id) ? COLLAPSED_CONTEXT : undefined"
+          />
+          <footer v-if="diffs.get(record.id)!.collapsible" class="record-footer">
+            <NButton text size="tiny" @click="toggle(record.id)">
+              {{ t(expanded.has(record.id) ? 'postEdit.collapse' : 'postEdit.expand') }}
+            </NButton>
+          </footer>
+        </template>
       </article>
     </div>
     <LoadMoreSentinel v-if="hasMore && !error" :loading="loading" @load="load(true)" />
@@ -202,21 +242,13 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
 .record-date { margin: 0 0 6px; font-size: var(--font-xs); font-weight: 600; color: var(--color-text-tertiary); }
 .edit-record { padding: 16px 0; border-bottom: 1px solid var(--color-border); }
 .record-meta, .meta-main { display: flex; align-items: center; gap: 12px; }
-.record-meta { justify-content: space-between; margin-bottom: 12px; }
+.record-meta { justify-content: space-between; min-height: 24px; margin-bottom: 10px; }
 .meta-main { min-width: 0; }
 .record-meta time { font-size: var(--font-sm); font-variant-numeric: tabular-nums; font-weight: 600; }
 .app-name { color: var(--color-text-tertiary); font-size: var(--font-xs); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.text-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; }
-.text-column { min-width: 0; }
-.text-column.edited { padding-left: 22px; border-left: 2px solid var(--color-accent); }
-.text-label { display: flex; align-items: center; justify-content: space-between; min-height: 20px; margin-bottom: 8px; font-size: var(--font-xs); color: var(--color-text-tertiary); }
-.label-actions { display: inline-flex; gap: 12px; }
-.record-text { font-size: 14px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
-.original .record-text { color: var(--color-text-secondary); }
-.text-pair.collapsible:not(.expanded) .record-text { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
-.record-footer { display: flex; justify-content: flex-end; margin-top: 10px; }
-@media (max-width: 760px) {
-  .text-pair { grid-template-columns: minmax(0, 1fr); gap: 18px; }
-  .text-column.edited { padding-left: 12px; }
-}
+.record-actions { display: inline-flex; align-items: center; gap: 14px; flex-shrink: 0; }
+.more-button { width: 24px; padding: 0; color: var(--color-text-secondary); }
+.edit-preview { margin-top: 10px; padding: 10px 12px; border-radius: 6px; background: var(--color-bg-secondary); }
+.preview-label { margin-bottom: 4px; font-size: var(--font-xs); color: var(--color-text-tertiary); }
+.record-footer { display: flex; justify-content: flex-end; margin-top: 6px; }
 </style>

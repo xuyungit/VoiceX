@@ -11,6 +11,7 @@ const props = defineProps<{
   saving?: boolean
 }>()
 const emit = defineEmits<{ save: [text: string]; cancel: [] }>()
+defineSlots<{ preview?: (props: { draft: string }) => unknown }>()
 
 const { t } = useI18n()
 const draft = ref(props.text)
@@ -71,6 +72,8 @@ onMounted(async () => {
         <NButton type="primary" size="tiny" :disabled="!canSave" :loading="saving" @click="save">{{ t('postEdit.save') }}</NButton>
       </div>
     </div>
+    <!-- Live feedback on the draft, e.g. its diff against the original. -->
+    <slot name="preview" :draft="draft" />
   </div>
 </template>
 

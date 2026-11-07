@@ -17,7 +17,8 @@ import {
 import SettingsSection from '../components/settings/SettingsSection.vue'
 import SettingRow from '../components/settings/SettingRow.vue'
 import ProbeStatus from '../components/settings/ProbeStatus.vue'
-import { diffChars } from '../utils/textDiff'
+import { diffText } from '../utils/textDiff'
+import DiffText from '../components/DiffText.vue'
 
 const settingsStore = useSettingsStore()
 const { t, locale } = useI18n()
@@ -463,7 +464,7 @@ const probeErrorMessage = computed(() => llmProbeError.value || llmProbeResult.v
 
 const probeDiff = computed(() => {
   const result = llmProbeResult.value
-  return result?.responseText ? diffChars(result.requestText, result.responseText) : null
+  return result?.responseText ? diffText(result.requestText, result.responseText) : null
 })
 </script>
 
@@ -491,16 +492,12 @@ const probeDiff = computed(() => {
           <template v-if="llmProbeResult?.requestText" #default>
             <div class="probe-detail-label">{{ t('llm.providerProbeInput') }}</div>
             <div class="probe-detail-text">
-              <template v-if="probeDiff">
-                <component :is="part.changed ? 'del' : 'span'" v-for="(part, i) in probeDiff.before" :key="i">{{ part.text }}</component>
-              </template>
+              <DiffText v-if="probeDiff" :diff="probeDiff" view="before" />
               <template v-else>{{ llmProbeResult.requestText }}</template>
             </div>
             <div class="probe-detail-label">{{ t('llm.providerProbeOutput') }}</div>
             <div class="probe-detail-text">
-              <template v-if="probeDiff">
-                <component :is="part.changed ? 'ins' : 'span'" v-for="(part, i) in probeDiff.after" :key="i">{{ part.text }}</component>
-              </template>
+              <DiffText v-if="probeDiff" :diff="probeDiff" view="after" />
               <template v-else>{{ t('llm.providerProbeOutputEmpty') }}</template>
             </div>
           </template>

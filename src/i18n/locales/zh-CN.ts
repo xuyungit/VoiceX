@@ -93,6 +93,8 @@ const zhCN = {
     unknownApp: '未知应用',
     copy: '复制',
     copied: '已复制',
+    copyOriginal: '复制原文',
+    changesFromOriginal: '与听写原文对比',
     expand: '展开全文',
     collapse: '收起',
     deleteTitle: '删除这条修改？',

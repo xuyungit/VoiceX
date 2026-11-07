@@ -88,15 +88,4 @@ defineProps<{
   color: var(--color-text-primary);
   overflow-wrap: anywhere;
 }
-
-.probe-details :slotted(del) {
-  color: var(--color-error);
-  text-decoration: line-through;
-}
-
-.probe-details :slotted(ins) {
-  text-decoration: none;
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--color-success) 20%, transparent);
-}
 </style>

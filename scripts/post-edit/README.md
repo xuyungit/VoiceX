@@ -126,7 +126,7 @@ scripts/post-edit/check-macos-dispatch.sh /tmp/voicex-dispatch-samples.json
 node scripts/post-edit/history-ui-preview.mjs
 ```
 
-打开 `http://127.0.0.1:1522/history?scenario=edited`。可选场景为 `empty`、`edited`、`long`、`many`、`error`、`save-error` 和 `off`（开关关闭，修改记录 Tab 隐藏）。夹具同时提供全部听写行和 `set_history_final_text`，可核对两处原位编辑。此服务加载实际 Vue 页面并注入模拟 Tauri 接口，适合核对 Tab、空状态、长文、分页和错误提示；不能作为真实目标应用采集成功的证据。
+打开 `http://127.0.0.1:1522/history?scenario=edited`。可选场景为 `empty`、`edited`、`diff`（行内与上下对照两种差异显示、长文折叠）、`long`、`many`、`error`、`save-error` 和 `off`（开关关闭，修改记录 Tab 隐藏）。夹具同时提供全部听写行和 `set_history_final_text`，可核对两处原位编辑。此服务加载实际 Vue 页面并注入模拟 Tauri 接口，适合核对 Tab、空状态、长文、分页和错误提示；不能作为真实目标应用采集成功的证据。
 
 ## 当前验证边界
 
