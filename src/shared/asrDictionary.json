@@ -1,0 +1,15 @@
+{
+  "volcengine": { "defaultEnabled": true, "channel": "native" },
+  "google": { "defaultEnabled": true, "channel": "native" },
+  "funasr": { "defaultEnabled": true, "channel": "context" },
+  "qwen": { "defaultEnabled": true, "channel": "mixed" },
+  "gemini": { "defaultEnabled": false, "channel": "mixed" },
+  "openai": { "defaultEnabled": true, "channel": "mixed" },
+  "elevenlabs": { "defaultEnabled": true, "channel": "batch" },
+  "soniox": { "defaultEnabled": true, "channel": "native" },
+  "stepaudio": { "defaultEnabled": true, "channel": "native" },
+  "qwen-local": { "defaultEnabled": true, "channel": "prompt" },
+  "cohere": { "defaultEnabled": false, "channel": "unsupported" },
+  "mimo": { "defaultEnabled": false, "channel": "unsupported" },
+  "coli": { "defaultEnabled": false, "channel": "unsupported" }
+}

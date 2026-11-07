@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { isAsrDictionaryEnabled } from '../../utils/asrDictionary'
 import { computed, ref, watch } from 'vue'
 import AsrModelSelect from './AsrModelSelect.vue'
 import { NAlert, NInput, NInputNumber, NSelect, NSwitch, NTag } from 'naive-ui'
@@ -166,7 +167,7 @@ const usesActiveQwenAudioStreaming = computed(() =>
   qwenAsrRecognitionMode.value === 'realtime' && isQwenAudioStreamingModel(qwenAsrModel.value)
 )
 const usesQwenAudioFeatures = computed(() => connection.value.needsWorkspace)
-const hasDictionary = computed(() => settingsStore.settings.dictionaryText.trim().length > 0)
+const hasDictionary = computed(() => isAsrDictionaryEnabled(settingsStore.settings) && settingsStore.settings.dictionaryText.trim().length > 0)
 const vocabularyIdOverridden = computed(() =>
   usesQwenAudioFeatures.value && hasDictionary.value && qwenAsrVocabularyId.value.trim().length > 0
 )

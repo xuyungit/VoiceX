@@ -5,6 +5,7 @@ import { isMacOS } from '../utils/platform'
 import { useSettingsStore } from './settings'
 import { buildLlmProviderOptions, providerSelectionKey } from '../utils/llmOptions'
 import { buildAsrProviderOptions } from '../utils/providerOptions'
+import { checkAsrDictionarySettings } from '../utils/asrDictionary.spec'
 
 export function checkLlmDefault(expectedMacOS: boolean) {
   if (isMacOS !== expectedMacOS) throw new Error('Platform fixture was not applied')
@@ -12,6 +13,7 @@ export function checkLlmDefault(expectedMacOS: boolean) {
   try {
     // Inspect initial state only: no backend load, save, API call, or timer.
     const store = useSettingsStore(pinia)
+    checkAsrDictionarySettings(store.settings)
     const model = store.settings.llmVolcengineModel
     if (model !== llmModels.volcengineDefaultModel || model !== 'doubao-seed-2-0-mini-260428') {
       throw new Error('The settings UI must use the shared current Doubao default')

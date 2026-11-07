@@ -1,5 +1,5 @@
 //! Explicit, read-only provider probe. Does not save settings or initialize the app DB.
-//! cargo run --example asr_model_probe -- <settings-db> <audio-file> <provider> <model> [mode]
+//! cargo run --example asr_model_probe -- <settings-db> <audio-file> <provider> <model> [mode] [--dictionary=on|off]
 use std::{path::PathBuf, time::Instant};
 use voicex_lib::{
     asr::{transcribe_audio_path, AsrConfig},
@@ -27,10 +27,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings.asr_provider_type = args[3].clone();
     settings.enable_diagnostics = false;
     settings.enable_asr_context = false;
-    let mode = args.get(5).map(String::as_str).unwrap_or("batch");
+    let mode = args.get(5).filter(|arg| !arg.starts_with("--"))
+        .map(String::as_str).unwrap_or("batch");
     match args[3].as_str() {
-        "gemini" => settings.gemini_model = args[4].clone(),
-        "gemini-live" => settings.gemini_live_model = args[4].clone(),
+        "gemini" => {
+            settings.gemini_recognition_mode = mode.into();
+            if mode == "realtime" {
+                settings.gemini_live_model = args[4].clone();
+            } else {
+                settings.gemini_model = args[4].clone();
+            }
+            settings.gemini_post_recording_refine = "off".into();
+        }
+        "gemini-live" => {
+            settings.asr_provider_type = "gemini".into();
+            settings.gemini_recognition_mode = "realtime".into();
+            settings.gemini_live_model = args[4].clone();
+            settings.gemini_post_recording_refine = "off".into();
+        }
         "qwen" => {
             settings.qwen_asr_model = args[4].clone();
             settings.qwen_asr_batch_model = args[4].clone();
@@ -41,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings.openai_asr_model = args[4].clone();
             settings.openai_asr_mode = mode.into();
             settings.openai_asr_post_recording_refine = "off".into();
-            if let Some(refine) = args.get(6) {
+            if let Some(refine) = args.get(6).filter(|arg| !arg.starts_with("--")) {
                 settings.openai_asr_post_recording_refine = "batch_refine".into();
                 settings.openai_asr_refine_model = refine.clone();
             }
@@ -51,9 +65,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "qwen-local" => settings.qwen_local_model_dir = args[4].clone(),
         _ => return Err("Unsupported probe provider".into()),
     }
-    let mut config = AsrConfig::from(&settings);
     // Only the probe vocabulary is sent, never the user's dictionary/history.
-    config.hotwords = vec!["VoiceX".into(), "ASR".into()];
+    settings.dictionary_text = "VoiceX\nASR".into();
+    settings.online_hotword_id.clear();
+    settings.qwen_asr_vocabulary_id.clear();
+    if let Some(value) = args.iter().find_map(|arg| arg.strip_prefix("--dictionary=")) {
+        let enabled = match value {
+            "on" => true,
+            "off" => false,
+            _ => return Err("Expected --dictionary=on or --dictionary=off".into()),
+        };
+        settings.asr_dictionary_enabled.insert(settings.asr_provider_type.clone(), enabled);
+    }
+    let mut config = AsrConfig::from(&settings);
+    let dictionary_enabled = !config.hotwords.is_empty();
     let started = Instant::now();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(150),
@@ -68,6 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(text) => println!(
             "{}",
             serde_json::json!({"provider": args[3], "model": args[4],
+            "dictionary_enabled": dictionary_enabled,
             "elapsed_ms": started.elapsed().as_millis(), "text": text})
         ),
         Err(error) => {

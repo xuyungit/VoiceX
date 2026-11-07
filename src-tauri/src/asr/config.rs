@@ -2,6 +2,39 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DictionaryPolicy {
+    default_enabled: bool,
+    channel: String,
+}
+
+static DICTIONARY_POLICIES: std::sync::LazyLock<std::collections::BTreeMap<String, DictionaryPolicy>> =
+    std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("../../../src/shared/asrDictionary.json"))
+            .expect("valid shared ASR dictionary policies")
+    });
+
+fn dictionary_enabled(settings: &crate::commands::settings::AppSettings) -> bool {
+    let provider = match settings.asr_provider_type.as_str() {
+        "gemini-live" => "gemini",
+        provider => provider,
+    };
+    let Some(policy) = DICTIONARY_POLICIES.get(provider) else {
+        return false;
+    };
+    if policy.channel == "unsupported" {
+        return false;
+    }
+    settings.asr_dictionary_enabled.get(provider).copied().unwrap_or_else(|| {
+        match provider {
+            "qwen-local" => settings.qwen_local_use_dictionary,
+            "elevenlabs" => settings.elevenlabs_enable_keyterms,
+            _ => policy.default_enabled,
+        }
+    })
+}
+
 /// ASR provider type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AsrProviderType {
@@ -373,6 +406,7 @@ impl Default for AsrConfig {
 
 impl From<&crate::commands::settings::AppSettings> for AsrConfig {
     fn from(settings: &crate::commands::settings::AppSettings) -> Self {
+        let use_dictionary = dictionary_enabled(settings);
         let provider_type = match settings.asr_provider_type.as_str() {
             "google" => AsrProviderType::Google,
             "funasr" => AsrProviderType::FunAsr,
@@ -417,7 +451,11 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             qwen_workspace_id: settings.qwen_asr_workspace_id.clone(),
             qwen_language: settings.qwen_asr_language.clone(),
             qwen_post_recording_refine: settings.qwen_asr_post_recording_refine,
-            qwen_vocabulary_id: settings.qwen_asr_vocabulary_id.clone(),
+            qwen_vocabulary_id: if use_dictionary {
+                settings.qwen_asr_vocabulary_id.clone()
+            } else {
+                String::new()
+            },
             qwen_hotword_weight: settings.qwen_asr_hotword_weight,
             qwen_semantic_punctuation_enabled: settings.qwen_asr_semantic_punctuation_enabled,
             qwen_max_sentence_silence_ms: settings.qwen_asr_max_sentence_silence_ms,
@@ -453,7 +491,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             elevenlabs_realtime_model: settings.elevenlabs_realtime_model.clone(),
             elevenlabs_batch_model: settings.elevenlabs_batch_model.clone(),
             elevenlabs_language: settings.elevenlabs_language.clone(),
-            elevenlabs_enable_keyterms: settings.elevenlabs_enable_keyterms,
+            elevenlabs_enable_keyterms: use_dictionary,
             soniox_api_key: settings.soniox_api_key.clone(),
             soniox_model: settings.soniox_model.clone(),
             soniox_language: settings.soniox_language.clone(),
@@ -469,7 +507,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             qwen_local_command_path: settings.qwen_local_command_path.clone(),
             qwen_local_model_dir: settings.qwen_local_model_dir.clone(),
             qwen_local_language: settings.qwen_local_language.clone(),
-            qwen_local_use_dictionary: settings.qwen_local_use_dictionary,
+            qwen_local_use_dictionary: use_dictionary,
             coli_command_path: settings.coli_command_path.clone(),
             coli_use_vad: settings.coli_use_vad,
             coli_asr_interval_ms: settings.coli_asr_interval_ms,
@@ -493,12 +531,13 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
                 settings
                     .dictionary_text
                     .lines()
+                    .filter(|_| use_dictionary)
                     .map(|l| l.trim().to_string())
                     .filter(|l| !l.is_empty())
                     .filter(|l| seen.insert(l.clone()))
                     .collect()
             },
-            online_hotword_id: if settings.online_hotword_id.is_empty() {
+            online_hotword_id: if !use_dictionary || settings.online_hotword_id.is_empty() {
                 None
             } else {
                 Some(settings.online_hotword_id.clone())
@@ -887,6 +926,67 @@ impl AsrConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dictionary_switch_isolates_providers_and_clears_all_bias_channels() {
+        use crate::commands::settings::AppSettings;
+        let mut settings = AppSettings::default();
+        settings.dictionary_text = " VoiceX \nVoiceX\n\n反力".into();
+        settings.online_hotword_id = "online-table".into();
+        settings.qwen_asr_vocabulary_id = "qwen-vocabulary".into();
+        for provider in super::DICTIONARY_POLICIES.keys() {
+            settings.asr_provider_type = provider.clone();
+            settings.asr_dictionary_enabled.insert(provider.clone(), false);
+            let disabled = super::AsrConfig::from(&settings);
+            assert!(disabled.hotwords.is_empty(), "{provider}");
+            assert!(disabled.online_hotword_id.is_none(), "{provider}");
+            assert!(disabled.qwen_vocabulary_id.is_empty(), "{provider}");
+            settings.asr_dictionary_enabled.insert(provider.clone(), true);
+            let enabled = super::AsrConfig::from(&settings);
+            if super::DICTIONARY_POLICIES[provider].channel == "unsupported" {
+                assert!(enabled.hotwords.is_empty(), "{provider}");
+            } else {
+                assert_eq!(enabled.hotwords, ["VoiceX", "反力"], "{provider}");
+                assert_eq!(enabled.online_hotword_id.as_deref(), Some("online-table"));
+                assert_eq!(enabled.qwen_vocabulary_id, "qwen-vocabulary");
+            }
+        }
+        // Only Gemini changes its default. Its two modes share one preference.
+        settings.asr_dictionary_enabled.clear();
+        settings.asr_provider_type = "gemini".into();
+        for mode in ["batch", "realtime"] {
+            settings.gemini_recognition_mode = mode.into();
+            assert!(super::AsrConfig::from(&settings).hotwords.is_empty());
+            settings.asr_dictionary_enabled.insert("gemini".into(), true);
+            assert_eq!(super::AsrConfig::from(&settings).hotwords.len(), 2);
+            settings.asr_dictionary_enabled.clear();
+        }
+        settings.asr_provider_type = "soniox".into();
+        settings.asr_dictionary_enabled.insert("gemini".into(), false);
+        assert_eq!(super::AsrConfig::from(&settings).hotwords.len(), 2);
+        assert_eq!(settings.dictionary_text, " VoiceX \nVoiceX\n\n反力");
+    }
+
+    #[test]
+    fn dictionary_switch_preserves_legacy_preferences_and_roundtrips() {
+        use crate::commands::settings::AppSettings;
+        let mut settings: AppSettings = serde_json::from_value(serde_json::json!({
+            "dictionaryText": "VoiceX",
+            "qwenLocalUseDictionary": false,
+            "elevenlabsEnableKeyterms": false
+        })).unwrap();
+        for provider in ["qwen-local", "elevenlabs"] {
+            settings.asr_provider_type = provider.into();
+            assert!(super::AsrConfig::from(&settings).hotwords.is_empty());
+            settings.asr_dictionary_enabled.insert(provider.into(), true);
+            let config = super::AsrConfig::from(&settings);
+            assert_eq!(config.hotwords, ["VoiceX"]);
+            assert!(config.qwen_local_use_dictionary);
+            assert!(config.elevenlabs_enable_keyterms);
+        }
+        let restored: AppSettings = serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(restored.asr_dictionary_enabled, settings.asr_dictionary_enabled);
+    }
+
     #[test]
     fn validation_names_missing_fields_without_exposing_values() {
         let mut config = super::AsrConfig::default();

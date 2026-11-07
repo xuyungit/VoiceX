@@ -38,6 +38,7 @@ pub struct AppSettings {
     pub force_to_speech_time: Option<u32>,
     pub enable_ddc: bool,
     pub enable_asr_context: bool,
+    pub asr_dictionary_enabled: BTreeMap<String, bool>,
 
     // ASR Provider: Google Cloud Speech-to-Text V2
     pub google_stt_api_key: String,
@@ -100,7 +101,7 @@ pub struct AppSettings {
     pub elevenlabs_realtime_model: String,
     pub elevenlabs_batch_model: String,
     pub elevenlabs_language: String,
-    pub elevenlabs_enable_keyterms: bool,
+    pub elevenlabs_enable_keyterms: bool, // Legacy fallback for asr_dictionary_enabled.
 
     // ASR Provider: Soniox
     pub soniox_api_key: String,
@@ -124,7 +125,7 @@ pub struct AppSettings {
     pub qwen_local_command_path: String,
     pub qwen_local_model_dir: String,
     pub qwen_local_language: String,
-    pub qwen_local_use_dictionary: bool,
+    pub qwen_local_use_dictionary: bool, // Legacy fallback for asr_dictionary_enabled.
     pub coli_command_path: String,
     pub coli_use_vad: bool,
     pub coli_asr_interval_ms: u32,
@@ -208,9 +209,9 @@ pub struct AppSettings {
     /// Not to be confused with `tts_clipboard_fallback` above, which is a way
     /// of reading the *selection* through a synthesized copy.
     pub tts_clipboard_when_no_selection: bool,
-
     /// Maximum input characters for plain reading; zero means unlimited.
     pub tts_read_max_chars: usize,
+
     // Translate-and-read: one LLM call between the selection and the engine.
     // Prefixed `tts_translate_*` to stay apart from dictation's
     // `translation_*`, a different feature with its own prompt and pipeline.
@@ -220,8 +221,8 @@ pub struct AppSettings {
     /// `auto`, or a code from `tts::llm_stage::LANGUAGES`.
     pub tts_translate_source_language: String,
     pub tts_translate_target_language: String,
-    pub tts_translate_prompt_template: String,
     pub tts_translate_max_chars: usize,
+    pub tts_translate_prompt_template: String,
     /// Voice for the translated text, keyed by provider name or
     /// `aliyun:<model>`. A missing or empty entry reuses the reading voice.
     pub tts_translate_voice_overrides: BTreeMap<String, String>,
@@ -448,6 +449,7 @@ impl Default for AppSettings {
             force_to_speech_time: Some(3500),
             enable_ddc: true,
             enable_asr_context: false,
+            asr_dictionary_enabled: BTreeMap::new(),
 
             google_stt_api_key: String::new(),
             google_stt_project_id: String::new(),
@@ -568,15 +570,15 @@ impl Default for AppSettings {
             tts_hotkey_config: None,
             tts_clipboard_fallback: true,
             tts_clipboard_when_no_selection: true,
+            tts_read_max_chars: llm_stage::reading_limits().default_read_max_chars,
 
             tts_translate_enabled: true,
-            tts_read_max_chars: llm_stage::reading_limits().default_read_max_chars,
             tts_translate_hotkey_config: None,
             tts_translate_source_language: llm_stage::SOURCE_LANGUAGE_AUTO.to_string(),
             tts_translate_target_language: llm_stage::DEFAULT_TARGET_LANGUAGE.to_string(),
+            tts_translate_max_chars: llm_stage::reading_limits().default_translate_max_chars,
             tts_translate_prompt_template: llm_stage::DEFAULT_TRANSLATE_PROMPT_ZH.to_string(),
             tts_translate_voice_overrides: BTreeMap::new(),
-            tts_translate_max_chars: llm_stage::reading_limits().default_translate_max_chars,
             tts_translate_copy_to_clipboard: false,
             tts_translate_save_history: true,
             tts_llm_provider_key: LLM_PROVIDER_FOLLOW.to_string(),
@@ -1317,8 +1319,6 @@ pub fn save_settings(
     debug: State<'_, AsrDebugService>,
 ) -> Result<(), String> {
     let current_settings = crate::storage::get_settings().map_err(|e| e.to_string())?;
-    settings.ui_language = crate::ui_locale::normalize_ui_language(&settings.ui_language);
-    normalize_qwen_settings(&mut settings);
     let limits = llm_stage::reading_limits();
     if (settings.tts_read_max_chars != 0
         && !limits.max_chars_options.contains(&settings.tts_read_max_chars))
@@ -1327,6 +1327,8 @@ pub fn save_settings(
     {
         return Err("Reading length must use one of the available character limits".to_string());
     }
+    settings.ui_language = crate::ui_locale::normalize_ui_language(&settings.ui_language);
+    normalize_qwen_settings(&mut settings);
     normalize_elevenlabs_settings(&mut settings);
     normalize_llm_settings(&mut settings);
     normalize_text_injection_overrides(&mut settings);

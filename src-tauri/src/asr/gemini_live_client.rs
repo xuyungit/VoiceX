@@ -240,16 +240,20 @@ fn is_transcribe_live(model: &str) -> bool {
 }
 
 fn build_setup_message(config: &AsrConfig) -> Value {
+    let mut input_transcription = json!({
+        "languageCodes": super::gemini_client::transcription_languages(&config.gemini_language)
+    });
+    let vocabulary = super::gemini_client::transcription_vocabulary(config);
+    if !vocabulary.is_empty() {
+        input_transcription["customVocabulary"] = json!(vocabulary);
+    }
     if is_transcribe_live(&config.gemini_live_model) {
+        input_transcription["mode"] = json!("VERBATIM");
         return json!({"setup": {
             "model": format!("models/{}", config.gemini_live_model.trim()),
             "generationConfig": {"responseModalities": ["TEXT"]},
             "realtimeInputConfig": {"automaticActivityDetection": {"disabled": true}},
-            "inputAudioTranscription": {
-                "languageCodes": super::gemini_client::transcription_languages(&config.gemini_language),
-                "customVocabulary": super::gemini_client::transcription_vocabulary(config),
-                "mode": "VERBATIM"
-            }
+            "inputAudioTranscription": input_transcription
         }});
     }
     json!({
@@ -268,10 +272,7 @@ fn build_setup_message(config: &AsrConfig) -> Value {
                     "disabled": true,
                 }
             },
-            "inputAudioTranscription": {
-                "languageCodes": super::gemini_client::transcription_languages(&config.gemini_language),
-                "customVocabulary": super::gemini_client::transcription_vocabulary(config),
-            },
+            "inputAudioTranscription": input_transcription,
         }
     })
 }
@@ -828,6 +829,24 @@ mod tests {
         assert!(setup["setup"]["generationConfig"]
             .get("thinkingConfig")
             .is_none());
+    }
+
+    #[test]
+    fn dictionary_switch_applies_to_both_live_protocols() {
+        let mut settings = crate::commands::settings::AppSettings::default();
+        settings.asr_provider_type = "gemini".into();
+        settings.gemini_recognition_mode = "realtime".into();
+        settings.dictionary_text = "NeverSpokenBrand".into();
+        for model in ["gemini-3.5-transcribe-live", "gemini-3.8-live"] {
+            settings.gemini_live_model = model.into();
+            settings.asr_dictionary_enabled.insert("gemini".into(), false);
+            let setup = build_setup_message(&AsrConfig::from(&settings));
+            assert!(setup["setup"]["inputAudioTranscription"].get("customVocabulary").is_none());
+            assert!(!setup.to_string().contains("NeverSpokenBrand"));
+            settings.asr_dictionary_enabled.insert("gemini".into(), true);
+            let setup = build_setup_message(&AsrConfig::from(&settings));
+            assert_eq!(setup["setup"]["inputAudioTranscription"]["customVocabulary"], json!(["NeverSpokenBrand"]));
+        }
     }
 
     #[test]

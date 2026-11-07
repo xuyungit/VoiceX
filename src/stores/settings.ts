@@ -43,10 +43,11 @@ export interface AppSettings {
     forceToSpeechTime: number | null
     enableDdc: boolean
     enableAsrContext: boolean
+    asrDictionaryEnabled: Partial<Record<AppSettings['asrProviderType'], boolean>>
     qwenLocalCommandPath: string
     qwenLocalModelDir: string
     qwenLocalLanguage: string
-    qwenLocalUseDictionary: boolean
+    qwenLocalUseDictionary: boolean // Legacy preference, used when no per-provider override exists.
     coliCommandPath: string
     coliUseVad: boolean
     coliAsrIntervalMs: number
@@ -108,7 +109,7 @@ export interface AppSettings {
     elevenlabsRealtimeModel: string
     elevenlabsBatchModel: string
     elevenlabsLanguage: string
-    elevenlabsEnableKeyterms: boolean
+    elevenlabsEnableKeyterms: boolean // Legacy preference, used when no per-provider override exists.
 
     // ASR Provider: Soniox
     sonioxApiKey: string
@@ -190,9 +191,9 @@ export interface AppSettings {
     // Both reading keys read the clipboard when no selection can be read.
     // Not `ttsClipboardFallback`, which reads the *selection* via a copy.
     ttsClipboardWhenNoSelection: boolean
-
     /** Maximum input characters for plain reading; zero means unlimited. */
     ttsReadMaxChars: number
+
     // Translate-and-read: one LLM call between the selection and the engine.
     // `ttsTranslate*` is deliberately not `translation*` — that prefix belongs
     // to dictation's translate mode, a different feature.
@@ -201,8 +202,8 @@ export interface AppSettings {
     /** 'auto' or a code from TTS_LANGUAGES */
     ttsTranslateSourceLanguage: string
     ttsTranslateTargetLanguage: string
-    ttsTranslatePromptTemplate: string
     ttsTranslateMaxChars: number
+    ttsTranslatePromptTemplate: string
     /** provider or `aliyun:<model>` → voice id; missing entry reuses the reading voice */
     ttsTranslateVoiceOverrides: Record<string, string>
     ttsTranslateCopyToClipboard: boolean
@@ -355,6 +356,7 @@ const defaultSettings: AppSettings = {
     forceToSpeechTime: 3500,
     enableDdc: true,
     enableAsrContext: false,
+    asrDictionaryEnabled: {},
     qwenLocalCommandPath: '',
     qwenLocalModelDir: '',
     qwenLocalLanguage: 'Chinese',
@@ -478,15 +480,15 @@ const defaultSettings: AppSettings = {
     ttsHotkeyConfig: null,
     ttsClipboardFallback: true,
     ttsClipboardWhenNoSelection: true,
+    ttsReadMaxChars: readingLimits.defaultReadMaxChars,
 
     ttsTranslateEnabled: true,
-    ttsReadMaxChars: readingLimits.defaultReadMaxChars,
     ttsTranslateHotkeyConfig: null,
     ttsTranslateSourceLanguage: 'auto',
     ttsTranslateTargetLanguage: 'en',
+    ttsTranslateMaxChars: readingLimits.defaultTranslateMaxChars,
     ttsTranslatePromptTemplate: getDefaultPrompt('ttsTranslate', 'zh-CN'),
     ttsTranslateVoiceOverrides: {},
-    ttsTranslateMaxChars: readingLimits.defaultTranslateMaxChars,
     ttsTranslateCopyToClipboard: false,
     ttsTranslateSaveHistory: true,
     ttsLlmProviderKey: 'follow',

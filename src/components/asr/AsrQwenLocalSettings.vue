@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NButton, NInput, NSelect, NSwitch } from 'naive-ui'
+import { NButton, NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
 import SettingsSection from '../settings/SettingsSection.vue'
@@ -23,11 +23,6 @@ const qwenLocalModelDir = computed({
 const qwenLocalLanguage = computed({
   get: () => settingsStore.settings.qwenLocalLanguage,
   set: (v: string) => settingsStore.updateSetting('qwenLocalLanguage', v)
-})
-
-const qwenLocalUseDictionary = computed({
-  get: () => settingsStore.settings.qwenLocalUseDictionary,
-  set: (v: boolean) => settingsStore.updateSetting('qwenLocalUseDictionary', v)
 })
 
 interface LocalModel { path: string; label: string; filesReady: boolean; message: string; configured: boolean }
@@ -101,9 +96,6 @@ const languageOptions = computed(() => [
         :options="languageOptions"
         size="small"
       />
-    </SettingRow>
-    <SettingRow :label="t('asr.qwenLocalUseDictionary')" :help="t('asr.qwenLocalUseDictionaryNote')">
-      <NSwitch v-model:value="qwenLocalUseDictionary" />
     </SettingRow>
   </SettingsSection>
 </template>

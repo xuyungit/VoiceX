@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import AsrModelSelect from './AsrModelSelect.vue'
-import { NCheckbox, NInput, NSelect } from 'naive-ui'
+import { NInput, NSelect } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
 import {
@@ -59,11 +59,6 @@ const elevenlabsLanguage = computed({
   set: (value: string) => settingsStore.updateSetting('elevenlabsLanguage', value)
 })
 
-const elevenlabsEnableKeyterms = computed({
-  get: () => settingsStore.settings.elevenlabsEnableKeyterms,
-  set: (value: boolean) => settingsStore.updateSetting('elevenlabsEnableKeyterms', value)
-})
-
 const recognitionModeOptions = computed(() => buildElevenLabsRecognitionModeOptions(t))
 const postRecordingRefineOptions = computed(() => buildElevenLabsPostRecordingRefineOptions(t))
 
@@ -106,9 +101,6 @@ const batchRefineDisabled = computed(() => elevenlabsRecognitionMode.value === '
         v-model:value="elevenlabsLanguage"
         :placeholder="t('asr.elevenlabsLanguagePlaceholder')"
       />
-    </SettingRow>
-    <SettingRow :label="t('asr.elevenlabsEnableKeyterms')" :help="t('asr.elevenlabsEnableKeytermsNote')">
-      <NCheckbox v-model:checked="elevenlabsEnableKeyterms" />
     </SettingRow>
   </SettingsSection>
 </template>

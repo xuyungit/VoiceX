@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NButton, NSelect, NTooltip } from 'naive-ui'
+import { NButton, NSelect, NSwitch, NTooltip } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import type { LocalAsrStatus } from '../types/asr'
 import { buildAsrProviderOptions, type AsrProviderValue as ProviderValue } from '../utils/providerOptions'
 import { isWindows } from '../utils/platform'
+import { ASR_DICTIONARY_POLICIES, isAsrDictionaryEnabled } from '../utils/asrDictionary'
 import AsrVolcengineSettings from '../components/asr/AsrVolcengineSettings.vue'
 import AsrGoogleSettings from '../components/asr/AsrGoogleSettings.vue'
 import AsrFunAsrSettings from '../components/asr/AsrFunAsrSettings.vue'
@@ -111,6 +112,15 @@ const isMimo = computed(() => settingsStore.settings.asrProviderType === 'mimo')
 const isQwenLocal = computed(() => settingsStore.settings.asrProviderType === 'qwen-local')
 const isColi = computed(() => settingsStore.settings.asrProviderType === 'coli')
 const diagnosticsEnabled = computed(() => settingsStore.settings.enableDiagnostics)
+
+const dictionaryPolicy = computed(() => ASR_DICTIONARY_POLICIES[asrProviderType.value])
+const dictionaryEnabled = computed({
+  get: () => isAsrDictionaryEnabled(settingsStore.settings),
+  set: (enabled: boolean) => settingsStore.updateSetting('asrDictionaryEnabled', {
+    ...settingsStore.settings.asrDictionaryEnabled,
+    [asrProviderType.value]: enabled
+  })
+})
 
 watch([diagnosticsEnabled, isSoniox], ([enabled, soniox]) => {
   if (enabled && soniox) {
@@ -370,6 +380,16 @@ async function clearSonioxDebugOverrides() {
           :options="providerOptions"
           size="small"
         />
+      </SettingRow>
+      <SettingRow :label="t('asr.useDictionary')" :help="t('asr.useDictionaryHelp')"
+        :disabled="dictionaryPolicy.channel === 'unsupported'">
+        <template #status>
+          <span>{{ t(`asr.dictionaryChannel_${dictionaryPolicy.channel}`) }}</span>
+          <span v-if="isGemini">{{ t('asr.dictionaryGeminiNote') }}</span>
+        </template>
+        <NSwitch v-model:value="dictionaryEnabled" :aria-label="t('asr.useDictionary')"
+          :aria-disabled="dictionaryPolicy.channel === 'unsupported'"
+          :disabled="dictionaryPolicy.channel === 'unsupported'" />
       </SettingRow>
       <div v-if="showColiUnavailableWarning" class="settings-callout">
         {{ t('asr.warningColiUnavailable') }}

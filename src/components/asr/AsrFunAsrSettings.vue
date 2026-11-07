@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { findAsrModel } from '../../utils/asrModels'
+import { isAsrDictionaryEnabled } from '../../utils/asrDictionary'
 import AsrModelSelect from './AsrModelSelect.vue'
 import { NInput, NSelect, NTag, NAlert } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
@@ -42,6 +43,7 @@ const currentModel = computed(() => findAsrModel('funasr', funasrModel.value))
 // 当用户填了词典但选中模型不支持上下文增强时，显式提示。
 // 遵守 AGENTS.md 防静默失败规则：不能让用户 unknowingly 用了不支持的模型还以为词典生效。
 const contextUnsupportedWarning = computed(() => {
+  if (!isAsrDictionaryEnabled(settingsStore.settings)) return false
   if (!hasDictionary.value) return false
   if (!currentModel.value) return false
   return !currentModel.value.supportsContext
