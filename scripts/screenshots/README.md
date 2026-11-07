@@ -40,24 +40,29 @@ npx --package @playwright/cli playwright-cli -s=readme run-code --filename=scrip
 npx --package @playwright/cli playwright-cli -s=readme close
 ```
 
-The script writes 20 PNGs under `assets/screenshots/{zh,en}/` at 2× pixel density.
-It uses light Overview/settings pages, dark History, and the native stream HUD's
-256 × 100 logical size. The first-launch images are the Overview permission card
-(the fixture reports permissions missing) and the macOS drag helper at its
+The script writes 34 PNGs under `assets/screenshots/{zh,en}/` at 2× pixel density.
+Main-window pages are captured at the app's default 900 × 650 window size, each
+in light (`<name>.png`) and dark (`<name>-dark.png`); the READMEs use `<picture>`
+so GitHub shows the one matching the reader's theme. The native stream HUD uses
+its 256 × 100 logical size. The first-launch images are the Overview permission
+card (the fixture reports permissions missing) and the macOS drag helper at its
 420 × 160 window size with a transparent background; System Settings itself is
 not captured. Reading examples include the translate-and-read settings
 and a transparent caption HUD driven by synthetic `state:reading` / `state:caption`
 events. The caption viewport uses the bounds requested by the actual HUD code.
+The HUD, caption, and drag helper look the same in both themes and are captured once.
 Review every image before publishing. The images show
 frontend content without a native title bar; they do not demonstrate live ASR,
 TTS, or Windows validation.
 
-脚本会在 `assets/screenshots/{zh,en}/` 写入 20 张 2 倍像素密度的 PNG：浅色概览和设置页、
-深色历史页，以及原生流式 HUD 的 256 × 100 逻辑尺寸。首次启动的两张图分别是概览中的
-权限卡片（替身报告权限缺失）和 macOS 拖拽助手（420 × 160 窗口尺寸、透明背景）；
-不截取系统设置本身。朗读示例包括翻译朗读设置，
+脚本会在 `assets/screenshots/{zh,en}/` 写入 34 张 2 倍像素密度的 PNG。主窗口页面按应用默认的
+900 × 650 窗口尺寸截取，浅色（`<name>.png`）和深色（`<name>-dark.png`）各一张；README 用
+`<picture>` 让 GitHub 按读者的主题显示对应的一张。原生流式 HUD 使用 256 × 100 逻辑尺寸。
+首次启动的两张图分别是概览中的权限卡片（替身报告权限缺失）和 macOS 拖拽助手（420 × 160
+窗口尺寸、透明背景）；不截取系统设置本身。朗读示例包括翻译朗读设置，
 以及通过模拟 `state:reading` / `state:caption` 事件驱动的透明字幕 HUD；字幕取景尺寸
-来自实际 HUD 代码请求的窗口尺寸。发布前应逐张检查。
+来自实际 HUD 代码请求的窗口尺寸。HUD、字幕和拖拽助手在两种主题下外观相同，只截一张。
+发布前应逐张检查。
 截图仅展示前端内容，不含原生标题栏，也不代表真实 ASR、TTS 或 Windows 验证。
 
 For manual inspection, use `?lang=zh` or `?lang=en` and optionally `&theme=dark`

@@ -3,7 +3,10 @@
 [English](./README.en.md) | 中文
 
 <p align="center">
-  <img src="assets/screenshots/zh/main-window.png" alt="VoiceX 浅色概览：听写与朗读的真实使用统计" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/zh/main-window-dark.png" />
+    <img src="assets/screenshots/zh/main-window.png" alt="VoiceX 概览：听写与朗读的真实使用统计" width="900" />
+  </picture>
 </p>
 
 <p align="center">
@@ -52,7 +55,10 @@ Intel Mac 暂无安装包，可[从源码构建](./docs/development.md)。
 VoiceX 需要系统权限才能听到你的声音并替你输入。缺少权限时，概览页顶部会出现「完成 VoiceX 的权限设置」卡片，侧栏的「概览」旁也会显示一个橙色圆点：
 
 <p align="center">
-  <img src="assets/screenshots/zh/permission-setup.png" alt="概览页的权限设置卡片：麦克风、辅助功能、输入监控" width="760" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/zh/permission-setup-dark.png" />
+    <img src="assets/screenshots/zh/permission-setup.png" alt="概览页的权限设置卡片：麦克风、辅助功能、输入监控" width="648" />
+  </picture>
 </p>
 
 macOS 上需要三项权限：
@@ -98,7 +104,10 @@ Windows 不需要额外授权。只有当系统关闭了麦克风权限时才会
 长按阈值和双击间隔均可调。录音期间按 **Escape** 可随时取消并丢弃。
 
 <p align="center">
-  <img src="assets/screenshots/zh/input-settings.png" alt="VoiceX 输入设置：热键、交互时序和麦克风" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/zh/input-settings-dark.png" />
+    <img src="assets/screenshots/zh/input-settings.png" alt="VoiceX 输入设置：热键、交互时序和麦克风" width="900" />
+  </picture>
 </p>
 
 **录音时静音**（可选，默认关闭）：在「输入 → 麦克风」开启后，录音期间会把系统默认输出静音，结束后恢复。只切换静音开关、不改音量，播放器继续播放，音乐不会被录进去。本来就静音的设备不受影响；无法软件静音的设备（如 macOS 上的 HDMI 输出）会在设置页提示。
@@ -121,13 +130,19 @@ Windows 不需要额外授权。只有当系统关闭了麦克风权限时才会
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/zh/reading-settings.png" alt="VoiceX 朗读设置：热键、语音引擎和音色" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/zh/reading-settings-dark.png" />
+    <img src="assets/screenshots/zh/reading-settings.png" alt="VoiceX 朗读设置：热键、语音引擎和音色" width="900" />
+  </picture>
 </p>
 
 翻译朗读可以单独选择目标语言、大模型和译文音色，并设置是否复制译文、保存历史或显示字幕：
 
 <p align="center">
-  <img src="assets/screenshots/zh/translate-reading-settings.png" alt="VoiceX 翻译朗读设置：语言、模型、音色和字幕开关" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/zh/translate-reading-settings-dark.png" />
+    <img src="assets/screenshots/zh/translate-reading-settings.png" alt="VoiceX 翻译朗读设置：语言、模型、音色和字幕开关" width="900" />
+  </picture>
 </p>
 
 | | 说明 |
@@ -185,7 +200,10 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --tr
 在 **ASR** 页切换引擎、选择模型并调整参数，参数说明可通过旁边的帮助图标查看。
 
 <p align="center">
-  <img src="assets/screenshots/zh/asr-settings.png" alt="VoiceX 语音识别设置：Soniox 示例配置与就地帮助" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/zh/asr-settings-dark.png" />
+    <img src="assets/screenshots/zh/asr-settings.png" alt="VoiceX 语音识别设置：Soniox 示例配置与就地帮助" width="900" />
+  </picture>
 </p>
 
 | 引擎 | 方式 | 说明 |
@@ -274,7 +292,10 @@ curl -L -C - --retry 8 -o ~/models/qwen3-asr-0.6b/model.safetensors "https://hug
 ## 历史记录与统计
 
 <p align="center">
-  <img src="assets/screenshots/zh/history-dark.png" alt="VoiceX 深色历史页：按日期分组的示例听写记录" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/zh/history-dark.png" />
+    <img src="assets/screenshots/zh/history.png" alt="VoiceX 历史页：按日期分组的示例听写记录" width="900" />
+  </picture>
 </p>
 
 - 按日期分组浏览全部听写，可回放录音、复制、查看详情，并对比原始识别结果与大模型纠正结果。

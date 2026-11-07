@@ -3,7 +3,10 @@
 English | [中文](./README.md)
 
 <p align="center">
-  <img src="assets/screenshots/en/main-window.png" alt="VoiceX light Overview with real dictation and reading statistics" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en/main-window-dark.png" />
+    <img src="assets/screenshots/en/main-window.png" alt="VoiceX Overview with real dictation and reading statistics" width="900" />
+  </picture>
 </p>
 
 <p align="center">
@@ -52,7 +55,10 @@ Run `VoiceX_x.y.z_x64-setup.exe` (or the `.msi`). If SmartScreen warns about an 
 VoiceX needs system permissions to hear you and type for you. While any are missing, Overview shows a **Finish setting up VoiceX** card and the Overview item in the sidebar gets an orange dot:
 
 <p align="center">
-  <img src="assets/screenshots/en/permission-setup.png" alt="Overview permission card listing Microphone, Accessibility and Input Monitoring" width="760" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en/permission-setup-dark.png" />
+    <img src="assets/screenshots/en/permission-setup.png" alt="Overview permission card listing Microphone, Accessibility and Input Monitoring" width="648" />
+  </picture>
 </p>
 
 On macOS VoiceX needs three permissions:
@@ -98,7 +104,10 @@ One hotkey, three gestures:
 The hold threshold and double-tap window are adjustable. Press **Escape** at any time to cancel and discard.
 
 <p align="center">
-  <img src="assets/screenshots/en/input-settings.png" alt="VoiceX Input settings with hotkeys, gesture timing, and microphone options" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en/input-settings-dark.png" />
+    <img src="assets/screenshots/en/input-settings.png" alt="VoiceX Input settings with hotkeys, gesture timing, and microphone options" width="900" />
+  </picture>
 </p>
 
 **Mute while recording** (optional, off by default): enable it under Input → Microphone to mute the default system output while you dictate and restore it afterwards. Only the mute switch changes, not the volume, and players keep playing, so music no longer leaks into the microphone. Devices that were already muted are left alone; outputs that cannot be muted by software (such as HDMI on macOS) are flagged on the settings page.
@@ -121,13 +130,19 @@ Engines that report progress show each sentence as a large caption:
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/en/reading-settings.png" alt="VoiceX Reading settings with hotkeys, speech engine, and voice selection" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en/reading-settings-dark.png" />
+    <img src="assets/screenshots/en/reading-settings.png" alt="VoiceX Reading settings with hotkeys, speech engine, and voice selection" width="900" />
+  </picture>
 </p>
 
 Translate-and-read has its own target language, LLM, and voice options, plus switches for copying translations, keeping history, and showing captions:
 
 <p align="center">
-  <img src="assets/screenshots/en/translate-reading-settings.png" alt="VoiceX translate-and-read settings with language, model, voice, and caption controls" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en/translate-reading-settings-dark.png" />
+    <img src="assets/screenshots/en/translate-reading-settings.png" alt="VoiceX translate-and-read settings with language, model, voice, and caption controls" width="900" />
+  </picture>
 </p>
 
 | | Detail |
@@ -185,7 +200,10 @@ The output defaults to the input filename plus `.mp3` (such as `notes.md.mp3`); 
 Choose an engine and model and adjust its parameters on the **ASR** page; each parameter has a help icon next to it.
 
 <p align="center">
-  <img src="assets/screenshots/en/asr-settings.png" alt="VoiceX ASR settings with a demo Soniox configuration and inline help" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en/asr-settings-dark.png" />
+    <img src="assets/screenshots/en/asr-settings.png" alt="VoiceX ASR settings with a demo Soniox configuration and inline help" width="900" />
+  </picture>
 </p>
 
 | Engine | Mode | Notes |
@@ -274,7 +292,10 @@ Optionally have an LLM correct or translate the recognized text. Choose a provid
 ## History & statistics
 
 <p align="center">
-  <img src="assets/screenshots/en/history-dark.png" alt="VoiceX dark History with demo dictations grouped by date" width="880" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/screenshots/en/history-dark.png" />
+    <img src="assets/screenshots/en/history.png" alt="VoiceX History with demo dictations grouped by date" width="900" />
+  </picture>
 </p>
 
 - Browse every dictation by date: replay audio, copy, view details, and compare the original recognition with the LLM-corrected text.
