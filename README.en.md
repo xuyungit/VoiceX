@@ -12,7 +12,7 @@ English | [中文](./README.md)
 
 VoiceX is a cross-platform voice workspace for your desktop: dictate, translate, and listen in any app. The dictation pipeline is: record audio, provide real-time feedback, recognize speech, optionally correct or translate the result, inject text into the active application, and save or sync the history. In the other direction, it reads selected text aloud, optionally translating it first. The dictation workflow is similar to other modern voice input tools, but VoiceX still makes its own product choices and trade-offs.
 
-Screenshots were refreshed on 2026-11-05 and captured from the current frontend. Overview shows real cumulative usage statistics; history text, device names, and other settings use demo data, with no personal dictations or API keys.
+Screenshots are captured from the current frontend. Reading examples were added on 2026-11-06; the other screenshots were refreshed on 2026-11-05. Overview shows real cumulative usage statistics; history text, device names, and other settings use demo data, with no personal dictations or API keys.
 
 ## Highlights
 
@@ -55,7 +55,13 @@ Hold threshold and double-tap window are configurable. Press **Escape** at any t
 
 ## Reading and Translate-and-Read
 
-VoiceX also works in the other direction. Select text in **any application**:
+VoiceX also works in the other direction. Select text in **any application** and use a hotkey to start reading.
+
+Reading engines that report progress show each sentence as a large caption, for both plain reading and translate-and-read. This is the actual caption interface rendered with demo text:
+
+<p align="center">
+  <img src="assets/screenshots/en/reading-caption.png" alt="VoiceX reading caption with the current sentence in a dark subtitle strip (demo text)" width="880" />
+</p>
 
 | Hotkey (configurable) | What it does |
 |---|---|
@@ -81,6 +87,12 @@ from the tray menu. Tray reading on Windows still needs testing on a real machin
 
 <p align="center">
   <img src="assets/screenshots/en/reading-settings.png" alt="VoiceX Reading settings with hotkeys, speech engine, and voice selection" width="880" />
+</p>
+
+Translate-and-read has its own target language, LLM, and voice options, plus controls for copying translations, keeping history, and displaying captions:
+
+<p align="center">
+  <img src="assets/screenshots/en/translate-reading-settings.png" alt="VoiceX translate-and-read settings with language, model, voice, and caption controls" width="880" />
 </p>
 
 | | Detail |

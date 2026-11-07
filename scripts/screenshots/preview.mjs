@@ -18,6 +18,7 @@ function installFixture(usage) {
     sonioxLanguage: 'zh, en',
     ttsProviderType: 'edge',
     edgeTtsVoice: english ? 'en-US-AriaNeural' : 'zh-CN-XiaoxiaoNeural',
+    ttsTranslateVoiceOverrides: { edge: 'en-US-AriaNeural' },
   }
   const texts = english ? [
     'The new interface brings dictation, translation, and reading into one workspace.',
@@ -57,7 +58,10 @@ function installFixture(usage) {
     unregisterCallback(id) { callbacks.delete(id) },
     async invoke(command, args = {}) {
       switch (command) {
-        case 'get_settings': return structuredClone(settings)
+        case 'get_settings': {
+          const { getDefaultPrompt } = await import('/src/utils/llmPrompts.ts')
+          return { ...structuredClone(settings), ttsTranslatePromptTemplate: getDefaultPrompt('ttsTranslate', locale) }
+        }
         case 'save_settings': settings = structuredClone(args.settings); return
         case 'get_resolved_ui_locale': return locale
         case 'get_usage_stats': return structuredClone(usage.total)
@@ -81,8 +85,16 @@ function installFixture(usage) {
         case 'apply_hotkey_config':
         case 'set_input_device':
         case 'plugin:window|set_theme':
-        case 'set_hud_content_bounds': return
+        case 'set_hud_content_bounds': window.__readmeHudBounds = args; return
         case 'hud_ready':
+          if (params.get('hud') === 'reading') {
+            emit('state:hud_presentation', { mode: 'caption' })
+            emit('state:reading', { phase: 'speaking', kind: 'read', source: 'selection' })
+            emit('state:caption', { text: english
+              ? 'Select text, press the reading shortcut, and follow along with captions.'
+              : '选中一段文字，按下朗读热键，就能一边听、一边看字幕。' })
+            return
+          }
           emit('state:recording_style', { style: 'hands_free' })
           emit('asr:event', { text: english ? 'Turn your ideas into words with VoiceX.' : '用 VoiceX 说出想法，让语音变成文字。', isFinal: false })
           return

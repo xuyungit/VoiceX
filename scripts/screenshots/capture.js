@@ -46,8 +46,32 @@ async (page) => {
       await capturePage.locator('#textArea').filter({ hasText: 'VoiceX' }).waitFor()
       if (errors.length) throw new Error(errors.join('\n'))
       await capturePage.screenshot({ path: `assets/screenshots/${lang}/hud-window.png`, animations: 'disabled' })
+
+      await capturePage.setViewportSize({ width: 1120, height: 650 })
+      await capturePage.goto(`http://127.0.0.1:1523/reading-settings?lang=${lang}`)
+      const translation = capturePage.locator('.settings-section').filter({
+        has: capturePage.getByRole('heading', { name: lang === 'zh' ? /^翻译并朗读/ : /^Translate and read/ }),
+      })
+      await translation.waitFor()
+      await capturePage.evaluate(() => document.fonts.ready)
+      await translation.evaluate(section => {
+        const scroller = document.querySelector('.content-body')
+        scroller.scrollTop += section.getBoundingClientRect().top - 24
+      })
+      await capturePage.waitForTimeout(400)
+      if (errors.length) throw new Error(errors.join('\n'))
+      await capturePage.screenshot({ path: `assets/screenshots/${lang}/translate-reading-settings.png`, animations: 'disabled' })
+
+      await capturePage.goto(`http://127.0.0.1:1523/src/hud/index.html?lang=${lang}&hud=reading`)
+      await capturePage.locator('body.caption-mode:not(.hud-loading)').waitFor()
+      await capturePage.locator('#textArea').filter({ hasText: lang === 'zh' ? '选中一段文字' : 'Select text' }).waitFor()
+      const bounds = await capturePage.evaluate(() => window.__readmeHudBounds)
+      await capturePage.setViewportSize(bounds)
+      await capturePage.evaluate(() => document.fonts.ready)
+      if (errors.length) throw new Error(errors.join('\n'))
+      await capturePage.screenshot({ path: `assets/screenshots/${lang}/reading-caption.png`, animations: 'disabled', omitBackground: true })
     }
-    console.log('Captured 12 bilingual screenshots; no browser errors.')
+    console.log('Captured 16 bilingual screenshots; no browser errors.')
   } finally {
     await context.close()
   }
