@@ -1,0 +1,5 @@
+{
+  "defaultReadMaxChars": 0,
+  "defaultTranslateMaxChars": 16000,
+  "maxCharsOptions": [4000, 8000, 16000, 32000, 128000]
+}

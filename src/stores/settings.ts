@@ -1,6 +1,7 @@
 import type { TtsProviderValue } from '../utils/ttsOptions'
 import { ASR_MODEL_DEFAULTS } from '../utils/asrModels'
 import llmModels from '../shared/llmModels.json'
+import readingLimits from '../shared/readingLimits.json'
 import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
@@ -190,6 +191,8 @@ export interface AppSettings {
     // Not `ttsClipboardFallback`, which reads the *selection* via a copy.
     ttsClipboardWhenNoSelection: boolean
 
+    /** Maximum input characters for plain reading; zero means unlimited. */
+    ttsReadMaxChars: number
     // Translate-and-read: one LLM call between the selection and the engine.
     // `ttsTranslate*` is deliberately not `translation*` — that prefix belongs
     // to dictation's translate mode, a different feature.
@@ -199,6 +202,7 @@ export interface AppSettings {
     ttsTranslateSourceLanguage: string
     ttsTranslateTargetLanguage: string
     ttsTranslatePromptTemplate: string
+    ttsTranslateMaxChars: number
     /** provider or `aliyun:<model>` → voice id; missing entry reuses the reading voice */
     ttsTranslateVoiceOverrides: Record<string, string>
     ttsTranslateCopyToClipboard: boolean
@@ -476,11 +480,13 @@ const defaultSettings: AppSettings = {
     ttsClipboardWhenNoSelection: true,
 
     ttsTranslateEnabled: true,
+    ttsReadMaxChars: readingLimits.defaultReadMaxChars,
     ttsTranslateHotkeyConfig: null,
     ttsTranslateSourceLanguage: 'auto',
     ttsTranslateTargetLanguage: 'en',
     ttsTranslatePromptTemplate: getDefaultPrompt('ttsTranslate', 'zh-CN'),
     ttsTranslateVoiceOverrides: {},
+    ttsTranslateMaxChars: readingLimits.defaultTranslateMaxChars,
     ttsTranslateCopyToClipboard: false,
     ttsTranslateSaveHistory: true,
     ttsLlmProviderKey: 'follow',

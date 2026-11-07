@@ -11,6 +11,7 @@ import { buildLlmProviderOptions } from '../utils/llmOptions'
 import { getDefaultPrompt } from '../utils/llmPrompts'
 import { isMacOS, isWindows } from '../utils/platform'
 import { buildTtsProviderOptions, type TtsProviderValue as ProviderValue } from '../utils/ttsOptions'
+import readingLimits from '../shared/readingLimits.json'
 import SettingsSection from '../components/settings/SettingsSection.vue'
 import SettingRow from '../components/settings/SettingRow.vue'
 import HelpTip from '../components/settings/HelpTip.vue'
@@ -391,8 +392,18 @@ const LANGUAGE_LABEL_KEYS: Record<TranslateLanguage, string> = {
   ru: 'reading.langRu',
   pt: 'reading.langPt'
 }
-// `TRANSLATE_MAX_CHARS` in llm_stage.rs; shown in the note, enforced there.
-const TRANSLATE_MAX_CHARS = 5000
+const readingLengthOptions = computed(() => [
+  { label: t('reading.lengthUnlimited'), value: 0 },
+  ...readingLimits.maxCharsOptions.map(value => ({ label: `${value / 1000}K`, value }))
+])
+const readMaxChars = computed({
+  get: () => settingsStore.settings.ttsReadMaxChars,
+  set: (value: number) => settingsStore.updateSetting('ttsReadMaxChars', value)
+})
+const translateMaxChars = computed({
+  get: () => settingsStore.settings.ttsTranslateMaxChars,
+  set: (value: number) => settingsStore.updateSetting('ttsTranslateMaxChars', value)
+})
 
 type PromptLocale = Parameters<typeof getDefaultPrompt>[1]
 const resolvedLocale = computed<PromptLocale>(() => (locale.value === 'zh-CN' ? 'zh-CN' : 'en-US'))
@@ -1080,6 +1091,15 @@ onBeforeUnmount(() => {
          voice. Its switch and hotkey are in the first card next to the plain
          reading key; its LLM and prompt live here, not on the LLM page,
          because nothing but reading ever uses them. -->
+    <SettingsSection :title="t('reading.lengthTitle')" :help="t('reading.lengthNote')">
+      <SettingRow :label="t('reading.readMaxChars')" :help="t('reading.readMaxCharsNote')">
+        <NSelect v-model:value="readMaxChars" :options="readingLengthOptions" size="small" />
+      </SettingRow>
+      <SettingRow :label="t('reading.translateMaxChars')" :help="t('reading.translateMaxCharsNote')">
+        <NSelect v-model:value="translateMaxChars" :options="readingLengthOptions" size="small" />
+      </SettingRow>
+    </SettingsSection>
+
     <SettingsSection :title="t('reading.translateTitle')" :help="t('reading.translateSub')">
       <SettingRow :label="t('reading.sourceLanguage')" :help="t('reading.sourceLanguageNote')">
         <NSelect
@@ -1148,7 +1168,7 @@ onBeforeUnmount(() => {
         <div class="prompt-header">
           <div class="prompt-label">
             <span>{{ t('reading.translatePrompt') }}</span>
-            <HelpTip :text="t('reading.translatePromptNote', { max: TRANSLATE_MAX_CHARS })" />
+            <HelpTip :text="t('reading.translatePromptNote', { limit: translateMaxChars === 0 ? t('reading.lengthUnlimited') : translateMaxChars })" />
           </div>
           <NButton size="small" quaternary @click="resetTranslatePrompt">
             {{ t('reading.resetPrompt') }}

@@ -10,23 +10,28 @@
 //! the dictionary, recent history and a "原文：" prefix, none of which belongs
 //! in front of a document the user selected.
 
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 
 use crate::llm::{correction_timeout_for_text, LLMClient, LLMConfig, LLMError};
 
 use super::{log_event, CancelToken};
 
-/// Longest selection the translate path accepts, in characters. One LLM call
-/// has to finish inside the timeout before anything is heard; past this the
-/// wait is long enough to look broken, and streaming (M5) is the real answer.
-/// A constant rather than a setting: nobody tunes this, and a setting would
-/// only move the cliff around.
-///
-/// Was 3000 while reasoning models spent a fixed 4096-token output cap on
-/// thinking (2900 characters took 44 s or came back cut). With the caps gone
-/// and reasoning at each vendor's floor the same text takes 1.4–11 s, so 5000
-/// stays well inside the 60 s timeout ceiling.
-pub const TRANSLATE_MAX_CHARS: usize = 5_000;
+/// Shared with the settings UI. Zero means unlimited for either reading mode.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingLimits {
+    pub default_read_max_chars: usize,
+    pub default_translate_max_chars: usize,
+    pub max_chars_options: Vec<usize>,
+}
+
+pub fn reading_limits() -> &'static ReadingLimits {
+    static LIMITS: OnceLock<ReadingLimits> = OnceLock::new();
+    LIMITS.get_or_init(|| {
+        serde_json::from_str(include_str!("../../../src/shared/readingLimits.json"))
+            .expect("bundled reading limits must be valid")
+    })
+}
 
 /// Source-language value meaning "let the model work it out".
 pub const SOURCE_LANGUAGE_AUTO: &str = "auto";
@@ -126,9 +131,10 @@ pub fn fill_translate_prompt(template: &str, source_code: &str, target_code: &st
 pub enum LlmStageError {
     /// The chosen provider has no API key.
     NotConfigured,
-    /// The selection is over [`TRANSLATE_MAX_CHARS`].
+    /// The selection exceeds the configured reading limit.
     TooLong {
         chars: usize,
+        limit: usize,
     },
     Timeout(Duration),
     Failed(String),
@@ -161,9 +167,9 @@ impl std::fmt::Display for LlmStageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LlmStageError::NotConfigured => write!(f, "the selected LLM provider has no API key"),
-            LlmStageError::TooLong { chars } => write!(
+            LlmStageError::TooLong { chars, limit } => write!(
                 f,
-                "selection is {chars} characters, over the {TRANSLATE_MAX_CHARS} limit"
+                "selection is {chars} characters, over the {limit} limit"
             ),
             LlmStageError::Timeout(after) => {
                 write!(f, "no reply within {} ms", after.as_millis())
@@ -449,7 +455,10 @@ mod tests {
     fn error_codes_match_what_the_hud_maps() {
         // `hud.ts` maps these literally.
         assert_eq!(LlmStageError::NotConfigured.code(), "llm_not_configured");
-        assert_eq!(LlmStageError::TooLong { chars: 1 }.code(), "text_too_long");
+        assert_eq!(
+            LlmStageError::TooLong { chars: 4001, limit: 4000 }.code(),
+            "text_too_long"
+        );
         assert_eq!(
             LlmStageError::Timeout(Duration::from_secs(1)).code(),
             "llm_timeout"

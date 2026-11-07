@@ -17,7 +17,7 @@ use super::aliyun::{self, AliyunBackend, AliyunConfig};
 use super::azure::{self, AzureBackend, AzureConfig};
 use super::clipboard_text;
 use super::edge::EdgeBackend;
-use super::llm_stage::{self, LlmStageError, TRANSLATE_MAX_CHARS};
+use super::llm_stage::{self, LlmStageError};
 use super::mimo::{MimoBackend, MimoConfig};
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
@@ -1174,21 +1174,29 @@ fn stage_text(
     token: &super::CancelToken,
     llm_busy: &AtomicBool,
 ) -> Result<StagedText, LlmStageError> {
-    match kind {
-        ReadKind::Translate => {
+    if let Some(settings) = settings {
+        let limit = match kind {
+            ReadKind::Read => settings.tts_read_max_chars,
+            ReadKind::Translate => settings.tts_translate_max_chars,
+        };
+        if limit != 0 {
             let chars = text.chars().count();
-            if chars > TRANSLATE_MAX_CHARS {
-                let err = LlmStageError::TooLong { chars };
+            if chars > limit {
+                let err = LlmStageError::TooLong { chars, limit };
                 log_event(
-                    "llm_stage_err",
+                    "speak_err",
                     &[
-                        ("stage", "translate".to_string()),
+                        ("kind", kind.action().to_string()),
                         ("error", err.code().to_string()),
                         ("detail", err.to_string()),
                     ],
                 );
                 return Err(err);
             }
+        }
+    }
+    match kind {
+        ReadKind::Translate => {
             let Some(settings) = settings else {
                 log_event(
                     "speak_err",
@@ -1933,7 +1941,7 @@ mod tests {
 
     // --- translate-and-read ---
 
-    use super::super::llm_stage::{LlmStageError, TRANSLATE_MAX_CHARS};
+    use super::super::llm_stage::LlmStageError;
     use super::super::SpeechProgress;
     use super::{
         apply_translate_voice_override, caption_piece_limit, lingers_after_read, next_caption,
@@ -2171,11 +2179,14 @@ mod tests {
         let slot = SessionSlot::default();
         let token = slot.claim();
         let busy = AtomicBool::new(false);
-        let text = "字".repeat(TRANSLATE_MAX_CHARS + 1);
-        let result = stage_text(ReadKind::Translate, None, text, &token, &busy);
+        let settings = AppSettings::default();
+        let limit = settings.tts_translate_max_chars;
+        let text = "字".repeat(limit + 1);
+        let result = stage_text(ReadKind::Translate, Some(&settings), text, &token, &busy);
         assert!(matches!(
             result,
-            Err(LlmStageError::TooLong { chars }) if chars == TRANSLATE_MAX_CHARS + 1
+            Err(LlmStageError::TooLong { chars, limit: actual })
+                if chars == limit + 1 && actual == limit
         ));
     }
 

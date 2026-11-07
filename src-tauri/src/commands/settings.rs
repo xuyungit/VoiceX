@@ -209,6 +209,8 @@ pub struct AppSettings {
     /// of reading the *selection* through a synthesized copy.
     pub tts_clipboard_when_no_selection: bool,
 
+    /// Maximum input characters for plain reading; zero means unlimited.
+    pub tts_read_max_chars: usize,
     // Translate-and-read: one LLM call between the selection and the engine.
     // Prefixed `tts_translate_*` to stay apart from dictation's
     // `translation_*`, a different feature with its own prompt and pipeline.
@@ -219,6 +221,7 @@ pub struct AppSettings {
     pub tts_translate_source_language: String,
     pub tts_translate_target_language: String,
     pub tts_translate_prompt_template: String,
+    pub tts_translate_max_chars: usize,
     /// Voice for the translated text, keyed by provider name or
     /// `aliyun:<model>`. A missing or empty entry reuses the reading voice.
     pub tts_translate_voice_overrides: BTreeMap<String, String>,
@@ -567,11 +570,13 @@ impl Default for AppSettings {
             tts_clipboard_when_no_selection: true,
 
             tts_translate_enabled: true,
+            tts_read_max_chars: llm_stage::reading_limits().default_read_max_chars,
             tts_translate_hotkey_config: None,
             tts_translate_source_language: llm_stage::SOURCE_LANGUAGE_AUTO.to_string(),
             tts_translate_target_language: llm_stage::DEFAULT_TARGET_LANGUAGE.to_string(),
             tts_translate_prompt_template: llm_stage::DEFAULT_TRANSLATE_PROMPT_ZH.to_string(),
             tts_translate_voice_overrides: BTreeMap::new(),
+            tts_translate_max_chars: llm_stage::reading_limits().default_translate_max_chars,
             tts_translate_copy_to_clipboard: false,
             tts_translate_save_history: true,
             tts_llm_provider_key: LLM_PROVIDER_FOLLOW.to_string(),
@@ -1314,6 +1319,14 @@ pub fn save_settings(
     let current_settings = crate::storage::get_settings().map_err(|e| e.to_string())?;
     settings.ui_language = crate::ui_locale::normalize_ui_language(&settings.ui_language);
     normalize_qwen_settings(&mut settings);
+    let limits = llm_stage::reading_limits();
+    if (settings.tts_read_max_chars != 0
+        && !limits.max_chars_options.contains(&settings.tts_read_max_chars))
+        || (settings.tts_translate_max_chars != 0
+            && !limits.max_chars_options.contains(&settings.tts_translate_max_chars))
+    {
+        return Err("Reading length must use one of the available character limits".to_string());
+    }
     normalize_elevenlabs_settings(&mut settings);
     normalize_llm_settings(&mut settings);
     normalize_text_injection_overrides(&mut settings);

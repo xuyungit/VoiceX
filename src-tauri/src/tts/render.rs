@@ -25,7 +25,6 @@ use super::controller::{
 use super::edge;
 use super::llm_stage::{
     fill_translate_prompt, run_llm_stage_attempt, wait_before_retry, LlmStageError,
-    TRANSLATE_MAX_CHARS,
 };
 use super::mimo::{self, MimoConfig};
 use super::volcengine::{self, VolcengineConfig};
@@ -33,6 +32,9 @@ use super::{split_for_backend, CancelToken, SessionSlot, TtsRequest};
 
 const LLM_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 const MAX_LLM_RETRY_DELAY: Duration = Duration::from_secs(60);
+/// File rendering processes long documents in bounded LLM requests, separately
+/// from the user-selected total length limits for interactive reading.
+const LLM_CHUNK_MAX_CHARS: usize = 5_000;
 
 /// Sample rate requested from cloud providers when rendering to a file.
 ///
@@ -349,7 +351,7 @@ fn validate_llm_provider_key(settings: &AppSettings, key: &str) -> Result<(), St
 
 /// Run the LLM cleanup/translation stage over `text`.
 ///
-/// Documents longer than [`TRANSLATE_MAX_CHARS`] are split on sentence or
+/// Documents longer than [`LLM_CHUNK_MAX_CHARS`] are split on sentence or
 /// paragraph boundaries and processed chunk by chunk so a full-length Markdown
 /// article does not exceed a single completion's timeout or output budget.
 /// Unlike interactive selection reading, failures here are returned as errors
@@ -366,7 +368,7 @@ pub fn optimize_text_for_speech(
     if trimmed.is_empty() {
         return Ok(String::new());
     }
-    let pieces = split_for_backend(trimmed, TRANSLATE_MAX_CHARS);
+    let pieces = split_for_backend(trimmed, LLM_CHUNK_MAX_CHARS);
     let total = pieces.len();
     let slot = SessionSlot::default();
     let token = slot.claim();
@@ -646,7 +648,7 @@ mod tests {
     fn only_the_failed_piece_is_retried_and_its_output_is_appended_once() {
         let (config, requests, worker) =
             serve_replies(vec![(200, FIRST_REPLY), (503, "busy"), (200, SECOND_REPLY)]);
-        let text = format!("{}尾", "字".repeat(TRANSLATE_MAX_CHARS));
+        let text = format!("{}尾", "字".repeat(LLM_CHUNK_MAX_CHARS));
         let mut retries = Vec::new();
         let result = optimize_text_for_speech(&config, "prepare", &text, |event| {
             if let RenderEvent::LlmRetry {
@@ -663,7 +665,10 @@ mod tests {
         worker.join().unwrap();
         let requests: Vec<_> = requests.into_iter().collect();
         assert_eq!(requests.len(), 3);
-        assert_eq!(requests[0]["messages"][1]["content"], "字".repeat(5000));
+        assert_eq!(
+            requests[0]["messages"][1]["content"],
+            "字".repeat(LLM_CHUNK_MAX_CHARS)
+        );
         assert_eq!(requests[1]["messages"][1]["content"], "尾");
         assert_eq!(requests[1], requests[2]);
         assert_eq!(result, "first\n\nsecond");
