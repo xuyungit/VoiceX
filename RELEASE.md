@@ -130,7 +130,7 @@ pnpm mac:setup-signing
 提交信息沿用 conventional commits，建议使用：
 
 ```bash
-git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json CHANGELOG.md README.md README.en.md README.zh-CN.md
+git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json CHANGELOG.md README.md README.en.md
 git commit -m "chore: release vX.Y.Z"
 ```
 

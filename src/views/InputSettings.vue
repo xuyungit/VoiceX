@@ -6,7 +6,7 @@ import { NButton, NSelect, NInputNumber, NCheckbox, NSwitch, NTooltip } from 'na
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore, type AppSettings } from '../stores/settings'
 import { usePostEditStore } from '../stores/postEdit'
-import { formatHotkey } from '../utils/hotkey'
+import { formatDictationHotkey } from '../utils/hotkey'
 import type { OutputMuteStatus } from '../utils/outputMute'
 import type { PostEditTestSnapshot } from '../types/postEdit'
 import SettingsSection from '../components/settings/SettingsSection.vue'
@@ -314,7 +314,7 @@ const overrideGroups = computed(() =>
 watch(
   () => settingsStore.settings.hotkeyConfig,
   (config) => {
-    displayHotkey.value = formatHotkey(config) ?? t('input.clickToRecord')
+    displayHotkey.value = formatDictationHotkey(config)
   },
   { immediate: true }
 )
@@ -342,9 +342,10 @@ async function applyHotkey(storage: string | null) {
   }
 }
 
-async function clearHotkey() {
+// No saved hotkey means the default one, so clearing restores the default.
+async function restoreDefaultHotkey() {
   settingsStore.updateSetting('hotkeyConfig', null)
-  displayHotkey.value = t('input.clickToRecord')
+  displayHotkey.value = formatDictationHotkey(null)
   await applyHotkey(null)
 }
 
@@ -577,9 +578,9 @@ onBeforeUnmount(() => {
         <HotkeyField
           :value="isRecording ? recordedKey : hotkeyDisplay"
           :recording="isRecording"
-          :empty="!settingsStore.settings.hotkeyConfig"
           :clearable="!!settingsStore.settings.hotkeyConfig"
-          @clear="clearHotkey"
+          :clear-label="t('input.restoreDefaultHotkey')"
+          @clear="restoreDefaultHotkey"
         />
         <NButton :disabled="isRecording" size="small" @click="startRecording">
           {{ t('input.record') }}

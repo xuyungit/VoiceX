@@ -292,6 +292,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_dictation_hotkey_matches_the_frontend_constant() {
+        // DEFAULT_DICTATION_HOTKEY in src/utils/hotkey.ts shows this as the
+        // active hotkey when none is saved; keep the two in step.
+        assert_eq!(HotkeyConfiguration::default_primary().to_storage(), "49|6400|0");
+    }
+
+    #[test]
     fn legacy_windows_right_win_binding_keeps_matching_the_named_key() {
         let cfg = HotkeyConfiguration::from_storage("92|0|0").unwrap();
         if cfg!(target_os = "windows") {

@@ -47,6 +47,28 @@ async (page) => {
       if (errors.length) throw new Error(errors.join('\n'))
       await capturePage.screenshot({ path: `assets/screenshots/${lang}/hud-window.png`, animations: 'disabled' })
 
+      // First launch: the fixture reports permissions missing, so Overview
+      // shows its setup card. Only the card is captured: it reads at README
+      // width and does not depend on the rest of the Overview layout.
+      await capturePage.setViewportSize({ width: 1120, height: 600 })
+      await capturePage.goto(`http://127.0.0.1:1523/overview?lang=${lang}&theme=light&perm=missing`)
+      await capturePage.locator('.permission-card').waitFor()
+      await capturePage.evaluate(() => document.fonts.ready)
+      await capturePage.waitForTimeout(400)
+      await capturePage.mouse.move(0, 0)
+      if (errors.length) throw new Error(errors.join('\n'))
+      await capturePage.locator('.permission-card').screenshot({ path: `assets/screenshots/${lang}/permission-setup.png`, animations: 'disabled' })
+
+      // The drag helper floats beside System Settings in its own transparent
+      // window. Match WIDTH / HEIGHT in src-tauri/src/permissions/guide.rs.
+      await capturePage.setViewportSize({ width: 420, height: 160 })
+      await capturePage.goto(`http://127.0.0.1:1523/src/permission-guide/index.html?lang=${lang}&kind=accessibility`)
+      await capturePage.locator('#title').filter({ hasText: lang === 'zh' ? '辅助功能' : 'Accessibility' }).waitFor()
+      await capturePage.locator('#appIcon').evaluate(img => img.decode())
+      await capturePage.evaluate(() => document.fonts.ready)
+      if (errors.length) throw new Error(errors.join('\n'))
+      await capturePage.screenshot({ path: `assets/screenshots/${lang}/permission-guide.png`, animations: 'disabled', omitBackground: true })
+
       await capturePage.setViewportSize({ width: 1120, height: 650 })
       await capturePage.goto(`http://127.0.0.1:1523/reading-settings?lang=${lang}`)
       const translation = capturePage.locator('.settings-section').filter({
@@ -71,7 +93,7 @@ async (page) => {
       if (errors.length) throw new Error(errors.join('\n'))
       await capturePage.screenshot({ path: `assets/screenshots/${lang}/reading-caption.png`, animations: 'disabled', omitBackground: true })
     }
-    console.log('Captured 16 bilingual screenshots; no browser errors.')
+    console.log('Captured 20 bilingual screenshots; no browser errors.')
   } finally {
     await context.close()
   }

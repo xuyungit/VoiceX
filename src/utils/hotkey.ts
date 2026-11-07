@@ -7,6 +7,17 @@ const metaDisplayName = isMacOS ? 'Command' : 'Win';
 
 const DIGIT_KEY_CODE_TAG = 0x100;
 
+// With no saved dictation hotkey the backend listens for its default,
+// HotkeyConfiguration::default_primary in src-tauri/src/hotkey/config.rs:
+// Control + Option + Command + Space (Ctrl + Alt + Win + Space on Windows).
+// A Rust test there pins this storage string.
+export const DEFAULT_DICTATION_HOTKEY = '49|6400|0';
+
+/** The dictation hotkey that is actually active: the saved one or the default. */
+export function formatDictationHotkey(config: string | null): string {
+  return formatHotkey(config ?? DEFAULT_DICTATION_HOTKEY) ?? '';
+}
+
 export function formatHotkey(config: string | null): string | null {
   if (!config) return null;
   const parts = config.split('|');

@@ -65,6 +65,13 @@ function installFixture(usage) {
         case 'save_settings': settings = structuredClone(args.settings); return
         case 'get_resolved_ui_locale': return locale
         case 'get_usage_stats': return structuredClone(usage.total)
+        // Every permission granted unless `perm=missing` asks for the
+        // first-launch state the Overview setup card and guide are shown in.
+        case 'permissions_status': return params.get('perm') === 'missing'
+          ? { platform: 'macos', microphone: 'notDetermined', accessibility: 'denied', inputMonitoring: 'denied', hotkeyListenerActive: false }
+          : { platform: 'macos', microphone: 'granted', accessibility: 'granted', inputMonitoring: 'granted', hotkeyListenerActive: true }
+        case 'permission_guide_info':
+          return { kind: params.get('kind') || 'accessibility', appPath: '/Applications/VoiceX.app', isAppBundle: true }
         case 'get_local_usage_stats': return structuredClone(usage.local)
         case 'get_history': return structuredClone(history.slice(args.offset, args.offset + args.limit))
         case 'get_post_edit_settings': return { mode: 'off' }

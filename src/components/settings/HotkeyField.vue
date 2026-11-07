@@ -8,6 +8,8 @@ defineProps<{
   recording?: boolean
   empty?: boolean
   clearable?: boolean
+  /** What the clear button does, when it is not plain "Clear". */
+  clearLabel?: string
   disabled?: boolean
 }>()
 const emit = defineEmits<{ clear: [] }>()
@@ -21,8 +23,8 @@ const { t } = useI18n()
       v-if="clearable && !recording"
       type="button"
       class="hotkey-clear"
-      :title="t('input.clear')"
-      :aria-label="t('input.clear')"
+      :title="clearLabel ?? t('input.clear')"
+      :aria-label="clearLabel ?? t('input.clear')"
       :disabled="disabled"
       @click="emit('clear')"
     >

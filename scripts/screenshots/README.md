@@ -40,17 +40,22 @@ npx --package @playwright/cli playwright-cli -s=readme run-code --filename=scrip
 npx --package @playwright/cli playwright-cli -s=readme close
 ```
 
-The script writes 16 PNGs under `assets/screenshots/{zh,en}/` at 2× pixel density.
+The script writes 20 PNGs under `assets/screenshots/{zh,en}/` at 2× pixel density.
 It uses light Overview/settings pages, dark History, and the native stream HUD's
-256 × 100 logical size. Reading examples include the translate-and-read settings
+256 × 100 logical size. The first-launch images are the Overview permission card
+(the fixture reports permissions missing) and the macOS drag helper at its
+420 × 160 window size with a transparent background; System Settings itself is
+not captured. Reading examples include the translate-and-read settings
 and a transparent caption HUD driven by synthetic `state:reading` / `state:caption`
 events. The caption viewport uses the bounds requested by the actual HUD code.
 Review every image before publishing. The images show
 frontend content without a native title bar; they do not demonstrate live ASR,
 TTS, or Windows validation.
 
-脚本会在 `assets/screenshots/{zh,en}/` 写入 16 张 2 倍像素密度的 PNG：浅色概览和设置页、
-深色历史页，以及原生流式 HUD 的 256 × 100 逻辑尺寸。朗读示例包括翻译朗读设置，
+脚本会在 `assets/screenshots/{zh,en}/` 写入 20 张 2 倍像素密度的 PNG：浅色概览和设置页、
+深色历史页，以及原生流式 HUD 的 256 × 100 逻辑尺寸。首次启动的两张图分别是概览中的
+权限卡片（替身报告权限缺失）和 macOS 拖拽助手（420 × 160 窗口尺寸、透明背景）；
+不截取系统设置本身。朗读示例包括翻译朗读设置，
 以及通过模拟 `state:reading` / `state:caption` 事件驱动的透明字幕 HUD；字幕取景尺寸
 来自实际 HUD 代码请求的窗口尺寸。发布前应逐张检查。
 截图仅展示前端内容，不含原生标题栏，也不代表真实 ASR、TTS 或 Windows 验证。
@@ -58,9 +63,13 @@ TTS, or Windows validation.
 For manual inspection, use `?lang=zh` or `?lang=en` and optionally `&theme=dark`
 on `/overview`, `/history`, `/asr-settings`, `/input-settings`, or `/reading-settings`.
 For reading captions, open `/src/hud/index.html?lang=zh&hud=reading` (or `lang=en`).
+Add `&perm=missing` to `/overview` for the permission card, and open
+`/src/permission-guide/index.html?lang=zh` for the drag helper.
 Stop the server with Ctrl+C when finished. Neither script changes production UI
 code or persists application settings.
 
 手动预览可在上述路由加 `?lang=zh` 或 `?lang=en`，并可加 `&theme=dark`。
 朗读字幕可通过 `/src/hud/index.html?lang=zh&hud=reading`（或 `lang=en`）预览。
+在 `/overview` 加 `&perm=missing` 可预览权限卡片，拖拽助手可打开
+`/src/permission-guide/index.html?lang=zh`。
 完成后按 Ctrl+C 停止服务器。脚本不会修改正式界面代码或持久化应用设置。

@@ -3,17 +3,14 @@ import { onMounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useHistoryStore } from '../stores/history'
 import { useSettingsStore } from '../stores/settings'
-import { formatHotkey } from '../utils/hotkey'
+import { formatDictationHotkey } from '../utils/hotkey'
 import PermissionSetupCard from '../components/PermissionSetupCard.vue'
 
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
 const { t, locale } = useI18n()
 
-const hotkeyDisplay = computed(() => {
-  const config = settingsStore.settings.hotkeyConfig
-  return formatHotkey(config) ?? t('overview.unset')
-})
+const hotkeyDisplay = computed(() => formatDictationHotkey(settingsStore.settings.hotkeyConfig))
 
 const ASR_DISPLAY_NAMES: Record<string, string> = {
   volcengine: 'Volcengine',

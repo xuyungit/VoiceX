@@ -10,86 +10,121 @@ English | [中文](./README.md)
   <img src="assets/screenshots/en/hud-window.png" alt="VoiceX live dictation HUD with demo text" width="256" />
 </p>
 
-VoiceX is a cross-platform voice workspace for your desktop: dictate, translate, and listen in any app. The dictation pipeline is: record audio, provide real-time feedback, recognize speech, optionally correct or translate the result, inject text into the active application, and save or sync the history. In the other direction, it reads selected text aloud, optionally translating it first. The dictation workflow is similar to other modern voice input tools, but VoiceX still makes its own product choices and trade-offs.
+VoiceX is a cross-platform voice workspace for your desktop: dictate, translate, and listen in any app. Press a hotkey and speak; the recognized text (optionally corrected or translated by an LLM) is typed into the app you are using and kept in your history. In the other direction, it reads selected text aloud, optionally translating it first.
 
-Screenshots are captured from the current frontend. Reading examples were added on 2026-11-06; the other screenshots were refreshed on 2026-11-05. Overview shows real cumulative usage statistics; history text, device names, and other settings use demo data, with no personal dictations or API keys.
+Screenshots show the current interface. Overview uses real cumulative statistics; history, device names, and other settings are demo data, with no personal dictations or API keys.
 
 ## Highlights
 
-- **Cross-platform** — runs on macOS and Windows with platform-native hotkey capture, tray icon, and text injection.
-- **Light and dark themes, compact settings** — choose light, dark, or system appearance. The sidebar groups navigation, settings use compact rows with inline help, and connection test results appear beside the action.
-- **Multiple ASR backends** — switch between fourteen cloud and local speech recognition providers to balance accuracy, latency, language coverage, and privacy.
-- **Read and translate-and-read** — select text in any application and one hotkey reads it aloud; another has an LLM translate it first and reads the translation. The HUD captions each sentence, and the clipboard is read when nothing is selected. Uses the system voice (macOS only) or any of the cloud TTS providers, on macOS and Windows.
-- **One hotkey, multiple gestures** — a single global hotkey drives three interaction modes: tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
-- **Real-time HUD overlay** — a lightweight always-on-top display shows live transcription, recording mode, countdown timer, and processing status, and on macOS it follows the active Space when triggered from another desktop.
-- **LLM-powered post-processing** — optionally send ASR output through an LLM for correction, translation, or refinement, with customizable prompt templates and dictionary-aware context.
-- **Smart text injection** — recognized text is pasted into the active app via clipboard (with automatic backup/restore) or simulated typing, with per-app overrides for apps that need a different injection strategy.
-- **History & statistics** — every dictation is logged with full metadata (duration, device, ASR/LLM model, original vs. corrected text), browsable by date with inline editing of the final text, audio playback, re-transcription, and replay injection testing; the Overview counts reading alongside dictation.
-- **Cross-device sync** — a self-hosted sync server keeps history in sync across your machines.
+- **Cross-platform** — macOS and Windows, with the interface, HUD, and tray menu in English and Chinese, and light, dark, or system appearance.
+- **More than a dozen speech recognition engines** — switch between cloud and local engines to balance accuracy, latency, language coverage, and privacy.
+- **One hotkey, three gestures** — tap for hands-free dictation, hold for push-to-talk, double-tap to translate.
+- **Live HUD** — a small always-on-top window shows the transcript, recording mode, countdown, and processing status as you speak.
+- **LLM post-processing** — optionally have an LLM correct or translate the result, with customizable prompts that use your dictionary.
+- **Read and translate-and-read** — select text in any app; one hotkey reads it aloud, another translates it first, with sentence-by-sentence captions.
+- **Smart text input** — paste through the clipboard (your clipboard is restored afterwards) or simulate typing, configurable per app.
+- **History & statistics** — browse every dictation by date, edit the final text, replay audio, and re-transcribe with another engine.
+- **Cross-device sync** — a self-hosted sync server shares history across your computers.
 
-## Interface Preview
+## Install
 
-Switch language and appearance at the bottom of the sidebar. History groups dictations by date, with copy, edit, and delete buttons appearing on hover or keyboard focus and additional actions in a menu.
+Download the latest version from [GitHub Releases](https://github.com/xuyungit/VoiceX/releases/latest).
+
+**macOS (Apple Silicon)**
+
+1. Open `VoiceX_x.y.z_aarch64.dmg` and drag VoiceX into Applications. VoiceX must run from `/Applications`; it will not start from anywhere else.
+2. The app is signed with a local certificate and not notarized by Apple, so macOS blocks the first launch. Click **Open Anyway** under **System Settings → Privacy & Security**, or run:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/VoiceX.app
+   ```
+
+There is no Intel Mac build yet; you can [build from source](./docs/development.md).
+
+**Windows (x64)**
+
+Run `VoiceX_x.y.z_x64-setup.exe` (or the `.msi`). If SmartScreen warns about an unrecognized app, choose **More info → Run anyway**.
+
+## First launch
+
+### 1. Grant permissions
+
+VoiceX needs system permissions to hear you and type for you. While any are missing, Overview shows a **Finish setting up VoiceX** card and the Overview item in the sidebar gets an orange dot:
 
 <p align="center">
-  <img src="assets/screenshots/en/history-dark.png" alt="VoiceX dark History with demo dictations grouped by date" width="880" />
+  <img src="assets/screenshots/en/permission-setup.png" alt="Overview permission card listing Microphone, Accessibility and Input Monitoring" width="760" />
 </p>
 
-## Interaction Modes
+On macOS VoiceX needs three permissions:
 
-VoiceX maps three distinct intents to a single configurable hotkey:
+| Permission | Used for | How to grant |
+|---|---|---|
+| **Microphone** | Recording your voice | Click **Allow** and accept the system prompt |
+| **Accessibility** | Making the hotkey work and typing into other apps | Click **Grant** and drag VoiceX into the list |
+| **Input Monitoring** | Noticing the hotkey while you are in other apps | Click **Grant** and drag VoiceX into the list |
+
+**Grant** opens the matching page in System Settings, moves the VoiceX window out of the way, and shows a small window below System Settings. **Drag the VoiceX icon into the System Settings list**, confirm with Touch ID or your password if asked, and make sure the switch is on:
+
+<p align="center">
+  <img src="assets/screenshots/en/permission-guide.png" alt="Drag helper: drag the VoiceX icon into the Accessibility list" width="420" />
+</p>
+
+Once the permission is on, the helper closes, VoiceX comes back, and the hotkey works right away, with no restart.
+
+- If VoiceX is already in the list, just turn its switch on.
+- If the switch is on but nothing works (for example after reinstalling), remove VoiceX with **−** below the list and drag it in again.
+- In rare cases the card asks you to **Restart VoiceX**; click the button to finish.
+
+Windows needs no extra permissions. The card appears only if Windows has turned off microphone access: click **Open Settings** and, under **Settings → Privacy & security → Microphone**, turn on **Microphone access** and **Let desktop apps access your microphone**.
+
+### 2. Choose a speech recognition engine
+
+On the **ASR** page, pick an engine and enter the API key from its provider (see [Speech recognition engines](#speech-recognition-engines)). To have an LLM correct or translate your dictation, also set up a provider on the **LLM** page.
+
+### 3. Start dictating
+
+The default dictation hotkey is **⌃⌥⌘ Space** (Windows: **Ctrl + Alt + Win + Space**); change it on the **Input** page. Put the cursor in any text field, tap the hotkey, and start speaking.
+
+## Interaction modes
+
+One hotkey, three gestures:
 
 | Gesture | Mode | Behavior |
 |---|---|---|
-| **Tap** (press & release) | Hands-free | Records until silence timeout or max duration; you can keep talking without holding anything. |
-| **Hold** (press & hold) | Push-to-talk | Records while the hotkey is held; releases to finalize. |
-| **Double-tap** | Translate | Like hands-free, but the result is translated to English via LLM (opt-in). |
+| **Tap** (press & release) | Hands-free | Records until a silence timeout or the maximum duration; no need to hold anything. |
+| **Hold** (press & hold) | Push-to-talk | Records while the hotkey is held; release to finish. |
+| **Double-tap** | Translate | Like hands-free, but an LLM translates the result to English (requires an LLM). |
 
-Hold threshold and double-tap window are configurable. Press **Escape** at any time to cancel and discard.
+The hold threshold and double-tap window are adjustable. Press **Escape** at any time to cancel and discard.
 
 <p align="center">
   <img src="assets/screenshots/en/input-settings.png" alt="VoiceX Input settings with hotkeys, gesture timing, and microphone options" width="880" />
 </p>
 
-**Mute while recording** (optional, off by default): enabled under Input → Microphone, it mutes the default system output while dictation records and restores it afterwards. Only the mute switch changes — volume is untouched and players keep playing — so music no longer leaks into the microphone. A device that was already muted is never touched, one you unmute mid-recording stays unmuted, and an output device selected mid-recording is muted too and restored at the end. Devices still waiting to be restored are recorded on this machine (never synced) and restored when they reconnect or on the next launch. Output devices that cannot be muted by software (HDMI and multi-output devices on macOS) are flagged on the settings page. The Windows side has not yet been tried on a real machine.
+**Mute while recording** (optional, off by default): enable it under Input → Microphone to mute the default system output while you dictate and restore it afterwards. Only the mute switch changes, not the volume, and players keep playing, so music no longer leaks into the microphone. Devices that were already muted are left alone; outputs that cannot be muted by software (such as HDMI on macOS) are flagged on the settings page.
 
-## Reading and Translate-and-Read
+## Reading and translate-and-read
 
-VoiceX also works in the other direction. Select text in **any application** and use a hotkey to start reading.
+Select text in **any application** and press a hotkey to hear it:
 
-Reading engines that report progress show each sentence as a large caption, for both plain reading and translate-and-read. This is the actual caption interface rendered with demo text:
+| Hotkey (configurable) | What it does |
+|---|---|
+| **⌥⌘R** Read (Windows: Ctrl + Alt + Win + R) | Reads the selection aloud |
+| **⌥⌘T** Translate and read (Windows: Ctrl + Alt + Win + T) | An LLM translates the selection into the target language (English by default), then it is read aloud. Text already in the target language is tidied, not translated |
+
+Press either reading key again, or **Escape**, to stop. You can also choose **Read Selection**, **Translate and Read**, or **Stop Reading** from the tray menu.
+
+Engines that report progress show each sentence as a large caption:
 
 <p align="center">
   <img src="assets/screenshots/en/reading-caption.png" alt="VoiceX reading caption with the current sentence in a dark subtitle strip (demo text)" width="880" />
 </p>
 
-| Hotkey (configurable) | What it does |
-|---|---|
-| **⌥⌘R** Read (Windows: Ctrl + Alt + Win + R) | Reads the selection aloud |
-| **⌥⌘T** Translate and read (Windows: Ctrl + Alt + Win + T) | Has an LLM translate the selection into the target language (English by default), then reads the translation. Text already in the target language is tidied, not translated |
-
-Press either reading key again, or **Escape**, to stop immediately; while the
-translation is pending, the key or Escape cancels it.
-
-You can also choose **Read Selection**, **Translate and Read**, or **Stop Reading**
-from the tray menu. Tray reading on Windows still needs testing on a real machine.
-
-> **On Windows** the selection is read through UI Automation, falling back to a
-> synthetic Ctrl + C with the clipboard restored — the same two layers as on macOS.
-> Recognized terminal controls use UI Automation only; VoiceX does not send Ctrl + C
-> there because it can interrupt a running command.
-> There is no system voice on Windows; the default engine there is Microsoft Edge
-> online speech (no key; the text goes to Microsoft's online service), and any other
-> cloud engine can be chosen instead. The default keys use the same modifiers as the
-> dictation key (Ctrl + Alt + Win + Space), clear of what Windows itself (such as Game
-> Bar's Win + Alt + R) and PowerToys already use. Apps running as administrator cannot
-> be read unless VoiceX runs elevated too.
-
 <p align="center">
   <img src="assets/screenshots/en/reading-settings.png" alt="VoiceX Reading settings with hotkeys, speech engine, and voice selection" width="880" />
 </p>
 
-Translate-and-read has its own target language, LLM, and voice options, plus controls for copying translations, keeping history, and displaying captions:
+Translate-and-read has its own target language, LLM, and voice options, plus switches for copying translations, keeping history, and showing captions:
 
 <p align="center">
   <img src="assets/screenshots/en/translate-reading-settings.png" alt="VoiceX translate-and-read settings with language, model, voice, and caption controls" width="880" />
@@ -97,17 +132,36 @@ Translate-and-read has its own target language, LLM, and voice options, plus con
 
 | | Detail |
 |---|---|
-| **How text is read** | Straight from the Accessibility API where possible (8–15 ms on macOS; UI Automation on Windows); otherwise a synthetic Command + C (Ctrl + C on Windows), with your clipboard restored afterwards (the compatibility mode; on macOS, switching it off loses Safari and VS Code). If there is still no selection, the **clipboard's** plain text is read instead and the HUD says so. Never in a password field, and content a password manager marks as concealed is never read |
-| **Captions** | On by default. Larger text, up to two lines, sits in a transparent window whose size stays fixed between sentences. Placement follows each screen's work area above the Dock or taskbar. Sentence-ending punctuation is simplified only for display; synthesis keeps the original text. Works for plain and translated reads. The default system voice (`say`) reports no progress, so it keeps the compact HUD. Windows caption click-through still needs testing on a real machine |
-| **Translate and read** | Its own LLM choice (follow the LLM page, a provider, or a custom endpoint) and optional voices per target language; up to 5000 characters per read. A failed, timed-out or unconfigured LLM is reported on the HUD and **never falls back to reading the untranslated text**. Source and translation are kept on the History page by default (no audio, not synced), and the translation can also be copied to the clipboard |
-| **Tidy before reading** (optional) | Before a plain read, the LLM strips Markdown, HTML markup and link URLs so only the prose is read; if tidying fails, the original is read. The reading and translation prompts read a table copied from a web page as sentences rather than cell by cell |
-| **Speech engines** | The system voice (macOS only; offline, no setup — by default the one from System Settings → Accessibility → Spoken Content, usually a Siri voice on current macOS); or, in the cloud, Volcengine Doubao Seed-TTS 2.0, Alibaba Cloud Model Studio (default `qwen-audio-3.1-tts-flash` for longer text at about a sixth of 3.0's price; `qwen-audio-3.0-tts-flash` for its 500+ extra basic voices; `qwen3-tts-flash` for dialect voices; `cosyvoice-v3-flash` / `cosyvoice-v3.5-flash`, the latter taking a Voice Design / cloned `voice_id`), Xiaomi MiMo, Microsoft Azure Speech, or Microsoft Edge online speech (no account or key; voices searchable by language, pitch in Hz, captions timed by the service's sentence and word boundaries; the default engine on Windows). Cloud engines stream, so speech starts roughly 0.4–0.6 s after the hotkey; long selections are split at sentence boundaries instead of being truncated. Voice, rate and volume are stored per engine; Alibaba Cloud models that accept one also take a plain-language style instruction, by default a calm delivery suited to technical text |
-| **Yields to dictation** | Starting dictation stops reading — otherwise the microphone would record the speech and transcribe it back |
+| **What is read** | The selected text, read directly where possible; otherwise VoiceX simulates a copy and restores your clipboard afterwards (the "compatibility mode" Safari and VS Code need). With nothing selected, the clipboard's text is read instead and the HUD says so. Password fields and content a password manager hides are never read |
+| **Captions** | On by default, up to two lines, above the Dock or taskbar. The system voice reports no progress, so it shows the compact HUD instead |
+| **Translate and read** | Its own LLM choice and optional voices per target language. A failed translation is reported on the HUD and **never falls back to reading the untranslated text**. Source and translation are kept in local history by default (no audio, not synced), and the translation can also be copied to the clipboard |
+| **Length limit** | Set separately for plain reading and translate-and-read under **Reading length**: unlimited, or 4K–128K characters (spaces and line breaks count; 1K = 1000 characters). Plain reading is unlimited by default, translate-and-read 16K. Text over the limit is reported on the HUD rather than truncated; tidy-before-reading uses the plain-reading limit |
+| **Tidy before reading** (optional) | An LLM strips Markdown, HTML markup, and links first so only the prose is read; tables copied from web pages are read as sentences. If tidying fails, the original is read |
+| **Yields to dictation** | Starting dictation stops reading, so the microphone never records the speech |
+
+**Speech engines:**
+
+- **System voice** (macOS only): offline with no setup; by default the voice from System Settings → Accessibility → Spoken Content.
+- **Microsoft Edge online speech**: no account or key; the default on Windows.
+- **Volcengine Doubao Seed-TTS 2.0**, **Alibaba Cloud Model Studio** (Qwen-Audio, Qwen3-TTS dialect voices, CosyVoice), **Xiaomi MiMo**, **Microsoft Azure Speech**.
+
+Cloud engines stream, so speech starts about half a second after the hotkey, and long selections are synthesized sentence by sentence. Voice, rate, and volume are saved per engine and can be previewed; some Alibaba Cloud models also accept a one-line description of the speaking style.
+
+**Windows:** there is no system voice, so Edge online speech is the default. Apps running as administrator cannot be read unless VoiceX also runs as administrator.
+
+### How this differs from macOS "Speak selection"
+
+macOS has a built-in equivalent (System Settings → Accessibility → Spoken Content, Option + Esc by default). The two can coexist, and the default hotkeys do not collide. VoiceX differs in that:
+
+- **It can use cloud voices.** The built-in feature only uses local voices, and every local Chinese voice available to third-party apps is the compact tier; the built-in feature sounds better by default because it uses Siri voices, which third-party apps cannot use.
+- **Settings are saved per engine**, with a preview so you can listen before deciding.
+- **It shares one hotkey system with dictation**, so conflicts are flagged on the settings page.
+
+The built-in feature does things VoiceX does not: word-by-word highlighting, and working in places such as the login window.
 
 ### Export MP3 from the command line
 
-`voicex-tts` turns a text or Markdown file into MP3 using the desktop app's saved
-TTS, voice and LLM settings. Run it from source:
+`voicex-tts` turns a text or Markdown file into an MP3 using the desktop app's saved speech engine, voice, and LLM settings. It currently runs from source:
 
 ```bash
 # Use Edge online speech directly, without an LLM
@@ -117,289 +171,135 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --tt
 cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --translate --to en --save-text notes.en.txt -o notes.en.mp3
 ```
 
-The default output appends `.mp3` to the input filename, such as `notes.md.mp3`.
-Use `--tts`, `--voice` and `--speed` to override synthesis settings, or `--db` to
-select a settings database; see `--help` for all options. If the desktop app uses
-the system voice, file export uses Edge because the system voice does not return
-MP3 data.
-
-Long-document LLM cleanup and translation use chunks of at most 5000 characters.
-Transient failures retry only the current chunk with visible progress; persistent
-failures report an error. The target MP3 is replaced only after synthesis finishes,
-so a failed export preserves any existing file. Text goes to the selected cloud
-TTS provider and, when cleanup or translation is enabled, the selected LLM.
-
-### How this differs from the built-in "Speak selection"
-
-macOS has its own version (System Settings → Accessibility → Spoken Content,
-Option + Esc by default). Both can coexist, and the default hotkeys deliberately
-do not collide. The differences:
-
-- **Cloud-quality voices.** The built-in feature can only use local voices, and
-  every Chinese voice available to third-party apps on this platform is the
-  compact tier. It sounds better by default because it uses a Siri voice, and
-  Siri voices are not available to third-party applications. Going through a
-  cloud engine sidesteps that ceiling.
-- **Per-engine settings**, with a preview button so you can hear before deciding.
-- **One hotkey system shared with dictation**, so conflicts are surfaced in the
-  settings page instead of silently swallowing a key.
-
-The built-in feature does things VoiceX does not: word-level highlighting, and
-working in places we cannot reach such as the login window.
+The output defaults to the input filename plus `.mp3` (such as `notes.md.mp3`); see `--help` for all options. If the desktop app uses the system voice, export uses Edge instead. The target file is replaced only after synthesis succeeds, so a failed export keeps any existing file.
 
 ### Where the text goes
 
-- On macOS the default engine is the **system voice, entirely local** — selected
-  text never leaves the machine. Windows has no system voice; its default engine
-  is **Microsoft Edge online speech**, which sends the text to Microsoft's online
-  service for synthesis.
-- With a cloud engine selected, **the text being read is sent to that provider**
-  for synthesis. The settings page says so when a cloud engine is chosen.
-- Translate-and-read and tidy-before-reading also send the text to the chosen
-  LLM provider.
-- Plain reads store **no** text and no synthesized audio. Translate-and-read keeps
-  the source and translation in local history by default (it can be switched off),
-  and those rows are never uploaded by sync. The Overview records only counts,
-  characters and time. Ordinary logs record length, how the text was read, the
-  target application and error codes, never the text itself.
+- On macOS the default **system voice runs entirely on your Mac**; the text never leaves it. On Windows the default Edge online speech sends the text to Microsoft's online service.
+- With a cloud engine selected, **the text being read is sent to that provider** for synthesis; the settings page says so.
+- Translate-and-read and tidy-before-reading also send the text to the chosen LLM provider.
+- Plain reads store **no** text or audio. Translate-and-read keeps the source and translation in local history by default (this can be switched off), never uploaded by sync. Logs record lengths, the target app, and error codes, never the text.
 
-## ASR Backends
+## Speech recognition engines
 
-Choose a provider and model and adjust recognition parameters on the ASR page. Providers share a compact settings layout, with parameter descriptions available through the adjacent help icons.
+Choose an engine and model and adjust its parameters on the **ASR** page; each parameter has a help icon next to it.
 
 <p align="center">
   <img src="assets/screenshots/en/asr-settings.png" alt="VoiceX ASR settings with a demo Soniox configuration and inline help" width="880" />
 </p>
 
-| Provider | Type | Notes |
+| Engine | Mode | Notes |
 |---|---|---|
-| Volcengine (Doubao Speech) | Cloud streaming (WebSocket) | Optimized for Chinese; hot-word boosting, ITN, punctuation, DDC |
-| Google Cloud Speech-to-Text V2 | Cloud streaming (gRPC) | Multi-language, phrase boost, configurable endpointing |
-| Fun-ASR Realtime | Cloud streaming (WebSocket) | DashScope; `fun-asr-realtime` / `fun-asr-flash-8k-realtime`; tuned for low-latency live dictation; selected models accept the dictionary as recognition context |
-| Qwen (DashScope ASR) | Cloud streaming / batch file upload | Alibaba Cloud; both model generations — the new `qwen-audio-3.1/3.0-asr-flash(-streaming)` (3.1 is billed per token, roughly 60–90% cheaper than 3.0) and the existing Qwen3-ASR; supports `Realtime`, `Batch`, and `Realtime + Batch Refine`; the new generation adds inline hotwords with a weight, precompiled vocabularies, context, and semantic endpointing; batch paths currently inherit a 5-minute short-audio API cap |
-| Google Gemini | Cloud realtime or batch | Realtime defaults to `gemini-3.5-transcribe-live` (10-minute limit); `gemini-3.8-live` may return text after recording and incur audio output charges. Batch defaults to `gemini-3.5-flash-lite`, with `gemini-3.5-transcribe` also available. Optional post-recording batch refinement retranscribes the audio and is off by default.
-| Cohere Audio Transcription | Cloud batch file upload | `cohere-transcribe-03-2026`; whole-file transcription with explicit ISO-639-1 language hint |
-| Soniox Realtime | Cloud streaming (WebSocket) | Default `stt-rt-v6` (saved model selections are preserved; v5 and v4 remain selectable); token-based streaming with hotword support and language hints |
-| StepAudio | Cloud batch file upload (HTTP + SSE) | StepFun; defaults to `stepaudio-3-asr-max`, with `stepaudio-2.5-asr` retained; uploads the full recording after capture stops, with a 30-minute VoiceX recording limit and incremental text over SSE |
-| Xiaomi MiMo ASR | Cloud batch file upload (HTTP + JSON) | Xiaomi; `mimo-v2.5-asr`; OpenAI-compatible chat/completions endpoint; uploads the full recording after capture stops, compressed to MP3 (macOS/Linux) or WAV (Windows) to fit the 10 MB input limit |
-| OpenAI ASR | Cloud batch / streaming (WebSocket) | `gpt-transcribe` / `gpt-live-transcribe`; dual-mode — batch file upload or realtime WebSocket streaming. The dictionary is sent through the native `keywords` parameter, with multi-language `languages` and a Realtime latency tier |
-| ElevenLabs Speech-to-Text | Cloud streaming / batch file upload | `scribe_v2_realtime` / `scribe_v2`; supports realtime transcription, whole-file batch uploads, and optional post-recording batch refine |
-| [Coli](https://www.npmjs.com/package/@marswave/coli) | Local offline | SenseVoice / Whisper based; installed separately via npm |
-| Qwen3-ASR (Local) | Local offline batch | Alibaba's open-weight model (Apache-2.0), fully offline; driven through the external `qwen-asr` CLI. Text appears after you release the hotkey — no incremental output yet |
+| Volcengine (Doubao Speech) | Cloud realtime | Optimized for Chinese; hot words, number formatting, punctuation |
+| Google Cloud Speech-to-Text V2 | Cloud realtime | Many languages, phrase boost |
+| Fun-ASR Realtime | Cloud realtime | Alibaba Cloud Model Studio; low latency; some models use the dictionary as context |
+| Qwen (Model Studio ASR) | Cloud realtime / after recording | New `qwen-audio-3.1/3.0-asr-flash` models and Qwen3-ASR; 3.1 costs roughly 60–90% less than 3.0; hot words with weights, context, and an optional full-recording refinement after realtime; after-recording mode is limited to 5 minutes |
+| Google Gemini | Cloud realtime / after recording | Realtime defaults to `gemini-3.5-transcribe-live` (up to 10 minutes); `gemini-3.8-live` may return text only after recording and incur audio output charges. After-recording mode defaults to `gemini-3.5-flash-lite` |
+| Cohere | After recording | `cohere-transcribe-03-2026`; requires a language |
+| Soniox | Cloud realtime | Default `stt-rt-v6`; hot words and language hints |
+| StepAudio (StepFun) | After recording | Default `stepaudio-3-asr-max`; recordings up to 30 minutes |
+| Xiaomi MiMo | After recording | `mimo-v2.5-asr` |
+| OpenAI | Cloud realtime / after recording | `gpt-live-transcribe` / `gpt-transcribe`; the dictionary is sent as keywords; multiple languages |
+| ElevenLabs | Cloud realtime / after recording | `scribe_v2_realtime` / `scribe_v2`; optional full-recording refinement after realtime |
+| [Coli](https://www.npmjs.com/package/@marswave/coli) | Local, offline | SenseVoice / Whisper based; installed separately |
+| Qwen3-ASR (Local) | Local, offline | Alibaba's open-weight model, fully offline; see below |
 
-At the moment, Doubao, Qwen, ElevenLabs, Soniox, and Coli are the recommended options. Still, results vary from person to person: pronunciation, wording, and domain-specific vocabulary all affect the final experience.
+Doubao, Qwen, ElevenLabs, Soniox, and Coli are currently recommended, but results vary from person to person: pronunciation, wording, and domain vocabulary all play a part.
 
-`gemini-3.1-flash-lite-preview` was [shut down](https://ai.google.dev/gemini-api/docs/changelog#may-25-2026) on May 25, 2026 and has been removed from the presets. Saved values remain visible with a warning and are rejected before recognition requests. Select `gemini-3.1-flash-lite` or another available model in ASR settings.
-
-The stable `gemini-3.1-flash-lite` remains available. Its earliest announced shutdown date is May 7, 2027, and Google recommends `gemini-3.5-flash-lite` as the replacement; consult the [Gemini API deprecation schedule](https://ai.google.dev/gemini-api/docs/deprecations) for updates.
-
-Qwen/Fun-ASR snapshots retired on 2026-10-10 are removed from presets. Exact saved realtime and short-audio snapshot IDs migrate to the corresponding same-provider main model; provider, endpoint, and recognition mode stay unchanged. The retired asynchronous filetrans snapshot stays saved and disabled with an explanation, since migrating to the short-audio API would change its limits. The former Gemini Live provider is migrated to Gemini realtime mode. VoiceX has retired its `gemini-3.1-flash-live-preview` option and migrates exact saved IDs to `gemini-3.8-live`; Google still lists the older model as a legacy preview.
-
-> **Note:** Cloud ASR services require API keys from their respective providers. Coli must be [installed separately](https://www.npmjs.com/package/@marswave/coli) (`npm i -g @marswave/coli`) before use. Streaming recognition (including Qwen-Audio 3.0) follows the system proxy: WinHTTP (with PAC/WPAD) on Windows, System Configuration plus PAC on macOS.
-
-For the offline option, see [Local offline recognition (Qwen3-ASR)](#local-offline-recognition-qwen3-asr) below.
+- Cloud engines need an API key from their provider. Realtime recognition follows your system proxy settings.
+- Models a provider retires are removed from the presets. Saved settings move to the provider's corresponding model automatically; those that cannot be moved safely are kept and flagged on the settings page so you can choose another.
 
 ### Local offline recognition (Qwen3-ASR)
 
-Runs entirely on your machine; audio never leaves the device. It is currently driven through the external `qwen-asr` CLI, which needs two setup steps.
+Runs entirely on your machine; audio never leaves the device (not available on Windows). It needs the `qwen-asr` command-line tool and a model download.
 
-**1. Install the CLI** (requires the Rust toolchain):
+**1. Install the command-line tool** (requires the [Rust toolchain](https://rustup.rs/)):
 
 ```bash
 cargo install qwen-asr-cli
 ```
 
-This installs to `~/.cargo/bin` by default. VoiceX searches `PATH` and that directory automatically, so the command path can usually be left blank.
-
-**2. Download the model**:
+**2. Download the model** (about 1.9 GB):
 
 ```bash
 qwen-asr download qwen3-asr-0.6b --output ~/models
 ```
 
-The 0.6B model is about 1.9 GB. If the download breaks off partway — common for large files served through the HuggingFace CDN — a resumable transfer is more reliable:
+If the download breaks off partway, a resumable transfer is more reliable:
 
 ```bash
 curl -L -C - --retry 8 -o ~/models/qwen3-asr-0.6b/model.safetensors "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/model.safetensors"
 ```
 
-**3. Configure it**: pick **Qwen3-ASR (Local)** on the ASR settings page and set "Model Directory" to the path from step 2 (e.g. `~/models/qwen3-asr-0.6b`; `~` is expanded). Leave the command path blank for auto-detection.
+**3. Configure it**: on the ASR page choose **Qwen3-ASR (Local)** and set "Model Directory" to the path from step 2 (such as `~/models/qwen3-asr-0.6b`). Leave the command path blank to find it automatically.
 
 Worth knowing:
 
-- **Force Language defaults to Chinese — keep it set.** On auto-detect the model may switch to English output partway through an utterance.
-- **Dictionary biasing is on by default.** It is this model's only hotword channel (passed as a biasing prompt) and clearly helps with proper nouns. Capped at 60 entries.
-- **No incremental output yet** — text appears after you release the hotkey; short utterances typically return in under a second.
-- **macOS / Linux only.** The provider is unavailable on Windows; use a cloud service or Coli there.
-- The model has no ITN, so "one thousand two hundred thirty" is not converted to "1230".
+- **Force Language defaults to Chinese; keep it set.** With auto-detect, the model may switch to English output partway through a sentence.
+- **Dictionary biasing is on by default** and clearly helps with proper nouns; up to 60 entries.
+- Text appears after you release the hotkey, usually within a second for short sentences. Spoken numbers are not converted to digits.
 
-## LLM Integration
+## LLM
 
-VoiceX can optionally pass ASR output through an LLM for correction or translation. Supported providers:
+Optionally have an LLM correct or translate the recognized text. Choose a provider and enter its API key on the **LLM** page:
 
-| Provider | Default Model |
+| Provider | Default model |
 |---|---|
 | Volcengine (Doubao) | `doubao-seed-2-0-mini-260428` |
 | OpenAI (or compatible) | `gpt-6-luna` |
-| Qwen (DashScope) | `qwen3.5-flash` |
+| Qwen (Model Studio) | `qwen3.5-flash` |
 | DeepSeek | `deepseek-flash` |
 | Google Gemini | `gemini-3.5-flash-lite` |
-| Anthropic (Claude, native Messages API; official base URL by default, or any compatible endpoint) | `claude-haiku-5-5` |
+| Anthropic (Claude, or any compatible endpoint) | `claude-haiku-5-5` |
 | Custom | Any OpenAI-compatible endpoint |
 
-Exact saved Doubao default IDs migrate to the new default. On the first upgrade, saved `gpt-4o-mini` / `gpt-4o-mini-2024-07-18` values migrate to `gpt-6-luna` only on the official OpenAI endpoint; compatible endpoints and custom model IDs are preserved.
+- **Correction** — fixes recognition errors using your dictionary, with customizable prompts (`{{DICTIONARY}}` inserts the word list).
+- **Translation** — double-tap the hotkey to translate the result to English.
+- **Connection test** — sends one real correction request with the current provider and model so you can check speed and quality.
+- **Recent input context** — optionally passes your last five inputs as reference, preferring edited versions.
+- **Lowest reasoning by default** — short corrections gain nothing from "thinking", so it is turned down to save time; the settings page shows exactly what is sent. A reply cut off at the output limit is reported as an error instead of being used.
 
-> **Note:** Each LLM provider requires an API key from the respective platform. Configure your chosen provider in **Settings → LLM**.
+## Dictionary and replacement rules
 
-If adding a custom endpoint left the LLM settings page blank, upgrade to **0.17.2
-or later** to restore it. Existing endpoints and history are preserved; no database
-editing is needed. Page rendering errors now show details and a retry button.
+- **Dictionary** — one word per line, used both as recognition hot words and as LLM context.
+- **Replacement rules** — exact, contains, or regex rules applied to the text before it is typed; exact matches ignore trailing punctuation.
+- **Short-sentence punctuation** — trailing punctuation is removed from short sentences, with an adjustable length threshold.
 
-Features:
-- **ASR correction** — fix recognition errors using dictionary context and customizable prompts.
-- **Translation** — translate dictation to English, triggered by double-tap gesture.
-- **Prompt templates** — full control over correction and translation prompts, with `{{DICTIONARY}}` placeholder for hot-word injection.
-- **Connectivity test** — send one real correction request with the active provider and model to inspect latency and output quality.
-- **Recent input context** — optionally send the last five inputs to the current LLM, preferring edited versions. These are context references; they do not guarantee future homophone or acronym corrections and do not automatically learn vocabulary or replacement rules.
-- **Lowest reasoning by default** — short corrections and translations gain nothing from thinking and lose seconds to it. Every provider defaults to "Auto lowest", resolved per provider, host and model into the spelling that vendor honours (for example `thinking: disabled` on Volcengine Ark), and the settings page shows the exact fields that will be sent. Custom endpoints can also merge an **extra request fields** JSON object into the body. There is no fixed output cap, and a reply cut off at the output limit is an error rather than half a result.
+## Text input
 
-## Dictionary & Hot-Words
+- Paste through the clipboard (your clipboard is restored afterwards) or simulate typing.
+- Configure per app: keep pasting in ordinary text fields and switch to typing in editors that handle paste differently.
+- Text goes to the app in front when typing starts, so you can switch apps while recognition runs.
 
-- Maintain a plain-text word list (one per line) that is sent to the ASR engine as hot-words and injected into LLM prompts.
-- **Keyword substitution rules** — define custom find-and-replace rules (exact, contains, or regex) to post-process recognized text.
-- **Online hot-word sync** — optionally sync your word list with Volcengine's hot-word platform (requires AK/SK).
+## History & statistics
 
-## Post-Processing
+<p align="center">
+  <img src="assets/screenshots/en/history-dark.png" alt="VoiceX dark History with demo dictations grouped by date" width="880" />
+</p>
 
-- **Smart punctuation cleanup** — auto-remove trailing punctuation from short sentences (configurable threshold, excluding trailing punctuation from the character count).
-- **Keyword substitution** — regex/exact/contains replacement rules applied before text injection; exact matches ignore trailing punctuation.
+- Browse every dictation by date: replay audio, copy, view details, and compare the original recognition with the LLM-corrected text.
+- Edit the final text directly; edited entries are marked "Edited" and copying uses your edit. Edits stay on this device.
+- Turn on **Track edits after dictation** under Input to briefly watch for your follow-up edits in supported apps and compare both versions under **History → Edits** (off by default).
+- Translate an entry into English and copy the translation.
+- Re-transcribe any recording with another engine to compare results, or type the result into the current app again.
+- Recordings whose recognition failed are kept so you can retry later instead of dictating again.
+- Keep text and audio for 7 / 30 / 180 / 365 days or forever.
+- Overview totals dictation and reading: volume, time, speed, and AI calls, for your account and for this device.
 
-## Text Injection
+## Cross-device sync
 
-- Global support for clipboard paste and simulated typing modes.
-- Per-app overrides can be created from recent target apps, so standard text fields can keep clipboard paste while editors that are sensitive to paste events can switch to typing.
-- Text goes to the application focused when injection starts, so you can switch destinations while recognition runs. Per-app injection overrides follow that destination. On macOS, input waits for physical modifiers to be released and checks cancellation while queued or typing in chunks.
+If you dictate on several computers, a lightweight self-hosted sync server (`sync-server/`) keeps your text history consistent across them; audio stays on each device. The server needs few resources; see [sync-server/README.md](./sync-server/README.md) for setup.
 
-## History & Statistics
+## Known limitations
 
-- Full history grouped by date, with per-record audio playback, copy, and detail view.
-- Edit the final text directly in an entry. Changed entries carry an “Edited” badge, the previous output remains available in Details, and copying uses the edited version. Edits stay on this device and are not synced.
-- Enable **Track edits after dictation** under Input to briefly observe changes in supported applications and review both versions in **History → Edits**. Tracking is off by default and records follow the original dictation's retention policy. You can also edit manually, restore the original output, or delete an edit.
-- Side-by-side comparison of original ASR output vs. LLM-corrected text.
-- Translate an entry's final text into English, compare it with the source, and copy the result without creating a new history entry.
-- Re-transcribe any saved recording with a different ASR backend and optional LLM correction to compare providers on the same audio; replay the final text into the current app to test the full end-to-end flow.
-- Failed batch transcriptions are preserved locally with the original audio so you can retry later instead of repeating the whole dictation immediately.
-- Configurable retention policies for text and audio (7 / 30 / 180 / 365 days, or forever).
-- Overview dashboard: total duration, character count, AI correction calls, average dictation speed; plus a Reading section with plain reads, translated reads, characters read, reading time and the AI calls reads triggered. Each shows the account total alongside this device.
-- Translate-and-read rows appear in History too, but stay on this device.
-- Recording counts are tracked independently of the usage sync cursor. Upgrading repairs missed counts from existing history, and replayed sync events do not count a recording twice.
+- The macOS build is Apple Silicon only and not notarized by Apple.
+- These Windows features have not been fully tested on a real machine: mute while recording, tray reading, caption click-through, and tracking edits after dictation.
+- Local Qwen3-ASR is not available on Windows.
 
-## Localization
+## Building from source
 
-- Full `zh-CN` and `en-US` coverage across the main UI, HUD overlay, tray menu, and default prompt templates.
-- System / Chinese / English interface switcher, with automatic OS locale fallback when `system` is selected.
-- Light, dark, and system appearance options at the bottom of the sidebar.
-- Localized history, settings, diagnostics, and provider descriptions, so the bilingual experience is consistent end to end.
-
-## Cross-Device Sync
-
-Memory will likely remain a long-term theme in the AI era. If you use voice input across multiple computers, keeping all input history in one place makes it easier to turn that history into searchable, reusable memory over time. VoiceX supports a lightweight self-hosted sync server (`sync-server/`) to keep text history consistent across devices. Audio files are stored locally only. Running the sync service requires one server reachable by your devices, but resource usage is low.
-
-- Token + shared-secret authentication.
-- Real-time sync status (live / connecting / reconnecting / blocked).
-- Reading statistics are uploaded per device and summed into account totals; an older server that lacks the endpoint simply leaves them unsummed, and history sync is unaffected.
-- See [sync-server/README.md](./sync-server/README.md) for setup.
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Frontend | Vue 3 · TypeScript · Naive UI · Vite |
-| Desktop shell | Tauri 2 (Rust) |
-| Audio capture | cpal · Opus (OggOpus) · 16 kHz mono |
-| Sync server | Rust · Axum · SQLite |
-
-## Development
-
-### Prerequisites
-
-- [Node.js](https://nodejs.org/) (LTS)
-- [pnpm](https://pnpm.io/)
-- [Rust](https://rustup.rs/) (stable)
-- Tauri 2 system dependencies: [Tauri Prerequisites](https://v2.tauri.app/start/prerequisites/)
-
-### Getting Started
-
-```bash
-# Install JS dependencies
-pnpm install
-
-# Start the web dev server
-pnpm dev
-
-# Start the desktop dev environment (Tauri)
-pnpm tauri dev
-
-# Production build
-pnpm build
-pnpm tauri build
-```
-
-### macOS Permissions
-
-VoiceX requires the following three macOS permissions to function properly — global hotkey capture needs Accessibility and Input Monitoring, and audio recording needs Microphone access:
-
-| Permission | Purpose |
-|---|---|
-| **Accessibility** | Intercept global hotkey events and inject text into other apps |
-| **Input Monitoring** | Capture keyboard events system-wide for hotkey detection |
-| **Microphone** | Record audio for speech recognition |
-
-Grant these in **System Settings → Privacy & Security** when prompted on first launch.
-
-### macOS Local Signing (recommended)
-
-Without code signing, macOS treats each new build as a different app, which means you have to **re-grant all three permissions above every time you recompile**. By signing builds with a persistent local certificate, macOS recognizes the app identity across rebuilds and your permission grants carry over.
-
-```bash
-# One-time setup: create a local code-signing identity in your Keychain
-pnpm mac:setup-signing
-
-# Build, sign, and install to /Applications
-pnpm mac:build-local
-```
-
-`mac:setup-signing` generates a self-signed certificate named "VoiceX Local Code Signing" and imports it into your login keychain (only needed once). `mac:build-local` builds a release, signs it with that identity, and installs to `/Applications` with quarantine flags removed.
-
-> This is only needed for local development builds. CI/CD or distribution builds should use a proper Apple Developer certificate.
-
-### Windows Build
-
-On Windows, no code-signing is needed for local development. Build directly with PowerShell:
-
-```powershell
-.\scripts\Build-VoiceX.ps1
-```
-
-## Project Structure
-
-```
-src/                 # Vue 3 frontend
-  components/        #   Shared UI components
-  views/             #   Route pages (Overview, History, Dictionary, Settings, About)
-  stores/            #   Pinia state management
-  hud/               #   Lightweight HUD overlay
-src-tauri/           # Tauri (Rust) desktop shell
-  src/               #   Tauri commands & core logic
-  proto/             #   gRPC proto definitions (Google Cloud Speech)
-  vendor/            #   Vendored dependencies (audiopus_sys, rdev)
-sync-server/         # Self-hosted history sync server
-tools/llm-bench/     # LLM correction benchmark
-scripts/             # Build & signing helper scripts
-```
+See [docs/development.md](./docs/development.md) for prerequisites, builds, local signing, and the project layout.
 
 ## License
 
-This project is licensed under the [MIT License](./LICENSE).
-
-Third-party component licenses are listed in [THIRD_PARTY_LICENSES](./THIRD_PARTY_LICENSES).
+This project is licensed under the [MIT License](./LICENSE). Third-party component licenses are listed in [THIRD_PARTY_LICENSES](./THIRD_PARTY_LICENSES).
