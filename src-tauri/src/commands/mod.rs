@@ -10,6 +10,7 @@ pub mod hotkey;
 pub mod hotword;
 pub mod post_edit;
 pub mod hud;
+pub mod permissions;
 pub mod retranscribe;
 pub mod settings;
 pub mod sync;

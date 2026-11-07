@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useHistoryStore } from '../stores/history'
 import { useSettingsStore } from '../stores/settings'
 import { formatHotkey } from '../utils/hotkey'
+import PermissionSetupCard from '../components/PermissionSetupCard.vue'
 
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
@@ -211,6 +212,8 @@ onMounted(async () => {
         <span class="info-pill-value" :class="{ off: !settingsStore.settings.syncEnabled }">{{ syncDisplay }}</span>
       </div>
     </div>
+
+    <PermissionSetupCard />
 
     <section v-for="section in statSections" :key="section.title" class="stat-section">
       <h2 class="section-title">{{ section.title }}</h2>

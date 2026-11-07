@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { NDropdown, NTooltip } from 'naive-ui'
 import LanguageSwitcher from './LanguageSwitcher.vue'
 import { useSettingsStore } from '../stores/settings'
+import { usePermissionsStore } from '../stores/permissions'
 import type { UiTheme } from '../theme'
 import type { UiLanguage } from '../i18n'
 
@@ -12,6 +13,7 @@ const router = useRouter()
 const route = useRoute()
 const { t } = useI18n()
 const settingsStore = useSettingsStore()
+const permissionsStore = usePermissionsStore()
 
 // Material icons: brightness_auto-ish half circle, light_mode, dark_mode.
 const THEME_ICONS: Record<UiTheme, string> = {
@@ -159,6 +161,12 @@ function navigateTo(path: string) {
           </svg>
         </span>
         <span class="nav-label">{{ t(item.labelKey) }}</span>
+        <span
+          v-if="item.name === 'overview' && permissionsStore.needsAttention"
+          class="nav-attention"
+          :title="t('permissions.sidebarHint')"
+          :aria-label="t('permissions.sidebarHint')"
+        />
       </button>
       </template>
     </div>
@@ -239,6 +247,15 @@ function navigateTo(path: string) {
   transition: background-color var(--transition-fast), color var(--transition-fast);
   text-align: left;
   width: 100%;
+}
+
+.nav-attention {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background-color: var(--color-warning);
+  flex: none;
 }
 
 .nav-item:hover {

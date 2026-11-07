@@ -220,12 +220,63 @@ pub struct HotkeyManager {
     translate_selection: ActionBinding,
     suspension_count: Arc<AtomicU32>,
     listener_started: Arc<AtomicBool>,
+    /// Whether the system-level hook is installed right now. On macOS it is
+    /// false until the event tap can be created, which needs the
+    /// Accessibility and Input Monitoring grants.
+    listener_active: Arc<AtomicBool>,
     recording_sender: Arc<Mutex<Option<Sender<HotkeyConfiguration>>>>,
     swallow_escape: Arc<AtomicBool>,
     /// Whether we are actively recording a hotkey combination
     recording_active: Arc<AtomicBool>,
     /// Accumulated hotkey configuration during recording
     recording_accumulated_config: Arc<Mutex<Option<HotkeyConfiguration>>>,
+}
+
+/// How often a hook that could not be installed is tried again.
+const GRAB_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Install the system keyboard hook, trying again until it succeeds.
+///
+/// On macOS the event tap cannot be created until the user grants
+/// Accessibility and Input Monitoring, which usually happens after launch;
+/// retrying lets the hotkey start working the moment the grant lands instead
+/// of after a restart. `grab` blocks for as long as the hook is installed.
+fn run_grab_until_installed<C>(callback: C, active: &AtomicBool)
+where
+    C: Fn(Event) -> Option<Event> + Send + 'static,
+{
+    // `grab` takes its callback by value, so each attempt gets a handle to
+    // the one shared callback (and its hotkey state) rather than a new one.
+    let callback = Arc::new(Mutex::new(callback));
+    let mut attempts: u64 = 0;
+    loop {
+        attempts += 1;
+        let shared = callback.clone();
+        active.store(true, Ordering::SeqCst);
+        let result = rdev::grab(move |event| match shared.lock() {
+            Ok(callback) => callback(event),
+            Err(poisoned) => (poisoned.into_inner())(event),
+        });
+        active.store(false, Ordering::SeqCst);
+        match result {
+            Ok(()) => {
+                log::warn!("Global hotkey listener stopped");
+                return;
+            }
+            Err(err) if attempts == 1 => {
+                log::error!(
+                    "Global hotkey listener failed: {:?}; retrying every {}s until permissions allow it",
+                    err,
+                    GRAB_RETRY_INTERVAL.as_secs()
+                );
+            }
+            Err(_) => {}
+        }
+        thread::sleep(GRAB_RETRY_INTERVAL);
+        if attempts.is_multiple_of(60) {
+            log::warn!("Global hotkey listener still not installed after {attempts} attempts");
+        }
+    }
 }
 
 impl HotkeyManager {
@@ -240,6 +291,7 @@ impl HotkeyManager {
             translate_selection: ActionBinding::new(),
             suspension_count: Arc::new(AtomicU32::new(0)),
             listener_started: Arc::new(AtomicBool::new(false)),
+            listener_active: Arc::new(AtomicBool::new(false)),
             recording_sender: Arc::new(Mutex::new(None)),
             swallow_escape: Arc::new(AtomicBool::new(false)),
             recording_active: Arc::new(AtomicBool::new(false)),
@@ -273,6 +325,7 @@ impl HotkeyManager {
         let session_handler = session.clone();
         let recording_active = self.recording_active.clone();
         let recording_accumulated_config = self.recording_accumulated_config.clone();
+        let listener_active = self.listener_active.clone();
         let tts_active = tts.as_ref().map(|controller| controller.active_handle());
 
         thread::spawn(move || {
@@ -601,10 +654,13 @@ impl HotkeyManager {
                 }
             };
 
-            if let Err(err) = rdev::grab(callback) {
-                log::error!("Global hotkey listener failed: {:?}", err);
-            }
+            run_grab_until_installed(callback, &listener_active);
         });
+    }
+
+    /// Whether the global keyboard hook is installed.
+    pub fn is_listener_active(&self) -> bool {
+        self.listener_active.load(Ordering::SeqCst)
     }
 
     /// Update active hotkey configuration used for recognition.

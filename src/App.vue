@@ -2,6 +2,7 @@
 import { computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { NConfigProvider, darkTheme, NMessageProvider, NDialogProvider, type GlobalThemeOverrides } from 'naive-ui'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import Sidebar from './components/Sidebar.vue'
 import PageErrorBoundary from './components/PageErrorBoundary.vue'
 import type { ResolvedLocale, UiLanguage } from './i18n'
@@ -10,6 +11,7 @@ import { resolveLocale, setLocale } from './i18n'
 import { useSettingsStore } from './stores/settings'
 import { useHistoryStore } from './stores/history'
 import { useSyncStore, type SyncStateResponse } from './stores/sync'
+import { usePermissionsStore } from './stores/permissions'
 
 // Naive UI derives hover/alpha shades from these values, so they must be literal colors
 // (not CSS variables). Keep them in sync with styles/variables.css.
@@ -55,11 +57,14 @@ import { getDefaultPrompt, isBuiltInDefaultPrompt } from './utils/llmPrompts'
 const settingsStore = useSettingsStore()
 const historyStore = useHistoryStore()
 const syncStore = useSyncStore()
+const permissionsStore = usePermissionsStore()
 // Loaded up front so History shows its tab bar on first render when enabled.
 const postEditStore = usePostEditStore()
 let unlistenHistory: (() => void) | null = null
 let unlistenSync: (() => void) | null = null
 let unlistenLocale: (() => void) | null = null
+let unlistenPermissions: (() => void) | null = null
+let unlistenFocus: (() => void) | null = null
 let historyRefreshTimer: number | null = null
 let historyRefreshQueued = false
 
@@ -153,6 +158,17 @@ onMounted(async () => {
       setLocale(nextLocale)
     }
   })
+
+  // Overview's setup card and the sidebar dot read this from any page.
+  // Grants happen in System Settings, so re-check whenever VoiceX comes back.
+  const checkPermissions = () => permissionsStore.check().catch((err) => {
+    console.error('[permissions] status check failed:', err)
+  })
+  checkPermissions()
+  unlistenPermissions = await listen('permissions:changed', checkPermissions)
+  unlistenFocus = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+    if (focused) checkPermissions()
+  })
 })
 
 watch(
@@ -182,6 +198,10 @@ onBeforeUnmount(() => {
     unlistenLocale()
     unlistenLocale = null
   }
+  unlistenPermissions?.()
+  unlistenPermissions = null
+  unlistenFocus?.()
+  unlistenFocus = null
   if (historyRefreshTimer !== null) {
     clearTimeout(historyRefreshTimer)
     historyRefreshTimer = null

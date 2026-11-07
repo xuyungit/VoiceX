@@ -141,6 +141,10 @@ core-graphics = "0.25"
 # Direct dependency (previously transitive via core-graphics): the Accessibility
 # API is a C API that traffics in CFString/CFTypeRef.
 core-foundation = "0.10"
+# Permission guide: drag VoiceX.app into System Settings' privacy lists.
+drag = "2.1"
+# Completion handler for the microphone prompt (AVCaptureDevice).
+block2 = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Windows specific - SendInput API for direct unicode injection
@@ -161,6 +165,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Gdi",
     # Whether the foreground process runs elevated (UIPI blocks reading it).
     "Win32_Security",
+    # Microphone privacy switches (capability consent store).
+    "Win32_System_Registry",
 ] }
 # Selected-text reading through UI Automation. COM interfaces are only in the
 # `windows` crate, not `windows-sys`; this is the version Tauri's WebView2

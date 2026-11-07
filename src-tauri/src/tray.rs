@@ -146,7 +146,7 @@ fn run_off_main_thread(app: &AppHandle, action: impl FnOnce(&TtsController) + Se
     tauri::async_runtime::spawn_blocking(move || action(&tts));
 }
 
-fn show_main_window(app: &AppHandle) {
+pub(crate) fn show_main_window(app: &AppHandle) {
     let Some(main) = app.get_webview_window("main") else {
         return;
     };

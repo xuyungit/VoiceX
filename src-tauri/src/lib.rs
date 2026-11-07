@@ -16,6 +16,7 @@ mod logging;
 #[cfg(target_os = "macos")]
 mod mac_pasteboard;
 mod network;
+pub mod permissions;
 pub mod post_edit;
 pub mod selection;
 pub mod services;
@@ -353,7 +354,16 @@ pub fn run() {
             commands::hotkey::record_hotkey,
             commands::hotkey::apply_hotkey_config,
             commands::hotkey::current_hotkey,
-            commands::hotkey::hotkey_permission_status,
+            commands::permissions::permissions_status,
+            commands::permissions::permissions_request_microphone,
+            commands::permissions::permissions_open_settings,
+            commands::permissions::permissions_start_guide,
+            commands::permissions::permissions_close_guide,
+            #[cfg(target_os = "macos")]
+            commands::permissions::permission_guide_info,
+            #[cfg(target_os = "macos")]
+            commands::permissions::permission_guide_start_drag,
+            commands::permissions::restart_app,
             commands::tts::list_tts_voices,
             commands::tts::preview_tts,
             commands::tts::stop_tts,

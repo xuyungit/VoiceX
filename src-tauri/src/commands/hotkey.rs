@@ -3,7 +3,7 @@
 use serde::Serialize;
 use tauri::State;
 
-use crate::hotkey::{HotkeyConfiguration, HotkeyManager, HotkeyPermissionStatus};
+use crate::hotkey::{HotkeyConfiguration, HotkeyManager};
 
 #[derive(Serialize)]
 pub struct RecordedHotkey {
@@ -43,10 +43,4 @@ pub async fn apply_hotkey_config(
 #[tauri::command]
 pub fn current_hotkey(manager: State<'_, HotkeyManager>) -> Option<String> {
     manager.current_config().map(|c| c.display_string())
-}
-
-/// Check current hotkey-related permissions (macOS only).
-#[tauri::command]
-pub fn hotkey_permission_status() -> HotkeyPermissionStatus {
-    HotkeyPermissionStatus::detect()
 }

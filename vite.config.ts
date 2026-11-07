@@ -15,6 +15,7 @@ export default defineConfig(async () => ({
       input: {
         main: resolve(__dirname, 'index.html'),
         hud: resolve(__dirname, 'src/hud/index.html'),
+        'permission-guide': resolve(__dirname, 'src/permission-guide/index.html'),
       },
     },
   },
