@@ -268,6 +268,7 @@ impl AsrClient {
                                     if is_last {
                                         evt.is_final = true;
                                         evt.definite = true;
+                                        evt.committed_len = evt.text.len();
                                     }
                                     if evt.definite {
                                         log::info!(

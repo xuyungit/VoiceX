@@ -9,6 +9,13 @@ async (page) => {
     const url = new URL(route.request().url())
     return url.origin === 'http://127.0.0.1:1523' ? route.continue() : route.abort()
   })
+  // The HUD sizes its windows from the screen they open on. Resizing the
+  // viewport also resizes Playwright's emulated screen, so pin one that
+  // stands in for a laptop display.
+  await context.addInitScript(() => {
+    Object.defineProperty(window.screen, 'width', { get: () => 1120 })
+    Object.defineProperty(window.screen, 'height', { get: () => 700 })
+  })
   const capturePage = await context.newPage()
   await capturePage.clock.setFixedTime(new Date('2026-11-05T10:30:00+08:00'))
   const errors = []
@@ -75,13 +82,16 @@ async (page) => {
       }
 
       // The HUD, caption, and drag helper have one look in both themes.
-      // Match STREAM_HUD_WIDTH / STREAM_HUD_HEIGHT in src-tauri/src/hud/window.rs.
-      await capturePage.setViewportSize({ width: 256, height: 100 })
+      // Window sizes match src-tauri/src/hud/window.rs on the pinned screen:
+      // a share of its width plus HUD_SHADOW_PAD on each side.
+      await capturePage.setViewportSize({ width: Math.floor(1120 * 0.5) + 40, height: 102 })
       await capturePage.goto(`http://127.0.0.1:1523/src/hud/index.html?lang=${lang}`)
       await capturePage.locator('body:not(.hud-loading)').waitFor()
       await capturePage.locator('#textArea').filter({ hasText: 'VoiceX' }).waitFor()
+      await capturePage.evaluate(() => document.fonts.ready)
+      await capturePage.waitForTimeout(400)
       if (errors.length) throw new Error(errors.join('\n'))
-      await capturePage.screenshot({ path: `assets/screenshots/${lang}/hud-window.png`, animations: 'disabled' })
+      await capturePage.screenshot({ path: `assets/screenshots/${lang}/hud-window.png`, animations: 'disabled', omitBackground: true })
 
       // The drag helper floats beside System Settings in its own transparent
       // window. Match WIDTH / HEIGHT in src-tauri/src/permissions/guide.rs.
@@ -93,17 +103,11 @@ async (page) => {
       if (errors.length) throw new Error(errors.join('\n'))
       await capturePage.screenshot({ path: `assets/screenshots/${lang}/permission-guide.png`, animations: 'disabled', omitBackground: true })
 
-      // The caption sizes itself from the screen it starts on, not from the
-      // main window; this starting viewport stands in for a laptop screen.
-      await capturePage.setViewportSize({ width: 1120, height: 650 })
+      await capturePage.setViewportSize({ width: Math.floor(1120 * 0.8) + 40, height: 134 })
       await capturePage.goto(`http://127.0.0.1:1523/src/hud/index.html?lang=${lang}&hud=reading`)
       await capturePage.locator('body.caption-mode:not(.hud-loading)').waitFor()
       await capturePage.locator('#textArea').filter({ hasText: lang === 'zh' ? '选中一段文字' : 'Select text' }).waitFor()
-      const bounds = await capturePage.evaluate(() => window.__readmeHudBounds)
-      await capturePage.setViewportSize(bounds)
       await capturePage.evaluate(() => document.fonts.ready)
-      // Let the resized frame paint; capturing right away can return a blank,
-      // fully transparent image.
       await capturePage.waitForTimeout(400)
       if (errors.length) throw new Error(errors.join('\n'))
       await capturePage.screenshot({ path: `assets/screenshots/${lang}/reading-caption.png`, animations: 'disabled', omitBackground: true })

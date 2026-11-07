@@ -245,7 +245,7 @@ const enUS = {
     overlay: 'Overlay',
     overlaySub: 'The status panel at the bottom of the screen while recording or reading.',
     translucent: 'Translucent',
-    translucentNote: 'Lets you see content behind the panel. Text will look slightly softer.',
+    translucentNote: 'Lets you see content behind the panel. Text stays solid.',
     textInjection: 'Text injection',
     postEditSwitch: 'Track edits after dictation',
     postEditSwitchNote: 'Briefly reads your changes to the dictated text in the target field. Review them in History → Edits. Stored on this device, kept as long as the dictation, and never synced.',

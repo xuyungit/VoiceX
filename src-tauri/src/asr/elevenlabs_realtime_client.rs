@@ -213,13 +213,10 @@ impl ElevenLabsRealtimeClient {
                                 "partial_transcript" => {
                                     if let Some(text) = payload.get("text").and_then(Value::as_str) {
                                         if let Some(combined) = transcript.push_partial(text) {
-                                            on_event_reader(AsrEvent {
-                                                text: combined,
-                                                is_final: false,
-                                                prefetch: false,
-                                                definite: false,
-                                                confidence: None,
-                                            });
+                                            on_event_reader(AsrEvent::interim(
+                                                combined,
+                                                transcript.committed_len(),
+                                            ));
                                             last_relevant_event_at = Instant::now();
                                         }
                                     }
@@ -227,13 +224,7 @@ impl ElevenLabsRealtimeClient {
                                 "committed_transcript" | "committed_transcript_with_timestamps" => {
                                     if let Some(text) = payload.get("text").and_then(Value::as_str) {
                                         if let Some(combined) = transcript.commit_segment(text) {
-                                            on_event_reader(AsrEvent {
-                                                text: combined,
-                                                is_final: true,
-                                                prefetch: false,
-                                                definite: true,
-                                                confidence: None,
-                                            });
+                                            on_event_reader(AsrEvent::committed(combined));
                                             last_relevant_event_at = Instant::now();
                                         }
                                     }
@@ -537,6 +528,12 @@ impl ElevenLabsTranscriptAccumulator {
         self.last_emitted_final = combined.clone();
         self.last_emitted_partial.clear();
         Some(combined)
+    }
+
+    /// Byte length of the committed segments at the head of the combined
+    /// transcript; the partial follows them after a space.
+    fn committed_len(&self) -> usize {
+        self.combine(None).len()
     }
 
     fn combine(&self, partial: Option<&str>) -> String {

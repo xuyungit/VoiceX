@@ -3,10 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import zhCN from "../i18n/locales/zh-CN";
 import enUS from "../i18n/locales/en-US";
-import { isWindows } from "../utils/platform";
 import { trimCaptionPunctuation } from "../utils/text";
 
+const hudCapsule = document.getElementById("hudCapsule");
 const statusIcon = document.getElementById("statusIcon");
+const miniWave = document.getElementById("miniWave");
 const countdown = document.getElementById("countdown");
 const textArea = document.getElementById("textArea");
 const intentChip = document.getElementById("intentChip");
@@ -16,8 +17,9 @@ const waveformHybridCanvas = document.getElementById(
 ) as HTMLCanvasElement | null;
 const titleElement = document.querySelector("title");
 
-if (!statusIcon || !countdown || !textArea || !intentChip || !waveformBars) {
+if (!hudCapsule || !statusIcon || !countdown || !textArea || !intentChip || !waveformBars) {
   console.error("[HUD] Missing required DOM elements", {
+    hudCapsule: !!hudCapsule,
     statusIcon: !!statusIcon,
     countdown: !!countdown,
     textArea: !!textArea,
@@ -27,18 +29,17 @@ if (!statusIcon || !countdown || !textArea || !intentChip || !waveformBars) {
 }
 
 const BATCH_WAVEFORM_STYLE: "timeline" | "hybrid" = "timeline";
-const WAVEFORM_BAR_COUNT = 27;
+const WAVEFORM_BAR_COUNT = 15;
 const HYBRID_BAND_COUNT = 8;
 const HYBRID_HISTORY_COLUMNS = 26;
+/// Stream dictation's mini waveform: the level spread over five bars, tallest
+/// in the middle.
+const MINI_WAVE_SHAPE = [0.55, 0.85, 1, 0.8, 0.6];
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-if (isWindows) {
-  document.body.classList.add("hud-windows");
-}
-
+/// The setting makes the capsule's fill translucent. On every platform the
+/// window itself is transparent at full opacity, so text and bars stay solid.
 function setHudTranslucent(enabled: boolean) {
-  if (!isWindows) {
-    return;
-  }
   document.body.classList.toggle("hud-translucent", enabled);
 }
 
@@ -52,6 +53,15 @@ if (waveformBars && waveformBars.childElementCount === 0) {
 
 const waveformBarNodes = waveformBars
   ? (Array.from(waveformBars.querySelectorAll("span")) as HTMLSpanElement[])
+  : [];
+
+if (miniWave && miniWave.childElementCount === 0) {
+  for (let i = 0; i < MINI_WAVE_SHAPE.length; i += 1) {
+    miniWave.appendChild(document.createElement("span"));
+  }
+}
+const miniWaveNodes = miniWave
+  ? (Array.from(miniWave.querySelectorAll("span")) as HTMLSpanElement[])
   : [];
 
 let currentMode:
@@ -96,6 +106,14 @@ let captionText = "";
 let lastActiveIcon: keyof typeof icons = "mic";
 let partialText = "";
 let lastNonEmptyText = "";
+/// How much of `partialText` / `lastNonEmptyText` the recognizer has
+/// committed, in UTF-16 units. What follows may still change and is drawn
+/// dimmer.
+let partialCommitted = 0;
+let lastNonEmptyCommitted = 0;
+/// The text was typed. The check mark stays until the next session starts,
+/// whatever the session's reset reports in the meantime.
+let inserted = false;
 let currentLocale: "zh-CN" | "en-US" = "en-US";
 let currentAudioLevel = 0;
 let currentAudioSpectrum = Array.from({ length: HYBRID_BAND_COUNT }, () => 0);
@@ -108,9 +126,12 @@ const MAX_LINES = 2;
 // screen. A piece that wraps past two lines loses its head to the ellipsis.
 const CAPTION_MAX_LINES = 2;
 const CAPTION_SCREEN_WIDTH_FRACTION = 0.8;
-// Must match `body.caption-mode .hud-container` padding in hud.css.
-const CAPTION_PADDING_X = 20;
-const CAPTION_PADDING_Y = 10;
+/// A streaming transcript's capsule grows with the text up to this share of
+/// the screen, then wraps to its second line.
+const STREAM_SCREEN_WIDTH_FRACTION = 0.5;
+/// Transparent margin around the capsule, for its shadow. Must match
+/// `--hud-pad` in hud.css and `HUD_SHADOW_PAD` in window.rs.
+const HUD_PAD = 20;
 const ELLIPSIS = "\u2026";
 const WAVEFORM_ATTACK = 0.4;
 const WAVEFORM_RELEASE = 0.15;
@@ -119,8 +140,13 @@ const WAVEFORM_GAIN = 6.5;
 /// Derived from measured output RMS rather than picked by eye — see
 /// `handleAudioLevelUpdate`.
 const READING_WAVEFORM_GAIN = 2.4;
-const WAVEFORM_HISTORY_SCROLL_SPEED = 24;
-const WAVEFORM_PROCESSING_SCROLL_SPEED = 34;
+/// Seconds of level history the bars span, newest on the right.
+const WAVEFORM_HISTORY_SECONDS = 1.1;
+/// Seconds a processing pulse takes to cross the bars.
+const WAVEFORM_PROCESSING_SWEEP_SECONDS = 0.8;
+const WAVEFORM_HISTORY_SCROLL_SPEED = WAVEFORM_BAR_COUNT / WAVEFORM_HISTORY_SECONDS;
+const WAVEFORM_PROCESSING_SCROLL_SPEED =
+  WAVEFORM_BAR_COUNT / WAVEFORM_PROCESSING_SWEEP_SECONDS;
 const WAVEFORM_IDLE_FLOOR = 0.04;
 const WAVEFORM_MIN_SCALE = 0.16;
 
@@ -165,24 +191,51 @@ function getTextMeasureEl() {
   return el;
 }
 
+/// The widest the capsule may become. Stream and caption windows are a share
+/// of the screen, sized by window.rs (`HudWidth::ScreenShare`) before they are
+/// shown; the text is wrapped against that same share rather than the
+/// window's width, which can reach the page after the first render does. A
+/// batch window has a fixed width.
+function capsuleMaxWidth() {
+  if (isCaptionMode()) {
+    return Math.floor(window.screen.width * CAPTION_SCREEN_WIDTH_FRACTION);
+  }
+  if (hudPresentation === "stream") {
+    return Math.floor(window.screen.width * STREAM_SCREEN_WIDTH_FRACTION);
+  }
+  return window.innerWidth - 2 * HUD_PAD;
+}
+
+/// What the capsule spends on everything beside the text: its padding, and
+/// whichever of icon, waveform, countdown and chip are showing, a gap each.
+function capsuleChromeWidth() {
+  if (!hudCapsule) return 0;
+  const style = getComputedStyle(hudCapsule);
+  const gap = parseFloat(style.columnGap) || 0;
+  let width =
+    (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+  for (const child of Array.from(hudCapsule.children) as HTMLElement[]) {
+    if (child === textArea) continue;
+    // offsetWidth: layout size, unaffected by the icon's breathing scale.
+    if (child.offsetWidth > 0) width += child.offsetWidth + gap;
+  }
+  return width;
+}
+
 function updateTextAreaMaxWidth() {
   if (!textArea) return;
   const style = getComputedStyle(textArea);
-  const pl = parseFloat(style.paddingLeft) || 0;
-  const pr = parseFloat(style.paddingRight) || 0;
-  // A caption window is sized to its text, so the widest it may become —
-  // not the window's current width — is what the text is wrapped against.
-  textAreaMaxWidth = isCaptionMode()
-    ? Math.floor(window.screen.width * CAPTION_SCREEN_WIDTH_FRACTION) -
-      2 * CAPTION_PADDING_X
-    : textArea.clientWidth - pl - pr;
+  // offsetWidth rounds to whole pixels; one pixel of slack keeps the text
+  // wrapping where it was measured instead of a hair earlier.
+  textAreaMaxWidth = Math.floor(capsuleMaxWidth() - capsuleChromeWidth()) - 1;
   if (textAreaMaxWidth <= 0) textAreaMaxWidth = 230;
+  textArea.style.maxWidth = `${textAreaMaxWidth}px`;
 
   const parsedLineHeight = parseFloat(style.lineHeight);
   if (Number.isFinite(parsedLineHeight) && parsedLineHeight > 0) {
     textAreaLineHeight = parsedLineHeight;
   } else {
-    const fontSize = parseFloat(style.fontSize) || 12;
+    const fontSize = parseFloat(style.fontSize) || 15;
     textAreaLineHeight = fontSize * 1.4;
   }
 
@@ -199,17 +252,6 @@ function updateTextAreaMaxWidth() {
   measureEl.style.wordBreak = style.wordBreak;
   measureEl.style.overflowWrap = style.overflowWrap;
   measureEl.style.textTransform = style.textTransform;
-}
-
-/// A caption window is fixed for the whole read: 80% of the screen wide and
-/// two lines tall, transparent and click-through. The visible caption is a
-/// pill inside it (hud.css) that follows the text, so changing sentences never
-/// resizes the native window — which cannot be redrawn in step with the page,
-/// and flashed a strip of unpainted window each time it grew.
-function sizeCaptionWindow() {
-  const width = Math.floor(window.screen.width * CAPTION_SCREEN_WIDTH_FRACTION);
-  const height = Math.ceil(CAPTION_MAX_LINES * textAreaLineHeight) + 2 * CAPTION_PADDING_Y;
-  void invoke("set_hud_content_bounds", { width, height });
 }
 
 function maxLines() {
@@ -248,7 +290,6 @@ function fitText(text: string): string {
 }
 
 window.addEventListener("resize", () => {
-  updateTextAreaMaxWidth();
   renderTranscript();
 });
 
@@ -258,6 +299,8 @@ const icons: Record<string, Element | null | undefined> = {
   cloud: statusIcon?.querySelector(".icon-cloud") ?? null,
   wand: statusIcon?.querySelector(".icon-wand") ?? null,
   speaking: statusIcon?.querySelector(".icon-speaking") ?? null,
+  check: statusIcon?.querySelector(".icon-check") ?? null,
+  alert: statusIcon?.querySelector(".icon-alert") ?? null,
 };
 
 const hudMessages = {
@@ -359,34 +402,45 @@ function currentCompactBatchMode() {
 function applyWaveformVisibility(compactBatchMode: boolean) {
   if (!waveformBars) return;
   const readingWithoutLevel = isReadingMode() && !hasRecentLevel();
+  const wasHidden = waveformBars.hidden;
   waveformBars.hidden =
     !compactBatchMode ||
     BATCH_WAVEFORM_STYLE !== "timeline" ||
-    readingWithoutLevel;
+    readingWithoutLevel ||
+    inserted;
+  if (wasHidden !== waveformBars.hidden) fitCapsuleSize();
+}
+
+/// Stream dictation leads with a mini waveform rather than an icon: it shows
+/// the microphone is hearing you, and its colour carries the stage.
+function isStreamWaveMode() {
+  return (
+    hudPresentation === "stream" &&
+    !isReadingMode() &&
+    currentMode !== "error" &&
+    !inserted
+  );
 }
 
 function setBatchLayoutMode(batchWaveMode: boolean, compactBatchMode: boolean) {
   const batchErrorMode = isCompactBatchMode() && currentMode === "error";
-  const wasBatchErrorMode = document.body.classList.contains("batch-error-mode");
   document.body.classList.toggle("batch-wave-mode", batchWaveMode);
   document.body.classList.toggle("compact-batch-mode", compactBatchMode);
   document.body.classList.toggle("batch-error-mode", batchErrorMode);
-  const wasCaptionMode = document.body.classList.contains("caption-mode");
   document.body.classList.toggle("caption-mode", isCaptionMode());
 
-  const wasTextAreaHidden = textArea ? textArea.hidden : false;
-  if (textArea) {
-    textArea.hidden = compactBatchMode;
+  // Batch dictation is the waveform alone: its colour and motion carry the
+  // stage. A read keeps its icon beside the bars, because the system voice
+  // reports no level and its bars never appear. Once the text is typed, a
+  // check mark takes the place of either.
+  document.body.classList.toggle("inserted", inserted);
+  if (inserted) showIcon("check");
+  if (statusIcon) {
+    statusIcon.hidden =
+      !inserted && ((compactBatchMode && !isReadingMode()) || isStreamWaveMode());
   }
-  if (
-    wasCaptionMode !== isCaptionMode() ||
-    wasBatchErrorMode !== batchErrorMode ||
-    (wasTextAreaHidden && !compactBatchMode)
-  ) {
-    // Refresh measurement width/font whenever textArea becomes visible or
-    // layout mode changes, so error/caption text is measured against the
-    // actual container width rather than a stale fallback.
-    updateTextAreaMaxWidth();
+  if (miniWave) {
+    miniWave.hidden = !isStreamWaveMode() || isCaptionMode();
   }
   applyWaveformVisibility(compactBatchMode);
   if (waveformHybridCanvas) {
@@ -452,7 +506,7 @@ function updateStatus(mode: typeof currentMode) {
       break;
     case "error":
       document.body.classList.add("error");
-      showIcon(lastActiveIcon);
+      showIcon("alert");
       statusIcon?.classList.remove("animating");
       break;
     case "idle":
@@ -468,6 +522,8 @@ function updateStatus(mode: typeof currentMode) {
 function resetTranscript() {
   partialText = "";
   lastNonEmptyText = "";
+  partialCommitted = 0;
+  lastNonEmptyCommitted = 0;
   currentAudioLevel = 0;
   smoothedAudioLevel = 0;
   waveformLastFrameTime = 0;
@@ -692,7 +748,8 @@ function startWaveformLoop() {
         ? Math.min((time - waveformLastFrameTime) / 1000, 0.05)
         : 1 / 60;
     waveformLastFrameTime = time;
-    const target = isCompactBatchMode() ? currentAudioLevel : 0;
+    const target =
+      isCompactBatchMode() || isStreamWaveMode() ? currentAudioLevel : 0;
     const easing =
       target > smoothedAudioLevel ? WAVEFORM_ATTACK : WAVEFORM_RELEASE;
     smoothedAudioLevel += (target - smoothedAudioLevel) * easing;
@@ -753,9 +810,11 @@ function startWaveformLoop() {
 
     renderWaveformBars();
     renderHybridSpectrum();
+    renderMiniWave(time, liveLevel);
 
     if (
       isCompactBatchMode() ||
+      isStreamWaveMode() ||
       smoothedAudioLevel > 0.01 ||
       hasWaveformEnergy() ||
       hasHybridSpectrumEnergy()
@@ -768,6 +827,24 @@ function startWaveformLoop() {
   };
 
   waveformFrameId = window.requestAnimationFrame(tick);
+}
+
+/// Recording: the live level across the five bars. Recognizing and
+/// polishing: a pulse travelling through them, like the batch bars.
+function renderMiniWave(time: number, liveLevel: number) {
+  if (!miniWave || miniWave.hidden) return;
+  const t = time / 1000;
+  const processing = currentMode === "recognizing" || currentMode === "correcting";
+  const speed = currentMode === "correcting" ? 8 : 6;
+  miniWaveNodes.forEach((bar, index) => {
+    const level = processing
+      ? 0.22 + 0.42 * Math.pow(Math.max(0, Math.sin(t * speed - index * 0.9)), 1.5)
+      : liveLevel *
+        MINI_WAVE_SHAPE[index] *
+        (0.85 + 0.15 * Math.sin(t * 17 + index * 2.1)) *
+        1.25;
+    bar.style.setProperty("--bar-scale", clamp(level, 0.18, 1).toFixed(3));
+  });
 }
 
 function handleAudioLevelUpdate(level: number | undefined) {
@@ -804,7 +881,14 @@ function renderTranscript() {
   const rawText =
     isCaptionMode() && !showError
       ? trimCaptionPunctuation(captionText)
-      : partialText.trim() || lastNonEmptyText.trim();
+      : partialText || lastNonEmptyText;
+  // Only dictation has words still in flux.
+  const pendingLength =
+    isCaptionMode() || showError
+      ? 0
+      : partialText
+        ? partialText.length - partialCommitted
+        : lastNonEmptyText.length - lastNonEmptyCommitted;
   const batchWaveMode = isBatchWaveMode();
   const compactBatchMode = isCompactBatchMode() && !showError;
 
@@ -812,71 +896,153 @@ function renderTranscript() {
 
   if (compactBatchMode) {
     startWaveformLoop();
-  }
-
-  if (batchWaveMode) {
+    setTextAreaContent("", false);
     return;
   }
 
-  if (compactBatchMode) {
-    return;
+  // After the layout mode: what is showing beside the text decides how much
+  // room the text has.
+  updateTextAreaMaxWidth();
+  const display = fitText(rawText);
+  if (display) {
+    // fitText keeps the end, so the pending words are still the last ones
+    // shown, behind the ellipsis it may have put in front.
+    const shownText = display === rawText ? display.length : display.length - 1;
+    setTextAreaContent(display, false, Math.min(pendingLength, shownText));
+  } else {
+    setTextAreaContent(placeholderText(), true);
   }
+}
 
-  let display = fitText(rawText);
-
-  if (!display && isCaptionMode() && !isReadingMode() && !showError) {
+/// What the text area says when there is no text. Dictation says nothing:
+/// the icon is the state, and the capsule stays a small pill until words
+/// arrive. A read's caption names its phase, because before the first
+/// sentence there is nothing else on screen.
+function placeholderText() {
+  if (currentMode === "error") return t("error");
+  if (!isCaptionMode()) return "";
+  switch (currentMode) {
+    case "reading_prepare":
+      return t("readingPrepare");
+    case "reading_translate":
+      return readingKind === "translate"
+        ? t("readingTranslating")
+        : t("readingPreprocessing");
+    case "reading_speak":
+      return t("reading");
     // The read is over with no caption to keep: it was stopped before its
     // first sentence, or its error just cleared. The window is on its way
-    // out and there is nothing to announce, least of all the dictation prompt.
-    textArea?.classList.remove("is-placeholder");
-    if (textArea) {
-      textArea.textContent = "";
-    }
+    // out and there is nothing to announce.
+    default:
+      return "";
+  }
+}
+
+/// `pendingLength`: how many characters at the end the recognizer may still
+/// revise.
+function setTextAreaContent(text: string, placeholder: boolean, pendingLength = 0) {
+  if (!textArea) return;
+  textArea.hidden = !text;
+  if (placeholder && text) {
+    const span = document.createElement("span");
+    span.className = "placeholder";
+    span.textContent = text;
+    textArea.replaceChildren(span);
+  } else if (pendingLength > 0) {
+    const pending = document.createElement("span");
+    pending.className = "pending";
+    pending.textContent = text.slice(text.length - pendingLength);
+    textArea.replaceChildren(text.slice(0, text.length - pendingLength), pending);
+  } else {
+    textArea.textContent = text;
+  }
+  updateCapsuleShape();
+}
+
+/// A dictation capsule with nothing but its icon is an even pill; a caption
+/// with nothing to say is not drawn at all.
+function updateCapsuleShape() {
+  if (!hudCapsule || !textArea) return;
+  const iconOnly =
+    !isCaptionMode() &&
+    !document.body.classList.contains("compact-batch-mode") &&
+    textArea.hidden &&
+    !countdown?.textContent &&
+    !intentChip?.textContent;
+  hudCapsule.classList.toggle("icon-only", iconOnly);
+  hudCapsule.style.visibility = isCaptionMode() && textArea.hidden ? "hidden" : "";
+  fitCapsuleSize();
+}
+
+/// The widest the capsule has been in this utterance. While words stream in
+/// it only grows: a revision that drops a word would otherwise shrink it and
+/// grow it back a moment later.
+let capsuleFloorWidth = 0;
+/// The next size is set, not eased: the window has just been shown, and the
+/// capsule comes in at its size.
+let capsuleSnapNext = true;
+
+/// Ease the capsule's size toward its content, so it grows the way a sentence
+/// does rather than stepping word by word. CSS cannot transition to an
+/// automatic size: the target is measured at auto, then both ends are set.
+/// Captions keep automatic sizing — a new sentence replaces the old one
+/// whole, and a box easing around it would cut it off.
+function fitCapsuleSize() {
+  if (!hudCapsule) return;
+  if (isCaptionMode()) {
+    hudCapsule.style.width = "";
+    hudCapsule.style.height = "";
     return;
   }
+  const current = getComputedStyle(hudCapsule);
+  const fromWidth = parseFloat(current.width);
+  const fromHeight = parseFloat(current.height);
 
-  if (!display) {
-    textArea?.classList.add("is-placeholder");
-    const placeholder =
-      currentMode === "correcting"
-        ? t("processingText")
-        : currentMode === "error"
-          ? t("error")
-        : currentMode === "recognizing"
-          ? t("recognizing")
-          : currentMode === "reading_prepare"
-            ? t("readingPrepare")
-          : currentMode === "reading_translate"
-            ? (readingKind === "translate" ? t("readingTranslating") : t("readingPreprocessing"))
-          : currentMode === "reading_speak"
-            ? t("reading")
-          : currentMode === "push_to_talk" || currentMode === "hands_free"
-            ? t("recording")
-            : t("startRecording");
-    if (textArea) {
-      textArea.innerHTML = `<span class="placeholder">${placeholder}</span>`;
-    }
-  } else {
-    textArea?.classList.remove("is-placeholder");
-    if (textArea) {
-      textArea.textContent = display;
-    }
+  hudCapsule.classList.add("sizing");
+  hudCapsule.style.width = "";
+  hudCapsule.style.height = "";
+  let toWidth = hudCapsule.offsetWidth;
+  const toHeight = hudCapsule.offsetHeight;
+
+  const streaming =
+    isStreamWaveMode() && currentMode !== "idle" && !!textArea && !textArea.hidden;
+  if (streaming) toWidth = Math.max(toWidth, capsuleFloorWidth);
+  capsuleFloorWidth = streaming ? toWidth : 0;
+
+  if (!capsuleSnapNext && !reduceMotion) {
+    hudCapsule.style.width = `${fromWidth}px`;
+    hudCapsule.style.height = `${fromHeight}px`;
+    // Commit the start before easing away from it.
+    void hudCapsule.offsetWidth;
   }
+  capsuleSnapNext = false;
+  hudCapsule.classList.remove("sizing");
+  hudCapsule.style.width = `${toWidth}px`;
+  hudCapsule.style.height = `${toHeight}px`;
 }
 
 function handleTranscriptUpdate(
   text: string | undefined,
-  _isFinal: boolean,
+  isFinal: boolean,
   clear = false,
+  committedLength = 0,
 ) {
   if (clear) {
     partialText = "";
     lastNonEmptyText = "";
+    partialCommitted = 0;
+    lastNonEmptyCommitted = 0;
     renderTranscript();
     return;
   }
 
-  const trimmed = (text || "").trim();
+  const raw = text || "";
+  const trimmed = raw.trim();
+  // The committed length counts from the start of the untrimmed text.
+  const leading = raw.length - raw.trimStart().length;
+  const committed = isFinal
+    ? trimmed.length
+    : clamp(committedLength - leading, 0, trimmed.length);
 
   if (isCompactBatchMode()) {
     partialText = "";
@@ -896,8 +1062,10 @@ function handleTranscriptUpdate(
   }
 
   partialText = trimmed;
+  partialCommitted = committed;
   if (trimmed) {
     lastNonEmptyText = trimmed;
+    lastNonEmptyCommitted = committed;
   }
   renderTranscript();
 }
@@ -911,12 +1079,16 @@ function handleErrorUpdate(message: string | undefined) {
     }
     partialText = "";
     lastNonEmptyText = "";
+    partialCommitted = 0;
+    lastNonEmptyCommitted = 0;
     renderTranscript();
     return;
   }
 
   partialText = trimmed;
   lastNonEmptyText = trimmed;
+  partialCommitted = trimmed.length;
+  lastNonEmptyCommitted = trimmed.length;
   updateStatus("error");
   renderTranscript();
 }
@@ -930,17 +1102,23 @@ function updateCountdown(seconds?: number | null) {
     const secs = seconds % 60;
     countdown.textContent = `${minutes}:${secs.toString().padStart(2, "0")}`;
   }
+  countdown.classList.toggle("urgent", seconds != null && seconds <= 10);
+  // Appearing or going, it changes the room the text has.
+  renderTranscript();
 }
 
 function updateIntent(intent?: string) {
   currentIntent = intent === "translate_en" ? "translate_en" : "assistant";
   renderIntentChip();
+  renderTranscript();
 }
 
 /// The chip labels what the HUD is currently doing.
 ///
 /// While reading it must not show a dictation intent: "助手" is left over from
 /// whatever the last dictation did, and reading has no intent of that kind.
+/// Dictation's default intent shows no chip at all; only translation, which
+/// changes what gets typed, is worth the space.
 function renderIntentChip() {
   if (!intentChip) return;
 
@@ -963,7 +1141,7 @@ function renderIntentChip() {
     intentChip.textContent = t("translateEn");
     intentChip.classList.add("translate");
   } else {
-    intentChip.textContent = t("assistant");
+    intentChip.textContent = "";
     intentChip.classList.remove("translate");
   }
 }
@@ -973,6 +1151,17 @@ updateTextAreaMaxWidth();
 renderTranscript();
 updateIntent("assistant");
 handleAudioLevelUpdate(0);
+
+/// The window has just been shown: bring the capsule in from below. The
+/// class comes off on the next frame, which is the first one painted.
+function enterHud() {
+  document.body.classList.remove("hud-exit");
+  if (reduceMotion) return;
+  document.body.classList.add("hud-enter");
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => document.body.classList.remove("hud-enter"));
+  });
+}
 
 async function initListeners() {
   const unsubs: Array<() => void> = [];
@@ -1061,6 +1250,7 @@ async function initListeners() {
       updateStatus("idle");
     }
     renderIntentChip();
+    renderTranscript();
     },
   );
 
@@ -1076,11 +1266,24 @@ async function initListeners() {
 
   await add(
     "asr:event",
-    (event: { payload?: { text?: string; isFinal?: boolean; clear?: boolean } }) => {
-      const { text, isFinal, clear } = event.payload || {};
-      handleTranscriptUpdate(text, !!isFinal, !!clear);
+    (event: {
+      payload?: { text?: string; isFinal?: boolean; clear?: boolean; committedLength?: number };
+    }) => {
+      const { text, isFinal, clear, committedLength } = event.payload || {};
+      handleTranscriptUpdate(text, !!isFinal, !!clear, committedLength ?? 0);
     },
   );
+
+  await add("state:inserted", () => {
+    inserted = true;
+    statusIcon?.classList.remove("animating");
+    renderTranscript();
+  });
+
+  // window.rs orders the window out once the capsule has faded.
+  await add("hud:exit", () => {
+    document.body.classList.add("hud-exit");
+  });
 
   await add("state:countdown", (event: { payload?: { seconds?: number } }) => {
     updateCountdown(event.payload?.seconds);
@@ -1114,6 +1317,7 @@ async function initListeners() {
   await add(
     "state:hud_presentation",
     (event: { payload?: { mode?: string } }) => {
+      // Sent with every show: a new session starts here.
       const mode = event.payload?.mode;
       hudPresentation =
         mode === "batch" ? "batch" : mode === "caption" ? "caption" : "stream";
@@ -1121,10 +1325,11 @@ async function initListeners() {
         currentAudioLevel = 0;
         smoothedAudioLevel = 0;
       }
+      inserted = false;
+      capsuleSnapNext = true;
+      capsuleFloorWidth = 0;
+      enterHud();
       renderTranscript();
-      // After the render: it is what switches to the caption layout and
-      // measures its line height.
-      if (isCaptionMode()) sizeCaptionWindow();
     },
   );
 

@@ -150,6 +150,12 @@ impl TranscriptAccumulator {
         Some(combined)
     }
 
+    /// Byte length of the committed text at the head of what `push_partial`
+    /// returned: `merge_transcript` keeps the accumulated finals as its prefix.
+    fn committed_len(&self) -> usize {
+        self.accumulated_final.len()
+    }
+
     fn push_final(&mut self, text: &str) -> Option<String> {
         let incoming = text.trim();
         if incoming.is_empty() {
@@ -302,20 +308,16 @@ impl ColiAsrClient {
                         if text.is_empty() {
                             continue;
                         }
-                        let combined = if evt.is_final {
-                            transcript.push_final(text)
+                        let event = if evt.is_final {
+                            transcript.push_final(text).map(AsrEvent::committed)
                         } else {
-                            transcript.push_partial(text)
+                            transcript
+                                .push_partial(text)
+                                .map(|text| AsrEvent::interim(text, transcript.committed_len()))
                         };
-                        if let Some(text) = combined {
+                        if let Some(event) = event {
                             saw_transcript_reader.store(true, std::sync::atomic::Ordering::SeqCst);
-                            stdout_on_event(AsrEvent {
-                                text,
-                                is_final: evt.is_final,
-                                prefetch: false,
-                                definite: evt.is_final,
-                                confidence: None,
-                            });
+                            stdout_on_event(event);
                         }
                     }
                     Err(_) => {
@@ -332,13 +334,7 @@ impl ColiAsrClient {
 
             if let Some(text) = transcript.flush_pending() {
                 saw_transcript_reader.store(true, std::sync::atomic::Ordering::SeqCst);
-                stdout_on_event(AsrEvent {
-                    text,
-                    is_final: true,
-                    prefetch: false,
-                    definite: true,
-                    confidence: None,
-                });
+                stdout_on_event(AsrEvent::committed(text));
             }
 
             Ok::<(), std::io::Error>(())

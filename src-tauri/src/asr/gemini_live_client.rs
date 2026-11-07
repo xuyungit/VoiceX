@@ -315,18 +315,17 @@ fn handle_transcribe_payload(
         let text = normalize_transcript_text(text);
         let is_final = final_text.is_some();
         transcript.current_partial = text;
+        let committed_len = transcript.committed_len();
         let combined = combine_segments(&transcript.accumulated_final, &transcript.current_partial);
         if is_final {
             transcript.accumulated_final = combined.clone();
             transcript.current_partial.clear();
         }
         if !combined.is_empty() {
-            on_event(AsrEvent {
-                text: combined,
-                is_final,
-                prefetch: false,
-                definite: is_final,
-                confidence: None,
+            on_event(if is_final {
+                AsrEvent::committed(combined)
+            } else {
+                AsrEvent::interim(combined, committed_len)
             });
         }
         // Manual VAD makes activityEnd the boundary of this one dictation turn.
@@ -389,13 +388,7 @@ fn handle_runtime_payload(
             log::debug!("Gemini Live inputTranscription (full): {}", input_text);
         }
         if let Some(combined) = transcript.push_partial(input_text) {
-            on_event(AsrEvent {
-                text: combined,
-                is_final: false,
-                prefetch: false,
-                definite: false,
-                confidence: None,
-            });
+            on_event(AsrEvent::interim(combined, transcript.committed_len()));
         }
     }
 
@@ -447,13 +440,7 @@ fn handle_runtime_payload(
 
     if turn_complete {
         if let Some(combined) = transcript.commit_turn() {
-            on_event(AsrEvent {
-                text: combined,
-                is_final: true,
-                prefetch: false,
-                definite: true,
-                confidence: None,
-            });
+            on_event(AsrEvent::committed(combined));
         }
         log::debug!("Gemini Live turnComplete received");
     }
@@ -464,13 +451,7 @@ fn handle_runtime_payload(
     if audio_stream_ended && *completed_after_end && saw_input_transcription.load(Ordering::SeqCst)
     {
         if let Some(combined) = transcript.commit_turn() {
-            on_event(AsrEvent {
-                text: combined,
-                is_final: true,
-                prefetch: false,
-                definite: true,
-                confidence: None,
-            });
+            on_event(AsrEvent::committed(combined));
         }
         log::info!(
             "Gemini Live stopping after audio end on turnComplete (generationComplete={}, turnComplete={})",
@@ -609,6 +590,12 @@ impl GeminiTranscriptAccumulator {
 
         self.last_emitted_partial = combined.clone();
         Some(combined)
+    }
+
+    /// Byte length of the committed turns at the head of the combined
+    /// transcript (`combine_segments` trims them before the space it adds).
+    fn committed_len(&self) -> usize {
+        self.accumulated_final.trim_end().len()
     }
 
     fn commit_turn(&mut self) -> Option<String> {

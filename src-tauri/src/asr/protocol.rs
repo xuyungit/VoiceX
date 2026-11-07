@@ -11,12 +11,58 @@ use super::config::AsrProviderType;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsrEvent {
     pub text: String,
+    /// Byte length of the prefix of `text` the provider has committed: it
+    /// will not revise that part. The rest is its current hypothesis and may
+    /// still change. All of `text` for a final. The HUD draws the two apart.
+    pub committed_len: usize,
     pub is_final: bool,
     /// True when server marks this as a first-pass/pre-fetch result in two-pass mode.
     pub prefetch: bool,
     /// Raw definite flag (two-pass final marker).
     pub definite: bool,
     pub confidence: Option<f32>,
+}
+
+impl AsrEvent {
+    /// A result the provider has committed in full.
+    pub fn committed(text: String) -> Self {
+        Self {
+            committed_len: text.len(),
+            text,
+            is_final: true,
+            prefetch: false,
+            definite: true,
+            confidence: None,
+        }
+    }
+
+    /// An interim result: the first `committed_len` bytes of `text` are
+    /// committed, the rest may still change.
+    pub fn interim(text: String, committed_len: usize) -> Self {
+        assert!(
+            text.is_char_boundary(committed_len),
+            "committed length {committed_len} is not a char boundary of a {}-byte transcript",
+            text.len()
+        );
+        Self {
+            text,
+            committed_len,
+            is_final: false,
+            prefetch: false,
+            definite: false,
+            confidence: None,
+        }
+    }
+
+    /// An interim result made of `committed` text followed by `pending` text,
+    /// trimmed as a whole.
+    pub fn interim_from_parts(committed: &str, pending: &str) -> Self {
+        let combined = format!("{committed}{pending}");
+        let lead = combined.len() - combined.trim_start().len();
+        let text = combined.trim().to_string();
+        let committed_len = committed.len().saturating_sub(lead).min(text.len());
+        Self::interim(text, committed_len)
+    }
 }
 
 /// ASR error types
@@ -707,9 +753,18 @@ pub fn decode_server_response(payload: &[u8]) -> Option<AsrEvent> {
             })
             .unwrap_or(false);
         let prefetch = item.prefetch.unwrap_or(false);
+        let committed_len = if definite {
+            text.len()
+        } else {
+            item.utterances
+                .as_deref()
+                .map(|utterances| definite_prefix_len(&text, utterances))
+                .unwrap_or(0)
+        };
 
         Some(AsrEvent {
             text,
+            committed_len,
             is_final: definite,
             prefetch,
             definite,
@@ -717,16 +772,31 @@ pub fn decode_server_response(payload: &[u8]) -> Option<AsrEvent> {
         })
     }
 
+    /// How much of `text` the leading definite utterances account for. The
+    /// full text is the utterances in order; the first one still in flux ends
+    /// the committed part, and so does any utterance the text does not begin
+    /// with where expected.
+    fn definite_prefix_len(text: &str, utterances: &[Utterance]) -> usize {
+        let mut end = 0;
+        for utterance in utterances {
+            let (true, Some(piece)) = (utterance.definite.unwrap_or(false), utterance.text.as_deref())
+            else {
+                break;
+            };
+            let rest = &text[end..];
+            let skipped = rest.len() - rest.trim_start().len();
+            if !rest[skipped..].starts_with(piece) {
+                break;
+            }
+            end += skipped + piece.len();
+        }
+        end
+    }
+
     // Case 1: top-level text or vec result
     if let Ok(parsed) = serde_json::from_slice::<ResponseVec>(payload) {
         if let Some(text) = parsed.text {
-            return Some(AsrEvent {
-                text,
-                is_final: false,
-                prefetch: false,
-                definite: false,
-                confidence: None,
-            });
+            return Some(AsrEvent::interim(text, 0));
         }
 
         if let Some(mut list) = parsed.result {
@@ -741,13 +811,7 @@ pub fn decode_server_response(payload: &[u8]) -> Option<AsrEvent> {
     // Case 2: result as object (common shape: {"result":{"text": "...", "definite": bool}})
     if let Ok(parsed) = serde_json::from_slice::<ResponseObj>(payload) {
         if let Some(text) = parsed.text {
-            return Some(AsrEvent {
-                text,
-                is_final: false,
-                prefetch: false,
-                definite: false,
-                confidence: None,
-            });
+            return Some(AsrEvent::interim(text, 0));
         }
 
         if let Some(result) = parsed.result {
@@ -822,6 +886,34 @@ pub fn parse_message_type(header: &[u8]) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::{decode_server_response, AsrEvent};
+
+    #[test]
+    fn interim_parts_keep_the_committed_boundary_through_trimming() {
+        let event = AsrEvent::interim_from_parts("  你好，", "世界 ");
+        assert_eq!(event.text, "你好，世界");
+        assert_eq!(&event.text[..event.committed_len], "你好，");
+
+        let event = AsrEvent::interim_from_parts(" ", "hello");
+        assert_eq!(event.committed_len, 0);
+        let event = AsrEvent::interim_from_parts("done ", "");
+        assert_eq!(event.committed_len, event.text.len());
+    }
+
+    #[test]
+    fn volcengine_commits_the_leading_definite_utterances() {
+        let payload = r#"{"result":{"text":"第一句。第二句","utterances":[
+            {"text":"第一句。","definite":true},{"text":"第二句","definite":false}]}}"#;
+        let event = decode_server_response(payload.as_bytes()).unwrap();
+        assert!(!event.is_final);
+        assert_eq!(&event.text[..event.committed_len], "第一句。");
+
+        let payload = br#"{"result":{"text":"one two","utterances":[
+            {"text":"one","definite":true},{"text":"two","definite":true}]}}"#;
+        let event = decode_server_response(payload).unwrap();
+        assert_eq!(event.committed_len, event.text.len());
+    }
+
     #[test]
     fn local_audio_errors_are_not_provider_capability_or_service_failures() {
         for reason in [

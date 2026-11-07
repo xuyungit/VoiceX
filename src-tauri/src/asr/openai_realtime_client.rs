@@ -229,13 +229,7 @@ impl OpenAIRealtimeClient {
             }
 
             if let Some(text) = transcript.finalize_if_needed() {
-                on_event_reader(AsrEvent {
-                    text,
-                    is_final: true,
-                    prefetch: false,
-                    definite: true,
-                    confidence: None,
-                });
+                on_event_reader(AsrEvent::committed(text));
             }
 
             Ok::<(), AsrError>(())
@@ -530,13 +524,7 @@ fn handle_runtime_payload(
                 );
             }
             if let Some(text) = transcript.push_delta(item_id.to_string(), delta) {
-                on_event(AsrEvent {
-                    text,
-                    is_final: false,
-                    prefetch: false,
-                    definite: false,
-                    confidence: None,
-                });
+                on_event(AsrEvent::interim(text, transcript.committed_len()));
             }
         }
         "conversation.item.input_audio_transcription.completed" => {
@@ -560,13 +548,7 @@ fn handle_runtime_payload(
                 completed.chars().count()
             );
             if let Some(text) = transcript.complete(item_id.to_string(), completed) {
-                on_event(AsrEvent {
-                    text,
-                    is_final: true,
-                    prefetch: false,
-                    definite: true,
-                    confidence: None,
-                });
+                on_event(AsrEvent::committed(text));
             }
         }
         "error" => {
@@ -676,6 +658,33 @@ impl OpenAITranscriptAccumulator {
         Some(combined)
     }
 
+    /// Byte length of the leading completed items in `combine(false)`: an
+    /// item still receiving deltas, and everything after it, may change.
+    fn committed_len(&self) -> usize {
+        let mut len = 0;
+        let mut joined = 0;
+        for item_id in &self.order {
+            let Some(final_text) = self.finals.get(item_id) else {
+                if self
+                    .partials
+                    .get(item_id)
+                    .is_some_and(|partial| !partial.trim().is_empty())
+                {
+                    break;
+                }
+                continue;
+            };
+            let trimmed = final_text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // `combine` joins the non-empty parts with one space.
+            len += if joined == 0 { 0 } else { 1 } + trimmed.len();
+            joined += 1;
+        }
+        len
+    }
+
     fn ensure_item_known(&mut self, item_id: &str) {
         if !self.order.iter().any(|id| id == item_id) {
             self.order.push(item_id.to_string());
@@ -726,6 +735,21 @@ fn merge_delta_text(existing: &mut String, incoming: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_leading_completed_items_are_committed() {
+        let mut transcript = super::OpenAITranscriptAccumulator::default();
+        transcript.register_commit("a".into(), None);
+        transcript.register_commit("b".into(), Some("a".into()));
+        transcript.push_delta("b".into(), "later");
+        let text = transcript.push_delta("a".into(), "first").unwrap();
+        assert_eq!(transcript.committed_len(), 0);
+
+        transcript.complete("a".into(), "First.");
+        let text_after = transcript.push_delta("b".into(), " words").unwrap();
+        assert_eq!(&text_after[..transcript.committed_len()], "First.");
+        assert_ne!(text, text_after);
+    }
+
     use super::{build_realtime_ws_url, build_session_update_event};
     use crate::asr::config::AsrConfig;
 

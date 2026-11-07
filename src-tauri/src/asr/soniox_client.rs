@@ -268,33 +268,23 @@ impl SonioxClient {
                                 } else {
                                     &non_final_part
                                 };
-                                let combined = format!("{}{}", final_text, display_non_final);
-                                let trimmed = combined.trim();
+                                // Final tokens are committed; the non-final
+                                // ones after them may still change.
+                                let interim =
+                                    AsrEvent::interim_from_parts(&final_text, display_non_final);
 
                                 if finished {
                                     // Session done — emit one definitive final event
                                     log::info!("Soniox ASR session finished");
-                                    if !trimmed.is_empty() {
-                                        on_event_reader(AsrEvent {
-                                            text: trimmed.to_string(),
-                                            is_final: true,
-                                            prefetch: false,
-                                            definite: true,
-                                            confidence: None,
-                                        });
+                                    if !interim.text.is_empty() {
+                                        on_event_reader(AsrEvent::committed(interim.text));
                                     }
                                     return Ok(());
                                 }
 
                                 // Interim update — always is_final: false during session
-                                if !trimmed.is_empty() {
-                                    on_event_reader(AsrEvent {
-                                        text: trimmed.to_string(),
-                                        is_final: false,
-                                        prefetch: false,
-                                        definite: false,
-                                        confidence: None,
-                                    });
+                                if !interim.text.is_empty() {
+                                    on_event_reader(interim);
                                 }
                             }
                         }
@@ -321,13 +311,7 @@ impl SonioxClient {
                 let full = format!("{}{}", final_text, last_non_final);
                 let trimmed = full.trim();
                 if !trimmed.is_empty() {
-                    on_event_reader(AsrEvent {
-                        text: trimmed.to_string(),
-                        is_final: true,
-                        prefetch: false,
-                        definite: true,
-                        confidence: None,
-                    });
+                    on_event_reader(AsrEvent::committed(trimmed.to_string()));
                 }
 
                 Ok(())

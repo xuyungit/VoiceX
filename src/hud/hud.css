@@ -1,4 +1,52 @@
-/* VoiceX HUD Styles */
+/* VoiceX HUD Styles
+ *
+ * Every presentation is one dark capsule drawn inside a transparent,
+ * click-through window. The window is sized once per session, before it is
+ * shown (window.rs); the capsule follows its content inside it,
+ * anchored to the window's bottom edge, `--hud-pad` in from every side so its
+ * shadow has room. The capsule is always dark: it has to read over whatever
+ * window is underneath, light or dark.
+ */
+
+:root {
+    /* Must match HUD_SHADOW_PAD in window.rs and HUD_PAD in hud.ts. */
+    --hud-pad: 20px;
+
+    --hud-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+        'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+
+    /* The main window's dark background (src/styles/variables.css). */
+    --hud-surface: rgb(27, 28, 31);
+    --hud-surface-translucent: rgba(27, 28, 31, 0.88);
+    --hud-error-surface: rgb(52, 26, 28);
+    --hud-error-surface-translucent: rgba(52, 26, 28, 0.88);
+    --hud-hairline: rgba(255, 255, 255, 0.09);
+    --hud-shadow: 0 4px 16px rgba(0, 0, 0, 0.34), 0 1px 3px rgba(0, 0, 0, 0.28);
+
+    --hud-text: rgba(255, 255, 255, 0.94);
+    --hud-text-secondary: rgba(255, 255, 255, 0.62);
+    --hud-text-placeholder: rgba(255, 255, 255, 0.5);
+    /* Words the recognizer may still revise. */
+    --hud-text-pending: rgba(255, 255, 255, 0.48);
+    --hud-error-text: rgba(254, 214, 214, 0.97);
+
+    /* Stage colours. Recognizing is the app's accent; polishing shifts it
+       toward violet so the two waits read as different. */
+    --hud-recording: rgba(255, 255, 255, 0.92);
+    --hud-recognizing: #4f8cff;
+    --hud-polishing: #8f9cff;
+    --hud-error: #f87171;
+    --hud-done: #34c759;
+    --hud-warning: #f5a524;
+
+    /* The capsule's size follows its content (hud.ts `fitCapsuleSize`). */
+    --hud-resize: 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+
+    --hud-chip-text: rgba(255, 255, 255, 0.66);
+    --hud-chip-fill: rgba(255, 255, 255, 0.08);
+    --hud-chip-translate-text: #86efac;
+    --hud-chip-translate-fill: rgba(52, 199, 89, 0.16);
+}
 
 * {
     margin: 0;
@@ -10,6 +58,7 @@ html,
 body {
     width: 100%;
     height: 100%;
+    background: transparent;
 }
 
 body.hud-loading {
@@ -17,62 +66,103 @@ body.hud-loading {
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
-        'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
-    background: #2b2b2b;
+    font-family: var(--hud-font);
     overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
 
-/* Windows only: the native window is composition-transparent for its whole
-   lifetime, so CSS alpha reaches the desktop. macOS keeps these backgrounds
-   opaque and fades the NSWindow instead — applying both would compound. */
-body.hud-windows.hud-translucent,
-body.hud-windows.hud-translucent .hud-container {
-    background: rgba(43, 43, 43, 0.88);
-}
-
 #hud {
-    /* Window size is controlled by Rust; content should fill the window. */
+    /* Window size is controlled by Rust and hud.ts; the capsule sits on the
+       window's bottom edge, centered. */
     width: 100%;
     height: 100%;
+    padding: var(--hud-pad);
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     justify-content: center;
 }
 
-.hud-container {
-    width: 100%;
-    height: 100%;
-    padding: 12px;
-    background: #2b2b2b;
-    border-radius: 0;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+/* ---------- Capsule ---------- */
+
+.hud-capsule {
+    --bar: var(--hud-recording);
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    align-items: center;
+    gap: 10px;
+    max-width: 100%;
+    min-height: 40px;
+    padding: 9px 18px 9px 13px;
+    border-radius: 20px;
+    background: var(--hud-surface);
+    box-shadow: inset 0 0 0 1px var(--hud-hairline), var(--hud-shadow);
+    color: var(--hud-text);
+    /* While the size eases toward its content, the content may be wider or
+       taller than the capsule for a moment. */
+    overflow: hidden;
+    transition: width var(--hud-resize), height var(--hud-resize),
+        opacity 160ms ease-out, transform 160ms ease-out, background-color 200ms;
 }
 
-/* Status Area */
-.status-area {
-    position: relative;
-    width: 100%;
-    height: 22px;
-    min-height: 22px;
+/* Measuring and setting the start of a resize (hud.ts): the size jumps,
+   the rest keeps easing. */
+.hud-capsule.sizing {
+    transition-property: opacity, transform, background-color;
 }
+
+/* Coming in: the window has just been shown. hud.ts removes this on the next
+   frame, and the capsule rises into place. */
+body.hud-enter .hud-capsule {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+    transition: none;
+}
+
+/* Going out: window.rs orders the window out once this has played, so the
+   last frame it painted, and the next show starts from, is empty. */
+body.hud-exit .hud-capsule {
+    opacity: 0;
+    transform: scale(0.97);
+    /* Same properties as `.hud-capsule`; the fade is a little quicker. */
+    transition-duration: 220ms, 220ms, 180ms, 180ms, 200ms;
+}
+
+/* Nothing but the icon: an even pill. */
+.hud-capsule.icon-only {
+    padding: 9px 11px;
+}
+
+body.hud-translucent .hud-capsule {
+    background: var(--hud-surface-translucent);
+}
+
+body.recognizing .hud-capsule {
+    --bar: var(--hud-recognizing);
+}
+
+body.correcting .hud-capsule {
+    --bar: var(--hud-polishing);
+}
+
+body.error .hud-capsule {
+    background: var(--hud-error-surface);
+}
+
+body.error.hud-translucent .hud-capsule {
+    background: var(--hud-error-surface-translucent);
+}
+
+/* ---------- State icon ---------- */
 
 .status-icon {
-    width: 24px;
-    height: 24px;
-    color: rgba(255, 255, 255, 0.9);
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
+    flex: none;
+    width: 18px;
+    height: 18px;
+    color: var(--hud-recording);
+}
+
+.status-icon[hidden] {
+    display: none;
 }
 
 .status-icon svg {
@@ -88,234 +178,41 @@ body.hud-windows.hud-translucent .hud-container {
     display: block;
 }
 
-/* Breathing animation */
+body.recognizing .status-icon {
+    color: var(--hud-recognizing);
+}
+
+body.correcting .status-icon {
+    color: var(--hud-polishing);
+}
+
+body.error .status-icon {
+    color: var(--hud-error);
+}
+
+/* The text was typed: a check mark in place of whatever was showing. */
+body.inserted .status-icon {
+    color: var(--hud-done);
+    animation: check-in 240ms cubic-bezier(0.3, 1.5, 0.5, 1) both;
+}
+
+@keyframes check-in {
+    from {
+        opacity: 0;
+        transform: scale(0.5);
+    }
+
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
 .status-icon.animating {
     animation: breathe 1.6s ease-in-out infinite;
 }
 
 @keyframes breathe {
-
-    0%,
-    100% {
-        opacity: 0.35;
-        transform: translate(-50%, -50%) scale(1);
-    }
-
-    50% {
-        opacity: 1;
-        transform: translate(-50%, -50%) scale(1.08);
-    }
-}
-
-/* Countdown */
-.countdown {
-    font-size: 10px;
-    color: rgba(255, 255, 255, 0.55);
-    position: absolute;
-    left: 0;
-    top: 50%;
-    transform: translateY(-50%);
-    margin-top: 0;
-    line-height: 1;
-    white-space: nowrap;
-}
-
-.countdown:empty {
-    display: none;
-}
-
-.intent-chip {
-    position: absolute;
-    right: 0;
-    top: 50%;
-    transform: translateY(-50%);
-    margin-top: 0;
-    padding: 1px 6px;
-    border-radius: 999px;
-    font-size: 8px;
-    line-height: 1.5;
-    color: rgba(255, 255, 255, 0.6);
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    white-space: nowrap;
-}
-
-.intent-chip.translate {
-    color: rgba(134, 239, 172, 0.8);
-    border-color: rgba(134, 239, 172, 0.28);
-}
-
-/* Text Area */
-.text-area {
-    font-size: 12px;
-    line-height: 1.4;
-    color: rgba(255, 255, 255, 0.65);
-    overflow: hidden;
-    word-break: break-word;
-    max-height: calc(12px * 1.4 * 2 + 2px);
-    /* exactly 2 lines; truncation is handled by fitText() in hud.ts */
-}
-
-/* A caption is the sentence being spoken and nothing else, laid out like a
-   film subtitle: no status row, no chip, no bars, no frame. Its window is
-   fixed for the whole read — 80% of the screen wide, two lines tall,
-   transparent and click-through (hud.ts `sizeCaptionWindow`) — and the visible
-   caption is the pill below, sitting on the window's bottom edge and growing
-   with its text. Padding and font size here are what hud.ts measures with
-   (CAPTION_PADDING_X / CAPTION_PADDING_Y there). */
-html body.caption-mode,
-html body.caption-mode.hud-windows.hud-translucent {
-    background: transparent;
-}
-
-body.caption-mode #hud {
-    align-items: flex-end;
-}
-
-body.caption-mode .hud-container {
-    width: fit-content;
-    max-width: 100%;
-    height: auto;
-    padding: 10px 20px;
-    gap: 0;
-    border: none;
-    border-radius: 10px;
-    justify-content: center;
-}
-
-body.caption-mode .status-area,
-body.caption-mode .waveform-bars,
-body.caption-mode .waveform-hybrid {
-    display: none;
-}
-
-body.caption-mode .text-area {
-    font-size: 26px;
-    line-height: 1.4;
-    max-height: calc(26px * 1.4 * 2 + 2px);
-    color: rgba(255, 255, 255, 0.95);
-    text-align: center;
-}
-
-body.caption-mode .text-area .placeholder {
-    color: rgba(255, 255, 255, 0.5);
-}
-
-.text-area.is-placeholder {
-    -webkit-line-clamp: unset;
-    line-clamp: unset;
-    max-height: none;
-    text-overflow: clip;
-}
-
-.text-area .placeholder {
-    color: rgba(255, 255, 255, 0.35);
-}
-
-.text-area[hidden],
-.waveform-bars[hidden],
-.waveform-hybrid[hidden] {
-    display: none !important;
-}
-
-.waveform-bars {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 2px;
-    width: min(calc(100% - 18px), 252px);
-    height: 22px;
-    margin: 0 auto;
-    padding: 0;
-}
-
-.waveform-bars span {
-    display: block;
-    flex: 1 1 0;
-    min-width: 3px;
-    max-width: 6px;
-    height: 100%;
-    border-radius: 999px;
-    background: linear-gradient(180deg,
-            rgba(255, 255, 255, 0.42) 0%,
-            rgba(255, 255, 255, 0.96) 45%,
-            rgba(117, 199, 255, 0.92) 100%);
-    box-shadow: 0 0 12px rgba(117, 199, 255, calc(var(--bar-glow, 0.2) * 0.32));
-    transform-origin: center center;
-    transform: scaleY(var(--bar-scale, 0.16));
-    opacity: var(--bar-opacity, 0.18);
-    will-change: transform, opacity, box-shadow;
-    transition: transform 70ms linear, opacity 70ms linear, box-shadow 90ms linear;
-}
-
-.waveform-hybrid {
-    display: block;
-    width: min(calc(100% - 18px), 252px);
-    height: 26px;
-    margin: 0 auto;
-}
-
-body.compact-batch-mode .hud-container {
-    padding: 9px 14px;
-    gap: 4px;
-    justify-content: center;
-}
-
-body.compact-batch-mode .status-area {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 20px;
-    min-height: 20px;
-}
-
-body.compact-batch-mode .status-icon {
-    position: static;
-    width: 20px;
-    height: 20px;
-    transform: none;
-}
-
-body.compact-batch-mode .status-icon.animating {
-    animation-name: breathe-compact;
-}
-
-body.compact-batch-mode .countdown,
-body.compact-batch-mode .countdown {
-    display: none;
-}
-
-body.compact-batch-mode .intent-chip {
-    display: inline-flex;
-    align-items: center;
-    right: 0;
-    font-size: 7px;
-    line-height: 1.35;
-    padding: 1px 5px;
-    color: rgba(255, 255, 255, 0.64);
-    border-color: rgba(255, 255, 255, 0.16);
-}
-
-body.compact-batch-mode .intent-chip.translate {
-    color: rgba(134, 239, 172, 0.84);
-    border-color: rgba(134, 239, 172, 0.3);
-}
-
-body.batch-recognizing-mode .hud-container {
-    justify-content: center;
-}
-
-body.compact-batch-mode .waveform-bars {
-    margin-top: 4px;
-}
-
-body.compact-batch-mode.recognizing .status-icon,
-body.compact-batch-mode.correcting .status-icon,
-body.compact-batch-mode.recording .status-icon {
-    color: rgba(255, 255, 255, 0.86);
-}
-
-@keyframes breathe-compact {
 
     0%,
     100% {
@@ -329,62 +226,225 @@ body.compact-batch-mode.recording .status-icon {
     }
 }
 
-/* States */
-body.recording .status-icon {
-    color: rgba(255, 255, 255, 0.9);
+/* ---------- Text ---------- */
+
+.text-area {
+    /* hud.ts sets max-width: the capsule's widest less everything beside the
+       text, and fits the text to two lines of it (fitText). Not shrinkable:
+       flex would take back a fraction of a pixel and wrap a line that was
+       measured to fit. */
+    flex: 0 0 auto;
+    font-size: 15px;
+    line-height: 22px;
+    max-height: calc(22px * 2);
+    color: var(--hud-text);
+    overflow: hidden;
+    word-break: break-word;
 }
 
-body.recognizing .status-icon {
-    color: #60a5fa;
+.text-area .placeholder {
+    color: var(--hud-text-placeholder);
 }
 
-body.correcting .status-icon {
-    color: #a78bfa;
+.text-area .pending {
+    color: var(--hud-text-pending);
 }
 
-body.error .status-icon {
-    color: #f87171;
+/* Polishing: a light sweep across the text while the LLM edits it. */
+body.correcting:not(.compact-batch-mode):not(.caption-mode) .text-area {
+    background: linear-gradient(100deg,
+            rgba(255, 255, 255, 0.5) 0%,
+            rgba(255, 255, 255, 0.5) 35%,
+            #ffffff 50%,
+            rgba(255, 255, 255, 0.5) 65%,
+            rgba(255, 255, 255, 0.5) 100%);
+    background-size: 250% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer 1.3s linear infinite;
+}
+
+body.correcting:not(.compact-batch-mode):not(.caption-mode) .text-area span {
+    color: transparent;
+}
+
+@keyframes shimmer {
+    from {
+        background-position: 100% 0;
+    }
+
+    to {
+        background-position: -150% 0;
+    }
 }
 
 body.error .text-area {
-    color: rgba(254, 202, 202, 0.96);
+    font-size: 14px;
+    line-height: 20px;
+    max-height: calc(20px * 2);
+    color: var(--hud-error-text);
 }
 
-body.batch-error-mode .hud-container {
-    padding: 8px 12px;
-    gap: 4px;
+/* ---------- Countdown and chip ---------- */
+
+.countdown {
+    flex: none;
+    font-size: 12px;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--hud-text-secondary);
+    white-space: nowrap;
 }
 
-body.batch-error-mode .status-area {
-    height: 18px;
-    min-height: 18px;
+.countdown:empty {
+    display: none;
 }
 
-body.batch-error-mode .status-icon {
+/* The last ten seconds before the recording limit. */
+.countdown.urgent {
+    color: var(--hud-warning);
+}
+
+.intent-chip {
+    flex: none;
+    padding: 0 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 16px;
+    letter-spacing: 0.02em;
+    color: var(--hud-chip-text);
+    background: var(--hud-chip-fill);
+    white-space: nowrap;
+}
+
+/* The default dictation intent says nothing worth a chip; hud.ts leaves it
+   empty. */
+.intent-chip:empty {
+    display: none;
+}
+
+.intent-chip.translate {
+    color: var(--hud-chip-translate-text);
+    background: var(--hud-chip-translate-fill);
+}
+
+/* ---------- Waveform ---------- */
+
+.text-area[hidden],
+.mini-wave[hidden],
+.waveform-bars[hidden],
+.waveform-hybrid[hidden] {
+    display: none !important;
+}
+
+/* Stream dictation's live level: five bars where the state icon was. */
+.mini-wave {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 2px;
     width: 18px;
+    height: 16px;
+}
+
+.mini-wave span {
+    display: block;
+    flex: 1 1 0;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--bar);
+    transform: scaleY(var(--bar-scale, 0.18));
+    transition: transform 70ms linear, background-color 240ms;
+}
+
+.waveform-bars {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 3px;
     height: 18px;
 }
 
-/* Light theme support (for future) */
-@media (prefers-color-scheme: light) {
-    body.light-theme .hud-container {
-        background: rgba(255, 255, 255, 0.85);
-        border-color: rgba(0, 0, 0, 0.1);
+.waveform-bars span {
+    display: block;
+    width: 3px;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--bar);
+    transform-origin: center center;
+    transform: scaleY(var(--bar-scale, 0.16));
+    opacity: var(--bar-opacity, 0.18);
+    will-change: transform, opacity;
+    transition: transform 70ms linear, opacity 70ms linear, background-color 240ms;
+}
+
+.waveform-hybrid {
+    flex: none;
+    display: block;
+    width: 118px;
+    height: 22px;
+}
+
+/* ---------- Compact: batch dictation and reads without captions ---------- */
+
+body.compact-batch-mode .hud-capsule {
+    min-height: 36px;
+    height: 36px;
+    padding: 0 16px;
+    border-radius: 18px;
+}
+
+/* An error in compact presentation carries text, and may take two lines. */
+body.batch-error-mode .hud-capsule {
+    padding: 8px 16px 8px 12px;
+}
+
+/* ---------- Caption: a read's subtitle ---------- */
+
+/* The sentence being spoken and nothing else, laid out like a film subtitle:
+   no icon, no chip, no bars. Its window is fixed for the whole read — 80% of
+   the screen wide, two lines tall (window.rs `CAPTION_HUD_WIDTH`) — and the
+   capsule grows with its text inside it. */
+body.caption-mode .hud-capsule {
+    min-height: 0;
+    padding: 10px 20px;
+    gap: 0;
+    border-radius: 14px;
+    justify-content: center;
+}
+
+body.caption-mode .status-icon,
+body.caption-mode .mini-wave,
+body.caption-mode .waveform-bars,
+body.caption-mode .waveform-hybrid,
+body.caption-mode .countdown,
+body.caption-mode .intent-chip {
+    display: none;
+}
+
+body.caption-mode .text-area,
+body.caption-mode.error .text-area {
+    font-size: 26px;
+    line-height: 1.4;
+    max-height: calc(26px * 1.4 * 2 + 2px);
+    text-align: center;
+}
+
+body.caption-mode .text-area {
+    color: rgba(255, 255, 255, 0.95);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .hud-capsule,
+    body.hud-exit .hud-capsule {
+        transition: none;
     }
 
-    body.light-theme .status-icon {
-        color: rgba(0, 0, 0, 0.8);
-    }
-
-    body.light-theme .countdown {
-        color: rgba(0, 0, 0, 0.45);
-    }
-
-    body.light-theme .text-area {
-        color: rgba(0, 0, 0, 0.65);
-    }
-
-    body.light-theme .text-area .placeholder {
-        color: rgba(0, 0, 0, 0.35);
+    body.inserted .status-icon,
+    .status-icon.animating,
+    body.correcting:not(.compact-batch-mode):not(.caption-mode) .text-area {
+        animation: none;
     }
 }

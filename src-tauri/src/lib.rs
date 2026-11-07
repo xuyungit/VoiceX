@@ -349,7 +349,6 @@ pub fn run() {
             commands::post_edit::get_post_edit_records,
             commands::post_edit::delete_post_edit_record,
             commands::post_edit::set_history_final_text,
-            commands::hud::set_hud_content_bounds,
             commands::hud::hud_ready,
             commands::hotkey::record_hotkey,
             commands::hotkey::apply_hotkey_config,

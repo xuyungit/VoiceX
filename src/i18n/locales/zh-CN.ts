@@ -245,7 +245,7 @@ const zhCN = {
     overlay: '悬浮窗',
     overlaySub: '录音和朗读时显示在屏幕底部的状态窗。',
     translucent: '半透明',
-    translucentNote: '开启后能看到被挡住的内容，文字会略微变淡。',
+    translucentNote: '开启后能看到被挡住的内容，文字保持清晰。',
     textInjection: '文字注入',
     postEditSwitch: '记录输入后的修改',
     postEditSwitchNote: '听写后短时读取目标输入框里你对这段文字的修改，在「历史 → 修改记录」中查看。仅保存在本机，随听写记录的保留期清理，不参与同步。',

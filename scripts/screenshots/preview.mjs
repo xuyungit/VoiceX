@@ -51,6 +51,8 @@ function installFixture(usage) {
       if (listener.event === event) callbacks.get(listener.handler)?.({ event, id, payload })
     }
   }
+  // Lets a capture script drive a page through further states.
+  window.__fixtureEmit = emit
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} }
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
@@ -92,8 +94,7 @@ function installFixture(usage) {
         case 'plugin:event|unlisten': listeners.delete(args.eventId); return
         case 'apply_hotkey_config':
         case 'set_input_device':
-        case 'plugin:window|set_theme':
-        case 'set_hud_content_bounds': window.__readmeHudBounds = args; return
+        case 'plugin:window|set_theme': return
         case 'hud_ready':
           if (params.get('hud') === 'reading') {
             emit('state:hud_presentation', { mode: 'caption' })
@@ -103,8 +104,12 @@ function installFixture(usage) {
               : '选中一段文字，按下朗读热键，就能一边听、一边看字幕。' })
             return
           }
+          emit('state:hud_presentation', { mode: 'stream' })
           emit('state:recording_style', { style: 'hands_free' })
-          emit('asr:event', { text: english ? 'Turn your ideas into words with VoiceX.' : '用 VoiceX 说出想法，让语音变成文字。', isFinal: false })
+          // The last words are still in flux, as they are mid-utterance.
+          emit('asr:event', english
+            ? { text: 'Turn your ideas into words with VoiceX.', isFinal: false, committedLength: 26 }
+            : { text: '用 VoiceX 说出想法，让语音变成文字。', isFinal: false, committedLength: 13 })
           return
         default: throw new Error(`Screenshot fixture does not implement: ${command}`)
       }

@@ -63,8 +63,8 @@ impl SessionController {
 
         state.injection_in_progress = false;
         if state.session_state == HotkeySessionState::Finalizing {
-            // We've displayed final text; hide/reset immediately to avoid lingering HUD.
-            self.hide_hud_and_reset_state(state);
+            // The text is in: confirm it, then leave without lingering.
+            self.confirm_inserted_and_reset_state(state);
         }
     }
 
@@ -120,7 +120,11 @@ impl SessionController {
             }
         }
         // Hide the HUD before resetting state so users don't see the placeholder flash.
-        self.hide_hud_and_reset_state(state);
+        if state.final_injected {
+            self.confirm_inserted_and_reset_state(state);
+        } else {
+            self.hide_hud_and_reset_state(state);
+        }
     }
 
     pub fn on_recording_timeout_state(&self, state: &mut AppState) {

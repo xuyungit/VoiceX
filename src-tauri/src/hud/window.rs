@@ -1,47 +1,71 @@
 //! HUD window management
+//!
+//! Every presentation is a transparent, click-through window with the visible
+//! capsule drawn inside it by the page (`src/hud/hud.css`). The window is
+//! sized here, for the screen it is about to appear on, before it is shown,
+//! and never follows the capsule: a native resize cannot be redrawn in step
+//! with the page, and flashes the window each time. The capsule sits
+//! `HUD_SHADOW_PAD` in from the window's edges, which leaves room for its
+//! CSS shadow.
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
-/// Stream-mode HUD content size (logical points). Shared definition; the
-/// same values drive `HudService::sync_bounds` and HUD repositioning.
-pub const STREAM_HUD_WIDTH: f64 = 256.0;
-pub const STREAM_HUD_HEIGHT: f64 = 100.0;
-/// Batch-mode HUD content size (logical points).
-pub const BATCH_HUD_WIDTH: f64 = 204.0;
-pub const BATCH_HUD_HEIGHT: f64 = 78.0;
+/// Transparent margin between the window's edge and the capsule, holding the
+/// capsule's shadow. Must match `--hud-pad` in `hud.css` and `HUD_PAD` in
+/// `hud.ts`.
+pub const HUD_SHADOW_PAD: f64 = 20.0;
+/// Space between the capsule's bottom edge and the top of the work area,
+/// which is above the Dock or taskbar. Shared by every presentation, so
+/// dictation and reading captions appear in the same spot.
+const HUD_CAPSULE_GAP: f64 = 24.0;
+
+/// How wide a presentation's window is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HudWidth {
+    /// A fixed width in logical points.
+    Points(f64),
+    /// This share of the target screen's width for the capsule, plus the
+    /// shadow margin on both sides. `hud.ts` wraps its text against the same
+    /// share, so the two must agree.
+    ScreenShare(f64),
+}
+
+impl HudWidth {
+    fn resolve(self, screen_width: f64) -> f64 {
+        match self {
+            HudWidth::Points(width) => width,
+            HudWidth::ScreenShare(share) => (screen_width * share).floor() + 2.0 * HUD_SHADOW_PAD,
+        }
+    }
+}
+
+/// Stream dictation: the capsule grows with the transcript up to half the
+/// screen width, two 22-point lines plus 9-point padding tall.
+pub const STREAM_HUD_WIDTH: HudWidth = HudWidth::ScreenShare(0.5);
+pub const STREAM_HUD_HEIGHT: f64 = 102.0;
+/// Batch dictation and reads without captions: a 36-point waveform capsule.
+/// The window leaves room for the widest it becomes, a two-line error.
+pub const BATCH_HUD_WIDTH: HudWidth = HudWidth::Points(480.0);
+pub const BATCH_HUD_HEIGHT: f64 = 96.0;
 /// A read with captions: the sentence being spoken and nothing else, laid out
-/// like a film subtitle. The window is transparent and click-through, and the
-/// page draws the caption as a pill inside it, so the window never follows the
-/// text. The page sets the real size once per read (80% of its screen wide —
-/// only it knows the screen); these are what it opens at.
-pub const CAPTION_HUD_WIDTH: f64 = 960.0;
-pub const CAPTION_HUD_HEIGHT: f64 = 96.0;
-/// Tallest a caption window may be: two lines plus padding (see `hud.css`).
-pub const CAPTION_HUD_MAX_HEIGHT: f64 = 112.0;
+/// like a film subtitle — 80% of the screen wide, two 26-point lines tall.
+pub const CAPTION_HUD_WIDTH: HudWidth = HudWidth::ScreenShare(0.8);
+pub const CAPTION_HUD_HEIGHT: f64 = 134.0;
 
-const HUD_BOTTOM_MARGIN: f64 = 120.0;
-/// Space below the caption pill, measured from the target screen's work area.
-const CAPTION_BOTTOM_GAP: f64 = 24.0;
 // The clamps bound what any presentation may ask for; a size outside them
 // would be shown smaller than its stylesheet lays out, and silently so.
 const HUD_MIN_WIDTH: f64 = 128.0;
-// Width is bounded only by what the page asks for: a caption window is 80%
-// of the screen, which the page knows and this module does not.
+// Stream and caption windows are a share of the screen; this bounds only a
+// screen wider than any real one.
 const HUD_MAX_WIDTH: f64 = 4096.0;
 const HUD_MIN_HEIGHT: f64 = 56.0;
-const HUD_MAX_HEIGHT: f64 = CAPTION_HUD_MAX_HEIGHT;
-/// macOS whole-window opacity via `NSWindow::setAlphaValue` when the setting
-/// is on. Windows does not read this: it keeps the native window
-/// composition-transparent and changes CSS alpha instead (see
-/// `apply_windows_hud_appearance`).
-#[cfg(target_os = "macos")]
-const HUD_WINDOW_ALPHA: f64 = 0.88;
+/// Tallest any presentation asks for: a two-line caption is about 133.
+const HUD_MAX_HEIGHT: f64 = 160.0;
 
 #[derive(Clone, Copy)]
 struct HudLayout {
-    width: f64,
+    width: HudWidth,
     height: f64,
-    caption: bool,
 }
 
 /// Desired logical content size and placement for the current presentation.
@@ -55,7 +79,6 @@ struct HudLayout {
 static DESIRED_LAYOUT: std::sync::Mutex<HudLayout> = std::sync::Mutex::new(HudLayout {
     width: STREAM_HUD_WIDTH,
     height: STREAM_HUD_HEIGHT,
-    caption: false,
 });
 
 fn desired_layout() -> HudLayout {
@@ -64,21 +87,14 @@ fn desired_layout() -> HudLayout {
         .expect("DESIRED_LAYOUT mutex poisoned")
 }
 
-pub fn set_hud_caption_mode(caption: bool) {
-    DESIRED_LAYOUT
-        .lock()
-        .expect("DESIRED_LAYOUT mutex poisoned")
-        .caption = caption;
-}
-
-/// All distances are logical points. Only captions anchor to the work area;
-/// dictation keeps its existing distance from the full screen's bottom edge.
-fn hud_bottom_margin(caption: bool, reserved_bottom: f64, work_height: f64, height: f64) -> f64 {
-    if caption {
-        reserved_bottom + CAPTION_BOTTOM_GAP.min((work_height - height).max(0.0))
-    } else {
-        HUD_BOTTOM_MARGIN
-    }
+/// Distance from the screen's bottom edge to the window's, in logical points.
+///
+/// The capsule sits `HUD_SHADOW_PAD` above the window's bottom edge, so this
+/// leaves `HUD_CAPSULE_GAP` between the capsule and the work area. A work
+/// area too short to hold the window as well gives up the gap, not the window.
+fn hud_bottom_margin(reserved_bottom: f64, work_height: f64, height: f64) -> f64 {
+    let gap = HUD_CAPSULE_GAP - HUD_SHADOW_PAD;
+    reserved_bottom + gap.min((work_height - height).max(0.0))
 }
 
 fn hud_transparent_from_settings() -> bool {
@@ -101,7 +117,9 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
     let builder =
         WebviewWindowBuilder::new(app, "hud", WebviewUrl::App("src/hud/index.html".into()))
             .title("VoiceX HUD")
-            .inner_size(layout.width, layout.height)
+            // Only the screen decides the width; `position_hud_window` sets it
+            // below, before the window is ever shown.
+            .inner_size(HUD_MIN_WIDTH, layout.height)
             .resizable(false)
             .decorations(false)
             .always_on_top(true)
@@ -109,15 +127,16 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
             .focused(false)
             .visible(false);
 
+    // Every presentation draws its capsule inside a transparent window, with
+    // the capsule's own CSS shadow. A native shadow would outline the whole
+    // window, empty margin included.
     // Windows: composition transparency is a create-time WebView2 flag.
     // The user setting only changes CSS alpha on top of it — recreating the
     // window on toggle would flash and could race a live recording.
-    // `shadow(false)` avoids the 1px white border Tauri draws on undecorated
-    // Windows windows, which would show through a translucent fill.
-    // macOS: the caption presentation needs a transparent window too. Its
-    // other presentations stay visually opaque — their pages fill the window.
+    // `shadow(false)` also avoids the 1px white border Tauri draws on
+    // undecorated Windows windows.
     #[cfg(target_os = "macos")]
-    let builder = builder.transparent(true);
+    let builder = builder.transparent(true).shadow(false);
 
     #[cfg(target_os = "windows")]
     let builder = builder
@@ -129,6 +148,16 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
         .build()
         .map_err(|e| HudError::CreateFailed(e.to_string()))?;
 
+    // Windows: let clicks fall through. The window is wider than the capsule
+    // in it, and would otherwise swallow clicks on whatever is underneath
+    // without any visible reason. Tauri implements this with `WS_EX_LAYERED`;
+    // reading captions have run with it on the transparent window since they
+    // shipped. macOS does the same in `configure_macos_hud`.
+    #[cfg(target_os = "windows")]
+    window
+        .set_ignore_cursor_events(true)
+        .map_err(|e| HudError::PlatformConfigFailed(e.to_string()))?;
+
     // Position at the bottom center of the screen under the cursor
     position_hud_window(&window, layout)?;
     apply_platform_hud_appearance(app, &window, transparent)?;
@@ -139,8 +168,9 @@ pub fn create_hud_window(app: &AppHandle) -> Result<(), HudError> {
 
 /// Apply the current overlay appearance to an already-created HUD.
 ///
-/// macOS changes `NSWindow` alpha. Windows emits a CSS class change; the
-/// native window stays composition-transparent for the lifetime of the process.
+/// The setting makes the capsule's fill translucent, in CSS, on every
+/// platform. The window itself is transparent and keeps full opacity: fading
+/// it would fade the text and the waveform along with the fill.
 pub fn apply_hud_appearance(app: &AppHandle, transparent: bool) {
     if let Err(err) = apply_hud_appearance_inner(app, transparent) {
         log::warn!("Failed to apply HUD appearance: {err}");
@@ -160,22 +190,17 @@ fn apply_platform_hud_appearance(
     transparent: bool,
 ) -> Result<(), HudError> {
     #[cfg(target_os = "macos")]
-    {
-        let _ = app;
-        return configure_macos_hud(window, transparent);
-    }
+    configure_macos_hud(window)?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
 
-    #[cfg(target_os = "windows")]
-    {
-        let _ = window;
-        return apply_windows_hud_appearance(app, transparent);
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = (app, window, transparent);
-        Ok(())
-    }
+    app.emit_to(
+        "hud",
+        "hud:appearance",
+        serde_json::json!({ "transparent": transparent }),
+    )
+    .map_err(|e| HudError::PlatformConfigFailed(e.to_string()))?;
+    Ok(())
 }
 
 fn reposition_hud_window(window: &tauri::WebviewWindow) -> Result<(), HudError> {
@@ -183,7 +208,7 @@ fn reposition_hud_window(window: &tauri::WebviewWindow) -> Result<(), HudError> 
 }
 
 fn position_hud_window(window: &tauri::WebviewWindow, layout: HudLayout) -> Result<(), HudError> {
-    let width = layout.width.clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH);
+    let width = layout.width;
     let height = layout.height.clamp(HUD_MIN_HEIGHT, HUD_MAX_HEIGHT);
 
     // Track the screen the cursor is on: that is where the user is working.
@@ -191,10 +216,10 @@ fn position_hud_window(window: &tauri::WebviewWindow, layout: HudLayout) -> Resu
     // stays on whatever screen the system placed it at startup (usually the
     // one with the main settings window) and never follows the user.
     #[cfg(target_os = "macos")]
-    return position_hud_on_cursor_screen_macos(window, width, height, layout.caption);
+    return position_hud_on_cursor_screen_macos(window, width, height);
 
     #[cfg(not(target_os = "macos"))]
-    position_hud_on_cursor_screen(window, width, height, layout.caption)
+    position_hud_on_cursor_screen(window, width, height)
 }
 
 /// macOS: place the HUD at the bottom center of the screen nearest the
@@ -211,9 +236,8 @@ fn position_hud_window(window: &tauri::WebviewWindow, layout: HudLayout) -> Resu
 #[cfg(target_os = "macos")]
 fn position_hud_on_cursor_screen_macos(
     window: &tauri::WebviewWindow,
-    width: f64,
+    width: HudWidth,
     height: f64,
-    caption: bool,
 ) -> Result<(), HudError> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSEvent, NSScreen, NSWindow};
@@ -281,11 +305,13 @@ fn position_hud_on_cursor_screen_macos(
 
             let frame = screen.frame();
             let work_area = screen.visibleFrame();
+            let width = width
+                .resolve(frame.size.width)
+                .clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH);
             let x = frame.origin.x + (frame.size.width - width) / 2.0;
             // A bottom Dock raises visibleFrame's bottom edge; a screen with
-            // no bottom Dock has no reserved strip to leave beneath captions.
+            // no bottom Dock has no reserved strip to leave beneath the HUD.
             let bottom_margin = hud_bottom_margin(
-                caption,
                 work_area.origin.y - frame.origin.y,
                 work_area.size.height,
                 height,
@@ -334,9 +360,8 @@ fn position_hud_on_cursor_screen_macos(
 #[cfg(not(target_os = "macos"))]
 fn position_hud_on_cursor_screen(
     window: &tauri::WebviewWindow,
-    width: f64,
+    width: HudWidth,
     height: f64,
-    caption: bool,
 ) -> Result<(), HudError> {
     let app = window.app_handle();
     let monitor = app
@@ -350,6 +375,9 @@ fn position_hud_on_cursor_screen(
     };
 
     let scale = monitor.scale_factor();
+    let width = width
+        .resolve(monitor.size().width as f64 / scale)
+        .clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH);
     let target_w = (width * scale).round();
     let target_h = (height * scale).round();
 
@@ -360,7 +388,6 @@ fn position_hud_on_cursor_screen(
     let work_area = monitor.work_area();
     let work_bottom = work_area.position.y as f64 + work_area.size.height as f64;
     let bottom_margin = hud_bottom_margin(
-        caption,
         (screen_bottom - work_bottom) / scale,
         work_area.size.height as f64 / scale,
         height,
@@ -432,7 +459,8 @@ pub fn refresh_hud_window(window: &tauri::WebviewWindow) -> Result<(), HudError>
     reposition_hud_window(window)
 }
 
-pub fn set_hud_content_bounds(app: &AppHandle, width: f64, height: f64) -> Result<(), HudError> {
+/// Size the window for a presentation, on the screen the cursor is on.
+pub fn set_hud_size(app: &AppHandle, width: HudWidth, height: f64) -> Result<(), HudError> {
     let layout = {
         let mut layout = DESIRED_LAYOUT
             .lock()
@@ -449,17 +477,8 @@ pub fn set_hud_content_bounds(app: &AppHandle, width: f64, height: f64) -> Resul
 }
 
 #[cfg(target_os = "macos")]
-fn configure_macos_hud(
-    window: &tauri::WebviewWindow,
-    transparent: bool,
-) -> Result<(), HudError> {
+fn configure_macos_hud(window: &tauri::WebviewWindow) -> Result<(), HudError> {
     use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
-
-    let alpha = if transparent {
-        HUD_WINDOW_ALPHA
-    } else {
-        1.0
-    };
 
     window
         .with_webview(move |webview| {
@@ -486,63 +505,11 @@ fn configure_macos_hud(
                 // Click-through HUD: never intercept mouse interactions from the
                 // currently focused app underneath.
                 ns_win.setIgnoresMouseEvents(true);
-
-                // Public API: composites the entire HUD (chrome + webview)
-                // against whatever is underneath. No macos-private-api needed.
-                // CSS stays opaque so this alpha is the only fade.
-                ns_win.setAlphaValue(alpha);
             }
         })
         .map_err(|e| HudError::PlatformConfigFailed(format!("{e:?}")))?;
 
     Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn apply_windows_hud_appearance(app: &AppHandle, transparent: bool) -> Result<(), HudError> {
-    use tauri::Emitter;
-
-    // Click-through (WS_EX_TRANSPARENT) is a separate concern. Do not use
-    // WS_EX_LAYERED / SetLayeredWindowAttributes for this visual: that style
-    // fights WebView2's compositor, which `transparent(true)` already uses.
-    app.emit_to(
-        "hud",
-        "hud:appearance",
-        serde_json::json!({ "transparent": transparent }),
-    )
-    .map_err(|e| HudError::PlatformConfigFailed(e.to_string()))?;
-    Ok(())
-}
-
-/// A transparent caption window would cast a shadow the width of the whole
-/// window around its empty area, so it goes without one. macOS only: Windows
-/// already creates the window shadowless.
-pub fn set_hud_shadow(app: &AppHandle, shadow: bool) {
-    #[cfg(target_os = "macos")]
-    if let Some(window) = app.get_webview_window("hud") {
-        if let Err(err) = window.set_shadow(shadow) {
-            log::warn!("Failed to set HUD shadow: {err}");
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (app, shadow);
-}
-
-/// Windows: let clicks fall through the caption window. It is a transparent
-/// strip 80% of the screen wide, so while it is up it would otherwise swallow
-/// clicks on whatever is underneath without any visible reason. macOS does
-/// this for every presentation in `configure_macos_hud`; Windows has it for
-/// captions only, because Tauri implements it with `WS_EX_LAYERED`, which the
-/// other presentations have no reason to risk against WebView2's compositor.
-pub fn set_hud_click_through(app: &AppHandle, click_through: bool) {
-    #[cfg(target_os = "windows")]
-    if let Some(window) = app.get_webview_window("hud") {
-        if let Err(err) = window.set_ignore_cursor_events(click_through) {
-            log::warn!("Failed to set HUD click-through: {err}");
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    let _ = (app, click_through);
 }
 
 /// Show the HUD window
@@ -579,40 +546,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn captions_leave_the_same_gap_above_each_screens_work_area() {
+    fn capsule_sits_the_same_gap_above_each_screens_work_area() {
         for (reserved_bottom, work_height) in [(0.0, 900.0), (80.0, 820.0), (48.0, 1032.0)] {
-            let margin = hud_bottom_margin(true, reserved_bottom, work_height, 93.0);
-            assert_eq!(margin - reserved_bottom, 24.0);
+            let window_bottom = hud_bottom_margin(reserved_bottom, work_height, 134.0);
+            let capsule_bottom = window_bottom + HUD_SHADOW_PAD;
+            assert_eq!(capsule_bottom - reserved_bottom, HUD_CAPSULE_GAP);
         }
     }
 
     #[test]
-    fn caption_gap_fits_a_short_work_area() {
-        assert_eq!(hud_bottom_margin(true, 80.0, 100.0, 93.0), 87.0);
-    }
-
-    #[test]
-    fn dictation_keeps_its_screen_bottom_margin() {
-        for reserved_bottom in [0.0, 48.0, 80.0] {
-            assert_eq!(
-                hud_bottom_margin(false, reserved_bottom, 900.0, 100.0),
-                120.0
-            );
-        }
+    fn a_short_work_area_gives_up_the_gap_not_the_window() {
+        assert_eq!(hud_bottom_margin(80.0, 100.0, 98.0), 82.0);
+        assert_eq!(hud_bottom_margin(80.0, 90.0, 98.0), 80.0);
     }
 
     /// A presentation asking for more than the clamp allows would be shown
     /// smaller than its stylesheet lays out, and the clamp never says so.
     #[test]
     fn every_presentation_size_survives_the_clamp() {
-        for (width, height) in [
-            (STREAM_HUD_WIDTH, STREAM_HUD_HEIGHT),
-            (BATCH_HUD_WIDTH, BATCH_HUD_HEIGHT),
-            (CAPTION_HUD_WIDTH, CAPTION_HUD_HEIGHT),
-            (CAPTION_HUD_WIDTH, CAPTION_HUD_MAX_HEIGHT),
-        ] {
-            assert_eq!(width.clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH), width);
-            assert_eq!(height.clamp(HUD_MIN_HEIGHT, HUD_MAX_HEIGHT), height);
+        for screen_width in [1280.0, 1440.0, 1728.0, 2560.0, 3840.0] {
+            for (width, height) in [
+                (STREAM_HUD_WIDTH, STREAM_HUD_HEIGHT),
+                (BATCH_HUD_WIDTH, BATCH_HUD_HEIGHT),
+                (CAPTION_HUD_WIDTH, CAPTION_HUD_HEIGHT),
+            ] {
+                let width = width.resolve(screen_width);
+                assert_eq!(width.clamp(HUD_MIN_WIDTH, HUD_MAX_WIDTH), width);
+                assert_eq!(height.clamp(HUD_MIN_HEIGHT, HUD_MAX_HEIGHT), height);
+            }
         }
+    }
+
+    #[test]
+    fn a_screen_share_leaves_the_shadow_margin_outside_the_capsule() {
+        assert_eq!(HudWidth::ScreenShare(0.5).resolve(1512.0), 756.0 + 2.0 * HUD_SHADOW_PAD);
+        assert_eq!(HudWidth::Points(480.0).resolve(1512.0), 480.0);
     }
 }

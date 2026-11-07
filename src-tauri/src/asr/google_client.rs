@@ -548,13 +548,7 @@ impl GoogleSttClient {
                             pending_partial.chars().count(),
                             flushed.chars().count(),
                         );
-                        on_event(AsrEvent {
-                            text: flushed,
-                            is_final: true,
-                            prefetch: false,
-                            definite: true,
-                            confidence: None,
-                        });
+                        on_event(AsrEvent::committed(flushed));
                     }
                     break;
                 }
@@ -775,22 +769,16 @@ fn process_response<F>(
                 accumulated_final.push_str(&alt.transcript);
                 pending_partial.clear(); // this segment is now finalized
                 on_event(AsrEvent {
-                    text: accumulated_final.clone(),
-                    is_final: true,
-                    prefetch: false,
-                    definite: true,
                     confidence,
+                    ..AsrEvent::committed(accumulated_final.clone())
                 });
             } else {
                 // Interim: show accumulated finals + current partial segment
                 *pending_partial = alt.transcript.clone();
                 let combined = format!("{}{}", accumulated_final, alt.transcript);
                 on_event(AsrEvent {
-                    text: combined,
-                    is_final: false,
-                    prefetch: false,
-                    definite: false,
                     confidence,
+                    ..AsrEvent::interim(combined, accumulated_final.len())
                 });
             }
         }

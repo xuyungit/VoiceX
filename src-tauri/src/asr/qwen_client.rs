@@ -143,13 +143,10 @@ impl QwenRealtimeClient {
                                         {
                                             continue;
                                         }
-                                        on_event_reader(AsrEvent {
-                                            text: combined,
-                                            is_final: false,
-                                            prefetch: false,
-                                            definite: false,
-                                            confidence: None,
-                                        });
+                                        on_event_reader(AsrEvent::interim(
+                                            combined,
+                                            transcript.committed_len(),
+                                        ));
                                     }
                                 }
                             }
@@ -185,13 +182,7 @@ impl QwenRealtimeClient {
 
                                 if let Some(text) = completed_text {
                                     if let Some(combined) = transcript.push_final(&text) {
-                                        on_event_reader(AsrEvent {
-                                            text: combined,
-                                            is_final: true,
-                                            prefetch: false,
-                                            definite: true,
-                                            confidence: None,
-                                        });
+                                        on_event_reader(AsrEvent::committed(combined));
                                     }
                                 }
                             }
@@ -211,22 +202,10 @@ impl QwenRealtimeClient {
                                         break;
                                     }
                                     if let Some(combined) = transcript.finish_with_text(&text) {
-                                        on_event_reader(AsrEvent {
-                                            text: combined,
-                                            is_final: true,
-                                            prefetch: false,
-                                            definite: true,
-                                            confidence: None,
-                                        });
+                                        on_event_reader(AsrEvent::committed(combined));
                                     }
                                 } else if let Some(combined) = transcript.flush_pending() {
-                                    on_event_reader(AsrEvent {
-                                        text: combined,
-                                        is_final: true,
-                                        prefetch: false,
-                                        definite: true,
-                                        confidence: None,
-                                    });
+                                    on_event_reader(AsrEvent::committed(combined));
                                 }
                                 break;
                             }
@@ -266,13 +245,7 @@ impl QwenRealtimeClient {
 
             if !saw_session_finished {
                 if let Some(combined) = transcript.flush_pending() {
-                    on_event_reader(AsrEvent {
-                        text: combined,
-                        is_final: true,
-                        prefetch: false,
-                        definite: true,
-                        confidence: None,
-                    });
+                    on_event_reader(AsrEvent::committed(combined));
                 }
             }
 
@@ -387,6 +360,12 @@ impl TranscriptAccumulator {
             .to_string();
 
         Some(combined)
+    }
+
+    /// Byte length of the committed text at the head of what `push_partial`
+    /// returned: `merge_transcript` keeps the accumulated finals as its prefix.
+    fn committed_len(&self) -> usize {
+        self.accumulated_final.len()
     }
 
     fn push_final(&mut self, text: &str) -> Option<String> {

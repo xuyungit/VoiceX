@@ -648,6 +648,16 @@ impl SessionController {
     }
 
     pub(crate) fn hide_hud_and_reset_state(&self, state: &mut AppState) {
+        self.end_session(state, false);
+    }
+
+    /// The text is typed: the HUD confirms it before it leaves. The session
+    /// itself ends at once, so the next one can start during the check mark.
+    pub(crate) fn confirm_inserted_and_reset_state(&self, state: &mut AppState) {
+        self.end_session(state, true);
+    }
+
+    fn end_session(&self, state: &mut AppState, inserted: bool) {
         self.cancel_auto_hide();
         self.cancel_asr_final_timeout();
         self.stop_asr_audio_bridge();
@@ -656,7 +666,15 @@ impl SessionController {
         // database (e.g. ASR returned no result).  Delete it so it doesn't become an orphan.
         self.discard_session_audio_file(state, "session_reset");
         self.discard_session_refinement_audio_file(state, "session_reset");
-        self.hide_hud();
+        if inserted {
+            self.cancel_audio_level_task();
+            if let Some(hud) = self.hud_service() {
+                hud.finish_inserted();
+            }
+            self.set_escape_swallowing(false);
+        } else {
+            self.hide_hud();
+        }
         state.reset();
         self.emit_state_from(state);
     }
@@ -951,9 +969,10 @@ impl SessionController {
         }
     }
 
+    /// A final is committed in full; anything else here has no committed part.
     fn emit_transcript(&self, text: &str, is_final: bool) {
         if let Some(hud) = self.hud_service() {
-            hud.emit_transcript(text, is_final);
+            hud.emit_transcript(text, if is_final { text.len() } else { 0 }, is_final);
         }
     }
 

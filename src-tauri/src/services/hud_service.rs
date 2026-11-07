@@ -3,9 +3,15 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter};
 
 use crate::hud::{
-    self, BATCH_HUD_HEIGHT, BATCH_HUD_WIDTH, CAPTION_HUD_HEIGHT, CAPTION_HUD_WIDTH,
+    self, HudWidth, BATCH_HUD_HEIGHT, BATCH_HUD_WIDTH, CAPTION_HUD_HEIGHT, CAPTION_HUD_WIDTH,
     STREAM_HUD_HEIGHT, STREAM_HUD_WIDTH,
 };
+
+/// How long the page takes to fade the capsule out (`hud.ts`, `HUD_EXIT_MS`)
+/// before the window is ordered out.
+const HUD_EXIT_MS: u64 = 180;
+/// How long the check mark stays after the text is typed, before the exit.
+const HUD_INSERTED_HOLD_MS: u64 = 320;
 use crate::state::{ProcessingIntent, RecordingStyle};
 use crate::tts::SpeechProgress;
 
@@ -14,13 +20,14 @@ use crate::tts::SpeechProgress;
 /// mid-session would jump under the user's eyes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HudPresentation {
-    /// Streaming dictation: a status row over the live transcript.
+    /// Streaming dictation: the live transcript in a capsule that grows
+    /// with it, up to half the screen width.
     Stream,
-    /// Batch dictation and reads without captions: the compact card, where
-    /// the waveform or the reading icon is all there is to show.
+    /// Batch dictation and reads without captions: the compact capsule,
+    /// where the waveform or the reading icon is all there is to show.
     Batch,
     /// A read with captions: the sentence being spoken, drawn large, and
-    /// nothing else — no status row, no chip, no bars.
+    /// nothing else — no icon, no chip, no bars.
     Caption,
 }
 
@@ -33,8 +40,9 @@ impl HudPresentation {
         }
     }
 
-    /// Content size in logical points.
-    fn bounds(self) -> (f64, f64) {
+    /// Window size: width as a rule for the target screen, height in
+    /// logical points.
+    fn bounds(self) -> (HudWidth, f64) {
         match self {
             HudPresentation::Stream => (STREAM_HUD_WIDTH, STREAM_HUD_HEIGHT),
             HudPresentation::Batch => (BATCH_HUD_WIDTH, BATCH_HUD_HEIGHT),
@@ -48,6 +56,9 @@ impl HudPresentation {
 pub struct HudService {
     app_handle: AppHandle,
     hide_timer: std::sync::Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
+    /// Bumped by every show and every exit. An exit hides the window only if
+    /// nothing has shown it since; the lock orders that check against a show.
+    window_generation: std::sync::Arc<std::sync::Mutex<u64>>,
     snapshot: std::sync::Arc<std::sync::Mutex<HudSnapshot>>,
 }
 
@@ -122,27 +133,79 @@ impl HudService {
         Self {
             app_handle,
             hide_timer: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            window_generation: std::sync::Arc::new(std::sync::Mutex::new(0)),
             snapshot: std::sync::Arc::new(std::sync::Mutex::new(HudSnapshot::default())),
         }
     }
 
     pub fn show(&self, presentation: HudPresentation) {
-        hud::set_hud_caption_mode(presentation == HudPresentation::Caption);
+        // Cancels an exit still fading out: this session keeps the window.
+        *self
+            .window_generation
+            .lock()
+            .expect("HUD window generation mutex poisoned") += 1;
         // Recreate/position in case display changed.
         if let Err(err) = hud::create_hud_window(&self.app_handle) {
             log::warn!("Failed to create HUD window: {}", err);
         }
-        // Bounds first: a caption page sizes the window itself as soon as it
-        // hears the presentation, and must not be overwritten by this reset.
+        // Sized for its screen before it is shown: resizing a visible window
+        // flashes it.
         self.sync_bounds(presentation);
-        hud::set_hud_shadow(&self.app_handle, presentation != HudPresentation::Caption);
-        hud::set_hud_click_through(&self.app_handle, presentation == HudPresentation::Caption);
+        // The page takes the presentation as its cue to bring the capsule in.
         self.emit_presentation_mode(presentation);
         hud::show_hud(&self.app_handle);
     }
 
+    /// Fade the capsule out, then order the window out.
+    ///
+    /// WebKit paints nothing while the window is hidden, so the frame it last
+    /// painted is what the next show starts from. Ordered out at once, that
+    /// was the previous session's capsule, shown for a frame before the new
+    /// one replaced it; after the fade it is an empty frame.
     pub fn hide(&self) {
-        hud::hide_hud(&self.app_handle);
+        self.exit_after(0);
+    }
+
+    /// The text is typed: show the check mark, then leave.
+    pub fn finish_inserted(&self) {
+        let _ = self.app_handle.emit_to("hud", "state:inserted", json!({}));
+        self.exit_after(HUD_INSERTED_HOLD_MS);
+    }
+
+    fn exit_after(&self, delay_ms: u64) {
+        let generation = {
+            let mut guard = self
+                .window_generation
+                .lock()
+                .expect("HUD window generation mutex poisoned");
+            *guard += 1;
+            *guard
+        };
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let still_current = || {
+                *this
+                    .window_generation
+                    .lock()
+                    .expect("HUD window generation mutex poisoned")
+                    == generation
+            };
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            if !still_current() {
+                return;
+            }
+            let _ = this.app_handle.emit_to("hud", "hud:exit", json!({}));
+            tokio::time::sleep(std::time::Duration::from_millis(HUD_EXIT_MS)).await;
+            // Held across the hide, so a show cannot slip in between the
+            // check and the hide and be hidden by it.
+            let guard = this
+                .window_generation
+                .lock()
+                .expect("HUD window generation mutex poisoned");
+            if *guard == generation {
+                hud::hide_hud(&this.app_handle);
+            }
+        });
     }
 
     pub fn replay_snapshot(&self) {
@@ -184,10 +247,14 @@ impl HudService {
         }
     }
 
-    pub fn emit_transcript(&self, text: &str, is_final: bool) {
+    /// `committed_len` is the byte length of the prefix of `text` the
+    /// provider will not revise; the HUD draws the rest as still changing.
+    pub fn emit_transcript(&self, text: &str, committed_len: usize, is_final: bool) {
         let payload = json!({
             "text": text,
-            "isFinal": is_final
+            "isFinal": is_final,
+            // In UTF-16 code units, which is how the page indexes strings.
+            "committedLength": text[..committed_len].encode_utf16().count(),
         });
         self.cache_event("asr:event", &payload);
         let _ = self.app_handle.emit("asr:event", payload.clone());
@@ -243,7 +310,9 @@ impl HudService {
 
     pub fn sync_bounds(&self, presentation: HudPresentation) {
         let (width, height) = presentation.bounds();
-        let _ = hud::set_hud_content_bounds(&self.app_handle, width, height);
+        if let Err(err) = hud::set_hud_size(&self.app_handle, width, height) {
+            log::warn!("Failed to size HUD window: {}", err);
+        }
     }
 
     pub fn emit_correcting(&self, is_correcting: bool) {

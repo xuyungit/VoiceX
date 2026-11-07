@@ -346,22 +346,13 @@ async fn read_events(
                             if sentence_end {
                                 committed_text.push_str(text);
                                 pending_partial.clear();
-                                on_event(AsrEvent {
-                                    text: committed_text.clone(),
-                                    is_final: true,
-                                    prefetch: false,
-                                    definite: true,
-                                    confidence: None,
-                                });
+                                on_event(AsrEvent::committed(committed_text.clone()));
                             } else {
                                 pending_partial = text.to_string();
-                                on_event(AsrEvent {
-                                    text: format!("{}{}", committed_text, pending_partial),
-                                    is_final: false,
-                                    prefetch: false,
-                                    definite: false,
-                                    confidence: None,
-                                });
+                                on_event(AsrEvent::interim(
+                                    format!("{}{}", committed_text, pending_partial),
+                                    committed_text.len(),
+                                ));
                             }
                         }
                     }
@@ -369,13 +360,7 @@ async fn read_events(
                         if !pending_partial.is_empty() {
                             committed_text.push_str(&pending_partial);
                             pending_partial.clear();
-                            on_event(AsrEvent {
-                                text: committed_text.clone(),
-                                is_final: true,
-                                prefetch: false,
-                                definite: true,
-                                confidence: None,
-                            });
+                            on_event(AsrEvent::committed(committed_text.clone()));
                         }
                         return Ok(());
                     }

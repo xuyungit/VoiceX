@@ -126,7 +126,11 @@ impl SessionController {
                                     .send_message(SessionMessage::AsrEvent(evt.clone()));
 
                                 if let Some(hud) = &maybe_hud {
-                                    hud.emit_transcript(&evt.text, evt.is_final);
+                                    hud.emit_transcript(
+                                        &evt.text,
+                                        evt.committed_len,
+                                        evt.is_final,
+                                    );
                                     let event_name = if evt.is_final {
                                         "recognition:final"
                                     } else {
