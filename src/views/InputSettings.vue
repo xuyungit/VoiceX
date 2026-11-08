@@ -231,6 +231,11 @@ const deviceOptions = computed(() =>
 )
 const selectedDevice = ref<string | null>(null)
 const loadingDevices = ref(false)
+const devicesLoaded = ref(false)
+// "System Default" is always listed, so it alone means nothing can record.
+const noInputDevice = computed(() =>
+  devicesLoaded.value && devices.value.every((d) => d.isDefault)
+)
 
 const hotkeyDisplay = computed(() => displayHotkey.value)
 const textInjectionOverrideMap = computed(() => {
@@ -381,6 +386,7 @@ async function refreshDevices() {
   loadingDevices.value = true
   try {
     devices.value = await invoke<InputDevice[]>('get_input_devices')
+    devicesLoaded.value = true
 
     if (devices.value.length > 0) {
       const preferred = settingsStore.settings.inputDeviceUid
@@ -413,14 +419,31 @@ async function loadRecentTargetApps() {
 function handleWindowFocus() {
   void loadRecentTargetApps()
   void refreshOutputMuteStatus()
+  void refreshDevices()
 }
 
 function handleVisibilityChange() {
   if (!document.hidden) {
     void loadRecentTargetApps()
     void refreshOutputMuteStatus()
+    void refreshDevices()
   }
 }
+
+// While nothing can record, look again every few seconds so a microphone
+// plugged in with this page open clears the warning without a click.
+const NO_DEVICE_POLL_MS = 3000
+let noDevicePollTimer: ReturnType<typeof setInterval> | null = null
+watch(noInputDevice, (missing) => {
+  if (missing && !noDevicePollTimer) {
+    noDevicePollTimer = setInterval(() => {
+      if (!document.hidden && !loadingDevices.value) void refreshDevices()
+    }, NO_DEVICE_POLL_MS)
+  } else if (!missing && noDevicePollTimer) {
+    clearInterval(noDevicePollTimer)
+    noDevicePollTimer = null
+  }
+})
 
 function getAppRuleKey(app: {
   platform: string
@@ -548,6 +571,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   inputSettingsDisposed = true
   if (postEditTestTimer) clearInterval(postEditTestTimer)
+  if (noDevicePollTimer) clearInterval(noDevicePollTimer)
   unlistenOutputMute?.()
   if (unlistenRecentTargetApps) {
     unlistenRecentTargetApps()
@@ -625,6 +649,9 @@ onBeforeUnmount(() => {
 
     <SettingsSection :title="t('input.recording')">
       <SettingRow :label="t('input.inputDevice')">
+        <template v-if="noInputDevice" #status>
+          <span class="is-warning">{{ t('input.noInputDevice') }}</span>
+        </template>
         <NSelect
           v-model:value="selectedDevice"
           :options="deviceOptions"

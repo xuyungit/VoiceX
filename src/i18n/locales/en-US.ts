@@ -234,6 +234,7 @@ const enUS = {
     selectInputDevice: 'Select input device',
     defaultDevice: '{name} (default)',
     refreshDevices: 'Refresh devices',
+    noInputDevice: 'No microphone found. Connect one, such as a headset or USB mic; it is picked up right away.',
     muteWhileRecording: 'Mute while recording',
     muteWhileRecordingNote: 'Mutes the default system output while recording and restores it afterwards. Only the mute switch changes: volume stays the same and music keeps playing.',
     muteWhileRecordingUnsupported: 'The current output device "{device}" cannot be muted by software, so it stays audible while recording.',
@@ -1010,7 +1011,9 @@ const enUS = {
     readingClipboardNotText: 'No readable selection, and the clipboard holds no text',
     readingClipboardConcealed: 'No readable selection; the clipboard holds a password, not read',
     readingClipboardUnavailable: 'No readable selection, and the clipboard could not be read',
-    injectionFailed: 'Couldn’t type all of the text; it’s saved in History'
+    injectionFailed: 'Couldn’t type all of the text; it’s saved in History',
+    noInputDevice: 'No microphone found; connect one and try again',
+    audioStartFailed: 'Couldn’t open the microphone; check the input device in Settings'
   }
 }
 

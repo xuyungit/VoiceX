@@ -3,7 +3,7 @@
 mod handlers;
 mod message;
 
-pub use message::{CancelReason, InjectionOutcome, SessionMessage};
+pub use message::{AudioStartFailure, CancelReason, InjectionOutcome, SessionMessage};
 
 use std::{
     collections::VecDeque,
@@ -425,6 +425,7 @@ impl SessionController {
             }
             SessionMessage::AudioStartFailed {
                 audio_epoch,
+                kind,
                 reason,
             } => {
                 if !self.is_current_audio_epoch(audio_epoch) {
@@ -435,7 +436,7 @@ impl SessionController {
                     );
                     return;
                 }
-                self.on_audio_start_failed_state(state, reason)
+                self.on_audio_start_failed_state(state, kind, reason)
             }
             SessionMessage::AudioStopFailed {
                 audio_epoch,
@@ -1184,10 +1185,15 @@ impl SessionController {
                     }
                 }
                 Err(err) => {
+                    let kind = match err {
+                        crate::audio::AudioCaptureError::NoDevice => AudioStartFailure::NoInputDevice,
+                        _ => AudioStartFailure::Other,
+                    };
                     let reason = format!("Failed to start audio capture: {}", err);
                     log::error!("{}", reason);
                     self.send_message(SessionMessage::AudioStartFailed {
                         audio_epoch,
+                        kind,
                         reason,
                     });
                 }
@@ -1197,6 +1203,7 @@ impl SessionController {
             log::error!("{}", reason);
             self.send_message(SessionMessage::AudioStartFailed {
                 audio_epoch,
+                kind: AudioStartFailure::Other,
                 reason,
             });
         }
@@ -1432,8 +1439,16 @@ impl SessionController {
         self.hide_hud_and_reset_state(state);
     }
 
-    fn on_audio_start_failed_state(&self, state: &mut AppState, reason: String) {
-        log::warn!("Audio start failed; resetting session: {}", reason);
+    /// The microphone never opened. The HUD says so for as long as any other
+    /// error, so a press that records nothing is not mistaken for a hotkey
+    /// that did not fire.
+    fn on_audio_start_failed_state(
+        &self,
+        state: &mut AppState,
+        kind: AudioStartFailure,
+        reason: String,
+    ) {
+        log::warn!("Audio start failed ({:?}): {}", kind, reason);
 
         // Invalidate any in-flight operations just in case.
         self.injection_epoch.fetch_add(1, Ordering::SeqCst);
@@ -1449,10 +1464,15 @@ impl SessionController {
 
         self.discard_session_audio_file(state, "audio_start_failed");
         self.discard_session_refinement_audio_file(state, "audio_start_failed");
-        self.hide_hud();
-        state.reset();
+
+        let code = kind.hud_code();
+        state.terminal_error_message = Some(code.into());
+        state.terminal_asr_failure = None;
+        state.transition_to_finalizing();
         self.emit_state_from(state);
-        self.set_escape_swallowing(false);
+        // Error must be the last HUD event; ordinary state events reset its mode.
+        self.emit_asr_error(code);
+        self.schedule_error_cleanup();
     }
 
     fn on_audio_stop_failed_state(&self, state: &mut AppState, reason: String) {
@@ -1717,12 +1737,40 @@ mod tests {
             &mut state,
             SessionMessage::AudioStartFailed {
                 audio_epoch: stale_epoch,
+                kind: AudioStartFailure::Other,
                 reason: "stale failure".to_string(),
             },
         );
 
         assert_eq!(state.session_state, HotkeySessionState::HandsFree);
         assert!(state.is_recording);
+        assert!(state.terminal_error_message.is_none());
+    }
+
+    #[test]
+    fn missing_microphone_stays_on_screen_until_the_error_display_ends() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        state.handle_hotkey_pressed();
+        let epoch = controller.next_audio_epoch();
+
+        controller.handle_message(
+            &mut state,
+            SessionMessage::AudioStartFailed {
+                audio_epoch: epoch,
+                kind: AudioStartFailure::NoInputDevice,
+                reason: "No input device available".to_string(),
+            },
+        );
+
+        assert!(!state.is_recording);
+        assert_eq!(state.session_state, HotkeySessionState::Finalizing);
+        assert_eq!(state.terminal_error_message.as_deref(), Some("no_input_device"));
+        // Releasing the key keeps the message up; the display timer ends it.
+        controller.on_hotkey_released(&mut state);
+        assert_eq!(state.terminal_error_message.as_deref(), Some("no_input_device"));
+        controller.on_error_display_done_state(&mut state);
+        assert_eq!(state.session_state, HotkeySessionState::Idle);
         assert!(state.terminal_error_message.is_none());
     }
 

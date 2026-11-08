@@ -328,6 +328,9 @@ function setHudLocale(locale: string | undefined) {
 const errorCodeMessages: Record<string, keyof typeof zhCN.hud> = {
   // The final text did not reach the app (session/handlers/finalize.rs).
   injection_failed: "injectionFailed",
+  // The microphone never opened (session/message.rs, AudioStartFailure).
+  no_input_device: "noInputDevice",
+  audio_start_failed: "audioStartFailed",
   no_selection: "readingNoSelection",
   permission_denied: "readingPermissionDenied",
   secure_input: "readingSecureInput",

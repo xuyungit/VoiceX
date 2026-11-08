@@ -65,6 +65,20 @@ impl AudioInputDeviceManager {
         Self::get_devices().into_iter().find(|d| d.is_default)
     }
 
+    /// Whether the host has any input device at all. On macOS the default
+    /// input is reported even when nothing can record (the unknown object),
+    /// so only the enumeration can tell a missing microphone apart. An
+    /// enumeration error counts as "has devices": it does not prove absence.
+    pub fn has_input_devices() -> bool {
+        match cpal::default_host().input_devices() {
+            Ok(mut devices) => devices.next().is_some(),
+            Err(err) => {
+                log::warn!("Failed to enumerate input devices: {}", err);
+                true
+            }
+        }
+    }
+
     /// Resolve an input device by UID (or default if missing/system default selected)
     pub fn resolve_device(preferred_uid: Option<&str>) -> Result<Device, AudioCaptureError> {
         let host = cpal::default_host();

@@ -234,6 +234,7 @@ const zhCN = {
     selectInputDevice: '选择输入设备',
     defaultDevice: '{name}（默认）',
     refreshDevices: '刷新设备',
+    noInputDevice: '未检测到麦克风。连接耳机或 USB 麦克风等设备后即可使用，无需重启。',
     muteWhileRecording: '录音时静音',
     muteWhileRecordingNote: '录音期间静音系统默认输出，结束后恢复原状态。只切换静音，不改音量，音乐会继续播放。',
     muteWhileRecordingUnsupported: '当前输出设备「{device}」不支持软件静音，录音时声音不会被静音。',
@@ -1010,7 +1011,9 @@ const zhCN = {
     readingClipboardNotText: '读不到选中文字，剪贴板里也不是文字',
     readingClipboardConcealed: '读不到选中文字，剪贴板里是密码，未朗读',
     readingClipboardUnavailable: '读不到选中文字，剪贴板也读取失败',
-    injectionFailed: '文字未能完整输入，已保存到历史记录'
+    injectionFailed: '文字未能完整输入，已保存到历史记录',
+    noInputDevice: '未检测到麦克风，请连接后重试',
+    audioStartFailed: '无法打开麦克风，请在设置中检查输入设备'
   }
 }
 

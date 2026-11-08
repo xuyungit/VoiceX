@@ -28,6 +28,25 @@ impl From<&crate::injector::DispatchOutcome> for InjectionOutcome {
     }
 }
 
+/// Why the microphone could not be opened, as far as the user can act on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioStartFailure {
+    /// No input device is connected at all.
+    NoInputDevice,
+    /// A device exists but could not be opened.
+    Other,
+}
+
+impl AudioStartFailure {
+    /// Stable code read by the HUD (`hud.ts`, error code messages).
+    pub fn hud_code(self) -> &'static str {
+        match self {
+            Self::NoInputDevice => "no_input_device",
+            Self::Other => "audio_start_failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CancelReason {
     EscapeKey,
@@ -82,6 +101,7 @@ pub enum SessionMessage {
     },
     AudioStartFailed {
         audio_epoch: u64,
+        kind: AudioStartFailure,
         reason: String,
     },
     AudioStopFailed {

@@ -489,6 +489,26 @@ impl AudioCaptureService {
         recordings_dir: Option<&Path>,
         capture_refinement_pcm: bool,
     ) -> Result<AudioCaptureHandle, AudioCaptureError> {
+        // Checked only once opening failed, so the hotkey path never pays for
+        // a device enumeration: with no microphone at all (a Mac mini, say)
+        // the default device is a placeholder that fails to configure.
+        self.start_inner(recordings_dir, capture_refinement_pcm)
+            .map_err(|err| match err {
+                AudioCaptureError::StartFailed(reason)
+                    if !AudioInputDeviceManager::has_input_devices() =>
+                {
+                    log::warn!("No input device present; capture failed with: {}", reason);
+                    AudioCaptureError::NoDevice
+                }
+                other => other,
+            })
+    }
+
+    fn start_inner(
+        &mut self,
+        recordings_dir: Option<&Path>,
+        capture_refinement_pcm: bool,
+    ) -> Result<AudioCaptureHandle, AudioCaptureError> {
         if self.active.is_some() {
             return Err(AudioCaptureError::AlreadyRunning);
         }
