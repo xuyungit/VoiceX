@@ -116,16 +116,6 @@ a,
     white-space: nowrap;
 }
 
-.fade-enter-active,
-.fade-leave-active {
-    transition: opacity var(--transition-normal);
-}
-
-.fade-enter-from,
-.fade-leave-to {
-    opacity: 0;
-}
-
 /* Disable native controls in Tauri */
 body::webkit-scrollbar {
     display: none;

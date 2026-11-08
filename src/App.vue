@@ -237,9 +237,11 @@ onBeforeUnmount(() => {
               <div class="page-shell">
                 <router-view v-slot="{ Component, route }">
                   <PageErrorBoundary :route-key="route.fullPath">
-                    <transition name="fade" mode="out-in">
+                    <!-- The new page replaces the old one in the same frame and only animates in:
+                         an out-in transition left a blank frame between pages. -->
+                    <div :key="route.path" class="page-enter">
                       <component :is="Component" />
-                    </transition>
+                    </div>
                   </PageErrorBoundary>
                 </router-view>
               </div>
@@ -278,5 +280,22 @@ onBeforeUnmount(() => {
 
 .page-shell {
   max-width: 1080px;
+}
+
+.page-enter {
+  animation: page-enter 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0.4;
+    transform: translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-enter {
+    animation: none;
+  }
 }
 </style>

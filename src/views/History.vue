@@ -93,8 +93,8 @@ const audioPlayer = ref<HTMLAudioElement | null>(null)
 const playingId = ref<string | null>(null)
 const objectUrl = ref<string | null>(null)
 onMounted(async () => {
+  // Settings are loaded once by App.vue; reloading here re-applied the global hotkey on every visit.
   await Promise.all([
-    settingsStore.loadSettings(),
     historyStore.loadHistory(true),
     postEditStore.load()
   ])
