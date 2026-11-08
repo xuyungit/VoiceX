@@ -5,6 +5,7 @@ mod config;
 mod provider;
 pub mod reasoning;
 mod timeout;
+pub mod warm;
 
 pub use client::{LLMClient, LLMError, PromptBuildOptions};
 pub use config::{LLMApiMode, LLMConfig, LLMProviderType};

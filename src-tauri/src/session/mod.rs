@@ -1174,6 +1174,11 @@ impl SessionController {
                         channels,
                         is_batch
                     );
+                    crate::llm::warm::begin_session(
+                        settings
+                            .as_ref()
+                            .and_then(crate::services::llm_service::dictation_llm_config),
+                    );
                     if is_batch {
                         // In batch mode we do NOT spawn a streaming ASR task.
                         // The receiver is dropped so audio chunks are discarded;
@@ -1356,6 +1361,13 @@ impl SessionController {
             self.schedule_error_cleanup();
             return;
         }
+
+        crate::llm::warm::rewarm(
+            crate::storage::get_settings()
+                .ok()
+                .as_ref()
+                .and_then(crate::services::llm_service::dictation_llm_config),
+        );
 
         // Batch mode: no streaming ASR was running — hand off to batch recognition.
         let is_batch = crate::storage::get_settings()

@@ -39,10 +39,16 @@ pub struct LLMClient {
 
 impl LLMClient {
     pub fn new(config: LLMConfig) -> Self {
+        Self::with_http(config, Client::new())
+    }
+
+    /// Send through `http`, reusing any connection its pool holds; see
+    /// [`crate::llm::warm`].
+    pub fn with_http(config: LLMConfig, http: Client) -> Self {
         let provider = create_provider(&config.provider_type);
         Self {
             config,
-            http: Client::new(),
+            http,
             provider,
         }
     }

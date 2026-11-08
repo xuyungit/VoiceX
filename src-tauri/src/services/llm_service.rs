@@ -38,6 +38,17 @@ pub fn settings_for_llm_key<'a>(
     std::borrow::Cow::Owned(selected)
 }
 
+/// The LLM configuration a dictation may call with these settings, or `None`
+/// when neither correction nor translation can run. Decides whether a
+/// recording warms a connection to the LLM host ([`crate::llm::warm`]).
+pub fn dictation_llm_config(settings: &AppSettings) -> Option<LLMConfig> {
+    if !settings.enable_llm_correction && !settings.translation_enabled {
+        return None;
+    }
+    let config = build_llm_config_from_settings(settings);
+    config.is_valid().then_some(config)
+}
+
 pub fn build_llm_config_for_key(settings: &AppSettings, key: &str) -> LLMConfig {
     build_llm_config_from_settings(&settings_for_llm_key(settings, key))
 }
@@ -169,7 +180,10 @@ impl LlmService {
             }
         };
 
-        let client = LLMClient::new(build_llm_config_from_settings(&settings));
+        let client = LLMClient::with_http(
+            build_llm_config_from_settings(&settings),
+            crate::llm::warm::session_client(),
+        );
 
         let (prompt_template, dictionary_text, history, prompt_options) = match intent {
             ProcessingIntent::Assistant => {
