@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.2] - 2026-11-08
+
+### Added
+
+- **In-app updates** — VoiceX checks for a new release shortly after launch and then once a day, and offers it in About and the tray menu. Updates install only when you choose, never during a recording or while reading aloud, and are verified against VoiceX's signing key before they replace the app. Automatic checks can be turned off in About. This version must be installed manually; later versions can be installed from within the app.
+
+### Changed
+
+- Windows releases ship the `.exe` installer only. If you installed the `.msi`, uninstall it and install the `.exe` to receive updates.
+
+### Fixed
+
+- A text field left with only a line break after sending (as some chat apps do) is treated as cleared, not as an edit of the dictated text.
+
 ## [0.18.1] - 2026-11-07
 
 ### Added
