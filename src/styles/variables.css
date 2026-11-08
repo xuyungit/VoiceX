@@ -19,6 +19,8 @@
   --color-accent: #4f8cff;
   --color-accent-hover: #6b9fff;
   --color-accent-light: rgba(79, 140, 255, 0.15);
+  /* Search matches: a highlighter, distinct from the accent used for tags and links. */
+  --color-search-highlight: rgba(250, 204, 21, 0.3);
 
   --color-success: #34c759;
   --color-warning: #f5a524;
@@ -93,6 +95,7 @@
   --color-accent: #2563eb;
   --color-accent-hover: #1d4ed8;
   --color-accent-light: rgba(37, 99, 235, 0.1);
+  --color-search-highlight: rgba(250, 204, 21, 0.42);
 
   --color-success: #16a34a;
   --color-warning: #d97706;

@@ -299,6 +299,7 @@ Optionally have an LLM correct or translate the recognized text. Choose a provid
 </p>
 
 - Browse every dictation by date: replay audio, copy, view details, and compare the original recognition with the LLM-corrected text.
+- Search all history stored on this device, including source text, output, and your edits. Space-separated keywords must all match; English matching is case-insensitive. Filter by dictation, translated dictation, translate-and-read, or failed recognition. Matches are highlighted and the usual record actions remain available.
 - Edit the final text directly; edited entries are marked "Edited" and copying uses your edit. Edits stay on this device.
 - Turn on **Track edits after dictation** under Input to briefly watch for your follow-up edits in supported apps and compare both versions under **History → Edits** (off by default).
 - Translate an entry into English and copy the translation.

@@ -405,6 +405,7 @@ pub fn run() {
             commands::history::get_usage_stats,
             commands::history::get_local_usage_stats,
             commands::history::load_history_audio,
+            commands::history::count_history,
             commands::sync::get_sync_state,
             commands::sync::sync_now,
             commands::hotword::sync_hotwords,

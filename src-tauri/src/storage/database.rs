@@ -9,7 +9,9 @@ use std::sync::Mutex;
 
 use crate::commands::settings::AppSettings;
 use crate::foreground_app::RecentTargetApp;
-use crate::services::history_service::{HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ};
+use crate::services::history_service::{
+    HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_PREFIX, HISTORY_MODE_TRANSLATE_READ,
+};
 use uuid::Uuid;
 
 static DB: std::sync::OnceLock<Mutex<Connection>> = std::sync::OnceLock::new();
@@ -446,25 +448,122 @@ pub struct UsageStats {
     pub tts: TtsCounters,
 }
 
-/// Get history records
+/// Presets for the history browser; failures remain independently discoverable.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryRecordType {
+    #[default]
+    All,
+    Dictation,
+    Translation,
+    TranslateRead,
+    Failed,
+}
+
+pub fn search_history(
+    limit: u32,
+    offset: u32,
+    query: &str,
+    record_type: HistoryRecordType,
+) -> Result<Vec<HistoryRecord>, StorageError> {
+    with_db(|conn| search_history_in(conn, limit, offset, query, record_type))
+}
+
+/// How many records a search matches in all, for the result count.
+pub fn count_history(query: &str, record_type: HistoryRecordType) -> Result<u32, StorageError> {
+    with_db(|conn| count_history_in(conn, query, record_type))
+}
+
+/// The `WHERE` clause shared by a search's pages and its count, with the
+/// values it binds; its placeholders are numbered from `first_param`.
+fn history_filter(
+    query: &str,
+    record_type: HistoryRecordType,
+    first_param: usize,
+) -> (String, Vec<rusqlite::types::Value>) {
+    let mut values: Vec<rusqlite::types::Value> = Vec::new();
+    let mut bind = |value: rusqlite::types::Value| {
+        values.push(value);
+        format!("?{}", first_param + values.len() - 1)
+    };
+    let ok = format!("h.error_code = {HISTORY_ERROR_NONE}");
+    let mut sql = match record_type {
+        HistoryRecordType::All => "1 = 1".to_string(),
+        HistoryRecordType::Dictation => {
+            let translated = bind(format!("{HISTORY_MODE_TRANSLATE_PREFIX}*").into());
+            let read = bind(HISTORY_MODE_TRANSLATE_READ.to_string().into());
+            format!("{ok} AND h.mode NOT GLOB {translated} AND h.mode != {read}")
+        }
+        HistoryRecordType::Translation => {
+            let translated = bind(format!("{HISTORY_MODE_TRANSLATE_PREFIX}*").into());
+            format!("{ok} AND h.mode GLOB {translated}")
+        }
+        HistoryRecordType::TranslateRead => {
+            let read = bind(HISTORY_MODE_TRANSLATE_READ.to_string().into());
+            format!("{ok} AND h.mode = {read}")
+        }
+        HistoryRecordType::Failed => format!("h.error_code != {HISTORY_ERROR_NONE}"),
+    };
+    // Spaces mean AND across keywords; a keyword may occur in any text version.
+    // LIKE folds ASCII case, preserves Chinese substrings, and treats user input literally.
+    for word in query.split_whitespace() {
+        let escaped = word
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let p = bind(format!("%{escaped}%").into());
+        sql.push_str(&format!(
+            " AND (h.edited_text LIKE {p} ESCAPE '\\' OR h.text LIKE {p} ESCAPE '\\' OR h.original_text LIKE {p} ESCAPE '\\')"
+        ));
+    }
+    (sql, values)
+}
+
+fn search_history_in(
+    conn: &Connection,
+    limit: u32,
+    offset: u32,
+    query: &str,
+    record_type: HistoryRecordType,
+) -> Result<Vec<HistoryRecord>, StorageError> {
+    let (filter, filter_values) = history_filter(query, record_type, 3);
+    // The ID makes pagination deterministic even for equal timestamps.
+    let sql = format!(
+        "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text
+         FROM history_record h
+         LEFT JOIN device_registry d ON d.device_id = h.source_device_id
+         WHERE {filter}
+         ORDER BY h.timestamp DESC, h.id DESC LIMIT ?1 OFFSET ?2"
+    );
+    let mut values: Vec<rusqlite::types::Value> = vec![limit.into(), offset.into()];
+    values.extend(filter_values);
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(values), map_history_record_row)
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))
+}
+
+fn count_history_in(
+    conn: &Connection,
+    query: &str,
+    record_type: HistoryRecordType,
+) -> Result<u32, StorageError> {
+    let (filter, values) = history_filter(query, record_type, 1);
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM history_record h WHERE {filter}"),
+        rusqlite::params_from_iter(values),
+        |row| row.get(0),
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))
+}
+
+/// Get history records, newest first, unfiltered.
 pub fn get_history(limit: u32, offset: u32) -> Result<Vec<HistoryRecord>, StorageError> {
-    with_db(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text
-             FROM history_record h
-             LEFT JOIN device_registry d ON d.device_id = h.source_device_id
-             ORDER BY h.timestamp DESC 
-             LIMIT ?1 OFFSET ?2"
-        ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-
-        let records = stmt
-            .query_map(params![limit, offset], map_history_record_row)
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        Ok(records)
-    })
+    search_history(limit, offset, "", HistoryRecordType::All)
 }
 
 pub fn get_history_since(
@@ -1644,6 +1743,105 @@ pub enum StorageError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn search_conn() -> Connection {
+        let conn = recording_conn();
+        conn.execute_batch(
+            "ALTER TABLE history_record ADD COLUMN edited_text TEXT;
+             CREATE TABLE device_registry (device_id TEXT PRIMARY KEY, device_name TEXT);
+             INSERT INTO history_record (id, timestamp, text, original_text, edited_text) VALUES
+             ('a', '2026-11-01', '今天完成标定', '支座返利', '支座反力已确认'),
+             ('b', '2026-11-02', 'OPENAI 50% a_b C:\\audio', NULL, NULL),
+             ('c', '2026-11-03', 'openai 500 axb C:audio', NULL, NULL);
+             INSERT INTO history_record (id, timestamp, text, original_text, mode, error_code) VALUES
+             ('d', '2026-11-04', 'Bearing calibration', '支座标定', 'translate_en_hands_free', 0),
+             ('e', '2026-11-04', 'Calibration complete', '标定完成', 'translate_read', 0),
+             ('f', '2026-11-05', '', NULL, 'assistant_raw', 1);",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn search_ids(conn: &Connection, query: &str, kind: HistoryRecordType) -> Vec<String> {
+        search_history_in(conn, 20, 0, query, kind)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect()
+    }
+
+    #[test]
+    fn history_search_matches_all_keywords_across_text_versions_and_literal_symbols() {
+        let conn = search_conn();
+        for query in ["反力", "返利", "反力 标定", "  标定\t反力\u{3000}返利  "] {
+            assert_eq!(search_ids(&conn, query, HistoryRecordType::All), ["a"]);
+        }
+        for query in ["50%", "a_b", "C:\\audio"] {
+            assert_eq!(search_ids(&conn, query, HistoryRecordType::All), ["b"]);
+        }
+        assert_eq!(
+            search_ids(&conn, "openai", HistoryRecordType::All),
+            ["c", "b"]
+        );
+        assert!(search_ids(&conn, "反力 openai", HistoryRecordType::All).is_empty());
+        assert!(search_ids(&conn, "' OR 1=1 --", HistoryRecordType::All).is_empty());
+        // Error messages and provider/device labels do not participate in text search.
+        conn.execute("UPDATE history_record SET error_message = 'network', asr_model_name = 'network' WHERE id = 'f'", []).unwrap();
+        assert!(search_ids(&conn, "network", HistoryRecordType::All).is_empty());
+    }
+
+    #[test]
+    fn history_count_matches_the_search_it_summarizes() {
+        let conn = search_conn();
+        for (query, kind) in [
+            ("", HistoryRecordType::All),
+            ("标定", HistoryRecordType::All),
+            ("openai", HistoryRecordType::Dictation),
+            ("标定", HistoryRecordType::Translation),
+            ("", HistoryRecordType::Failed),
+            ("50%", HistoryRecordType::All),
+        ] {
+            assert_eq!(
+                count_history_in(&conn, query, kind).unwrap() as usize,
+                search_ids(&conn, query, kind).len(),
+                "query={query:?}"
+            );
+        }
+        assert_eq!(
+            HISTORY_MODE_TRANSLATE_PREFIX,
+            crate::state::ProcessingIntent::TranslateEn.as_str()
+        );
+    }
+
+    #[test]
+    fn history_search_filters_types_and_paginates_with_stable_ties() {
+        let conn = search_conn();
+        assert_eq!(
+            search_ids(&conn, "", HistoryRecordType::Dictation),
+            ["c", "b", "a"]
+        );
+        assert_eq!(
+            search_ids(&conn, "标定", HistoryRecordType::Translation),
+            ["d"]
+        );
+        assert_eq!(
+            search_ids(&conn, "标定", HistoryRecordType::TranslateRead),
+            ["e"]
+        );
+        assert_eq!(search_ids(&conn, "", HistoryRecordType::Failed), ["f"]);
+        let ids = (0..3)
+            .flat_map(|page| {
+                search_history_in(&conn, 2, page * 2, "", HistoryRecordType::All).unwrap()
+            })
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["f", "e", "d", "c", "b", "a"]);
+        // A keyword on the oldest row is found without first fetching the preceding pages.
+        assert_eq!(
+            search_history_in(&conn, 1, 0, "反力", HistoryRecordType::All).unwrap()[0].id,
+            "a"
+        );
+    }
 
     fn recording_conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

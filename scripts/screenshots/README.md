@@ -69,6 +69,8 @@ TTS, or Windows validation.
 
 For manual inspection, use `?lang=zh` or `?lang=en` and optionally `&theme=dark`
 on `/overview`, `/history`, `/asr-settings`, `/input-settings`, or `/reading-settings`.
+On `/history`, add `&history=search` for synthetic search fixtures with edited text,
+translations, a failed record, long content, and enough rows to exercise pagination.
 For reading captions, open `/src/hud/index.html?lang=zh&hud=reading` (or `lang=en`).
 Add `&perm=missing` to `/overview` for the permission card, and open
 `/src/permission-guide/index.html?lang=zh` for the drag helper.

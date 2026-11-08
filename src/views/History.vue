@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NButton, NTabs, NTabPane, NSpin, NEmpty, NSelect, NModal, NDropdown, NTooltip, NPopover, useDialog, useMessage, type DropdownOption } from 'naive-ui'
+import { NButton, NInput, type InputInst, NTabs, NTabPane, NSpin, NEmpty, NSelect, NModal, NDropdown, NTooltip, NPopover, useDialog, useMessage, type DropdownOption } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
-import { useHistoryStore, finalText, type HistoryRecord } from '../stores/history'
+import { useHistoryStore, finalText, type HistoryRecord, type HistoryRecordType } from '../stores/history'
 import { usePostEditStore } from '../stores/postEdit'
 import { useSyncStore } from '../stores/sync'
 import { useSettingsStore } from '../stores/settings'
@@ -13,6 +13,8 @@ import HistoryTranslationDialog from '../components/HistoryTranslationDialog.vue
 import PostEditHistory from '../components/PostEditHistory.vue'
 import InlineTextEditor from '../components/InlineTextEditor.vue'
 import LoadMoreSentinel from '../components/LoadMoreSentinel.vue'
+import HistorySearchText from '../components/HistorySearchText.vue'
+import { hiddenSearchMatches } from '../utils/historySearch'
 
 const activeTab = ref('dictations')
 const historyStore = useHistoryStore()
@@ -24,6 +26,74 @@ const message = useMessage()
 const { t, locale } = useI18n()
 const editingId = ref<string | null>(null)
 const savingEdit = ref(false)
+const searchInput = ref(historyStore.searchQuery)
+const searchType = ref<HistoryRecordType>(historyStore.recordType)
+const searchPending = ref(false)
+let searchTimer: ReturnType<typeof setTimeout> | undefined
+const filterOptions = computed(() => [
+  { label: t('history.filterAll'), value: 'all' },
+  { label: t('history.filterDictation'), value: 'dictation' },
+  { label: t('history.filterTranslation'), value: 'translation' },
+  { label: t('history.translateRead'), value: 'translate_read' },
+  { label: t('history.filterFailed'), value: 'failed' },
+])
+const searchBusy = computed(() => searchPending.value || historyStore.isLoading)
+const hasSearchConditions = computed(() => Boolean(searchInput.value.trim()) || searchType.value !== 'all')
+
+function applySearch() {
+  clearTimeout(searchTimer)
+  searchPending.value = false
+  editingId.value = null
+  void historyStore.setSearch(searchInput.value, searchType.value)
+}
+
+watch([searchInput, searchType], ([query, type], [, previousType]) => {
+  clearTimeout(searchTimer)
+  if (!query.trim() || type !== previousType) {
+    applySearch()
+  } else {
+    searchPending.value = true
+    searchTimer = setTimeout(applySearch, 250)
+  }
+})
+
+function clearSearch() {
+  searchInput.value = ''
+  searchType.value = 'all'
+}
+
+function onSearchEnter(event: KeyboardEvent) {
+  if (!event.isComposing) applySearch()
+}
+
+const searchInputRef = ref<InputInst | null>(null)
+
+function onSearchEscape(event: KeyboardEvent) {
+  if (event.isComposing || !searchInput.value) return
+  event.stopPropagation()
+  searchInput.value = ''
+}
+
+// ⌘F / Ctrl+F finds in history, from either tab.
+async function onFindShortcut(event: KeyboardEvent) {
+  if (event.key.toLowerCase() !== 'f' || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return
+  event.preventDefault()
+  activeTab.value = 'dictations'
+  await nextTick()
+  searchInputRef.value?.focus()
+  searchInputRef.value?.select()
+}
+
+/** The count inside the search box: the total when known, else what has loaded. */
+const searchStatus = computed(() => {
+  if (!historyStore.hasFilters || historyStore.loadError) return ''
+  if (historyStore.total !== null) return t('history.matchesFound', { count: historyStore.total })
+  return t(historyStore.hasMore ? 'history.matchesLoaded' : 'history.matchesFound', { count: historyStore.records.length })
+})
+
+const hiddenMatches = computed(() => new Map(historyStore.records.map(record => [
+  record.id, hiddenSearchMatches(record, historyStore.searchQuery)
+])))
 
 // The edit records tab belongs to the post-edit switch in Input settings.
 watch(() => postEditStore.enabled, enabled => {
@@ -58,7 +128,7 @@ const retentionSummary = computed(() => t('history.retentionSummary', {
 }))
 
 const groupedRecords = computed(() => {
-  const buckets: { label: string; records: HistoryRecord[] }[] = []
+  const buckets: { key: string; label: string; records: HistoryRecord[] }[] = []
   const map = new Map<string, HistoryRecord[]>()
 
   for (const record of historyStore.records) {
@@ -70,14 +140,18 @@ const groupedRecords = computed(() => {
       date.getDate() === today.getDate()
     const label = isToday
       ? t('history.today')
-      : date.toLocaleDateString(locale.value, { month: 'long', day: 'numeric' })
+      : date.toLocaleDateString(locale.value, {
+        year: date.getFullYear() !== today.getFullYear() ? 'numeric' : undefined,
+        month: 'long', day: 'numeric'
+      })
+    const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
 
-    if (!map.has(label)) {
+    if (!map.has(key)) {
       const list: HistoryRecord[] = []
-      map.set(label, list)
-      buckets.push({ label, records: list })
+      map.set(key, list)
+      buckets.push({ key, label, records: list })
     }
-    map.get(label)!.push(record)
+    map.get(key)!.push(record)
   }
 
   return buckets
@@ -100,7 +174,11 @@ onMounted(async () => {
   ])
 })
 
+onMounted(() => window.addEventListener('keydown', onFindShortcut))
+
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onFindShortcut)
+  clearTimeout(searchTimer)
   stopPlayback()
 })
 
@@ -520,16 +598,41 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
     <NTabs v-model:value="activeTab" type="line" class="history-tabs" :class="{ single: !postEditStore.enabled }">
       <NTabPane name="dictations" :tab="t('postEdit.allDictations')">
-    <div v-if="historyStore.isLoading && historyStore.records.length === 0" class="loading-container">
-      <NSpin size="medium" />
+    <div class="search-toolbar" role="search" :aria-label="t('history.searchPlaceholder')">
+      <NInput
+        ref="searchInputRef"
+        v-model:value="searchInput"
+        clearable
+        class="history-search"
+        :placeholder="t('history.searchPlaceholder')"
+        :input-props="{ 'aria-label': t('history.searchPlaceholder') }"
+        @keydown.enter="onSearchEnter"
+        @keydown.esc="onSearchEscape"
+      >
+        <template #prefix>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" width="16" height="16" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4.5 4.5" /></svg>
+        </template>
+        <template #suffix>
+          <span class="search-status" :class="{ busy: searchBusy }" role="status" aria-live="polite">{{ searchStatus }}</span>
+        </template>
+      </NInput>
+      <NSelect v-model:value="searchType" :options="filterOptions" class="history-filter" :aria-label="t('history.filterLabel')" />
     </div>
 
-    <div v-else-if="historyStore.records.length === 0" class="empty-container">
-      <NEmpty :description="t('history.empty')" />
+    <div v-if="searchBusy && historyStore.records.length === 0" class="loading-container" :aria-label="t('history.searching')" aria-busy="true">
+      <NSpin size="small" />
     </div>
 
-    <div v-else class="list-wrapper">
-      <template v-for="group in groupedRecords" :key="group.label">
+    <div v-else-if="!historyStore.loadError && historyStore.records.length === 0" class="empty-container">
+      <NEmpty :description="t(hasSearchConditions ? 'history.noSearchResults' : 'history.empty')">
+        <template v-if="hasSearchConditions" #extra>
+          <NButton size="small" secondary @click="clearSearch">{{ t('history.clearSearch') }}</NButton>
+        </template>
+      </NEmpty>
+    </div>
+
+    <div v-if="historyStore.records.length" class="list-wrapper" :class="{ stale: historyStore.searching }" :aria-busy="searchBusy">
+      <template v-for="group in groupedRecords" :key="group.key">
         <div class="date-group">
         <div class="date-header">{{ group.label }}</div>
           <div
@@ -646,7 +749,11 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
               @cancel="editingId = null"
             />
             <div v-else class="list-text" :class="{ failed: isFailedRecord(record) }">
-              {{ displayText(record) }}
+              <HistorySearchText :text="displayText(record)" :query="hasRecordText(record) ? historyStore.searchQuery : ''" @expand="openDetails(record)" />
+            </div>
+            <div v-for="match in hiddenMatches.get(record.id)" :key="match.kind" class="search-source">
+              <span class="search-source-label">{{ t(match.kind === 'output' ? 'history.outputMatch' : isTranslateMode(record) ? 'history.sourceMatch' : 'history.originalMatch') }}</span>
+              <HistorySearchText :text="match.text" :query="match.query" @expand="openDetails(record)" />
             </div>
             <div v-if="isFailedRecord(record)" class="failure-note">
               {{ failureMessage(record) }}
@@ -655,12 +762,12 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
         </div>
       </template>
 
+      <LoadMoreSentinel v-if="historyStore.hasMore && !historyStore.loadError && !searchPending && !historyStore.searching" :loading="historyStore.isLoading" @load="loadMore" />
+    </div>
       <div v-if="historyStore.loadError" class="load-error" role="alert">
         <span>{{ t('history.loadError', { reason: historyStore.loadError }) }}</span>
-        <NButton size="small" :loading="historyStore.isLoading" @click="loadMore">{{ t('postEdit.retry') }}</NButton>
+        <NButton size="small" :loading="historyStore.isLoading" @click="historyStore.loadHistory(true)">{{ t('postEdit.retry') }}</NButton>
       </div>
-      <LoadMoreSentinel v-else-if="historyStore.hasMore" :loading="historyStore.isLoading" @load="loadMore" />
-    </div>
 
       </NTabPane>
       <NTabPane v-if="postEditStore.enabled" name="edits" :tab="t('postEdit.tab')" display-directive="show:lazy">
@@ -802,6 +909,27 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 </template>
 
 <style scoped>
+.search-toolbar { display: flex; align-items: center; gap: var(--spacing-sm); margin-bottom: 16px; }
+.history-search { flex: 1; min-width: 0; }
+.history-search :deep(.n-input__prefix) { color: var(--color-text-tertiary); margin-right: 8px; }
+.history-filter { width: 176px; flex-shrink: 0; }
+/* The count sits inside the box, like a find bar; it dims while a search runs. */
+.search-status {
+  font-size: var(--font-sm);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  margin-left: 8px;
+  transition: opacity 0.15s ease;
+}
+.search-status.busy { opacity: 0.5; transition-delay: 0.12s; }
+.search-source { font-size: var(--font-sm); color: var(--color-text-secondary); line-height: 1.65; overflow-wrap: anywhere; user-select: text; }
+.search-source-label { color: var(--color-text-tertiary); }
+/* Previous results stay while a new search runs; dim them only if it is slow,
+   so a fast local search does not flicker. */
+.list-wrapper { transition: opacity 0.15s ease; }
+.list-wrapper.stale { opacity: 0.5; transition-delay: 0.12s; }
+
 .history-header {
   flex-direction: row;
   align-items: center;

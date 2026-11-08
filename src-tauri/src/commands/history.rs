@@ -2,32 +2,54 @@
 
 use crate::services::history_service::HISTORY_MODE_TRANSLATE_READ;
 use crate::services::sync_service::SyncService;
-use crate::storage::{HistoryRecord, UsageStats};
+use crate::storage::{HistoryRecord, HistoryRecordType, UsageStats};
 use tauri::State;
 
 /// Get history records
 ///
-/// The first page applies retention, so History opened after days without a
-/// dictation does not show expired records; later pages need not repeat it.
+/// The first unfiltered page applies retention, so History opened after days
+/// without a dictation does not show expired records. Later pages and searches
+/// need not repeat it: a search runs on every pause in typing.
 #[tauri::command(async)]
-pub fn get_history(limit: u32, offset: u32) -> Result<Vec<HistoryRecord>, String> {
-    if offset > 0 {
-        return crate::storage::get_history(limit, offset).map_err(|e| e.to_string());
-    }
-    if let Ok(settings) = crate::storage::get_settings() {
-        let text_retention = if settings.sync_enabled {
-            0
-        } else {
-            settings.text_retention_days
-        };
-        if let Err(err) =
-            crate::storage::cleanup_history_retention(text_retention, settings.audio_retention_days)
-        {
-            log::warn!("History retention cleanup failed: {}", err);
+pub fn get_history(
+    limit: u32,
+    offset: u32,
+    query: Option<String>,
+    record_type: Option<HistoryRecordType>,
+) -> Result<Vec<HistoryRecord>, String> {
+    let query = query.unwrap_or_default();
+    let record_type = record_type.unwrap_or_default();
+    let searching = !query.trim().is_empty() || !matches!(record_type, HistoryRecordType::All);
+    if offset == 0 && !searching {
+        if let Ok(settings) = crate::storage::get_settings() {
+            let text_retention = if settings.sync_enabled {
+                0
+            } else {
+                settings.text_retention_days
+            };
+            if let Err(err) = crate::storage::cleanup_history_retention(
+                text_retention,
+                settings.audio_retention_days,
+            ) {
+                log::warn!("History retention cleanup failed: {}", err);
+            }
         }
     }
 
-    crate::storage::get_history(limit, offset).map_err(|e| e.to_string())
+    crate::storage::search_history(limit, offset, &query, record_type).map_err(|e| e.to_string())
+}
+
+/// How many records a search matches in all; History pages load 20 at a time.
+#[tauri::command(async)]
+pub fn count_history(
+    query: Option<String>,
+    record_type: Option<HistoryRecordType>,
+) -> Result<u32, String> {
+    crate::storage::count_history(
+        query.as_deref().unwrap_or_default(),
+        record_type.unwrap_or_default(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Delete a history record

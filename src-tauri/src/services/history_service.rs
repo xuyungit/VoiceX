@@ -18,6 +18,10 @@ pub const HISTORY_ERROR_ASR_FAILED: i32 = 1;
 /// mode never leave the machine, see [`HistoryService::translate_read_behavior`].
 pub const HISTORY_MODE_TRANSLATE_READ: &str = "translate_read";
 
+/// History `mode` prefix of a translated dictation (`translate_en`,
+/// `translate_en_hands_free`, ...), from [`ProcessingIntent::TranslateEn`].
+pub const HISTORY_MODE_TRANSLATE_PREFIX: &str = "translate_en";
+
 /// Whether the sync server owns the account-wide usage counters.
 ///
 /// With a complete sync configuration the server derives those totals and

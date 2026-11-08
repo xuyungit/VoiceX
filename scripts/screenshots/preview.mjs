@@ -43,6 +43,24 @@ function installFixture(usage) {
     asrModelName: 'Soniox · stt-rt-v6', llmModelName: i === 1 ? 'Demo LLM' : null,
     editedText: i === 0 ? text + (english ? ' Everything is a shortcut away.' : '常用操作都可以通过快捷键完成。') : null,
   }))
+  // Optional search workspace: synthetic long text, hidden matches and older pages.
+  if (params.get('history') === 'search') {
+    const row = (id, text, extra = {}) => ({
+      ...history[0], id, text, editedText: null, originalText: null,
+      timestamp: `2026-11-08T10:${String(59 - Number(id)).padStart(2, '0')}:00+08:00`,
+      ...extra,
+    })
+    history.splice(0, history.length,
+      row('0', '今天完成了支座返利传感器的标定。', { editedText: '今天完成了支座反力传感器的标定。', originalText: '今天完成了支座返利传感器的标定。' }),
+      row('1', 'The bearing reaction calibration is complete.', { mode: 'translate_en_hands_free', originalText: '支座反力标定已完成。' }),
+      row('2', 'Calibration is complete. Review the measurements before the next session.', { mode: 'translate_read', originalText: '标定已经完成，请在下次测试前复核支座反力测量结果。' }),
+      row('3', '本次现场测量按计划进行。'.repeat(30) + '反力标定结果已记录，下一步进行独立复核。' + '后续记录。'.repeat(30)),
+      row('4', '', { errorCode: 1, errorMessage: 'The speech service was temporarily unavailable.' }),
+      row('5', 'OPENAI · 50% · a_b · C:\\audio'),
+      ...Array.from({ length: 30 }, (_, i) => row(String(i + 6), `项目会议记录 ${i + 1}：整理试验数据，安排下一次测量。`)),
+      row('36', '去年完成了旧档反力标定。', { timestamp: '2025-11-08T03:00:00Z' }),
+    )
+  }
   let nextId = 0
   const callbacks = new Map()
   const listeners = new Map()
@@ -76,7 +94,31 @@ function installFixture(usage) {
           return { kind: params.get('kind') || 'accessibility', appPath: '/Applications/VoiceX.app', isAppBundle: true }
         case 'get_usage_stats': return structuredClone(usage.total)
         case 'get_local_usage_stats': return structuredClone(usage.local)
-        case 'get_history': return structuredClone(history.slice(args.offset, args.offset + args.limit))
+        case 'get_history':
+        case 'count_history': {
+          const words = (args.query || '').toLowerCase().split(/\s+/u).filter(Boolean)
+          const rows = history.filter(record => {
+            const type = args.recordType || 'all'
+            const isTranslation = record.mode.startsWith('translate_en')
+            const isReading = record.mode === 'translate_read'
+            if (type === 'failed' && !record.errorCode) return false
+            if (type !== 'all' && type !== 'failed' && record.errorCode) return false
+            if (type === 'dictation' && (isTranslation || isReading)) return false
+            if (type === 'translation' && !isTranslation) return false
+            if (type === 'translate_read' && !isReading) return false
+            return words.every(word => [record.text, record.editedText, record.originalText].some(text => text?.toLowerCase().includes(word)))
+          })
+          if (command === 'count_history') return rows.length
+          return structuredClone(rows.slice(args.offset, args.offset + args.limit))
+        }
+        case 'set_history_final_text': {
+          const record = history.find(row => row.id === args.recordId)
+          record.editedText = args.text === record.text ? null : args.text
+          emit('history:updated', { id: record.id })
+          return { editedText: record.editedText }
+        }
+        case 'delete_history_record': history.splice(history.findIndex(row => row.id === args.id), 1); return
+        case 'get_update_status': return { enabled: false, phase: 'idle', available: null, downloaded: 0, total: null, error: null, lastCheckedAt: null }
         case 'get_post_edit_settings': return { mode: 'off' }
         case 'get_sync_state': return { state: { status: 'live' }, deviceId: 'demo' }
         case 'get_input_devices': return [{ name: 'MacBook Pro Microphone', uid: 'demo-mic', isDefault: true }]
