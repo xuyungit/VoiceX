@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.4] - 2026-11-08
+
+### Changed
+
+- **Default hotkey on macOS** — new installs use Right Command, which every Mac keyboard has; existing settings are kept. Windows keeps its chord.
+- **In-app updates** — download from a mirror first and fall back to GitHub, so updates no longer stall where GitHub is slow. Packages are still verified with the built-in signing key.
+
+### Fixed
+
+- **No microphone** — when no input device is present, the HUD shows a clear error instead of disappearing, and the Input page warns until a microphone is connected.
+
 ## [0.18.3] - 2026-11-08
 
 ### Changed
