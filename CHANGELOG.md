@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.5] - 2026-11-08
+
+### Added
+
+- **History search** — search all history on this device, including the original recognition, the text before your edits and the edited text. Space-separated keywords must all match; English ignores case. Filter by dictation, translated dictation, translate-and-read or failed recognition. Matches are highlighted, long records open at the matching sentence, and the search box shows how many records match. ⌘F / Ctrl+F focuses the search and Esc clears it.
+- **Copy Last Dictation** — a tray menu item that copies your most recent dictation, for when it did not arrive in the target app.
+- **Open logs folder** — About → Diagnostics opens the folder with `voicex.log` for bug reports.
+- Release notes in About are shown as formatted text.
+
+### Changed
+
+- History shows play/stop in each row's toolbar, and switching pages no longer flashes a blank frame.
+- Dictation opens the connection to the LLM while you speak, shortening the wait after you release the key on slower networks.
+- Smaller app and update downloads.
+- History stays responsive with long histories: lists load from an index and no longer block the window.
+
+### Fixed
+
+- Unexpected internal errors are now written to the diagnostic log, and history keeps saving after one.
+- The reading-hotkey conflict warning no longer repeats at startup and when recording a hotkey.
+- History recordings play even when the app falls back to its secondary IPC channel.
+
 ## [0.18.4] - 2026-11-08
 
 ### Changed
