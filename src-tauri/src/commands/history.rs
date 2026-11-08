@@ -9,7 +9,7 @@ use tauri::State;
 ///
 /// The first page applies retention, so History opened after days without a
 /// dictation does not show expired records; later pages need not repeat it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_history(limit: u32, offset: u32) -> Result<Vec<HistoryRecord>, String> {
     if offset > 0 {
         return crate::storage::get_history(limit, offset).map_err(|e| e.to_string());
@@ -31,7 +31,7 @@ pub fn get_history(limit: u32, offset: u32) -> Result<Vec<HistoryRecord>, String
 }
 
 /// Delete a history record
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_history_record(id: String, sync: State<'_, SyncService>) -> Result<(), String> {
     // Translate-and-read rows are never uploaded (history_service), so there
     // is nothing on the server to delete and no event to send.
@@ -44,13 +44,13 @@ pub fn delete_history_record(id: String, sync: State<'_, SyncService>) -> Result
 }
 
 /// Get usage statistics
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_usage_stats() -> Result<UsageStats, String> {
     crate::storage::get_usage_stats().map_err(|e| e.to_string())
 }
 
 /// Get usage statistics for the current device.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_local_usage_stats() -> Result<UsageStats, String> {
     let device_id = crate::storage::get_or_create_device_id().map_err(|e| e.to_string())?;
     crate::storage::get_local_usage_stats(&device_id).map_err(|e| e.to_string())

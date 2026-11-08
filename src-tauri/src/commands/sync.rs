@@ -11,7 +11,7 @@ pub struct SyncStateResponse {
     pub device_id: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_sync_state() -> Result<SyncStateResponse, String> {
     let state = storage::get_sync_state().map_err(|e| e.to_string())?;
     let device_id = storage::get_or_create_device_id().map_err(|e| e.to_string())?;

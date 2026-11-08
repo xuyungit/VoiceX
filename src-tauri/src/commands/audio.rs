@@ -25,7 +25,7 @@ pub struct CaptureStopInfo {
 }
 
 /// Get list of available input devices
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_input_devices() -> Vec<AudioDevice> {
     AudioInputDeviceManager::get_devices()
 }

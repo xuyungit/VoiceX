@@ -22,12 +22,12 @@ pub fn set_post_edit_mode(mode: Mode) -> Result<Settings, String> {
     records::set_mode(mode).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_post_edit_records(limit: u32, offset: u32) -> Result<RecordPage, String> {
     records::list(limit, offset).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_post_edit_record(id: String, record_id: Option<String>) -> Result<(), String> {
     records::delete_record(&id, record_id.as_deref()).map_err(|e| e.to_string())
 }
