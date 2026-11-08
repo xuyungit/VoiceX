@@ -22,7 +22,36 @@ pub fn init(directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .target(env_logger::Target::Pipe(Box::new(writer)))
         .try_init()?;
     log::info!("Diagnostic logs: {}", directory.display());
+    install_panic_hook();
     Ok(())
+}
+
+/// A GUI launch has no terminal, so without this a panic on any thread would
+/// leave no trace in the diagnostic log. The default hook still runs after,
+/// keeping terminal output for `tauri dev`.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".into());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".into());
+        log::error!(
+            "Panic on thread {} at {}: {}\n{}",
+            thread.name().unwrap_or("<unnamed>"),
+            location,
+            message,
+            std::backtrace::Backtrace::force_capture()
+        );
+        default_hook(info);
+    }));
 }
 
 struct DiagnosticWriter {

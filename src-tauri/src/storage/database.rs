@@ -324,7 +324,14 @@ where
     F: FnOnce(&Connection) -> Result<T, StorageError>,
 {
     let db = DB.get().ok_or(StorageError::NotInitialized)?;
-    let conn = db.lock().map_err(|_| StorageError::LockFailed)?;
+    // A panic while the lock was held unwinds through any open transaction,
+    // which rolls it back, so the connection is still consistent. Refusing it
+    // would instead fail every later save until the app restarts.
+    let conn = db.lock().unwrap_or_else(|poisoned| {
+        log::warn!("Database lock was poisoned by a panic; recovering");
+        db.clear_poison();
+        poisoned.into_inner()
+    });
     f(&conn)
 }
 
@@ -1592,9 +1599,6 @@ fn ensure_column(
 pub enum StorageError {
     #[error("Database not initialized")]
     NotInitialized,
-
-    #[error("Failed to acquire database lock")]
-    LockFailed,
 
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
