@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.18.3] - 2026-11-08
+
+### Changed
+
+- **Edge reading voices** — find voices more easily by language in reading settings.
+
+### Fixed
+
+- **Windows hotkeys** — prevent Alt/Win shortcuts from freezing the keyboard hook, and recover modifier state after missed key releases.
+
 ## [0.18.2] - 2026-11-08
 
 ### Added
