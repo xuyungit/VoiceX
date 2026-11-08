@@ -12,7 +12,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "mac:setup-signing": "bash ./scripts/setup-macos-local-signing.sh",
-    "mac:build-local": "bash ./scripts/build-macos-local-release.sh"
+    "mac:build-local": "bash ./scripts/build-macos-local-release.sh",
+    "mac:release": "bash ./scripts/release-macos.sh"
   },
   "dependencies": {
     "vue": "^3.5.13",

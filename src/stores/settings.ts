@@ -317,6 +317,9 @@ export interface AppSettings {
 
     // Diagnostics
     enableDiagnostics: boolean
+
+    // Daily update check (official release builds only)
+    autoCheckUpdates: boolean
 }
 
 export interface HotwordSyncResult {
@@ -563,7 +566,9 @@ const defaultSettings: AppSettings = {
     remoteHotwordUpdatedAt: '',
     localHotwordUpdatedAt: '',
 
-    enableDiagnostics: false
+    enableDiagnostics: false,
+
+    autoCheckUpdates: true
 }
 
 export const useSettingsStore = defineStore('settings', () => {

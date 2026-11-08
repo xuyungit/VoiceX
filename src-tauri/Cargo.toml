@@ -109,6 +109,13 @@ enigo = "0.6"
 regex = "1.12.2"
 sys-locale = "0.3"
 
+# In-app update (official release builds only; see src/updater.rs).
+tauri-plugin-updater = "2"
+# Not used directly: the updater's reqwest 0.12 is built without system proxy
+# support, so it would ignore the macOS/Windows proxy settings the rest of the
+# app honours. Naming the feature here turns it on for that copy.
+reqwest-updater-proxy = { package = "reqwest", version = "0.12", default-features = false, features = ["system-proxy"] }
+
 [patch.crates-io]
 rdev = { path = "vendor/rdev" }
 audiopus_sys = { path = "vendor/audiopus_sys" }

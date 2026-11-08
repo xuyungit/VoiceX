@@ -949,7 +949,31 @@ const enUS = {
     built: 'Built',
     diagnostics: 'Diagnostics',
     showDiagnostics: 'Show diagnostics',
-    diagnosticsHint: 'Show hotword sync and ASR provider diagnostics for debugging.'
+    diagnosticsHint: 'Show hotword sync and ASR provider diagnostics for debugging.',
+    updates: 'Updates',
+    updatesOfficialOnly: 'Only official release builds check for updates.',
+    updateChecking: 'Checking for updates…',
+    updateAvailable: 'Version {version} is available',
+    updateUpToDate: 'VoiceX is up to date',
+    updateCheckFailed: 'Update check failed',
+    updateNotChecked: 'Not checked yet',
+    updateLastChecked: 'Last checked {time}',
+    updateCheckNow: 'Check now',
+    updateNotesTitle: 'What\'s new in {version}',
+    updatePublished: 'Published {time}',
+    updateInstall: 'Install and restart',
+    updateDownloadingPercent: 'Downloading… {percent}%',
+    updateDownloadingMb: 'Downloading… {mb} MB',
+    updateInstalling: 'Installing…',
+    updateAutoCheck: 'Check for updates automatically',
+    updateAutoCheckHint: 'Checks once a day. An update is installed only when you choose to install it.',
+    updateSidebarHint: 'An update is available',
+    updateErrors: {
+      disabled: 'Only official release builds check for updates.',
+      inProgress: 'An update check or install is already in progress.',
+      busy: 'Finish the current recording or reading first.',
+      noUpdate: 'There is no update to install. Check again.'
+    }
   },
   hud: {
     assistant: 'Assistant',

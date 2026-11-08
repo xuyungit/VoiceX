@@ -949,7 +949,31 @@ const zhCN = {
     built: '构建时间',
     diagnostics: '诊断信息',
     showDiagnostics: '显示诊断信息',
-    diagnosticsHint: '显示热词同步和 ASR 供应商诊断信息，仅用于调试。'
+    diagnosticsHint: '显示热词同步和 ASR 供应商诊断信息，仅用于调试。',
+    updates: '更新',
+    updatesOfficialOnly: '仅正式发布版本会检查更新。',
+    updateChecking: '正在检查更新…',
+    updateAvailable: '新版本 {version} 可用',
+    updateUpToDate: 'VoiceX 已是最新版本',
+    updateCheckFailed: '检查更新失败',
+    updateNotChecked: '尚未检查',
+    updateLastChecked: '上次检查：{time}',
+    updateCheckNow: '立即检查',
+    updateNotesTitle: '{version} 更新内容',
+    updatePublished: '发布于 {time}',
+    updateInstall: '安装并重启',
+    updateDownloadingPercent: '正在下载… {percent}%',
+    updateDownloadingMb: '正在下载… {mb} MB',
+    updateInstalling: '正在安装…',
+    updateAutoCheck: '自动检查更新',
+    updateAutoCheckHint: '每天检查一次。只有在你选择安装时才会安装更新。',
+    updateSidebarHint: '有可用更新',
+    updateErrors: {
+      disabled: '仅正式发布版本会检查更新。',
+      inProgress: '正在检查或安装更新。',
+      busy: '请先结束当前的录音或朗读。',
+      noUpdate: '没有可安装的更新，请重新检查。'
+    }
   },
   hud: {
     assistant: '助手',

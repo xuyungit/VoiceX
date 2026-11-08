@@ -369,6 +369,10 @@ pub struct AppSettings {
 
     // Diagnostics
     pub enable_diagnostics: bool,
+
+    /// Daily background update check. Only official release builds check at
+    /// all (see `crate::updater`).
+    pub auto_check_updates: bool,
 }
 
 /// A single named OpenAI-compatible custom endpoint.
@@ -663,6 +667,8 @@ impl Default for AppSettings {
             local_hotword_updated_at: String::new(),
 
             enable_diagnostics: false,
+
+            auto_check_updates: true,
         }
     }
 }

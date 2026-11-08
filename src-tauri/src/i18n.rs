@@ -7,11 +7,13 @@ pub fn tray_label(locale: &str, key: &str) -> &'static str {
         (LOCALE_ZH_CN, "stop_reading") => "停止朗读",
         (LOCALE_ZH_CN, "show_main_window") => "显示 VoiceX",
         (LOCALE_ZH_CN, "quit_app") => "退出 VoiceX",
+        (LOCALE_ZH_CN, "update_available") => "有可用更新…",
         (_, "read_selection") => "Read Selection",
         (_, "translate_selection") => "Translate and Read",
         (_, "stop_reading") => "Stop Reading",
         (_, "show_main_window") => "Show VoiceX",
         (_, "quit_app") => "Quit VoiceX",
+        (_, "update_available") => "Update Available…",
         _ => "",
     }
 }

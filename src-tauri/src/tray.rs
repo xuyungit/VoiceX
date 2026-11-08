@@ -6,23 +6,27 @@
 //! selection of the application the user was in before opening the menu —
 //! which on Windows is no longer in front by then (see
 //! [`crate::selection::SelectionTarget::BeforeTrayMenu`]).
+//!
+//! When a check has found a newer version, an item at the top leads to it.
 
 use std::sync::Mutex;
 
 use tauri::menu::{MenuBuilder, MenuItem};
-use tauri::{AppHandle, Manager, Wry};
+use tauri::{AppHandle, Emitter, Manager, Wry};
 
 use crate::commands::settings::AppSettings;
 use crate::i18n::tray_label;
 use crate::tts::controller::ReadKind;
 use crate::tts::TtsController;
 use crate::ui_locale::resolve_ui_locale;
+use crate::updater::UpdateService;
 
 const READ_SELECTION: &str = "read_selection";
 const TRANSLATE_SELECTION: &str = "translate_selection";
 const STOP_READING: &str = "stop_reading";
 const SHOW_MAIN_WINDOW: &str = "show_main_window";
 const QUIT_APP: &str = "quit_app";
+const UPDATE_AVAILABLE: &str = "update_available";
 
 /// Reading needs a selection reader, which exists on macOS and Windows only.
 const SELECTION_READING_SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
@@ -66,6 +70,10 @@ pub fn apply_menu(app: &AppHandle, settings: &AppSettings) -> Result<(), String>
     };
 
     let mut builder = MenuBuilder::new(app);
+    if let Some(version) = app.state::<UpdateService>().available_version() {
+        let text = format!("{} (v{version})", label(UPDATE_AVAILABLE));
+        builder = builder.text(UPDATE_AVAILABLE, text).separator();
+    }
     if let Some(items) = reading.as_ref() {
         if let Some(read) = items.read.as_ref() {
             builder = builder.item(read);
@@ -133,6 +141,14 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
         }
         STOP_READING => run_off_main_thread(app, |tts| tts.handle_menu_stop()),
         SHOW_MAIN_WINDOW => show_main_window(app),
+        UPDATE_AVAILABLE => {
+            show_main_window(app);
+            // The main window switches to the About page, where the update
+            // is installed.
+            if let Err(err) = app.emit_to("main", "update:open", ()) {
+                log::warn!("Failed to open the update page: {err}");
+            }
+        }
         QUIT_APP => app.exit(0),
         _ => {}
     }

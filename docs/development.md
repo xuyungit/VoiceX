@@ -81,6 +81,42 @@ No code signing is needed for local development. Build with PowerShell:
 .\scripts\Build-VoiceX.ps1
 ```
 
+## Releasing
+
+Installed copies update themselves from GitHub Releases (design:
+[auto-update-design-2026-11-08.md](./auto-update-design-2026-11-08.md)). Only
+**official builds** check for updates. These are release builds that merge
+`src-tauri/tauri.updater.conf.json`, which holds the updater's public key and
+endpoint. `pnpm tauri dev`, `mac:build-local`, and `Build-VoiceX.ps1` leave it
+out, so those builds never check and are never replaced by a published version.
+
+Keys (back up both offline):
+
+| Key | Where | If lost |
+|---|---|---|
+| Updater signing key | `~/.tauri/voicex-updater.key` + `~/.tauri/voicex-updater.password`; GitHub secrets `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Installed copies can no longer auto-update; every user must reinstall by hand |
+| "VoiceX Local Code Signing" certificate | login keychain | Every Mac user must grant Microphone, Accessibility, and Input Monitoring again |
+
+Steps:
+
+1. Bump the version in `package.json`, `src-tauri/Cargo.toml`, and
+   `src-tauri/tauri.conf.json`, update `CHANGELOG.md`, commit, tag `vX.Y.Z`,
+   and push the commit and the tag.
+2. On the Apple Silicon Mac, with the tag checked out:
+   ```bash
+   pnpm mac:release vX.Y.Z --notes-file notes.md --publish
+   ```
+   This creates the release as a draft if it doesn't exist, builds and signs the app,
+   and uploads the DMG, `VoiceX_X.Y.Z_aarch64.app.tar.gz`, its `.sig`, and
+   `latest.json`. With `--publish` it then publishes the release; leave the flag
+   off to check the draft first.
+3. Publishing starts `.github/workflows/windows-release.yml`, which uploads the
+   NSIS installer and its `.sig` and adds `windows-x86_64` to `latest.json`.
+   Until it finishes, Windows copies see no update.
+
+A release marked as a prerelease is never offered: the endpoint follows
+`releases/latest`, which skips prereleases and drafts.
+
 ## README screenshots
 
 README images are rendered from the real frontend with an in-memory backend

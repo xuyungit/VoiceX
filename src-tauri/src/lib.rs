@@ -26,6 +26,7 @@ pub mod storage;
 pub mod tray;
 pub mod tts;
 pub mod ui_locale;
+pub mod updater;
 #[cfg(target_os = "windows")]
 mod win_clipboard;
 
@@ -158,6 +159,9 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let app = app.handle().clone();
         tts_controller.set_activity_listener(move || tray::reading_state_changed(&app));
     }
+    // An update must not replace the app in the middle of a recording.
+    app.state::<updater::UpdateService>()
+        .attach_recording_flag(session_coordinator.recording_flag());
     // A tray-menu read on Windows has to find the window the menu took the
     // foreground from.
     #[cfg(target_os = "windows")]
@@ -267,6 +271,7 @@ pub fn run() {
         .manage(SessionController::default())
         .manage(SyncService::default())
         .manage(TtsController::default())
+        .manage(updater::UpdateService::default())
         .manage(commands::history_translation::HistoryTranslationState::default())
         .on_window_event(|window, event| {
             // Keep the process alive when the main window is closed; just hide it.
@@ -320,6 +325,9 @@ pub fn run() {
             if let Err(e) = init_app(app) {
                 log::error!("Failed to initialize app: {}", e);
             }
+            if let Err(e) = updater::init(app) {
+                log::error!("Failed to set up update checks: {}", e);
+            }
             #[cfg(target_os = "windows")]
             apply_windows_tray_icon(app);
             #[cfg(desktop)]
@@ -363,6 +371,9 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             commands::permissions::permission_guide_start_drag,
             commands::permissions::restart_app,
+            commands::updates::get_update_status,
+            commands::updates::check_for_update,
+            commands::updates::install_update,
             commands::tts::list_tts_voices,
             commands::tts::preview_tts,
             commands::tts::stop_tts,

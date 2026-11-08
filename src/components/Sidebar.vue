@@ -6,6 +6,7 @@ import { NDropdown, NTooltip } from 'naive-ui'
 import LanguageSwitcher from './LanguageSwitcher.vue'
 import { useSettingsStore } from '../stores/settings'
 import { usePermissionsStore } from '../stores/permissions'
+import { useUpdatesStore } from '../stores/updates'
 import type { UiTheme } from '../theme'
 import type { UiLanguage } from '../i18n'
 
@@ -14,6 +15,7 @@ const route = useRoute()
 const { t } = useI18n()
 const settingsStore = useSettingsStore()
 const permissionsStore = usePermissionsStore()
+const updatesStore = useUpdatesStore()
 
 // Material icons: brightness_auto-ish half circle, light_mode, dark_mode.
 const THEME_ICONS: Record<UiTheme, string> = {
@@ -166,6 +168,12 @@ function navigateTo(path: string) {
           class="nav-attention"
           :title="t('permissions.sidebarHint')"
           :aria-label="t('permissions.sidebarHint')"
+        />
+        <span
+          v-if="item.name === 'about' && updatesStore.hasUpdate"
+          class="nav-attention"
+          :title="t('about.updateSidebarHint')"
+          :aria-label="t('about.updateSidebarHint')"
         />
       </button>
       </template>

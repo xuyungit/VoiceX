@@ -3,6 +3,7 @@ import { computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { NConfigProvider, darkTheme, NMessageProvider, NDialogProvider, type GlobalThemeOverrides } from 'naive-ui'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { useRouter } from 'vue-router'
 import Sidebar from './components/Sidebar.vue'
 import PageErrorBoundary from './components/PageErrorBoundary.vue'
 import type { ResolvedLocale, UiLanguage } from './i18n'
@@ -12,6 +13,7 @@ import { useSettingsStore } from './stores/settings'
 import { useHistoryStore } from './stores/history'
 import { useSyncStore, type SyncStateResponse } from './stores/sync'
 import { usePermissionsStore } from './stores/permissions'
+import { useUpdatesStore } from './stores/updates'
 
 // Naive UI derives hover/alpha shades from these values, so they must be literal colors
 // (not CSS variables). Keep them in sync with styles/variables.css.
@@ -65,6 +67,9 @@ let unlistenSync: (() => void) | null = null
 let unlistenLocale: (() => void) | null = null
 let unlistenPermissions: (() => void) | null = null
 let unlistenFocus: (() => void) | null = null
+let unlistenUpdateOpen: (() => void) | null = null
+const router = useRouter()
+const updatesStore = useUpdatesStore()
 let historyRefreshTimer: number | null = null
 let historyRefreshQueued = false
 
@@ -169,6 +174,15 @@ onMounted(async () => {
   unlistenFocus = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
     if (focused) checkPermissions()
   })
+
+  // The sidebar dot and the About page read the update status from any page;
+  // the tray's update item opens About.
+  updatesStore.init().catch((err) => {
+    console.error('[updates] status load failed:', err)
+  })
+  unlistenUpdateOpen = await listen('update:open', () => {
+    router.push('/about')
+  })
 })
 
 watch(
@@ -202,6 +216,8 @@ onBeforeUnmount(() => {
   unlistenPermissions = null
   unlistenFocus?.()
   unlistenFocus = null
+  unlistenUpdateOpen?.()
+  unlistenUpdateOpen = null
   if (historyRefreshTimer !== null) {
     clearTimeout(historyRefreshTimer)
     historyRefreshTimer = null
