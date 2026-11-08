@@ -1418,14 +1418,14 @@ mod tests {
     }
 
     #[test]
-    fn a_digit_combo_is_not_the_default_dictation_hotkey() {
+    fn a_digit_combo_is_not_the_dictation_chord() {
         let mods = ModifierState {
             ctrl: true,
             alt: true,
             meta: true,
             ..Default::default()
         };
-        let dictation = HotkeyConfiguration::default_primary();
+        let dictation = HotkeyConfiguration::legacy_default_primary();
 
         let one = HotkeySnapshot::from_event(Key::Num1, &mods).unwrap();
         assert_ne!(one.to_config(), dictation);
@@ -1529,10 +1529,10 @@ mod tests {
     }
 
     #[test]
-    fn a_modifier_whose_release_was_missed_no_longer_blocks_the_dictation_key() {
+    fn a_modifier_whose_release_was_missed_no_longer_blocks_the_dictation_chord() {
         // Win+Shift+S opened the snipping overlay mid-chord and the hook never
         // saw Shift come up. Now the user presses Ctrl+Alt+Win+Space.
-        let dictation = HotkeyConfiguration::default_primary();
+        let dictation = HotkeyConfiguration::legacy_default_primary();
         let mut mods = ModifierState {
             shift: true,
             ..Default::default()

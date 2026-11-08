@@ -26,6 +26,9 @@ pub struct AppSettings {
     pub ui_language: String, // "system" | "zh-CN" | "en-US"
     pub ui_theme: String,    // "system" | "light" | "dark"
     pub model_defaults_version: u32,
+    /// 1 once a missing `hotkey_config` means today's default
+    /// ([`migrate_hotkey_defaults`]). Absent in blobs from older versions.
+    pub hotkey_defaults_version: u32,
 
     // ASR settings
     pub asr_provider_type: String, // "volcengine" | "google" | "funasr" | "qwen" | "gemini" | "gemini-live" | "cohere" | "openai" | "elevenlabs" | "soniox" | "stepaudio" | "mimo" | "coli"
@@ -443,6 +446,7 @@ impl Default for AppSettings {
             ui_language: crate::ui_locale::UI_LANGUAGE_SYSTEM.to_string(),
             ui_theme: "system".to_string(),
             model_defaults_version: 1,
+            hotkey_defaults_version: 1,
             asr_provider_type: "volcengine".to_string(),
             asr_app_key: String::new(),
             asr_access_key: String::new(),
@@ -832,6 +836,30 @@ pub fn migrate_retired_volcengine_default(value: &mut serde_json::Value) -> bool
         return false;
     };
     object.insert(key.into(), replacement.into());
+    true
+}
+
+/// The dictation default changed (Right Command on macOS). An install that
+/// never chose a hotkey was using the old default, so it is written down
+/// rather than swapped under the user's fingers; only new installs get the
+/// new one. Runs once: a blob saved by this version carries the marker.
+pub fn migrate_hotkey_defaults(value: &mut serde_json::Value) -> bool {
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    match object.get("hotkeyDefaultsVersion") {
+        None => {}
+        Some(serde_json::Value::Number(version)) if version.as_u64() == Some(0) => {}
+        _ => return false,
+    }
+    let legacy = crate::hotkey::HotkeyConfiguration::legacy_default_primary();
+    let unset = object
+        .get("hotkeyConfig")
+        .is_none_or(serde_json::Value::is_null);
+    if unset && legacy != crate::hotkey::HotkeyConfiguration::default_primary() {
+        object.insert("hotkeyConfig".into(), legacy.to_storage().into());
+    }
+    object.insert("hotkeyDefaultsVersion".into(), 1.into());
     true
 }
 
@@ -1586,6 +1614,38 @@ mod tests {
             assert!(!super::migrate_openai_default_model(&mut raw));
             assert_eq!(raw, original);
         }
+    }
+
+    #[test]
+    fn hotkey_default_migration_keeps_the_old_default_for_existing_installs() {
+        let legacy = crate::hotkey::HotkeyConfiguration::legacy_default_primary().to_storage();
+        let changed = crate::hotkey::HotkeyConfiguration::default_primary().to_storage() != legacy;
+
+        for unset in [serde_json::json!({}), serde_json::json!({"hotkeyConfig": null})] {
+            let mut raw = unset;
+            assert!(super::migrate_hotkey_defaults(&mut raw));
+            assert_eq!(raw["hotkeyDefaultsVersion"], 1);
+            if changed {
+                assert_eq!(raw["hotkeyConfig"], legacy.as_str());
+            } else {
+                assert!(raw.get("hotkeyConfig").is_none_or(serde_json::Value::is_null));
+            }
+            // Once marked, clearing the hotkey later means the new default.
+            raw["hotkeyConfig"] = serde_json::Value::Null;
+            let cleared = raw.clone();
+            assert!(!super::migrate_hotkey_defaults(&mut raw));
+            assert_eq!(raw, cleared);
+        }
+
+        let mut chosen = serde_json::json!({"hotkeyConfig": "82|2304|0"});
+        assert!(super::migrate_hotkey_defaults(&mut chosen));
+        assert_eq!(chosen["hotkeyConfig"], "82|2304|0");
+
+        // Fresh settings carry the marker, so a new install is left alone.
+        let fresh = serde_json::to_value(AppSettings::default()).unwrap();
+        let mut raw = fresh.clone();
+        assert!(!super::migrate_hotkey_defaults(&mut raw));
+        assert_eq!(raw, fresh);
     }
 
     #[test]

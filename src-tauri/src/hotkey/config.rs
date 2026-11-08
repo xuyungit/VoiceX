@@ -49,8 +49,24 @@ impl HotkeyConfiguration {
         }
     }
 
-    /// Default hotkey: Ctrl+Option+Cmd+Space
+    /// Default dictation hotkey: Right Command alone on macOS, where every
+    /// keyboard has one (Fn is missing on many external keyboards and is
+    /// claimed by the system for emoji, input sources and Dictation) and a
+    /// lone tap does nothing else. Elsewhere Ctrl+Alt+Win+Space
+    /// ([`Self::legacy_default_primary`]).
     pub fn default_primary() -> Self {
+        if cfg!(target_os = "macos") {
+            // kVK_RightCommand = 54
+            Self::new(54, 0, false)
+        } else {
+            Self::legacy_default_primary()
+        }
+    }
+
+    /// Ctrl+Option+Cmd+Space: the dictation default on every platform before
+    /// macOS moved to Right Command. Installs that relied on it keep it
+    /// (`migrate_hotkey_defaults` in commands/settings.rs).
+    pub fn legacy_default_primary() -> Self {
         // kVK_Space = 49, controlKey | optionKey | cmdKey
         Self {
             key_code: 49,
@@ -295,7 +311,12 @@ mod tests {
     fn default_dictation_hotkey_matches_the_frontend_constant() {
         // DEFAULT_DICTATION_HOTKEY in src/utils/hotkey.ts shows this as the
         // active hotkey when none is saved; keep the two in step.
-        assert_eq!(HotkeyConfiguration::default_primary().to_storage(), "49|6400|0");
+        let expected = if cfg!(target_os = "macos") { "54|0|0" } else { "49|6400|0" };
+        assert_eq!(HotkeyConfiguration::default_primary().to_storage(), expected);
+        assert_eq!(
+            HotkeyConfiguration::legacy_default_primary().to_storage(),
+            "49|6400|0"
+        );
     }
 
     #[test]
@@ -325,7 +346,7 @@ mod tests {
         assert_eq!(reading_default_modifiers(false), 0x0800 | 0x0100);
         assert_eq!(
             reading_default_modifiers(true),
-            HotkeyConfiguration::default_primary().modifiers,
+            HotkeyConfiguration::legacy_default_primary().modifiers,
             "on Windows the reading keys share the dictation default's chord"
         );
         // The stored forms the settings page falls back to when nothing is

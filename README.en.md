@@ -89,7 +89,7 @@ On the **ASR** page, pick an engine and enter the API key from its provider (see
 
 ### 3. Start dictating
 
-The default dictation hotkey is **⌃⌥⌘ Space** (Windows: **Ctrl + Alt + Win + Space**); change it on the **Input** page. Put the cursor in any text field, tap the hotkey, and start speaking.
+The default dictation hotkey is **Right Command** on macOS (Windows: **Ctrl + Alt + Win + Space**); change it on the **Input** page. Put the cursor in any text field, tap the hotkey, and start speaking.
 
 ## Interaction modes
 

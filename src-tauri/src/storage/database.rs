@@ -258,6 +258,7 @@ fn migrate_settings_blob(conn: &Connection) {
     let migrated_asr_models = crate::asr::models::migrate_known_model_settings(&mut value);
     let migrated_tts_provider =
         crate::commands::settings::migrate_tts_provider_without_system_voice(&mut value);
+    let migrated_hotkey_default = crate::commands::settings::migrate_hotkey_defaults(&mut value);
     if !migrated_endpoints
         && !migrated_restore
         && !migrated_asr
@@ -267,6 +268,7 @@ fn migrate_settings_blob(conn: &Connection) {
         && !migrated_model_defaults
         && !migrated_asr_models
         && !migrated_tts_provider
+        && !migrated_hotkey_default
     {
         return;
     }
@@ -296,14 +298,15 @@ fn migrate_settings_blob(conn: &Connection) {
         Ok(_) => log::info!(
             "Migrated persisted settings (custom LLM endpoints: {}, override restore flag: {}, \
              hotkey digit key codes: {}, Volcengine reasoning: {}, Volcengine model: {}, \
-             scheduled model defaults: {}, ASR models: {})",
+             scheduled model defaults: {}, ASR models: {}, hotkey default: {})",
             migrated_endpoints,
             migrated_restore,
             migrated_hotkeys,
             migrated_reasoning,
             migrated_volcengine_model,
             migrated_model_defaults,
-            migrated_asr_models
+            migrated_asr_models,
+            migrated_hotkey_default
         ),
         Err(e) => log::warn!("Settings migration write-back failed: {}", e),
     }
@@ -1145,6 +1148,7 @@ fn read_settings_from_connection(conn: &Connection) -> Result<AppSettings, Stora
                 crate::commands::settings::migrate_scheduled_model_defaults(&mut raw);
                 crate::asr::models::migrate_known_model_settings(&mut raw);
                 crate::commands::settings::migrate_tts_provider_without_system_voice(&mut raw);
+                crate::commands::settings::migrate_hotkey_defaults(&mut raw);
                 match serde_json::from_value::<AppSettings>(raw) {
                     Ok(mut settings) => {
                         crate::commands::settings::normalize_text_injection_overrides(

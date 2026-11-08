@@ -31,6 +31,7 @@ export interface AppSettings {
     uiLanguage: UiLanguage
     uiTheme: UiTheme
     modelDefaultsVersion: number
+    hotkeyDefaultsVersion: number
 
     // ASR
     asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'mimo' | 'coli' | 'qwen-local'
@@ -349,6 +350,7 @@ const defaultSettings: AppSettings = {
     uiLanguage: 'system',
     uiTheme: 'system',
     modelDefaultsVersion: 1,
+    hotkeyDefaultsVersion: 1,
     asrProviderType: 'volcengine',
     asrAppKey: '',
     asrAccessKey: '',
