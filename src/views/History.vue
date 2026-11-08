@@ -200,7 +200,10 @@ async function togglePlayback(record: HistoryRecord) {
 
   try {
     stopPlayback()
-    const bytes = await invoke<ArrayBuffer>('load_history_audio', { recordId: record.id })
+    // Raw IPC responses arrive as an ArrayBuffer over the custom protocol, but
+    // as a JSON number array when Tauri falls back to postMessage.
+    const raw = await invoke<ArrayBuffer | number[]>('load_history_audio', { recordId: record.id })
+    const bytes = raw instanceof ArrayBuffer ? raw : new Uint8Array(raw)
     const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/ogg' }))
     objectUrl.value = url
     const audio = new Audio(url)
