@@ -201,3 +201,10 @@ mp3lame-encoder = "0.2.4"
 [profile.dev]
 # No step-debugging in this project: keep file:line in panic backtraces, drop the rest of the debuginfo.
 debug = "line-tables-only"
+
+[profile.release]
+# A smaller binary means a smaller update download. Stripping drops function
+# names from release backtraces; the panic hook still logs file:line:column.
+lto = "thin"
+codegen-units = 1
+strip = true
