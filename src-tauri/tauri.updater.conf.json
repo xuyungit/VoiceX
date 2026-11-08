@@ -7,6 +7,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQyOTkyOUYyODYwMDI2QjAKUldTd0pnQ0c4aW1aMHQ3OTcvQ3hLT2dEY3Y4WmswRGlLZmtrTmFqTEhVRncvYng3Ylp1REFOd0kK",
       "endpoints": [
+        "https://dl.wddgxs.com/latest.json",
         "https://github.com/xuyungit/VoiceX/releases/latest/download/latest.json"
       ],
       "windows": {

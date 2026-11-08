@@ -29,6 +29,18 @@ const CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
 /// machine sleeps, which would stretch a plain 24-hour timer indefinitely.
 const WAKE_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(200);
+/// The endpoints are tried in order and the first manifest that answers
+/// decides where the package is downloaded from, so an unreachable endpoint
+/// has to fail fast for the next one to get a turn.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// A download that stops receiving data fails instead of hanging in the
+/// downloading phase; the user can retry. Not a total timeout, which would
+/// cut off a slow but progressing download.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Replaces the plugin's generic `tauri-plugin-updater/<version>` so update
+/// requests can be told apart from browser downloads. Carries no app version
+/// or other client detail.
+const USER_AGENT: &str = "VoiceX-Updater";
 
 /// Error codes the UI translates; any other error text comes from the plugin
 /// and is shown as is.
@@ -202,7 +214,17 @@ pub async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
         inner.status.error = None;
     });
 
-    let result = match app.updater() {
+    // The update returned by the check keeps this client setup for its download.
+    let result = match app
+        .updater_builder()
+        .configure_client(|client| {
+            client
+                .user_agent(USER_AGENT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
+        })
+        .build()
+    {
         Ok(updater) => updater.check().await,
         Err(err) => Err(err),
     };
