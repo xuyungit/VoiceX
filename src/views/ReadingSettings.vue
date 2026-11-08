@@ -11,17 +11,18 @@ import { buildLlmProviderOptions } from '../utils/llmOptions'
 import { getDefaultPrompt } from '../utils/llmPrompts'
 import { isMacOS, isWindows } from '../utils/platform'
 import { buildTtsProviderOptions, type TtsProviderValue as ProviderValue } from '../utils/ttsOptions'
+import {
+  buildTtsVoiceOptions,
+  buildVoiceLanguageOptions,
+  filterTtsVoiceOption,
+  primaryVoiceLanguage,
+  type TtsVoice as TtsVoiceOption
+} from '../utils/ttsVoices'
 import readingLimits from '../shared/readingLimits.json'
 import SettingsSection from '../components/settings/SettingsSection.vue'
 import SettingRow from '../components/settings/SettingRow.vue'
 import HelpTip from '../components/settings/HelpTip.vue'
 import HotkeyField from '../components/settings/HotkeyField.vue'
-
-interface TtsVoiceOption {
-  id: string
-  name: string
-  language: string
-}
 
 interface TtsVoiceList {
   voices: TtsVoiceOption[]
@@ -61,6 +62,7 @@ const { t, locale } = useI18n()
 const router = useRouter()
 
 const voices = ref<TtsVoiceOption[]>([])
+const voiceLanguage = ref('')
 // Declared by the backend with the list, so a model with no presets gets a
 // text field without the view having to know which models those are.
 const customVoiceOnly = ref(false)
@@ -121,6 +123,7 @@ const ttsProviderType = computed({
   set: (value: ProviderValue) => {
     void stopPreview()
     previewError.value = ''
+    voiceLanguage.value = ''
     settingsStore.updateSetting('ttsProviderType', value)
     // The voice list is per provider and shares nothing across them.
     void loadVoices(value)
@@ -196,19 +199,29 @@ const aliyunVoiceKey = computed(() => {
   }
 })
 
+const listedVoiceOptions = computed(() =>
+  buildTtsVoiceOptions(voices.value, ttsProviderType.value, locale.value)
+)
+
+const voiceLanguageOptions = computed(() => [
+  { label: t('reading.voiceAllLanguages'), value: '' },
+  ...buildVoiceLanguageOptions(voices.value, locale.value)
+])
+
 const voiceOptions = computed(() => {
-  const listed = voices.value.map((voice) => ({
-    label: `${voice.name} · ${voice.language}`,
-    value: voice.id
-  }))
+  const listed = isEdge.value && voiceLanguage.value
+    ? listedVoiceOptions.value.filter((voice) => voice.language === voiceLanguage.value)
+    : listedVoiceOptions.value
   // The cloud providers have no default-voice concept, and an empty speaker is
   // not a valid request — so only the local engine gets that entry.
   return isCloud.value ? listed : [{ label: t('reading.voiceDefault'), value: '' }, ...listed]
 })
 
-function filterVoice(pattern: string, option: SelectOption) {
-  const query = pattern.toLocaleLowerCase()
-  return `${option.label ?? ''} ${option.value ?? ''}`.toLocaleLowerCase().includes(query)
+function selectedVoiceOption(value: string | number) {
+  // A language filter only narrows the menu. Keep the current voice labelled
+  // accurately until the user actually selects a replacement.
+  return listedVoiceOptions.value.find((voice) => voice.value === value)
+    ?? { label: String(value), value }
 }
 
 const voiceNote = computed(() => {
@@ -499,28 +512,20 @@ const translateVoiceOverride = computed({
   }
 })
 
-function primaryLanguage(tag: string) {
-  return tag.toLowerCase().replace('_', '-').split('-')[0]
-}
-
 function voiceSpeaks(voice: TtsVoiceOption, language: string) {
-  return primaryLanguage(voice.language) === primaryLanguage(language)
+  return primaryVoiceLanguage(voice.language) === primaryVoiceLanguage(language)
 }
 
 const translateVoiceOptions = computed(() => {
   const target = translateTargetLanguage.value
-  const matching = voices.value
-    .filter((voice) => voiceSpeaks(voice, target))
-    .map((voice) => ({ label: `${voice.name} · ${voice.language}`, value: voice.id }))
+  const matching: SelectOption[] = listedVoiceOptions.value
+    .filter((voice) => voice.language === primaryVoiceLanguage(target))
   // A selection that no longer matches the target stays visible: hiding it
   // would leave a voice in effect that the picker denies exists.
   const selected = translateVoiceOverride.value
   if (selected && !matching.some((option) => option.value === selected)) {
-    const voice = voices.value.find((candidate) => candidate.id === selected)
-    matching.unshift({
-      label: voice ? `${voice.name} · ${voice.language}` : selected,
-      value: selected
-    })
+    const voice = listedVoiceOptions.value.find((candidate) => candidate.value === selected)
+    matching.unshift(voice ?? { label: selected, value: selected })
   }
   return [{ label: t('reading.translateVoiceFollow'), value: '' }, ...matching]
 })
@@ -969,6 +974,18 @@ onBeforeUnmount(() => {
           <HelpTip :text="t('reading.voiceSub')" />
         </h3>
 
+        <SettingRow v-if="isEdge" :label="t('reading.voiceLanguage')">
+          <NSelect
+            v-model:value="voiceLanguage"
+            :options="voiceLanguageOptions"
+            :filter="filterTtsVoiceOption"
+            :loading="voicesLoading"
+            :aria-label="t('reading.voiceLanguage')"
+            filterable
+            size="small"
+          />
+        </SettingRow>
+
         <SettingRow :label="t('reading.voiceLabel')" :help="isEdge ? `${voiceNote} ${t('reading.edgeStreamNote')}` : voiceNote">
           <NInput
             v-if="customVoiceOnly"
@@ -980,10 +997,13 @@ onBeforeUnmount(() => {
             v-else
             v-model:value="ttsVoiceId"
             :options="voiceOptions"
-            :filter="filterVoice"
+            :filter="filterTtsVoiceOption"
+            :fallback-option="selectedVoiceOption"
+            :placeholder="t('reading.voiceSearchPlaceholder')"
+            :aria-label="t('reading.voiceLabel')"
             :loading="voicesLoading"
             :disabled="!systemVoiceSupported && !isCloud"
-            :tag="isCloud"
+            :tag="isCloud && !isEdge"
             filterable
             size="small"
           />
@@ -1143,9 +1163,11 @@ onBeforeUnmount(() => {
           v-else
           v-model:value="translateVoiceOverride"
           :options="translateVoiceOptions"
-          :filter="filterVoice"
+          :filter="filterTtsVoiceOption"
+          :placeholder="t('reading.voiceSearchPlaceholder')"
+          :aria-label="t('reading.translateVoice')"
           :disabled="!systemVoiceSupported && !isCloud"
-          :tag="isCloud"
+          :tag="isCloud && !isEdge"
           filterable
           size="small"
         />
