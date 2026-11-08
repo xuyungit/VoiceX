@@ -24,6 +24,7 @@ use crate::updater::UpdateService;
 const READ_SELECTION: &str = "read_selection";
 const TRANSLATE_SELECTION: &str = "translate_selection";
 const STOP_READING: &str = "stop_reading";
+const COPY_LAST_DICTATION: &str = "copy_last_dictation";
 const SHOW_MAIN_WINDOW: &str = "show_main_window";
 const QUIT_APP: &str = "quit_app";
 const UPDATE_AVAILABLE: &str = "update_available";
@@ -84,6 +85,7 @@ pub fn apply_menu(app: &AppHandle, settings: &AppSettings) -> Result<(), String>
         builder = builder.item(&items.stop).separator();
     }
     let menu = builder
+        .text(COPY_LAST_DICTATION, label(COPY_LAST_DICTATION))
         .text(SHOW_MAIN_WINDOW, label(SHOW_MAIN_WINDOW))
         .separator()
         .text(QUIT_APP, label(QUIT_APP))
@@ -140,6 +142,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             run_off_main_thread(app, |tts| tts.handle_menu_read(ReadKind::Translate))
         }
         STOP_READING => run_off_main_thread(app, |tts| tts.handle_menu_stop()),
+        COPY_LAST_DICTATION => copy_last_dictation(),
         SHOW_MAIN_WINDOW => show_main_window(app),
         UPDATE_AVAILABLE => {
             show_main_window(app);
@@ -151,6 +154,25 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
         }
         QUIT_APP => app.exit(0),
         _ => {}
+    }
+}
+
+/// Recovers a dictation whose paste did not arrive without opening History.
+fn copy_last_dictation() {
+    let text = crate::storage::get_or_create_device_id()
+        .and_then(|device_id| crate::storage::latest_dictation_text(&device_id));
+    match text {
+        Ok(Some(text)) => {
+            match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(&text)) {
+                Ok(()) => log::info!(
+                    "Copied the last dictation to the clipboard (chars={})",
+                    text.chars().count()
+                ),
+                Err(err) => log::warn!("Failed to copy the last dictation: {err}"),
+            }
+        }
+        Ok(None) => log::info!("Copy last dictation: there is no dictation to copy"),
+        Err(err) => log::warn!("Failed to read the last dictation: {err}"),
     }
 }
 

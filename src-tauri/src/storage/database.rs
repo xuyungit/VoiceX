@@ -645,6 +645,25 @@ pub fn delete_history_record_allow_missing(id: &str) -> Result<(), StorageError>
     delete_history_record_internal(id, false)
 }
 
+/// The text of this device's most recent successful dictation, as last
+/// edited. Translate-and-read rows are reads, not dictations.
+pub fn latest_dictation_text(device_id: &str) -> Result<Option<String>, StorageError> {
+    with_db(|conn| {
+        conn.query_row(
+            "SELECT COALESCE(NULLIF(edited_text, ''), text)
+             FROM history_record
+             WHERE error_code = ?1 AND mode != ?2 AND TRIM(text) != ''
+               AND (source_device_id = ?3 OR source_device_id IS NULL OR source_device_id = '')
+             ORDER BY timestamp DESC
+             LIMIT 1",
+            params![HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ, device_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))
+    })
+}
+
 /// The recording kept for a history record, if it has one.
 pub fn history_audio_path(id: &str) -> Result<Option<String>, StorageError> {
     let path = with_db(|conn| {
