@@ -165,7 +165,6 @@ const enUS = {
     englishTranslation: 'English translation',
     assistantMode: 'Assistant mode',
     plainTranscription: 'Plain transcription',
-    playing: 'Playing',
     transcriptionFailed: 'Transcription failed',
     failedPlaceholder: 'The recording was kept, but transcription did not complete. You can re-transcribe it later.',
     failureReason: 'Failure reason',

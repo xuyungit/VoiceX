@@ -165,7 +165,6 @@ const zhCN = {
     englishTranslation: '英文翻译',
     assistantMode: 'Assistant 模式',
     plainTranscription: '普通转写',
-    playing: '播放中',
     transcriptionFailed: '转写失败',
     failedPlaceholder: '这次语音已保留，但转写未成功。你可以稍后重新转录。',
     failureReason: '失败原因',

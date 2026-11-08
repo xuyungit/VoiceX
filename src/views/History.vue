@@ -433,15 +433,7 @@ function renderIcon(path: string) {
 }
 
 function moreOptions(record: HistoryRecord): DropdownOption[] {
-  const isPlaying = playingId.value === record.id
-
   return [
-    {
-      label: isPlaying ? t('history.stopPlayback') : t('history.playAudio'),
-      key: 'play',
-      disabled: !record.audioPath,
-      icon: renderIcon(isPlaying ? 'M8 5h3v14H8zm5 0h3v14h-3z' : 'M8 5.14 19 12l-11 6.86V5.14z')
-    },
     {
       label: t('history.reTranscribe'),
       key: 'retranscribe',
@@ -463,11 +455,6 @@ function moreOptions(record: HistoryRecord): DropdownOption[] {
 }
 
 function handleMoreAction(key: string | number, record: HistoryRecord) {
-  if (key === 'play') {
-    void togglePlayback(record)
-    return
-  }
-
   if (key === 'retranscribe') {
     reTranscribeRecord.value = record
     reTranscribeVisible.value = true
@@ -576,8 +563,25 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
               </div>
               <div class="list-actions">
                 <span class="duration">{{ formatDuration(record.durationMs) }}</span>
-                <span v-if="playingId === record.id" class="pill accent">{{ t('history.playing') }}</span>
                 <div class="action-toolbar">
+                  <NButton
+                    quaternary
+                    size="small"
+                    class="toolbar-button play-button"
+                    :class="{ playing: playingId === record.id }"
+                    :aria-label="playingId === record.id ? t('history.stopPlayback') : t('history.playAudio')"
+                    :title="playingId === record.id ? t('history.stopPlayback') : t('history.playAudio')"
+                    :aria-pressed="playingId === record.id"
+                    :disabled="!record.audioPath"
+                    @click="() => togglePlayback(record)"
+                  >
+                    <template #icon>
+                      <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
+                        <path v-if="playingId === record.id" d="M7 7h10v10H7z" />
+                        <path v-else d="M8 5.14 19 12l-11 6.86V5.14z" />
+                      </svg>
+                    </template>
+                  </NButton>
                   <NButton quaternary size="small" class="toolbar-button" :aria-label="t('common.copy')" @click="() => handleCopy(record)">
                     <template #icon>
                       <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
@@ -969,17 +973,24 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   font-variant-numeric: tabular-nums;
 }
 
-/* Actions stay out of the way until the row is hovered or focused. */
+/* Actions stay out of the way until the row is hovered or focused.
+   Buttons fade individually so an active play button can stay visible. */
 .action-toolbar {
   display: inline-flex;
   align-items: center;
   gap: 0;
+}
+
+.action-toolbar > * {
   opacity: 0;
   transition: opacity var(--transition-fast);
 }
 
-.list-row:hover .action-toolbar,
-.list-row:focus-within .action-toolbar {
+/* :focus-visible rather than :focus-within: NButton focuses itself on mousedown,
+   so a clicked button would otherwise pin the toolbar open after the pointer leaves. */
+.list-row:hover .action-toolbar > *,
+.list-row:has(:focus-visible) .action-toolbar > *,
+.action-toolbar > .play-button.playing {
   opacity: 1;
 }
 
@@ -989,8 +1000,22 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   color: var(--color-text-secondary);
 }
 
+/* Same mousedown focus: drop NButton's focus fill unless focus came from the keyboard. */
+.toolbar-button:focus:not(:focus-visible):not(:hover) {
+  background-color: transparent;
+  color: var(--color-text-secondary);
+}
+
 .toolbar-button.danger:hover {
   color: var(--color-error);
+}
+
+/* Color marks the playing state only; at rest the play button is as neutral
+   as the rest of the toolbar. */
+.toolbar-button.play-button.playing,
+.toolbar-button.play-button.playing:focus {
+  color: var(--color-accent);
+  background: var(--color-accent-light);
 }
 
 .mode-tag.translate {
