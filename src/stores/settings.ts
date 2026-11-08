@@ -577,7 +577,6 @@ export const useSettingsStore = defineStore('settings', () => {
     const settings = ref<AppSettings>({ ...defaultSettings })
     const isLoading = ref(true)
     const saveTimeout = ref<number | null>(null)
-    const applyTimeout = ref<number | null>(null)
     const hotwordSyncInProgress = ref(false)
     const hotwordSyncTimer = ref<number | null>(null)
     const HOTWORD_SYNC_INTERVAL_MS = 5 * 60 * 1000
@@ -588,8 +587,9 @@ export const useSettingsStore = defineStore('settings', () => {
         try {
             isLoading.value = true
             const result = await invoke<AppSettings>('get_settings')
+            // The backend applies the saved dictation hotkey at startup, and InputSettings
+            // applies it when the user changes it, so loading settings does not touch it.
             Object.assign(settings.value, result)
-            await applyHotkeyConfig()
         } catch (error) {
             console.error('Failed to load settings:', error)
         } finally {
@@ -722,28 +722,6 @@ export const useSettingsStore = defineStore('settings', () => {
         clearInterval(hotwordSyncTimer.value)
         hotwordSyncTimer.value = null
     }
-
-    async function applyHotkeyConfig() {
-        try {
-            await invoke('apply_hotkey_config', { config: settings.value.hotkeyConfig })
-        } catch (error) {
-            console.error('Failed to apply hotkey config', error)
-        }
-    }
-
-    // Watch hotkey changes and apply debounced
-    watch(
-        () => settings.value.hotkeyConfig,
-        () => {
-            if (applyTimeout.value !== null) {
-                clearTimeout(applyTimeout.value)
-            }
-            applyTimeout.value = window.setTimeout(() => {
-                applyHotkeyConfig()
-                applyTimeout.value = null
-            }, 300)
-        }
-    )
 
     return {
         settings,
