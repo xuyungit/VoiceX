@@ -351,6 +351,7 @@ pub fn run() {
             commands::audio::get_recordings_dir,
             commands::audio::open_recordings_dir,
             commands::build_info::get_build_info,
+            commands::build_info::open_logs_dir,
             commands::post_edit::get_post_edit_test_status,
             commands::post_edit::get_post_edit_settings,
             commands::post_edit::set_post_edit_mode,

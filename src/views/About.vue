@@ -128,6 +128,14 @@ async function installUpdate() {
   }
 }
 
+async function openLogsFolder() {
+  try {
+    await invoke('open_logs_dir')
+  } catch (error) {
+    message.error(t('about.openLogsFailed', { reason: String(error) }))
+  }
+}
+
 onMounted(async () => {
   try {
     const info = await invoke<BuildInfo>('get_build_info')
@@ -189,6 +197,9 @@ onMounted(async () => {
     <SettingsSection :title="t('about.diagnostics')">
       <SettingRow :label="t('about.showDiagnostics')" :help="t('about.diagnosticsHint')">
         <NSwitch v-model:value="enableDiagnostics" />
+      </SettingRow>
+      <SettingRow :label="t('about.logs')" :help="t('about.logsHint')">
+        <NButton size="small" @click="openLogsFolder">{{ t('about.openLogs') }}</NButton>
       </SettingRow>
     </SettingsSection>
   </div>
