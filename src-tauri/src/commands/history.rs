@@ -56,8 +56,15 @@ pub fn get_local_usage_stats() -> Result<UsageStats, String> {
     crate::storage::get_local_usage_stats(&device_id).map_err(|e| e.to_string())
 }
 
-/// Load an audio file from disk for renderer playback.
-#[tauri::command]
-pub fn load_audio_file(path: String) -> Result<Vec<u8>, String> {
-    std::fs::read(&path).map_err(|e| format!("Failed to read audio file {}: {}", path, e))
+/// Load a history record's recording for renderer playback. The record names
+/// the file, so the renderer cannot read arbitrary paths; the bytes go back
+/// raw rather than as a JSON array of numbers.
+#[tauri::command(async)]
+pub fn load_history_audio(record_id: String) -> Result<tauri::ipc::Response, String> {
+    let path = crate::storage::history_audio_path(&record_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("History record {} has no recording", record_id))?;
+    let bytes =
+        std::fs::read(&path).map_err(|e| format!("Failed to read audio file {}: {}", path, e))?;
+    Ok(tauri::ipc::Response::new(bytes))
 }

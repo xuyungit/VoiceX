@@ -200,9 +200,8 @@ async function togglePlayback(record: HistoryRecord) {
 
   try {
     stopPlayback()
-    const bytes = await invoke<number[]>('load_audio_file', { path: record.audioPath })
-    const buffer = new Uint8Array(bytes)
-    const url = URL.createObjectURL(new Blob([buffer], { type: 'audio/ogg' }))
+    const bytes = await invoke<ArrayBuffer>('load_history_audio', { recordId: record.id })
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/ogg' }))
     objectUrl.value = url
     const audio = new Audio(url)
     audioPlayer.value = audio

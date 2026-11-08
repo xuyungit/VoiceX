@@ -403,7 +403,7 @@ pub fn run() {
             commands::history::delete_history_record,
             commands::history::get_usage_stats,
             commands::history::get_local_usage_stats,
-            commands::history::load_audio_file,
+            commands::history::load_history_audio,
             commands::sync::get_sync_state,
             commands::sync::sync_now,
             commands::hotword::sync_hotwords,

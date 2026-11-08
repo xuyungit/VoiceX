@@ -638,8 +638,9 @@ pub fn delete_history_record_allow_missing(id: &str) -> Result<(), StorageError>
     delete_history_record_internal(id, false)
 }
 
-fn delete_history_record_internal(id: &str, warn_on_missing: bool) -> Result<(), StorageError> {
-    let audio_path = with_db(|conn| {
+/// The recording kept for a history record, if it has one.
+pub fn history_audio_path(id: &str) -> Result<Option<String>, StorageError> {
+    let path = with_db(|conn| {
         conn.query_row(
             "SELECT audio_path FROM history_record WHERE id = ?1",
             params![id],
@@ -649,6 +650,11 @@ fn delete_history_record_internal(id: &str, warn_on_missing: bool) -> Result<(),
         .map_err(|e| StorageError::QueryFailed(e.to_string()))
     })?
     .flatten();
+    Ok(path.filter(|path| !path.trim().is_empty()))
+}
+
+fn delete_history_record_internal(id: &str, warn_on_missing: bool) -> Result<(), StorageError> {
+    let audio_path = history_audio_path(id)?;
 
     if let Some(path) = audio_path.as_deref() {
         remove_audio_file_if_needed(path)?;
