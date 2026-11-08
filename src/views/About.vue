@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import { NButton, NSwitch, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import { useUpdatesStore, UPDATE_ERROR_CODES } from '../stores/updates'
 import SettingsSection from '../components/settings/SettingsSection.vue'
 import SettingRow from '../components/settings/SettingRow.vue'
+import { renderMarkdown } from '../utils/markdown'
 
 type BuildInfo = {
   version: string
@@ -60,6 +62,22 @@ const autoCheckUpdates = computed({
 
 const update = computed(() => updatesStore.status)
 const available = computed(() => update.value?.available ?? null)
+const notesHtml = computed(() => {
+  const notes = available.value?.notes
+  return notes ? renderMarkdown(notes) : ''
+})
+
+// Links in the notes open in the system browser, not inside the app window.
+async function openNotesLink(event: MouseEvent) {
+  const link = (event.target as HTMLElement).closest('a')
+  if (!link) return
+  event.preventDefault()
+  try {
+    await openUrl(link.href)
+  } catch (error) {
+    console.error('[updates] failed to open link:', link.href, error)
+  }
+}
 
 const updateStatusLabel = computed(() => {
   const status = update.value
@@ -153,7 +171,7 @@ onMounted(async () => {
             <span v-if="available.publishedAt">{{ t('about.updatePublished', { time: formatTime(available.publishedAt) }) }}</span>
           </template>
           <div class="update-body">
-            <div v-if="available.notes" class="update-notes">{{ available.notes }}</div>
+            <div v-if="notesHtml" class="update-notes" @click="openNotesLink" v-html="notesHtml" />
             <div class="update-actions">
               <span v-if="installProgressLabel" class="update-progress">{{ installProgressLabel }}</span>
               <NButton type="primary" size="small" :disabled="updatesStore.working" @click="installUpdate">
@@ -204,8 +222,82 @@ onMounted(async () => {
   color: var(--color-text-secondary);
   font-size: var(--font-sm);
   line-height: 1.5;
-  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   user-select: text;
+}
+
+.update-notes :deep(:is(h1, h2, h3, h4, h5, h6)) {
+  margin: 12px 0 4px;
+  color: var(--color-text-primary);
+  font-size: var(--font-sm);
+  font-weight: 600;
+}
+
+.update-notes :deep(p),
+.update-notes :deep(ul),
+.update-notes :deep(ol) {
+  margin: 6px 0;
+}
+
+.update-notes :deep(ul),
+.update-notes :deep(ol) {
+  padding-left: 18px;
+}
+
+.update-notes :deep(li + li) {
+  margin-top: 2px;
+}
+
+.update-notes :deep(strong) {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.update-notes :deep(code) {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--color-bg-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.update-notes :deep(pre) {
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.update-notes :deep(pre code) {
+  padding: 0;
+  background: none;
+}
+
+.update-notes :deep(a) {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+.update-notes :deep(a:hover) {
+  text-decoration: underline;
+}
+
+.update-notes :deep(hr) {
+  margin: 12px 0;
+  border: none;
+  border-top: 1px solid var(--color-border);
+}
+
+.update-notes :deep(blockquote) {
+  margin: 6px 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--color-border);
+}
+
+.update-notes > :deep(:first-child) {
+  margin-top: 0;
+}
+
+.update-notes > :deep(:last-child) {
+  margin-bottom: 0;
 }
 
 .update-actions {
