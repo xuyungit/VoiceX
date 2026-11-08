@@ -136,6 +136,13 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     ensure_column(&conn, "sync_server_state", "usage_seq", "INTEGER DEFAULT 0")?;
     ensure_column(&conn, "sync_server_state", "seeded_at", "TEXT")?;
 
+    // History pages and retention cleanup all order or filter by timestamp;
+    // without this every page is a full scan plus a sort.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS history_record_time ON history_record(timestamp DESC);",
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
     migrate_recording_counts(&conn)?;
 
     // Upgrade the persisted settings blob in place (e.g. legacy single custom

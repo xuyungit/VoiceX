@@ -6,8 +6,14 @@ use crate::storage::{HistoryRecord, UsageStats};
 use tauri::State;
 
 /// Get history records
+///
+/// The first page applies retention, so History opened after days without a
+/// dictation does not show expired records; later pages need not repeat it.
 #[tauri::command]
 pub fn get_history(limit: u32, offset: u32) -> Result<Vec<HistoryRecord>, String> {
+    if offset > 0 {
+        return crate::storage::get_history(limit, offset).map_err(|e| e.to_string());
+    }
     if let Ok(settings) = crate::storage::get_settings() {
         let text_retention = if settings.sync_enabled {
             0
