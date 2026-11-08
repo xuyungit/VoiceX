@@ -3,9 +3,9 @@
 use std::{
     cell::RefCell,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
-        Arc, Mutex,
+        Arc, Mutex, TryLockError,
     },
     thread,
     time::Duration,
@@ -39,28 +39,39 @@ enum HookEvent {
     /// Diagnostic snapshot of a shortcut-shaped key press (root-cause hunt for
     /// "the first press does nothing"). Sent through the channel so the tap
     /// callback itself never does IO.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     Diag(DiagSnapshot),
 }
 
-/// What the hook believed vs. what the session actually held, at the moment a
-/// non-modifier key went down with modifiers involved. `tracked_*` comes from
-/// the event-driven [`ModifierState`]; `actual_*` from
-/// `CGEventSourceFlagsState`, which cannot go stale. A mismatch is the
+/// What the hook believed vs. what the system actually held, at the moment a
+/// key went down with modifiers involved. `tracked_*` comes from the
+/// event-driven [`ModifierState`]; `actual_*` from the system's own state
+/// ([`authoritative_modifiers`]), which cannot go stale. A mismatch is the
 /// modifier-state desync in person.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 #[derive(Debug)]
 struct DiagSnapshot {
     key_code: u32,
     tracked_mods: u32,
     actual_mods: u32,
     tracked_fn: bool,
-    actual_fn: bool,
+    /// `None` on Windows, which has no Fn state to read.
+    actual_fn: Option<bool>,
+    /// The event-tracked modifiers before this press re-seeded them.
+    before_sync_mods: u32,
+    /// The re-seed changed something: the tracked state had gone stale since
+    /// the previous key event — a release eaten by another application's hook,
+    /// the lock screen or a UAC prompt taking the keyboard mid-chord. Without
+    /// the re-seed this press would have matched against the stale state.
+    repaired: bool,
     /// Tracked and authoritative state disagree, after accounting for the
     /// pressed key's own stripped bit. With the sync in place this should
     /// never be true again; a `true` here is a regression alarm, which is why
     /// the diag line stays in.
     desynced: bool,
+    /// The press starts a hotkey action (not a key repeat of one). These and
+    /// repaired presses are the ones logged at info level.
+    first_press: bool,
     dictation_match: bool,
     read_match: bool,
     read_latched: bool,
@@ -72,7 +83,7 @@ struct DiagSnapshot {
 /// [`HotkeySnapshot::from_event`] strips from its own snapshot. The diag
 /// comparison has to strip the same bit from the authoritative side, or every
 /// modifier press would read as a false desync.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn own_modifier_bit(key_code: u32) -> u32 {
     match key_code {
         56 | 60 => 0x0200, // shift
@@ -83,11 +94,18 @@ fn own_modifier_bit(key_code: u32) -> u32 {
     }
 }
 
+/// Whether the modifiers the hook tracked disagree with the system's, leaving
+/// out the bit of the key being pressed (see [`own_modifier_bit`]).
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+fn modifiers_disagree(tracked: u32, actual: u32, key_code: u32) -> bool {
+    (tracked ^ actual) & !own_modifier_bit(key_code) != 0
+}
+
 /// The session's live modifier flags, as our internal modifier bits plus the
 /// Fn state. Authoritative: unlike the event-tracked state it does not depend
 /// on having seen every FlagsChanged event.
 #[cfg(target_os = "macos")]
-fn authoritative_modifier_bits() -> (u32, bool) {
+fn authoritative_modifiers() -> (u32, Option<bool>) {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGEventSourceFlagsState(state_id: u32) -> u64;
@@ -107,7 +125,41 @@ fn authoritative_modifier_bits() -> (u32, bool) {
     if flags & 0x0010_0000 != 0 {
         bits |= 0x0100; // command
     }
-    (bits, flags & 0x0080_0000 != 0)
+    (bits, Some(flags & 0x0080_0000 != 0))
+}
+
+/// Windows: the modifiers the system holds down, from the asynchronous key
+/// state. Inside a low-level keyboard hook that state does not include the
+/// event being processed yet (LowLevelKeyboardProc remarks), so it is the
+/// state up to the previous event — which is exactly what the re-seed wants;
+/// the event in hand is applied on top by `on_press` / `on_release`.
+///
+/// Repairs a tracked modifier the hook never saw released: the lock screen
+/// (Win+L), Ctrl+Alt+Del or a UAC prompt switching desktops mid-chord, or
+/// another application's hook that ate the release and sent its own. Before
+/// this the stale Alt or Win stayed "down" and no hotkey matched until that
+/// key was pressed again. There is no Fn state on Windows, so the tracked one
+/// is kept.
+#[cfg(target_os = "windows")]
+fn authoritative_modifiers() -> (u32, Option<bool>) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+    let down = |key: VIRTUAL_KEY| unsafe { GetAsyncKeyState(i32::from(key)) } as u16 & 0x8000 != 0;
+    let mut bits = 0u32;
+    if down(VK_CONTROL) {
+        bits |= 0x1000;
+    }
+    if down(VK_MENU) {
+        bits |= 0x0800;
+    }
+    if down(VK_SHIFT) {
+        bits |= 0x0200;
+    }
+    if down(VK_LWIN) || down(VK_RWIN) {
+        bits |= 0x0100;
+    }
+    (bits, None)
 }
 
 /// State of a reading binding (read or translate), as the settings page sees
@@ -235,28 +287,70 @@ pub struct HotkeyManager {
 /// How often a hook that could not be installed is tried again.
 const GRAB_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The hook callback, shared by every install attempt.
+///
+/// `grab` takes its callback by value and requires it to be `Send`, so each
+/// attempt gets a handle to the one callback (and its hotkey state) behind a
+/// lock. Only the hook thread calls it, so the lock is never contended by
+/// another thread — the one way to find it held is the hook thread re-entering
+/// the callback from inside itself, which on Windows is what a `SendInput`
+/// made from the callback does. Waiting there would be the thread waiting on
+/// itself forever, with every hotkey dead; the re-entrant event is passed
+/// through untouched instead, and counted so the worker can say so.
+struct SharedCallback<C> {
+    callback: Arc<Mutex<C>>,
+    reentries: Arc<AtomicU64>,
+}
+
+impl<C> Clone for SharedCallback<C> {
+    fn clone(&self) -> Self {
+        Self {
+            callback: self.callback.clone(),
+            reentries: self.reentries.clone(),
+        }
+    }
+}
+
+impl<C> SharedCallback<C>
+where
+    C: Fn(Event) -> Option<Event>,
+{
+    fn new(callback: C, reentries: Arc<AtomicU64>) -> Self {
+        Self {
+            callback: Arc::new(Mutex::new(callback)),
+            reentries,
+        }
+    }
+
+    fn call(&self, event: Event) -> Option<Event> {
+        match self.callback.try_lock() {
+            Ok(callback) => callback(event),
+            Err(TryLockError::Poisoned(poisoned)) => (poisoned.into_inner())(event),
+            Err(TryLockError::WouldBlock) => {
+                self.reentries.fetch_add(1, Ordering::SeqCst);
+                Some(event)
+            }
+        }
+    }
+}
+
 /// Install the system keyboard hook, trying again until it succeeds.
 ///
 /// On macOS the event tap cannot be created until the user grants
 /// Accessibility and Input Monitoring, which usually happens after launch;
 /// retrying lets the hotkey start working the moment the grant lands instead
 /// of after a restart. `grab` blocks for as long as the hook is installed.
-fn run_grab_until_installed<C>(callback: C, active: &AtomicBool)
+fn run_grab_until_installed<C>(callback: C, active: &AtomicBool, reentries: Arc<AtomicU64>)
 where
     C: Fn(Event) -> Option<Event> + Send + 'static,
 {
-    // `grab` takes its callback by value, so each attempt gets a handle to
-    // the one shared callback (and its hotkey state) rather than a new one.
-    let callback = Arc::new(Mutex::new(callback));
+    let callback = SharedCallback::new(callback, reentries);
     let mut attempts: u64 = 0;
     loop {
         attempts += 1;
         let shared = callback.clone();
         active.store(true, Ordering::SeqCst);
-        let result = rdev::grab(move |event| match shared.lock() {
-            Ok(callback) => callback(event),
-            Err(poisoned) => (poisoned.into_inner())(event),
-        });
+        let result = rdev::grab(move |event| shared.call(event));
         active.store(false, Ordering::SeqCst);
         match result {
             Ok(()) => {
@@ -327,8 +421,14 @@ impl HotkeyManager {
         let recording_accumulated_config = self.recording_accumulated_config.clone();
         let listener_active = self.listener_active.clone();
         let tts_active = tts.as_ref().map(|controller| controller.active_handle());
+        // Events the hook passed through because they arrived while the
+        // callback was already running on the same thread. See
+        // [`SharedCallback`]; the worker reports any.
+        let hook_reentries = Arc::new(AtomicU64::new(0));
 
         thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            let mask = super::menu_mask::Injector::spawn();
             let modifier_state = RefCell::new(ModifierState::default());
             let last_key_for_config: RefCell<Option<Key>> = RefCell::new(None);
             let last_active_config: RefCell<Option<HotkeyConfiguration>> = RefCell::new(None);
@@ -344,7 +444,9 @@ impl HotkeyManager {
             let worker_session = session_handler.clone();
             let worker_recording = recording_sender.clone();
             let worker_tts = tts.clone();
+            let worker_reentries = hook_reentries.clone();
             thread::spawn(move || {
+                let mut reentries_reported = 0u64;
                 while let Ok(event) = hook_rx.recv() {
                     match event {
                         HookEvent::RecordComplete(cfg) => {
@@ -393,14 +495,20 @@ impl HotkeyManager {
                                 controller.stop_for_dictation();
                             }
                         }
-                        #[cfg(target_os = "macos")]
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
                         HookEvent::Diag(diag) => {
-                            // Routine presses are debug-only; a desync "should
-                            // never be true again" (see DiagSnapshot) and is the
-                            // regression alarm this diag exists for, so that
-                            // case alone stays loud.
+                            // A desync "should never be true again" (see
+                            // DiagSnapshot) and is the regression alarm this
+                            // diag exists for, so it is loud. A press that
+                            // starts a hotkey action, or one the re-seed had to
+                            // repair, is what a field report needs to place the
+                            // hook's view next to the action's own log lines:
+                            // info, once per action. Everything else — key
+                            // repeat, other shortcuts — stays debug.
                             let (level, tag) = if diag.desynced {
                                 (log::Level::Warn, "event=hook_press_desync")
+                            } else if diag.first_press || diag.repaired {
+                                (log::Level::Info, "event=hook_press")
                             } else {
                                 (log::Level::Debug, "event=hook_press")
                             };
@@ -408,14 +516,17 @@ impl HotkeyManager {
                                 target: "voicex::hotkey",
                                 level,
                                 "{} key={} tracked_mods={:#06x} actual_mods={:#06x} \
+                                 before_sync_mods={:#06x} repaired={} \
                                  tracked_fn={} actual_fn={} desynced={} dict_match={} \
                                  read_match={} read_latched={} translate_match={} suspended={}",
                                 tag,
                                 diag.key_code,
                                 diag.tracked_mods,
                                 diag.actual_mods,
+                                diag.before_sync_mods,
+                                diag.repaired,
                                 diag.tracked_fn,
-                                diag.actual_fn,
+                                diag.actual_fn.map_or("-".to_string(), |f| f.to_string()),
                                 diag.desynced,
                                 diag.dictation_match,
                                 diag.read_match,
@@ -424,6 +535,19 @@ impl HotkeyManager {
                                 diag.suspended,
                             );
                         }
+                    }
+
+                    // Nothing in the callback injects input any more, so this
+                    // should stay silent; if it ever fires, the hook passed a
+                    // key through unmatched rather than hanging.
+                    let reentries = worker_reentries.load(Ordering::SeqCst);
+                    if reentries > reentries_reported {
+                        log::warn!(
+                            target: "voicex::hotkey",
+                            "event=hook_reentered count={reentries}: the keyboard hook was \
+                             re-entered from inside its own callback; those events passed through"
+                        );
+                        reentries_reported = reentries;
                     }
                 }
             });
@@ -453,12 +577,18 @@ impl HotkeyManager {
                         // input, misclassified press/release), and a stale
                         // modifier silently un-matches every combo until the
                         // user's own key releases repair it — the "first press
-                        // does nothing, second works" bug.
-                        #[cfg(target_os = "macos")]
-                        let (auth_mods, auth_fn) = authoritative_modifier_bits();
+                        // does nothing, second works" bug. Windows gets the
+                        // same re-seed from its async key state: there a
+                        // release the hook never saw (lock screen, UAC,
+                        // another app's hook) left Alt or Win stuck "down".
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
+                        let (auth_mods, auth_fn) = authoritative_modifiers();
 
                         let mut mods = modifier_state.borrow_mut();
-                        #[cfg(target_os = "macos")]
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
+                        let (before_sync_mods, before_sync_fn) =
+                            (mods.modifiers_bits(), mods.fn_key);
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
                         mods.sync_from_bits(auth_mods, auth_fn);
                         mods.on_press(key);
                         if key == Key::Escape {
@@ -513,27 +643,48 @@ impl HotkeyManager {
                             // view), record what the event-tracked state and the
                             // authoritative session flags each claim. Shift-only
                             // presses are ordinary typing and stay out of the log.
-                            #[cfg(target_os = "macos")]
+                            #[cfg(any(target_os = "macos", target_os = "windows"))]
                             {
                                 let shortcut_shaped = (snapshot.modifiers | auth_mods) & !0x0200
                                     != 0
                                     || snapshot.uses_fn
-                                    || auth_fn;
+                                    || auth_fn == Some(true);
                                 if shortcut_shaped {
                                     // The pressed key's own bit is stripped from
-                                    // the snapshot but present in the session
-                                    // flags; the fn state lags on the Fn key's
-                                    // own press. Neither is a desync.
-                                    let desynced = snapshot.modifiers
-                                        != auth_mods & !own_modifier_bit(cfg.key_code)
-                                        || (cfg.key_code != 63 && snapshot.uses_fn != auth_fn);
+                                    // the snapshot but may be present in the
+                                    // system flags; the fn state lags on the Fn
+                                    // key's own press. Neither is a desync.
+                                    let fn_lags = cfg.key_code == 63;
+                                    let fn_differs = |tracked: bool| {
+                                        !fn_lags && auth_fn.is_some_and(|actual| actual != tracked)
+                                    };
+                                    let desynced = modifiers_disagree(
+                                        snapshot.modifiers,
+                                        auth_mods,
+                                        cfg.key_code,
+                                    ) || fn_differs(snapshot.uses_fn);
+                                    let repaired = modifiers_disagree(
+                                        before_sync_mods,
+                                        auth_mods,
+                                        cfg.key_code,
+                                    ) || fn_differs(before_sync_fn);
+                                    let first_press = (enabled
+                                        && active_match
+                                        && !*active_hotkey_pressed.borrow())
+                                        || (read_selection_match
+                                            && read_selection_key.borrow().is_none())
+                                        || (translate_selection_match
+                                            && translate_selection_key.borrow().is_none());
                                     let _ = hook_tx.send(HookEvent::Diag(DiagSnapshot {
                                         key_code: cfg.key_code,
                                         tracked_mods: snapshot.modifiers,
                                         actual_mods: auth_mods,
                                         tracked_fn: snapshot.uses_fn,
                                         actual_fn: auth_fn,
+                                        before_sync_mods,
+                                        repaired,
                                         desynced,
+                                        first_press,
                                         dictation_match: active_match,
                                         read_match: read_selection_match,
                                         read_latched: read_selection_key.borrow().is_some(),
@@ -551,6 +702,14 @@ impl HotkeyManager {
                                 *last_active_config.borrow_mut() = Some(cfg.clone());
                                 if !*active_hotkey_pressed.borrow() {
                                     *active_hotkey_pressed.borrow_mut() = true;
+                                    // The swallowed main key would otherwise
+                                    // leave a bare Win tap (Start menu, which
+                                    // the transcript is then pasted into) or a
+                                    // bare Alt tap (menu bar).
+                                    #[cfg(target_os = "windows")]
+                                    if super::menu_mask::needs_mask(snapshot.modifiers) {
+                                        mask.request();
+                                    }
                                     // Dictation takes priority over reading:
                                     // speech playing into a live microphone
                                     // gets transcribed back (plan §3.3).
@@ -572,7 +731,7 @@ impl HotkeyManager {
                                     *read_selection_key.borrow_mut() = Some(key);
                                     #[cfg(target_os = "windows")]
                                     if super::menu_mask::needs_mask(snapshot.modifiers) {
-                                        super::menu_mask::send();
+                                        mask.request();
                                     }
                                     let _ = hook_tx.send(HookEvent::ReadSelectionPressed);
                                 }
@@ -584,7 +743,7 @@ impl HotkeyManager {
                                     *translate_selection_key.borrow_mut() = Some(key);
                                     #[cfg(target_os = "windows")]
                                     if super::menu_mask::needs_mask(snapshot.modifiers) {
-                                        super::menu_mask::send();
+                                        mask.request();
                                     }
                                     let _ = hook_tx.send(HookEvent::TranslateSelectionPressed);
                                 }
@@ -598,9 +757,9 @@ impl HotkeyManager {
                             // Same re-seed as on press, so the tracked state
                             // never carries a stale modifier across events even
                             // between presses.
-                            #[cfg(target_os = "macos")]
+                            #[cfg(any(target_os = "macos", target_os = "windows"))]
                             {
-                                let (auth_mods, auth_fn) = authoritative_modifier_bits();
+                                let (auth_mods, auth_fn) = authoritative_modifiers();
                                 mods.sync_from_bits(auth_mods, auth_fn);
                             }
                             mods.on_release(key);
@@ -654,7 +813,7 @@ impl HotkeyManager {
                 }
             };
 
-            run_grab_until_installed(callback, &listener_active);
+            run_grab_until_installed(callback, &listener_active, hook_reentries);
         });
     }
 
@@ -867,18 +1026,21 @@ struct ModifierState {
 }
 
 impl ModifierState {
-    /// Re-seed from the authoritative session flags. The event-driven updates
-    /// below still run afterwards for the key in hand — the session state can
+    /// Re-seed from the authoritative system state. The event-driven updates
+    /// below still run afterwards for the key in hand — the system state can
     /// lag behind the very event being processed — but any modifier this state
     /// wrongly remembered from a missed or misclassified earlier event is
-    /// corrected here before it can un-match a combo.
-    #[cfg(target_os = "macos")]
-    fn sync_from_bits(&mut self, bits: u32, fn_key: bool) {
+    /// corrected here before it can un-match a combo. `fn_key` is `None` where
+    /// the platform has no Fn state to read (Windows); the tracked one stays.
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    fn sync_from_bits(&mut self, bits: u32, fn_key: Option<bool>) {
         self.ctrl = bits & 0x1000 != 0;
         self.alt = bits & 0x0800 != 0;
         self.shift = bits & 0x0200 != 0;
         self.meta = bits & 0x0100 != 0;
-        self.fn_key = fn_key;
+        if let Some(fn_key) = fn_key {
+            self.fn_key = fn_key;
+        }
     }
 
     fn on_press(&mut self, key: Key) {
@@ -1312,6 +1474,114 @@ mod tests {
         for (key, code) in frozen {
             assert_eq!(key_code_from_key(key), code, "{key:?}");
         }
+    }
+
+    // --- the hook callback itself: re-entry and stale modifiers ---
+
+    fn key_press(key: Key) -> Event {
+        Event {
+            time: std::time::SystemTime::now(),
+            name: None,
+            event_type: EventType::KeyPress(key),
+        }
+    }
+
+    type Reenter = Arc<std::sync::OnceLock<Box<dyn Fn(Event) -> Option<Event> + Send + Sync>>>;
+
+    #[test]
+    fn a_reentrant_hook_call_passes_the_event_through_instead_of_hanging() {
+        // What `SendInput` from inside the callback did on Windows: the hook
+        // thread called the callback again while it was still running.
+        let reenter: Reenter = Arc::new(std::sync::OnceLock::new());
+        let inner_passed_through = Arc::new(Mutex::new(None));
+        let runs = Arc::new(AtomicU32::new(0));
+        let reentries = Arc::new(AtomicU64::new(0));
+
+        let shared = SharedCallback::new(
+            {
+                let reenter = reenter.clone();
+                let inner_passed_through = inner_passed_through.clone();
+                let runs = runs.clone();
+                move |_event: Event| {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    if let Some(call_again) = reenter.get() {
+                        let inner = call_again(key_press(Key::Unknown(0xE8)));
+                        *inner_passed_through.lock().unwrap() = Some(inner.is_some());
+                    }
+                    None // the outer press is swallowed, like a matched hotkey
+                }
+            },
+            reentries.clone(),
+        );
+        let again = shared.clone();
+        assert!(reenter.set(Box::new(move |event| again.call(event))).is_ok());
+
+        assert!(shared.call(key_press(Key::KeyR)).is_none(), "outer call ran normally");
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the inner call never ran the callback");
+        assert_eq!(*inner_passed_through.lock().unwrap(), Some(true));
+        assert_eq!(reentries.load(Ordering::SeqCst), 1);
+
+        // And the lock was released: the next event runs the callback again
+        // (which re-enters once more, and is passed through once more).
+        assert!(shared.call(key_press(Key::KeyT)).is_none());
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        assert_eq!(reentries.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_modifier_whose_release_was_missed_no_longer_blocks_the_dictation_key() {
+        // Win+Shift+S opened the snipping overlay mid-chord and the hook never
+        // saw Shift come up. Now the user presses Ctrl+Alt+Win+Space.
+        let dictation = HotkeyConfiguration::default_primary();
+        let mut mods = ModifierState {
+            shift: true,
+            ..Default::default()
+        };
+        for key in [Key::ControlLeft, Key::Alt, Key::MetaLeft] {
+            mods.on_press(key);
+        }
+        let stale = HotkeySnapshot::from_event(Key::Space, &mods).unwrap();
+        assert!(
+            !stale.matches_active(dictation.key_code, dictation.modifiers, dictation.uses_fn),
+            "the stuck Shift un-matches the dictation key"
+        );
+
+        // What the press now does first: re-seed from the system's state.
+        mods.sync_from_bits(dictation.modifiers, None);
+        mods.on_press(Key::Space);
+        let synced = HotkeySnapshot::from_event(Key::Space, &mods).unwrap();
+        assert!(synced.matches_active(dictation.key_code, dictation.modifiers, dictation.uses_fn));
+    }
+
+    #[test]
+    fn the_resync_clears_a_stuck_modifier_and_keeps_fn_where_there_is_none_to_read() {
+        let mut mods = ModifierState {
+            alt: true,
+            fn_key: true,
+            ..Default::default()
+        };
+        let tracked = mods.modifiers_bits();
+        let actual = 0x1000 | 0x0100; // ctrl + win; alt is up for real
+        assert!(modifiers_disagree(tracked, actual, key_code_from_key(Key::KeyR)));
+
+        mods.sync_from_bits(actual, None);
+        assert_eq!(mods.modifiers_bits(), actual);
+        assert!(mods.fn_key, "Windows has no Fn state; the tracked one stays");
+
+        mods.sync_from_bits(actual, Some(false));
+        assert!(!mods.fn_key, "macOS reports Fn; it wins");
+
+        // A stuck Alt would have refused Ctrl+Win+R; synced, it matches.
+        let read = HotkeyConfiguration::new('R' as u32, 0x1000 | 0x0100, false);
+        let snapshot = HotkeySnapshot::from_event(Key::KeyR, &mods).unwrap();
+        assert!(snapshot.matches_active(read.key_code, read.modifiers, read.uses_fn));
+    }
+
+    #[test]
+    fn a_modifier_press_does_not_disagree_over_its_own_bit() {
+        let alt = key_code_from_key(Key::Alt);
+        assert!(!modifiers_disagree(0x1000, 0x1000 | 0x0800, alt));
+        assert!(modifiers_disagree(0x1000 | 0x0200, 0x1000 | 0x0800, alt));
     }
 
     #[test]

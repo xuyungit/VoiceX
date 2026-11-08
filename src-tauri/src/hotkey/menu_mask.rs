@@ -11,6 +11,10 @@
 //! The remedy is the one AutoHotkey ships as its "menu mask key": while the
 //! modifier is still down, inject a key nothing acts on, so the modifier is no
 //! longer alone. Virtual key 0xE8 is unassigned.
+//!
+//! Every hotkey whose main key the hook swallows needs it: the reading keys
+//! and the dictation key alike (Ctrl + Alt + Win + Space by default — a bare
+//! Win tap there opens the Start menu, and the transcript is pasted into it).
 
 /// The mask key's virtual-key code, as the hook sees it (`Key::Unknown`).
 pub const MASK_KEY_CODE: u32 = 0xE8;
@@ -24,14 +28,52 @@ pub fn needs_mask(modifiers: u32) -> bool {
     modifiers & (ALT | META) != 0
 }
 
-/// Inject one press and release of the mask key.
+/// Sends the mask key from a thread of its own.
 ///
-/// Called from inside the keyboard hook, while the hotkey's own press is
-/// being swallowed: that is the one moment guaranteed to come before the
-/// modifier's release. `SendInput` only queues the events — they reach the
-/// hook (which lets them through untouched) after this callback returns.
+/// The hook callback must never call `SendInput` itself. Windows can run the
+/// low-level hooks for injected input before `SendInput` returns, and on the
+/// hook thread that means re-entering the hook while the callback is still
+/// running. That fits the field report this replaced: the first Alt/Win
+/// reading press never reached the reading controller, and every hotkey was
+/// dead until the app restarted. From here the injected keys reach the hook
+/// as ordinary input from another thread.
+///
+/// The request is made while the hotkey's own press is being swallowed, and
+/// this thread wakes within a millisecond or so — well before a hand lets go
+/// of the modifier, which is the only deadline the mask has.
 #[cfg(target_os = "windows")]
-pub fn send() {
+pub struct Injector {
+    requests: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(target_os = "windows")]
+impl Injector {
+    pub fn spawn() -> Self {
+        let (requests, pending) = std::sync::mpsc::channel::<()>();
+        let spawned = std::thread::Builder::new()
+            .name("voicex-menu-mask".to_string())
+            .spawn(move || {
+                while pending.recv().is_ok() {
+                    send();
+                }
+            });
+        if let Err(err) = spawned {
+            // Hotkeys still work; Alt or Win taps are just not masked.
+            log::error!("Menu mask thread not started; Alt/Win taps will not be masked: {err}");
+        }
+        Self { requests }
+    }
+
+    /// Ask for one mask press. A channel send: safe inside the hook callback.
+    pub fn request(&self) {
+        let _ = self.requests.send(());
+    }
+}
+
+/// Inject one press and release of the mask key. Never from the hook thread;
+/// see [`Injector`].
+#[cfg(target_os = "windows")]
+fn send() {
     use std::mem::size_of;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
@@ -58,7 +100,7 @@ pub fn send() {
         )
     };
     if sent as usize != inputs.len() {
-        // Not worth failing the hotkey over; the read itself still runs.
+        // Not worth failing the hotkey over; the action itself still runs.
         log::warn!("Menu mask key not sent ({sent} of {} events)", inputs.len());
     }
 }

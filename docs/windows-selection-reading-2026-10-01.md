@@ -129,9 +129,17 @@ Windows 上 Chromium 检测到 UIA/MSAA 客户端查询后会打开自己的无�
 - 裸 Alt 轻点 → 前台窗口激活菜单栏（Office 显示 KeyTips）。之后的 Ctrl+C 会被菜单模式吃掉，兼容模式失败。
 - 裸 Win 轻点 → **弹出开始菜单**，开始菜单变成前台窗口，取词直接报 `foreground_changed`。
 
-含 Alt 和 Win 的热键（默认的 Ctrl + Alt + Win + R / T，以及用户自设的 Alt + Win 等组合）视按键和松键顺序，两种都可能发生。处理沿用 AutoHotkey 的"menu mask key"做法：在钩子里吞掉朗读热键的同时，若 Alt 或 Win 按着，立即注入一次未分配的虚拟键 `0xE8` 的按下/松开，让修饰键不再"孤立"（`hotkey/menu_mask.rs`）。钩子对这个键直接放行，不更新修饰键状态、不参与绑定匹配、不会被录进热键。
+含 Alt 和 Win 的热键（默认的 Ctrl + Alt + Win + R / T，以及用户自设的 Alt + Win 等组合）视按键和松键顺序，两种都可能发生。处理沿用 AutoHotkey 的"menu mask key"做法：钩子吞掉热键主键的同时，若 Alt 或 Win 按着，注入一次未分配的虚拟键 `0xE8` 的按下/松开，让修饰键不再"孤立"（`hotkey/menu_mask.rs`）。钩子对这个键直接放行，不更新修饰键状态、不参与绑定匹配、不会被录进热键。
 
-> 听写热键（默认 Ctrl + Alt + Win + Space）理论上有同样的问题，但它是既有行为、本次没有改动，也没有在真机确认是否会触发，列为待验证项。
+**注入不能在钩子回调里做**（2026-11-08 修正）。最初版本在回调内直接调用 `SendInput`；Windows 可能在 `SendInput` 返回前就把注入的按键交给低级钩子，在钩子线程上等于回调重入自身，而回调外层持有锁，钩子线程就此卡死。这与真机现象吻合：第一次按 Ctrl + Alt + Win + R 后朗读没有触发（日志里没有任何 `hotkey_action`），听写热键也全部失效，直到重启。现在钩子只往 `menu_mask::Injector` 的通道发一个请求，由独立线程调用 `SendInput`；共享回调改用 `try_lock`，万一再被重入，事件原样放行并记 `event=hook_reentered`，而不是死锁。
+
+听写热键（默认 Ctrl + Alt + Win + Space）同样吞掉主键，同样会留下裸 Win / 裸 Alt 轻点，现在也在首次按下时发遮罩键。
+
+### 4.1.1 修饰键状态：从系统重新同步
+
+Windows 上钩子原先只凭自己看到的按下/松开事件记修饰键。锁屏（Win + L）、Ctrl + Alt + Del、UAC 弹窗切换桌面，或别的应用（输入法、PowerToys、AutoHotkey、键鼠驱动软件）的钩子吃掉了某次松开，Alt 或 Win 就一直被记成"按着"，此后所有热键都匹配不上，直到用户再按一次那个键。现在每个按键事件先用 `GetAsyncKeyState` 重新同步修饰键（钩子内读到的是"上一个事件为止"的状态，当前事件再叠加上去），与 macOS 用 `CGEventSourceFlagsState` 的做法一致。局限：若别的钩子把事件整个吞掉、系统自身的按键状态也没更新，那么系统和我们一样认为键还按着，这种情况同步修不了。
+
+Windows 现在也输出 `event=hook_press` 诊断行：开始一次热键动作的按下、以及同步修正了陈旧状态的按下（`repaired=true`）记为 info，其余为 debug；`before_sync_mods` 与 `actual_mods` 的差就是被修正的部分。
 
 ### 4.2 默认热键：与 macOS 分开
 
@@ -212,11 +220,12 @@ macOS 默认值不变。实现：`hotkey/config.rs` 的 `reading_default_modifie
 9. VS Code（`editor.accessibilitySupport: auto`）被读取一次后是否进入屏幕阅读器优化模式（§3.5）。
 10. 一个卡死的应用（或调试器暂停的进程）中按热键：HUD 在约 1–2 s 内报错而不是长时间停在"准备中"。
 11. 设置页"取词诊断"在 Windows 上输出 UIA 探针字段。
-12. 听写热键 Ctrl + Alt + Win + Space 以不同松键顺序是否会弹开始菜单（§4.1 附注，既有行为）。
+12. 听写热键 Ctrl + Alt + Win + Space 以不同松键顺序不再弹开始菜单、不再激活菜单栏（§4.1，已加遮罩键）。
+13. 默认朗读热键连按多次后，听写热键仍然可用；日志里每次按下都有 `event=hook_press ... read_match=true`，没有 `hook_reentered`。
+14. Win + L 锁屏再解锁后，不额外按任何键，各热键第一次按下即生效；若日志出现 `repaired=true`，说明同步修正了陈旧的修饰键。
 
 ## 10. 后续
 
 - 视 §9 第 9 项结果决定是否对 Electron 应用跳过 UIA。
 - Windows 本地语音后端（WinRT `SpeechSynthesizer`），让零配置也能朗读。
-- 若听写热键确有开始菜单问题，复用 `menu_mask` 修复。
 - `scripts/tts/` 下的自动化 harness 目前是 macOS（CGEvent 注入）专用，Windows 版可用 `SendInput` 同构实现。
