@@ -216,6 +216,32 @@ impl ColiAsrClient {
         Self { config }
     }
 
+    /// No model means streaming; file recognition selects SenseVoice or Whisper.
+    fn asr_command(&self, invocation: &ColiCommandInvocation, model: Option<&str>) -> Command {
+        let mut command = invocation.command();
+        match model {
+            Some(model) => {
+                command.args(["asr", "--json", "--model", model]);
+            }
+            None => {
+                command.args(["asr-stream", "--json"]);
+            }
+        }
+
+        if model.is_none() || model == Some("sensevoice") {
+            let model_path = self.config.coli_sensevoice_model_path.trim();
+            if !model_path.is_empty() {
+                command.arg("--model-path").arg(model_path);
+            }
+            // Omit auto so existing installations still work with older coli.
+            let language = self.config.coli_language.trim();
+            if !language.is_empty() && language != "auto" {
+                command.arg("--language").arg(language);
+            }
+        }
+        command
+    }
+
     pub async fn stream_session<F>(
         &self,
         sample_rate: u32,
@@ -235,10 +261,8 @@ impl ColiAsrClient {
                 )
             })?;
 
-        let mut command = invocation.command();
+        let mut command = self.asr_command(&invocation, None);
         command
-            .arg("asr-stream")
-            .arg("--json")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -502,12 +526,8 @@ impl ColiAsrClient {
             )));
         }
 
-        let output = invocation
-            .command()
-            .arg("asr")
-            .arg("--json")
-            .arg("--model")
-            .arg(model)
+        let output = self
+            .asr_command(&invocation, Some(model))
             .arg(audio_path)
             .stdin(std::process::Stdio::null())
             .output()
@@ -557,19 +577,24 @@ impl ColiAsrClient {
     }
 }
 
-pub fn probe_coli_status(configured_command: Option<&str>) -> ColiAsrStatus {
+pub fn probe_coli_status(
+    configured_command: Option<&str>,
+    sensevoice_model_path: Option<&str>,
+) -> ColiAsrStatus {
     let configured_command = configured_command.unwrap_or("").trim().to_string();
     let resolved_path = resolve_coli_command(&configured_command);
     let invocation = resolve_coli_invocation(&configured_command);
     let ffmpeg_available = is_ffmpeg_available();
     let models_dir = coli_models_dir();
-    let sensevoice_installed = models_dir
-        .as_ref()
-        .map(|dir| {
-            dir.join(COLI_SENSEVOICE_DIR)
-                .join(COLI_SENSEVOICE_CHECK_FILE)
-                .exists()
-        })
+    let custom_model_path = sensevoice_model_path.unwrap_or("").trim();
+    let sensevoice_path = if custom_model_path.is_empty() {
+        models_dir.as_ref().map(|dir| dir.join(COLI_SENSEVOICE_DIR))
+    } else {
+        Some(PathBuf::from(custom_model_path))
+    };
+    let sensevoice_installed = sensevoice_path
+        .as_deref()
+        .map(sensevoice_files_installed)
         .unwrap_or(false);
     let whisper_installed = models_dir
         .as_ref()
@@ -618,6 +643,18 @@ pub fn probe_coli_status(configured_command: Option<&str>) -> ColiAsrStatus {
         vad_installed,
         message,
     }
+}
+
+fn sensevoice_files_installed(path: &Path) -> bool {
+    let (model, tokens) = if path.is_dir() {
+        (
+            path.join(COLI_SENSEVOICE_CHECK_FILE),
+            path.join("tokens.txt"),
+        )
+    } else {
+        (path.to_path_buf(), path.with_file_name("tokens.txt"))
+    };
+    model.is_file() && tokens.is_file()
 }
 
 pub fn resolve_coli_command(configured_command: &str) -> Option<PathBuf> {
@@ -1088,10 +1125,69 @@ mod tests {
     #[cfg(target_os = "windows")]
     use super::normalize_existing_path;
     use super::{
-        extract_windows_command_shim_script, parse_json_suffix, ColiFileAsrOutput,
-        ColiRefinementMode, TranscriptAccumulator,
+        extract_windows_command_shim_script, parse_json_suffix, sensevoice_files_installed,
+        ColiAsrClient, ColiCommandInvocation, ColiFileAsrOutput, ColiRefinementMode,
+        TranscriptAccumulator,
     };
+    use crate::asr::AsrConfig;
     use std::{fs, path::PathBuf};
+
+    #[test]
+    fn sensevoice_options_apply_to_stream_and_file_but_not_whisper() {
+        let invocation = ColiCommandInvocation {
+            program: PathBuf::from("coli"),
+            prefix_args: Vec::new(),
+            extra_path_dirs: Vec::new(),
+        };
+        let args = |config: AsrConfig, model| {
+            ColiAsrClient::new(config)
+                .asr_command(&invocation, model)
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        // Default commands must remain usable by older coli versions.
+        assert_eq!(args(AsrConfig::default(), None), ["asr-stream", "--json"]);
+        assert_eq!(
+            args(AsrConfig::default(), Some("sensevoice")),
+            ["asr", "--json", "--model", "sensevoice"]
+        );
+
+        let config = AsrConfig {
+            coli_sensevoice_model_path: r" C:\ASR Models\SenseVoice\model.int8.onnx ".into(),
+            coli_language: "yue".into(),
+            ..AsrConfig::default()
+        };
+        for model in [None, Some("sensevoice")] {
+            let actual = args(config.clone(), model);
+            assert!(actual.ends_with(&[
+                "--model-path".into(),
+                r"C:\ASR Models\SenseVoice\model.int8.onnx".into(),
+                "--language".into(),
+                "yue".into(),
+            ]));
+        }
+        assert_eq!(
+            args(config, Some("whisper")),
+            ["asr", "--json", "--model", "whisper"]
+        );
+    }
+
+    #[test]
+    fn sensevoice_detection_accepts_directory_or_file_and_requires_tokens() {
+        let root = tempfile::tempdir().unwrap();
+        let model = root.path().join("model.int8.onnx");
+        fs::write(&model, []).unwrap();
+        assert!(!sensevoice_files_installed(root.path()));
+        assert!(!sensevoice_files_installed(&model));
+        fs::write(root.path().join("tokens.txt"), []).unwrap();
+        assert!(sensevoice_files_installed(root.path()));
+        assert!(sensevoice_files_installed(&model));
+        assert!(!sensevoice_files_installed(
+            &root.path().join("missing.onnx")
+        ));
+    }
 
     #[test]
     fn parses_json_suffix_after_logs() {

@@ -230,6 +230,7 @@ Doubao, Qwen, ElevenLabs, Soniox, and Coli are currently recommended, but result
 
 - Cloud engines need an API key from their provider. Realtime recognition follows your system proxy settings.
 - Models a provider retires are removed from the presets. Saved settings move to the provider's corresponding model automatically; those that cannot be moved safely are kept and flagged on the settings page so you can choose another.
+- Coli accepts an absolute SenseVoice model directory or ONNX file path in ASR settings, with its matching `tokens.txt` alongside the model. Leave it empty to keep coli's default. Custom models and language selection require coli **0.0.20 or later** and apply to realtime, Batch, and SenseVoice final refinement; Whisper is unaffected. Download custom models yourself. The `2025-09-09` model focuses on Cantonese and does not support punctuation.
 
 ### Local offline recognition (Qwen3-ASR)
 

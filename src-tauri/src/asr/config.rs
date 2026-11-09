@@ -276,6 +276,8 @@ pub struct AsrConfig {
 
     // Local ASR via `coli`
     pub coli_command_path: String,
+    pub coli_sensevoice_model_path: String,
+    pub coli_language: String,
     pub coli_use_vad: bool,
     pub coli_asr_interval_ms: u32,
     pub coli_final_refinement_mode: crate::asr::ColiRefinementMode,
@@ -379,6 +381,8 @@ impl Default for AsrConfig {
             qwen_local_language: "Chinese".to_string(),
             qwen_local_use_dictionary: true,
             coli_command_path: String::new(),
+            coli_sensevoice_model_path: String::new(),
+            coli_language: "auto".to_string(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
             coli_final_refinement_mode: crate::asr::ColiRefinementMode::Off,
@@ -506,6 +510,8 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             qwen_local_language: settings.qwen_local_language.clone(),
             qwen_local_use_dictionary: use_dictionary,
             coli_command_path: settings.coli_command_path.clone(),
+            coli_sensevoice_model_path: settings.coli_sensevoice_model_path.clone(),
+            coli_language: settings.coli_language.clone(),
             coli_use_vad: settings.coli_use_vad,
             coli_asr_interval_ms: settings.coli_asr_interval_ms,
             coli_final_refinement_mode: crate::asr::ColiRefinementMode::from_str(

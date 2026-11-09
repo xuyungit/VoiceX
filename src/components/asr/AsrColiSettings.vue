@@ -5,9 +5,11 @@ import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../../stores/settings'
 import type { LocalAsrStatus } from '../../types/asr'
 import {
+  buildColiLanguageOptions,
   buildColiPostRecordingRefineOptions,
   buildColiRecognitionModeOptions,
   normalizeColiPostRecordingRefine,
+  type ColiLanguage,
 } from '../../utils/providerOptions'
 import SettingsSection from '../settings/SettingsSection.vue'
 import SettingRow from '../settings/SettingRow.vue'
@@ -28,6 +30,16 @@ const { t } = useI18n()
 const coliCommandPath = computed({
   get: () => settingsStore.settings.coliCommandPath,
   set: (v: string) => settingsStore.updateSetting('coliCommandPath', v)
+})
+
+const coliSensevoiceModelPath = computed({
+  get: () => settingsStore.settings.coliSensevoiceModelPath,
+  set: (v: string) => settingsStore.updateSetting('coliSensevoiceModelPath', v)
+})
+
+const coliLanguage = computed({
+  get: () => settingsStore.settings.coliLanguage,
+  set: (v: ColiLanguage) => settingsStore.updateSetting('coliLanguage', v)
 })
 
 const coliUseVad = computed({
@@ -60,6 +72,7 @@ const coliRecognitionMode = computed({
 })
 
 const coliRecognitionModeOptions = computed(() => buildColiRecognitionModeOptions(t))
+const coliLanguageOptions = computed(() => buildColiLanguageOptions(t))
 const coliRefinementOptions = computed(() => buildColiPostRecordingRefineOptions(t))
 const batchRefineDisabled = computed(() => coliRecognitionMode.value === 'batch')
 </script>
@@ -102,6 +115,15 @@ const batchRefineDisabled = computed(() => coliRecognitionMode.value === 'batch'
       <div class="field-value mono">
         {{ coliStatus?.modelsDir || '—' }}
       </div>
+    </SettingRow>
+    <SettingRow :label="t('asr.coliSensevoiceModelPath')" :help="t('asr.coliSensevoiceModelPathNote')">
+      <NInput
+        v-model:value="coliSensevoiceModelPath"
+        :placeholder="t('asr.coliSensevoiceModelPathPlaceholder')"
+      />
+    </SettingRow>
+    <SettingRow :label="t('asr.language')" :help="t('asr.coliLanguageNote')">
+      <NSelect v-model:value="coliLanguage" :options="coliLanguageOptions" size="small" />
     </SettingRow>
     <SettingRow :label="t('asr.recognitionMode')" :help="t('asr.coliRecognitionModeNote')">
       <NSelect

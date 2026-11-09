@@ -50,6 +50,8 @@ export interface AppSettings {
     qwenLocalLanguage: string
     qwenLocalUseDictionary: boolean // Legacy preference, used when no per-provider override exists.
     coliCommandPath: string
+    coliSensevoiceModelPath: string
+    coliLanguage: 'auto' | 'zh' | 'en' | 'ja' | 'ko' | 'yue'
     coliUseVad: boolean
     coliAsrIntervalMs: number
     coliFinalRefinementMode: 'off' | 'sensevoice' | 'whisper'
@@ -366,6 +368,8 @@ const defaultSettings: AppSettings = {
     qwenLocalLanguage: 'Chinese',
     qwenLocalUseDictionary: true,
     coliCommandPath: '',
+    coliSensevoiceModelPath: '',
+    coliLanguage: 'auto',
     coliUseVad: true,
     coliAsrIntervalMs: 1000,
     coliFinalRefinementMode: 'off',

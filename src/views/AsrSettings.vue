@@ -54,7 +54,8 @@ async function refreshColiStatus() {
   coliStatusError.value = ''
   try {
     coliStatus.value = await invoke<LocalAsrStatus>('probe_local_asr', {
-      commandPath: settingsStore.settings.coliCommandPath.trim() || null
+      commandPath: settingsStore.settings.coliCommandPath.trim() || null,
+      sensevoiceModelPath: settingsStore.settings.coliSensevoiceModelPath.trim() || null
     })
   } catch (error) {
     coliStatusError.value = error instanceof Error ? error.message : String(error)
@@ -63,7 +64,10 @@ async function refreshColiStatus() {
   }
 }
 
-watch(() => settingsStore.settings.coliCommandPath, () => {
+watch(() => [
+  settingsStore.settings.coliCommandPath,
+  settingsStore.settings.coliSensevoiceModelPath
+], () => {
   if (coliStatusRefreshTimer !== null) {
     clearTimeout(coliStatusRefreshTimer)
   }

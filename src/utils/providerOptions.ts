@@ -11,6 +11,7 @@ export type ElevenLabsPostRecordingRefine = AppSettings['elevenlabsPostRecording
 export type OpenAiPostRecordingRefine = AppSettings['openaiAsrPostRecordingRefine']
 export type ColiRecognitionMode = BatchCapableRecognitionMode
 export type ColiPostRecordingRefine = AppSettings['coliFinalRefinementMode']
+export type ColiLanguage = AppSettings['coliLanguage']
 export const QWEN_BATCH_RECORDING_LIMIT_MINUTES = 5
 export const STEPAUDIO_RECORDING_LIMIT_MINUTES = 30
 
@@ -63,6 +64,15 @@ const COLI_POST_RECORDING_REFINE_LABEL_KEYS: Array<{
   { key: 'asr.refinementOff', value: 'off' },
   { key: 'asr.refinementSenseVoice', value: 'sensevoice' },
   { key: 'asr.refinementWhisper', value: 'whisper' }
+]
+
+const COLI_LANGUAGE_LABEL_KEYS: Array<{ key: string; value: ColiLanguage }> = [
+  { key: 'asr.coliLanguageAuto', value: 'auto' },
+  { key: 'asr.coliLanguageChinese', value: 'zh' },
+  { key: 'asr.coliLanguageEnglish', value: 'en' },
+  { key: 'asr.coliLanguageJapanese', value: 'ja' },
+  { key: 'asr.coliLanguageKorean', value: 'ko' },
+  { key: 'asr.coliLanguageCantonese', value: 'yue' }
 ]
 
 export const ELEVENLABS_REALTIME_MODEL_OPTIONS = ASR_MODELS
@@ -119,6 +129,10 @@ export function buildColiRecognitionModeOptions(
   t: Translate
 ): Array<ProviderOption<ColiRecognitionMode>> {
   return buildBatchCapableRecognitionModeOptions(t)
+}
+
+export function buildColiLanguageOptions(t: Translate): Array<ProviderOption<ColiLanguage>> {
+  return COLI_LANGUAGE_LABEL_KEYS.map(({ key, value }) => ({ label: t(key), value }))
 }
 
 export function buildBatchCapableRecognitionModeOptions(

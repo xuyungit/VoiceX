@@ -230,6 +230,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --tr
 
 - 云端引擎需要到对应平台申请 API Key。实时识别会使用系统代理设置。
 - 服务商下线的模型会从预设中移除：已保存的配置会自动迁移到同一服务商的对应模型；无法安全迁移的会保留并在设置页提示手动选择。
+- Coli 可在 ASR 设置中指定 SenseVoice 模型目录或 ONNX 文件的绝对路径，旁边需有配套的 `tokens.txt`；留空仍使用 coli 默认模型。自定义模型和指定语言需要 coli **0.0.20 或更新版本**，适用于实时识别、Batch 和 SenseVoice 录后精修，不影响 Whisper。`2025-09-09` 版侧重粤语且不支持标点，需自行下载后指定路径。
 
 ### 本地离线识别（Qwen3-ASR）
 

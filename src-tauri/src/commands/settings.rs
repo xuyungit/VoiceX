@@ -130,6 +130,8 @@ pub struct AppSettings {
     pub qwen_local_use_dictionary: bool, // Legacy fallback for asr_dictionary_enabled.
     // Local ASR Provider: `coli`
     pub coli_command_path: String,
+    pub coli_sensevoice_model_path: String,
+    pub coli_language: String,
     pub coli_use_vad: bool,
     pub coli_asr_interval_ms: u32,
     pub coli_final_refinement_mode: String, // "off" | "sensevoice" | "whisper"
@@ -524,6 +526,8 @@ impl Default for AppSettings {
             qwen_local_language: "Chinese".to_string(),
             qwen_local_use_dictionary: true,
             coli_command_path: String::new(),
+            coli_sensevoice_model_path: String::new(),
+            coli_language: "auto".to_string(),
             coli_use_vad: true,
             coli_asr_interval_ms: 1000,
             coli_final_refinement_mode: "off".to_string(),
@@ -1461,8 +1465,12 @@ pub async fn list_openai_models(base_url: String, api_key: String) -> Result<Vec
 #[tauri::command]
 pub async fn probe_local_asr(
     command_path: Option<String>,
+    sensevoice_model_path: Option<String>,
 ) -> Result<crate::asr::ColiAsrStatus, String> {
-    Ok(crate::asr::probe_coli_status(command_path.as_deref()))
+    Ok(crate::asr::probe_coli_status(
+        command_path.as_deref(),
+        sensevoice_model_path.as_deref(),
+    ))
 }
 
 #[tauri::command]
@@ -2230,6 +2238,29 @@ mod tests {
         assert_eq!(settings.llm_anthropic_base_url, "https://api.anthropic.com");
         assert_eq!(settings.llm_anthropic_api_key, "");
         assert_eq!(settings.llm_anthropic_model, "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn coli_model_settings_default_and_roundtrip() {
+        let mut settings: AppSettings =
+            serde_json::from_str(r#"{"asrProviderType":"coli"}"#).unwrap();
+        assert!(settings.coli_sensevoice_model_path.is_empty());
+        assert_eq!(settings.coli_language, "auto");
+        settings.coli_sensevoice_model_path = r"C:\ASR Models\SenseVoice".into();
+        settings.coli_language = "yue".into();
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(
+            saved["coliSensevoiceModelPath"],
+            settings.coli_sensevoice_model_path
+        );
+        assert_eq!(saved["coliLanguage"], "yue");
+        let loaded: AppSettings = serde_json::from_value(saved).unwrap();
+        let config = crate::asr::AsrConfig::from(&loaded);
+        assert_eq!(
+            config.coli_sensevoice_model_path,
+            settings.coli_sensevoice_model_path
+        );
+        assert_eq!(config.coli_language, "yue");
     }
 
     #[test]
