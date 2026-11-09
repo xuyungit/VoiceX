@@ -15,6 +15,7 @@ dist-ssr
 
 # Rust build artifacts
 src-tauri/target
+src-tauri/binaries/
 sync-server/target
 tools/llm-bench/target
 

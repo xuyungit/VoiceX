@@ -229,33 +229,16 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --tr
 
 ### 本地离线识别（Qwen3-ASR）
 
-完全在本机运行，音频不出设备（Windows 暂不支持）。需要先安装 `qwen-asr` 命令行工具并下载模型。
+仅支持 **Apple Silicon Mac**，音频在本机识别，不离开设备。VoiceX 安装包自带 `qwen-asr` 引擎，无需安装 Rust 或命令行工具，也不使用系统中已有的引擎。Windows 和 Intel Mac 暂不支持。
 
-**1. 安装命令行工具**（需要 [Rust 工具链](https://rustup.rs/)）：
+在 **ASR → Qwen3-ASR（本地）** 中选择模型和下载源，下载完成后即可使用：
 
-```bash
-cargo install qwen-asr-cli
-```
+- **0.6B（推荐）**：下载约 1.88 GB；**1.7B**：下载约 4.70 GB。首次识别还会生成缓存，界面显示模型、缓存及未完成下载的总占用。
+- **ModelScope（魔搭）和 Hugging Face** 提供相同模型。支持暂停、退出应用后续传，以及暂停后切换下载源续传；完整文件会校验 SHA-256。
+- 在“更多”中可重新下载、清理未完成下载或删除模型。删除同时清理其缓存；重新下载完成前保留现有可用模型。
+- 引擎随 VoiceX 更新；模型存放于应用数据目录，更新应用时保留，不单独检查模型升级。
 
-**2. 下载模型**（约 1.9 GB）：
-
-```bash
-qwen-asr download qwen3-asr-0.6b --output ~/models
-```
-
-如果下载中途断开，可改用断点续传：
-
-```bash
-curl -L -C - --retry 8 -o ~/models/qwen3-asr-0.6b/model.safetensors "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/model.safetensors"
-```
-
-**3. 配置**：ASR 页选择 **Qwen3-ASR（本地）**，「模型目录」填上一步的路径（如 `~/models/qwen3-asr-0.6b`）。命令路径留空会自动查找。
-
-几点说明：
-
-- **强制语种默认中文，建议保持。** 设为自动检测时，模型可能在句子中途切换成英文输出。
-- **词典默认开启**，对专有名词帮助明显。词典通过提示词传给模型，偶尔会过度匹配；只使用前 60 条。
-- 松开热键后整段出字，短句通常 1 秒内返回；不会把「一千两百三十」转成「1230」。
+强制语种默认中文，建议保持；自动检测可能在句子中途切换为英文。词典默认开启，通过提示词传给模型，只使用前 60 条。松开热键后整段出字，口述数字不会自动转成阿拉伯数字。
 
 ## 大模型（LLM）
 

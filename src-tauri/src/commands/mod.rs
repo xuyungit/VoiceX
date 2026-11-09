@@ -16,3 +16,4 @@ pub mod settings;
 pub mod sync;
 pub mod tts;
 pub mod updates;
+pub mod local_models;

@@ -111,9 +111,8 @@ sys-locale = "0.3"
 
 # In-app update (official release builds only; see src/updater.rs).
 tauri-plugin-updater = "2"
-# Not used directly: the updater's reqwest 0.12 is built without system proxy
-# support, so it would ignore the macOS/Windows proxy settings the rest of the
-# app honours. Naming the feature here turns it on for that copy.
+# Share the updater's reqwest 0.12 with model downloads and enable system proxy
+# support so both honour macOS/Windows proxy settings.
 reqwest-updater-proxy = { package = "reqwest", version = "0.12", default-features = false, features = ["system-proxy"] }
 
 [patch.crates-io]

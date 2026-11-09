@@ -124,11 +124,11 @@ pub struct AppSettings {
     pub mimo_base_url: String,
     pub mimo_language: String,
 
-    // Local ASR Provider: `coli`
-    pub qwen_local_command_path: String,
-    pub qwen_local_model_dir: String,
+    // Local ASR Provider: bundled Qwen3-ASR
+    pub qwen_local_model: String,
     pub qwen_local_language: String,
     pub qwen_local_use_dictionary: bool, // Legacy fallback for asr_dictionary_enabled.
+    // Local ASR Provider: `coli`
     pub coli_command_path: String,
     pub coli_use_vad: bool,
     pub coli_asr_interval_ms: u32,
@@ -520,8 +520,7 @@ impl Default for AppSettings {
             mimo_model: crate::asr::models::default_model("mimo"),
             mimo_base_url: "https://api.xiaomimimo.com/v1".to_string(),
             mimo_language: "auto".to_string(),
-            qwen_local_command_path: String::new(),
-            qwen_local_model_dir: String::new(),
+            qwen_local_model: crate::asr::managed_models::default_model(),
             qwen_local_language: "Chinese".to_string(),
             qwen_local_use_dictionary: true,
             coli_command_path: String::new(),
@@ -1466,12 +1465,6 @@ pub async fn list_openai_models(base_url: String, api_key: String) -> Result<Vec
 }
 
 #[tauri::command]
-pub async fn choose_local_model_directory() -> Result<Option<String>, String> {
-    Ok(rfd::AsyncFileDialog::new().pick_folder().await
-        .map(|folder| folder.path().to_string_lossy().into_owned()))
-}
-
-#[tauri::command]
 pub async fn probe_local_asr(
     command_path: Option<String>,
 ) -> Result<crate::asr::ColiAsrStatus, String> {
@@ -2253,12 +2246,25 @@ mod tests {
         let settings: AppSettings = serde_json::from_str(legacy).expect("legacy blob must load");
 
         assert_eq!(settings.coli_command_path, "/opt/coli");
-        assert_eq!(settings.qwen_local_command_path, "");
-        assert_eq!(settings.qwen_local_model_dir, "");
+        assert_eq!(settings.qwen_local_model, crate::asr::managed_models::default_model());
         // Language must default to Chinese, not blank: blank means auto-detect,
         // which makes the model drift into English mid-utterance.
         assert_eq!(settings.qwen_local_language, "Chinese");
         assert!(settings.qwen_local_use_dictionary);
+    }
+
+    #[test]
+    fn old_external_qwen_paths_are_discarded() {
+        let old = serde_json::json!({
+            "asrProviderType": "qwen-local",
+            "qwenLocalCommandPath": "/old/bin/qwen-asr",
+            "qwenLocalModelDir": "/old/models/qwen3-asr-1.7b"
+        });
+        let settings: AppSettings = serde_json::from_value(old).unwrap();
+        assert_eq!(settings.qwen_local_model, crate::asr::managed_models::default_model());
+        let saved = serde_json::to_value(settings).unwrap();
+        assert!(saved.get("qwenLocalCommandPath").is_none());
+        assert!(saved.get("qwenLocalModelDir").is_none());
     }
     #[test]
     fn refine_model_migration_preserves_existing_models_and_is_idempotent() {

@@ -85,7 +85,7 @@ async fn run_qwen_local_asr(
         text,
         model_name: HistoryService::format_provider_model(
             "Qwen3-ASR",
-            &config.qwen_local_model_dir,
+            &config.qwen_local_model,
         ),
     })
 }

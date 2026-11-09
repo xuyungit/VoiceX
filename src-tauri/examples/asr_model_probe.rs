@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "soniox" => settings.soniox_model = args[4].clone(),
         "stepaudio" => settings.stepaudio_model = args[4].clone(),
-        "qwen-local" => settings.qwen_local_model_dir = args[4].clone(),
+        "qwen-local" => return Err("Use the local_models_check example for the bundled engine".into()),
         _ => return Err("Unsupported probe provider".into()),
     }
     // Only the probe vocabulary is sent, never the user's dictionary/history.

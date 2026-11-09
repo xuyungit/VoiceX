@@ -1,6 +1,7 @@
 import type { TtsProviderValue } from '../utils/ttsOptions'
 import { ASR_MODEL_DEFAULTS } from '../utils/asrModels'
 import llmModels from '../shared/llmModels.json'
+import localAsrModels from '../shared/localAsrModels.json'
 import readingLimits from '../shared/readingLimits.json'
 import { defineStore, acceptHMRUpdate } from 'pinia'
 import { ref, watch } from 'vue'
@@ -45,8 +46,7 @@ export interface AppSettings {
     enableDdc: boolean
     enableAsrContext: boolean
     asrDictionaryEnabled: Partial<Record<AppSettings['asrProviderType'], boolean>>
-    qwenLocalCommandPath: string
-    qwenLocalModelDir: string
+    qwenLocalModel: string
     qwenLocalLanguage: string
     qwenLocalUseDictionary: boolean // Legacy preference, used when no per-provider override exists.
     coliCommandPath: string
@@ -362,8 +362,7 @@ const defaultSettings: AppSettings = {
     enableDdc: true,
     enableAsrContext: false,
     asrDictionaryEnabled: {},
-    qwenLocalCommandPath: '',
-    qwenLocalModelDir: '',
+    qwenLocalModel: localAsrModels.models[0].id,
     qwenLocalLanguage: 'Chinese',
     qwenLocalUseDictionary: true,
     coliCommandPath: '',

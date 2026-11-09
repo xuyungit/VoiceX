@@ -1,5 +1,6 @@
 import { ASR_MODELS } from './asrModels'
 import type { AppSettings } from '../stores/settings'
+import { isWindows } from './platform'
 
 export type AsrProviderValue = AppSettings['asrProviderType']
 export type BatchCapableRecognitionMode = 'realtime' | 'batch'
@@ -85,9 +86,9 @@ export function buildAsrProviderOptions(
     ...ASR_PROVIDER_LABEL_KEYS.map(({ key, value }) =>
       value === 'qwen-local'
         ? {
-            label: options.qwenLocalLabel ?? t(key),
+            label: options.qwenLocalLabel ?? t(isWindows ? 'asr.providerQwenLocalUnsupported' : key),
             value,
-            disabled: options.qwenLocalDisabled
+            disabled: options.qwenLocalDisabled ?? isWindows
           }
         : {
             label: t(key),

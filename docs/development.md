@@ -25,16 +25,25 @@ Building and running VoiceX from source. For using the app, see the
 # Install JS dependencies
 pnpm install
 
-# Start the web dev server
+# Frontend only (without the native backend)
 pnpm dev
 
-# Start the desktop dev environment (Tauri)
+# Start the desktop dev environment (also starts the frontend)
 pnpm tauri dev
 
 # Production build (type check + frontend bundle, then the desktop app)
 pnpm build
 pnpm tauri build
 ```
+
+On Apple Silicon Macs, `pnpm tauri dev` also prepares the pinned Qwen engine
+before launching: it downloads and verifies a missing engine, then reuses the
+verified copy on later starts. Debug reads it from
+`src-tauri/binaries/qwen-asr-aarch64-apple-darwin`; Release bundles that same
+engine inside the app. Neither searches PATH or uses a separate system install.
+Use the `pnpm tauri` entry point: direct `cargo run` skips engine preparation.
+Models are downloaded separately in settings and shared by Debug and Release
+through the app data directory. Windows skips Qwen engine preparation.
 
 ## macOS permissions during development
 

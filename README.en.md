@@ -229,33 +229,16 @@ Doubao, Qwen, ElevenLabs, Soniox, and Coli are currently recommended, but result
 
 ### Local offline recognition (Qwen3-ASR)
 
-Runs entirely on your machine; audio never leaves the device (not available on Windows). It needs the `qwen-asr` command-line tool and a model download.
+Available on **Apple Silicon Macs**. Audio is recognized on the device. VoiceX bundles the `qwen-asr` engine; no Rust toolchain or CLI installation is needed, and existing system installations are never used. Windows and Intel Macs are not supported.
 
-**1. Install the command-line tool** (requires the [Rust toolchain](https://rustup.rs/)):
+Choose **ASR → Qwen3-ASR (Local)**, select a model and download source, then download it:
 
-```bash
-cargo install qwen-asr-cli
-```
+- **0.6B (recommended)**: about 1.88 GB; **1.7B**: about 4.70 GB. First recognition creates additional cache files. Settings show total space used by the model, cache and partial download.
+- **ModelScope and Hugging Face** provide identical models. Pause and resume across app restarts, or pause to switch sources and continue. Completed files are verified with SHA-256.
+- Use “More” to download again, clear a partial download, or delete a model and its cache. A working model is kept until its replacement is fully downloaded.
+- Engine updates ship with VoiceX. Models stay in the app data directory across app updates; there is no separate model update check.
 
-**2. Download the model** (about 1.9 GB):
-
-```bash
-qwen-asr download qwen3-asr-0.6b --output ~/models
-```
-
-If the download breaks off partway, a resumable transfer is more reliable:
-
-```bash
-curl -L -C - --retry 8 -o ~/models/qwen3-asr-0.6b/model.safetensors "https://huggingface.co/Qwen/Qwen3-ASR-0.6B/resolve/main/model.safetensors"
-```
-
-**3. Configure it**: on the ASR page choose **Qwen3-ASR (Local)** and set "Model Directory" to the path from step 2 (such as `~/models/qwen3-asr-0.6b`). Leave the command path blank to find it automatically.
-
-Worth knowing:
-
-- **Force Language defaults to Chinese; keep it set.** With auto-detect, the model may switch to English output partway through a sentence.
-- **The dictionary is on by default** and clearly helps with proper nouns. It is passed in the model's prompt, so it can occasionally over-match; only the first 60 entries are used.
-- Text appears after you release the hotkey, usually within a second for short sentences. Spoken numbers are not converted to digits.
+Force Language defaults to Chinese; auto-detect can switch to English mid-sentence. Dictionary biasing is enabled by default and passes up to 60 entries in the prompt. Text appears after releasing the hotkey. Spoken numbers are not automatically converted to digits.
 
 ## LLM
 

@@ -11,6 +11,8 @@ pub mod coli_client;
 mod config;
 pub mod models;
 pub mod local_models;
+pub mod managed_models;
+mod model_download;
 pub mod elevenlabs_client;
 pub mod elevenlabs_realtime_client;
 pub mod funasr_client;

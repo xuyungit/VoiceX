@@ -1,9 +1,7 @@
-//! Local ASR client backed by the external `qwen-asr` CLI (Qwen3-ASR).
+//! File-based Qwen3-ASR using only the bundled engine and VoiceX-managed models.
 //!
-//! This is deliberately a *file-based* provider: the `qwen-asr` CLI only emits a
-//! single final line even in `--stream` mode, so there is no incremental output
-//! to surface. Live token streaming exists only in the `qwen-asr` Rust library,
-//! which is the intended target of a later in-process integration.
+//! VoiceX records the utterance first and invokes the CLI with a complete WAV
+//! file. Live capture/streaming offered by newer CLI versions is not used here.
 //!
 //! Two flags matter for quality and are always sent:
 //!   - `--language`: without it the model drifts into English mid-utterance,
@@ -45,30 +43,17 @@ impl QwenLocalAsrClient {
     }
 
     pub async fn transcribe_file(&self, path: &Path) -> Result<String, AsrError> {
-        check_platform_support()?;
-
-        let program = resolve_qwen_local_command(&self.config.qwen_local_command_path)
-            .map_err(AsrError::ConnectionFailed)?;
-
-        let model_dir = self.config.qwen_local_model_dir.trim();
-        if model_dir.is_empty() {
-            return Err(AsrError::ConnectionFailed(
-                "Qwen local ASR: model directory is not configured".to_string(),
-            ));
-        }
-        let model_dir = expand_tilde(model_dir);
-        if !model_dir.is_dir() {
-            return Err(AsrError::ConnectionFailed(format!(
-                "Qwen local ASR: model directory does not exist: {}",
-                model_dir.display()
-            )));
-        }
+        let models =
+            super::managed_models::ManagedModels::global().map_err(AsrError::ConnectionFailed)?;
+        let program = models.engine().map_err(AsrError::ConnectionFailed)?;
+        let lease = models.lease(&self.config.qwen_local_model).map_err(|e| AsrError::ConnectionFailed(format!("本地模型不可用，请在 ASR 设置中下载或重新下载模型 / Download the local model in ASR settings: {e}")))?;
+        let model_dir = &lease.path;
 
         // VoiceX records OGG/Opus, and the probe ships an .ogg sample, but the
         // CLI reads only 16-bit PCM WAV. Decode when needed.
         let prepared = PreparedAudio::for_input(path)?;
 
-        let args = build_args(&self.config, &model_dir, prepared.path());
+        let args = build_args(&self.config, model_dir, prepared.path());
         log::info!(
             "Starting Qwen local ASR ({} {})",
             program.display(),
@@ -138,28 +123,6 @@ impl QwenLocalAsrClient {
 
         Ok(text)
     }
-}
-
-/// Refuse the provider on Windows, before anything goes looking for a binary.
-///
-/// The settings page does not offer it there, but settings sync means a Windows
-/// install can inherit the choice from a Mac. Saying why it cannot run beats
-/// letting the PATH search answer "`qwen-asr` was not found": the binary is not
-/// missing, it does not exist for this platform. `qwen-asr-cli` defaults to
-/// `qwen-asr/vdsp`, i.e. Accelerate, and its live capture is documented as
-/// macOS-only — we have never had a Windows build to point at.
-#[cfg(target_os = "windows")]
-fn check_platform_support() -> Result<(), AsrError> {
-    Err(AsrError::ConnectionFailed(
-        "Qwen local ASR is not available on Windows: the `qwen-asr` CLI it drives is \
-         macOS / Linux only. Pick another ASR provider in settings."
-            .to_string(),
-    ))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn check_platform_support() -> Result<(), AsrError> {
-    Ok(())
 }
 
 /// Audio handed to the CLI, in the one format it accepts.
@@ -241,128 +204,6 @@ fn is_riff_wave(path: &Path) -> Result<bool, AsrError> {
     }
 }
 
-/// Locate the `qwen-asr` binary.
-///
-/// A bare PATH lookup is not enough: a bundled macOS app inherits launchd's
-/// minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), which contains neither
-/// `~/.cargo/bin` (where `cargo install` puts it) nor Homebrew's prefix. Without
-/// the common-location fallback this works under `tauri dev` and then fails for
-/// every packaged build.
-/// Returns the resolved binary, or an error explaining exactly what was tried.
-pub fn resolve_qwen_local_command(configured: &str) -> Result<PathBuf, String> {
-    let configured = configured.trim();
-
-    if !configured.is_empty() {
-        let path = expand_tilde(configured);
-
-        // Pointing at the containing directory is a natural thing to type, so
-        // accept it and look for the binary inside.
-        if path.is_dir() {
-            let candidate = path.join(exe_name());
-            return if candidate.is_file() {
-                Ok(candidate)
-            } else {
-                Err(format!(
-                    "the configured command path `{}` is a directory that does not contain `{}`",
-                    path.display(),
-                    exe_name()
-                ))
-            };
-        }
-
-        if path.is_absolute() || path.components().count() > 1 {
-            return if path.is_file() {
-                Ok(path)
-            } else {
-                Err(format!(
-                    "the configured command path `{}` does not exist",
-                    path.display()
-                ))
-            };
-        }
-
-        // A bare name: search PATH for it, then fall through to the defaults.
-        if let Some(found) = find_in_path(configured) {
-            return Ok(found);
-        }
-    }
-
-    find_in_path(exe_name())
-        .or_else(find_in_common_locations)
-        .ok_or_else(|| {
-            format!(
-                "`qwen-asr` was not found. Install it with `cargo install qwen-asr-cli`, \
-                 or set an explicit command path in ASR settings. Searched PATH and: {}",
-                searched_locations_hint()
-            )
-        })
-}
-
-/// Expand a leading `~`, which the OS does not do for us — shells expand it
-/// before exec, but a path typed into a settings field never passes through one.
-fn expand_tilde(raw: &str) -> PathBuf {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    match (raw.strip_prefix("~/").or(raw.strip_prefix("~")), home) {
-        (Some(rest), Some(home)) if raw.starts_with('~') => {
-            PathBuf::from(home).join(rest.trim_start_matches('/'))
-        }
-        _ => PathBuf::from(raw),
-    }
-}
-
-fn find_in_path(command: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    std::env::split_paths(&path_var)
-        .map(|dir| dir.join(command))
-        .find(|candidate| candidate.is_file())
-}
-
-fn find_in_common_locations() -> Option<PathBuf> {
-    candidate_locations()
-        .into_iter()
-        .find(|candidate| candidate.is_file())
-}
-
-/// Where `qwen-asr` realistically lands, in priority order.
-fn candidate_locations() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-
-    // `cargo install qwen-asr-cli` — by far the most likely location.
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        candidates.push(PathBuf::from(&home).join(".cargo/bin").join(exe_name()));
-    }
-
-    #[cfg(target_os = "macos")]
-    candidates.extend([
-        PathBuf::from("/opt/homebrew/bin/qwen-asr"),
-        PathBuf::from("/usr/local/bin/qwen-asr"),
-    ]);
-    #[cfg(all(unix, not(target_os = "macos")))]
-    candidates.extend([
-        PathBuf::from("/usr/local/bin/qwen-asr"),
-        PathBuf::from("/usr/bin/qwen-asr"),
-    ]);
-
-    candidates
-}
-
-fn exe_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "qwen-asr.exe"
-    } else {
-        "qwen-asr"
-    }
-}
-
-/// Human-readable list of the places we looked, for error messages.
-fn searched_locations_hint() -> String {
-    candidate_locations()
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn build_args(config: &AsrConfig, model_dir: &Path, path: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "-d".into(),
@@ -424,16 +265,12 @@ fn build_prompt(config: &AsrConfig) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_args, build_prompt, candidate_locations, resolve_qwen_local_command,
-        QWEN_LOCAL_MAX_PROMPT_HOTWORDS,
-    };
+    use super::{build_args, build_prompt, QWEN_LOCAL_MAX_PROMPT_HOTWORDS};
     use crate::asr::config::AsrConfig;
     use std::path::Path;
 
     fn config() -> AsrConfig {
         AsrConfig {
-            qwen_local_model_dir: "/models/qwen3-asr-0.6b".to_string(),
             qwen_local_language: "Chinese".to_string(),
             qwen_local_use_dictionary: true,
             hotwords: vec!["Tauri".to_string(), "Pinia".to_string()],
@@ -446,35 +283,6 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(" ")
-    }
-
-    #[test]
-    fn explicit_path_is_honoured_only_when_it_exists() {
-        // A configured path that does not exist must fail loudly rather than
-        // silently falling back to some other binary, and must say why.
-        let err = resolve_qwen_local_command("/definitely/not/here/qwen-asr").unwrap_err();
-        assert!(err.contains("does not exist"), "unhelpful error: {err}");
-
-        let this_binary = std::env::current_exe().unwrap();
-        assert_eq!(
-            resolve_qwen_local_command(this_binary.to_str().unwrap()).unwrap(),
-            this_binary
-        );
-    }
-
-    #[test]
-    fn configured_directory_is_searched_for_the_binary() {
-        // Users naturally type the containing directory rather than the binary.
-        let dir = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        let err = resolve_qwen_local_command(dir.to_str().unwrap()).unwrap_err();
-        assert!(
-            err.contains("is a directory that does not contain"),
-            "expected a directory-specific message, got: {err}"
-        );
     }
 
     #[test]
@@ -516,77 +324,6 @@ mod tests {
         assert!(path.is_file());
         drop(PreparedAudio::Temporary(temp));
         assert!(!path.is_file(), "temporary WAV must be removed after use");
-    }
-
-    #[test]
-    fn tilde_is_expanded() {
-        // `~` reaches us verbatim from a settings field: no shell expands it.
-        let home = std::env::var("HOME").unwrap();
-        assert_eq!(super::expand_tilde("~"), std::path::PathBuf::from(&home));
-        assert_eq!(
-            super::expand_tilde("~/.cargo/bin"),
-            std::path::PathBuf::from(&home).join(".cargo/bin")
-        );
-        // Non-tilde input must pass through untouched.
-        assert_eq!(
-            super::expand_tilde("/abs/path"),
-            std::path::PathBuf::from("/abs/path")
-        );
-    }
-
-    #[test]
-    fn tilde_directory_resolves_to_the_cargo_binary() {
-        // Reproduces the exact value that failed in the app: a tilde-prefixed
-        // directory rather than an absolute path to the executable.
-        let expected = std::path::PathBuf::from(std::env::var("HOME").unwrap())
-            .join(".cargo/bin")
-            .join(super::exe_name());
-        if !expected.is_file() {
-            return; // qwen-asr not installed on this machine; nothing to assert.
-        }
-        assert_eq!(
-            resolve_qwen_local_command("~/.cargo/bin").unwrap(),
-            expected
-        );
-        assert_eq!(
-            resolve_qwen_local_command("~/.cargo/bin/qwen-asr").unwrap(),
-            expected
-        );
-    }
-
-    #[test]
-    fn candidates_cover_the_cargo_install_location() {
-        // A packaged macOS app inherits launchd's minimal PATH, which excludes
-        // ~/.cargo/bin — the default target of `cargo install qwen-asr-cli`.
-        // Losing this candidate would break every bundled build.
-        let candidates = candidate_locations();
-        assert!(
-            candidates
-                .iter()
-                .any(|p| p.to_string_lossy().contains(".cargo/bin")),
-            "expected a ~/.cargo/bin candidate, got {candidates:?}"
-        );
-    }
-
-    #[test]
-    fn resolution_survives_a_gui_style_minimal_path() {
-        // Simulates the packaged-app environment: PATH has no ~/.cargo/bin, so
-        // resolution must come from the common-location fallback instead.
-        temp_env_path("/usr/bin:/bin:/usr/sbin:/sbin", || {
-            let expected = candidate_locations().into_iter().find(|p| p.is_file());
-            assert_eq!(resolve_qwen_local_command("").ok(), expected);
-        });
-    }
-
-    /// Swap PATH for the duration of `f`, then restore it.
-    fn temp_env_path(value: &str, f: impl FnOnce()) {
-        let original = std::env::var_os("PATH");
-        std::env::set_var("PATH", value);
-        f();
-        match original {
-            Some(v) => std::env::set_var("PATH", v),
-            None => std::env::remove_var("PATH"),
-        }
     }
 
     #[test]

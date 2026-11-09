@@ -10,6 +10,7 @@
 - 确认 macOS 原有代码签名证书可用。更新应继续使用同一证书，以保留系统权限；不要为了发布重新创建证书。
 - 确认本机 updater 私钥和密码可用（`~/.tauri/voicex-updater.key` 和 `~/.tauri/voicex-updater.password`，或对应的 `TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 环境变量），GitHub Actions 中也配置了同名 secrets。不要将私钥或密码提交到仓库。
 - 不要提交本地工作笔记、调试目录或生成产物。
+- Apple Silicon Mac 构建统一使用 `pnpm tauri`（发布脚本也通过此入口）。入口会下载并校验 `src/shared/localAsrModels.json` 中固定版本的 Qwen 引擎，再作为 sidecar 签名打包。不要直接用 `pnpm exec tauri build` 绕过此步骤。Windows 不打包 Qwen 引擎，模型不随安装包分发。
 
 ## 发布步骤
 

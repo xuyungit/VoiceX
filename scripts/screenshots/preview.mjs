@@ -6,6 +6,14 @@ const usage = JSON.parse(readFileSync(new URL('./usage-snapshot.json', import.me
 
 function installFixture(usage) {
   const params = new URLSearchParams(location.search)
+  const platform = params.get('platform')
+  if (platform) {
+    const windows = platform === 'windows'
+    Object.defineProperty(navigator, 'platform', { value: windows ? 'Win32' : 'MacIntel', configurable: true })
+    Object.defineProperty(navigator, 'userAgent', { value: windows ? 'Windows NT 10.0' : 'Macintosh', configurable: true })
+    Object.defineProperty(navigator, 'userAgentData', { value: { platform: windows ? 'Windows' : 'macOS' }, configurable: true })
+  }
+  const modelScenario = params.get('local-models')
   const locale = params.get('lang') === 'en' ? 'en-US' : 'zh-CN'
   const english = locale === 'en-US'
   let settings = {
@@ -14,7 +22,8 @@ function installFixture(usage) {
     syncEnabled: Boolean(usage.settings.syncEnabled),
     uiLanguage: locale,
     uiTheme: params.get('theme') === 'dark' ? 'dark' : 'light',
-    ...(location.pathname === '/asr-settings' ? { asrProviderType: 'soniox' } : {}),
+    ...(location.pathname === '/asr-settings' ? { asrProviderType: modelScenario ? 'qwen-local' : 'soniox' } : {}),
+    ...(modelScenario ? { qwenLocalModel: 'qwen3-asr-0.6b' } : {}),
     sonioxLanguage: 'zh, en',
     ttsProviderType: 'edge',
     edgeTtsVoice: english ? 'en-US-AriaNeural' : 'zh-CN-XiaoxiaoNeural',
@@ -72,6 +81,24 @@ function installFixture(usage) {
   }
   // Lets a capture script drive a page through further states.
   window.__fixtureEmit = emit
+  const modelStatus = {
+    supported: platform !== 'windows' && platform !== 'intel',
+    platform: platform === 'windows' ? 'windows' : 'macos', architecture: platform ? 'x86_64' : 'aarch64',
+    engineAvailable: platform !== 'windows' && platform !== 'intel' && params.get('engine') !== 'missing', engineVersion: '0.10.1', source: 'modelscope',
+    models: ['0.6b', '1.7b'].map((size, index) => ({
+      id: 'qwen3-asr-' + size, label: 'Qwen3-ASR ' + size.replace('b', 'B'),
+      phase: index ? 'missing' : modelScenario || 'missing', installed: index === 0 && modelScenario === 'ready',
+      downloadBytes: index ? 4703041213 : 1880546583,
+      downloadedBytes: index === 0 && ['paused', 'downloading', 'error'].includes(modelScenario) ? 754000000 : 0,
+      diskBytes: index === 0 ? modelScenario === 'ready' ? 2480394166 : ['paused', 'downloading', 'error'].includes(modelScenario) ? 754000000 : 0 : 0,
+      speedBytesPerSecond: modelScenario === 'downloading' ? 12000000 : 0, inUse: false,
+      error: modelScenario === 'error' ? 'Connection timed out' : null,
+    }))
+  }
+  window.__fixtureModels = phase => {
+    Object.assign(modelStatus.models[0], { phase, installed: phase === 'ready', downloadedBytes: phase === 'ready' ? 0 : 754000000, diskBytes: phase === 'ready' ? 1880546583 : 754000000 })
+    emit('local-models:updated', structuredClone(modelStatus))
+  }
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} }
   window.__TAURI_INTERNALS__ = {
     metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
@@ -79,6 +106,22 @@ function installFixture(usage) {
     unregisterCallback(id) { callbacks.delete(id) },
     async invoke(command, args = {}) {
       switch (command) {
+        case 'get_local_model_status': return structuredClone(modelStatus)
+        case 'download_local_model': {
+          const model = modelStatus.models.find(m => m.id === args.id)
+          Object.assign(model, { phase: 'downloading', downloadedBytes: args.restart ? 0 : model.downloadedBytes, error: null })
+          modelStatus.source = args.source
+          emit('local-models:updated', structuredClone(modelStatus)); return
+        }
+        case 'pause_local_model_download': {
+          modelStatus.models.find(m => m.id === args.id).phase = 'paused'
+          emit('local-models:updated', structuredClone(modelStatus)); return
+        }
+        case 'delete_local_model': {
+          const model = modelStatus.models.find(m => m.id === args.id)
+          Object.assign(model, { phase: args.partialOnly && model.installed ? 'ready' : 'missing', installed: args.partialOnly && model.installed, downloadedBytes: 0, diskBytes: 0, error: null })
+          emit('local-models:updated', structuredClone(modelStatus)); return
+        }
         case 'get_settings': {
           const { getDefaultPrompt } = await import('/src/utils/llmPrompts.ts')
           return { ...structuredClone(settings), ttsTranslatePromptTemplate: getDefaultPrompt('ttsTranslate', locale) }

@@ -270,8 +270,7 @@ pub struct AsrConfig {
     pub mimo_language: String,
 
     // Local ASR via the `qwen-asr` CLI (Qwen3-ASR)
-    pub qwen_local_command_path: String,
-    pub qwen_local_model_dir: String,
+    pub qwen_local_model: String,
     pub qwen_local_language: String,
     pub qwen_local_use_dictionary: bool,
 
@@ -376,8 +375,7 @@ impl Default for AsrConfig {
             mimo_model: crate::asr::models::default_model("mimo"),
             mimo_base_url: "https://api.xiaomimimo.com/v1".to_string(),
             mimo_language: "auto".to_string(),
-            qwen_local_command_path: String::new(),
-            qwen_local_model_dir: String::new(),
+            qwen_local_model: super::managed_models::default_model(),
             qwen_local_language: "Chinese".to_string(),
             qwen_local_use_dictionary: true,
             coli_command_path: String::new(),
@@ -504,8 +502,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             mimo_model: settings.mimo_model.clone(),
             mimo_base_url: settings.mimo_base_url.clone(),
             mimo_language: settings.mimo_language.clone(),
-            qwen_local_command_path: settings.qwen_local_command_path.clone(),
-            qwen_local_model_dir: settings.qwen_local_model_dir.clone(),
+            qwen_local_model: settings.qwen_local_model.clone(),
             qwen_local_language: settings.qwen_local_language.clone(),
             qwen_local_use_dictionary: use_dictionary,
             coli_command_path: settings.coli_command_path.clone(),
@@ -773,6 +770,22 @@ impl AsrConfig {
         &self,
         phase: super::AsrPhase,
     ) -> Result<(), super::AsrFailure> {
+        if self.provider_type == AsrProviderType::QwenLocal {
+            let ready = super::managed_models::ManagedModels::global().and_then(|m| {
+                m.engine()?;
+                m.lease(&self.qwen_local_model).map(|_| ())
+            });
+            if let Err(error) = ready {
+                let message = match error.as_str() {
+                    "unsupported_platform" => "本地识别仅支持 Apple Silicon Mac，请选择其他识别服务。 / Local recognition requires an Apple Silicon Mac; select another provider.",
+                    "bundled_engine_missing" => "内置识别引擎缺失，请重新安装完整的 VoiceX。 / The bundled engine is missing; reinstall the complete VoiceX app.",
+                    _ => "本地模型尚不可用，请在 ASR 设置中下载模型，或选择其他识别引擎。 / Download the local model in ASR settings, or select another provider.",
+                };
+                let mut failure = super::AsrFailure::configuration(self.provider_type, phase, error);
+                failure.display_message = message.into();
+                return Err(failure);
+            }
+        }
         let missing = self.missing_configuration_fields();
         if !missing.is_empty() {
             let fields = missing
@@ -911,9 +924,9 @@ impl AsrConfig {
             }
             QwenLocal => {
                 require(
-                    "qwen_local_model_dir",
-                    "本地模型目录",
-                    &self.qwen_local_model_dir,
+                    "qwen_local_model",
+                    "本地模型",
+                    &self.qwen_local_model,
                 );
             }
             Coli => {

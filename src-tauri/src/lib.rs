@@ -88,6 +88,7 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize database
     let app_data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&app_data_dir)?;
+    asr::managed_models::ManagedModels::init(app.handle())?;
 
     let db_path = app_data_dir.join("voicex.db");
     log::info!("Database path: {:?}", db_path);
@@ -392,8 +393,11 @@ pub fn run() {
             commands::settings::save_settings,
             commands::settings::probe_local_asr,
             commands::settings::list_local_qwen_models,
+            commands::local_models::get_local_model_status,
+            commands::local_models::download_local_model,
+            commands::local_models::pause_local_model_download,
+            commands::local_models::delete_local_model,
             commands::settings::list_openai_models,
-            commands::settings::choose_local_model_directory,
             commands::settings::probe_current_asr_provider,
             commands::settings::probe_current_llm_provider,
             commands::settings::preview_llm_reasoning,
