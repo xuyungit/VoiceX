@@ -62,6 +62,11 @@ const autoCheckUpdates = computed({
 
 const update = computed(() => updatesStore.status)
 const available = computed(() => update.value?.available ?? null)
+const updateErrorLabel = computed(() => {
+  const error = update.value?.error
+  return error && (UPDATE_ERROR_CODES as readonly string[]).includes(error)
+    ? t(`about.updateErrors.${error}`) : error
+})
 const notesHtml = computed(() => {
   const notes = available.value?.notes
   return notes ? renderMarkdown(notes) : ''
@@ -167,7 +172,7 @@ onMounted(async () => {
       <template v-else>
         <SettingRow :label="updateStatusLabel">
           <template #status>
-            <div v-if="update.error" class="update-error">{{ update.error }}</div>
+            <div v-if="update.error" class="update-error">{{ updateErrorLabel }}</div>
             <div v-if="update.lastCheckedAt">{{ t('about.updateLastChecked', { time: formatTime(update.lastCheckedAt) }) }}</div>
           </template>
           <NButton size="small" :loading="update.phase === 'checking'" :disabled="updatesStore.working" @click="checkForUpdate">

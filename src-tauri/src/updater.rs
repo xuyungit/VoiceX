@@ -107,7 +107,69 @@ pub struct UpdateService {
 struct Inner {
     status: UpdateStatus,
     pending: Option<Update>,
-    downloaded_package: Option<Arc<Vec<u8>>>,
+    downloaded_package: Option<DownloadedPackage>,
+}
+
+#[derive(Clone)]
+struct DownloadedPackage {
+    identity: PackageIdentity,
+    bytes: Arc<Vec<u8>>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct PackageIdentity {
+    version: String,
+    target: String,
+    url: String,
+    signature: String,
+}
+
+impl From<&Update> for PackageIdentity {
+    fn from(update: &Update) -> Self {
+        Self {
+            version: update.version.clone(),
+            target: update.target.clone(),
+            url: update.download_url.to_string(),
+            signature: update.signature.clone(),
+        }
+    }
+}
+
+impl Inner {
+    fn offer(&mut self, update: Update) {
+        self.retain_package(&PackageIdentity::from(&update));
+        self.status.available = Some(AvailableUpdate {
+            version: update.version.clone(),
+            notes: update.body.clone(),
+            published_at: update.date.map(|d| d.unix_timestamp()),
+        });
+        self.status.phase = Phase::Available;
+        self.status.last_checked_at = Some(now_secs());
+        self.pending = Some(update);
+    }
+
+    fn retain_package(&mut self, identity: &PackageIdentity) {
+        if !self
+            .downloaded_package
+            .as_ref()
+            .is_some_and(|package| &package.identity == identity)
+        {
+            self.downloaded_package = None;
+            self.status.downloaded = 0;
+            self.status.total = None;
+        }
+    }
+
+    fn install_failed(&mut self, message: &str) {
+        self.status.phase = if message == ERR_BUSY {
+            Phase::Available
+        } else {
+            Phase::Error
+        };
+        // A busy refusal is reported by the translated action toast, not a
+        // persistent error. Keep the verified package for the next attempt.
+        self.status.error = (message != ERR_BUSY).then(|| message.to_owned());
+    }
 }
 
 impl UpdateService {
@@ -264,15 +326,7 @@ pub async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
                 update.version
             );
             service.update(app, |inner| {
-                inner.status.available = Some(AvailableUpdate {
-                    version: update.version.clone(),
-                    notes: update.body.clone(),
-                    published_at: update.date.map(|d| d.unix_timestamp()),
-                });
-                inner.status.phase = Phase::Available;
-                inner.status.last_checked_at = Some(now_secs());
-                inner.pending = Some(update);
-                inner.downloaded_package = None;
+                inner.offer(update);
             });
             Ok(())
         }
@@ -353,7 +407,7 @@ pub async fn install(app: &AppHandle) -> Result<(), String> {
 
     let result = async {
         let bytes = if let Some(bytes) = cached {
-            bytes
+            bytes.bytes
         } else {
             log::info!("Downloading update {}", update.version);
             let mut downloaded: u64 = 0;
@@ -378,7 +432,10 @@ pub async fn install(app: &AppHandle) -> Result<(), String> {
                 .map_err(|err| err.to_string())?;
             // download() verifies the signature before returning these bytes.
             let bytes = Arc::new(bytes);
-            service.lock().downloaded_package = Some(bytes.clone());
+            service.lock().downloaded_package = Some(DownloadedPackage {
+                identity: PackageIdentity::from(&update),
+                bytes: bytes.clone(),
+            });
             bytes
         };
 
@@ -406,12 +463,7 @@ pub async fn install(app: &AppHandle) -> Result<(), String> {
             let message = err.to_string();
             log::warn!("Update installation did not complete: {message}");
             service.update(app, |inner| {
-                inner.status.phase = if message == ERR_BUSY {
-                    Phase::Available
-                } else {
-                    Phase::Error
-                };
-                inner.status.error = Some(message.clone());
+                inner.install_failed(&message);
             });
             Err(message)
         }
@@ -421,6 +473,73 @@ pub async fn install(app: &AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cached_package() -> DownloadedPackage {
+        DownloadedPackage {
+            identity: PackageIdentity {
+                version: "1.0.0".into(),
+                target: "darwin-aarch64".into(),
+                url: "https://example.com/update".into(),
+                signature: "signed".into(),
+            },
+            bytes: Arc::new(vec![1, 2, 3]),
+        }
+    }
+
+    #[test]
+    fn busy_is_a_transient_refusal_and_keeps_the_verified_package() {
+        let package = cached_package();
+        let bytes = package.bytes.clone();
+        let mut inner = Inner {
+            downloaded_package: Some(package),
+            ..Inner::default()
+        };
+        inner.install_failed(ERR_BUSY);
+        assert_eq!(inner.status.phase, Phase::Available);
+        assert!(inner.status.error.is_none());
+        assert!(Arc::ptr_eq(
+            &bytes,
+            &inner.downloaded_package.as_ref().unwrap().bytes
+        ));
+        inner.install_failed("installer failed");
+        assert_eq!(inner.status.phase, Phase::Error);
+        assert_eq!(inner.status.error.as_deref(), Some("installer failed"));
+    }
+
+    #[test]
+    fn repeated_checks_keep_only_the_same_signed_package() {
+        let package = cached_package();
+        let identity = package.identity.clone();
+        let bytes = package.bytes.clone();
+        for field in ["same", "version", "target", "url", "signature"] {
+            let mut next = identity.clone();
+            match field {
+                "version" => next.version.push('2'),
+                "target" => next.target.push('2'),
+                "url" => next.url.push('2'),
+                "signature" => next.signature.push('2'),
+                _ => {}
+            }
+            let mut inner = Inner {
+                downloaded_package: Some(package.clone()),
+                ..Inner::default()
+            };
+            inner.status.downloaded = 3;
+            inner.status.total = Some(3);
+            inner.retain_package(&next);
+            if field == "same" {
+                assert!(Arc::ptr_eq(
+                    &bytes,
+                    &inner.downloaded_package.unwrap().bytes
+                ));
+                assert_eq!(inner.status.downloaded, 3);
+            } else {
+                assert!(inner.downloaded_package.is_none());
+                assert_eq!(inner.status.downloaded, 0);
+                assert!(inner.status.total.is_none());
+            }
+        }
+    }
 
     #[test]
     fn busy_after_download_keeps_installation_out_until_session_and_saves_finish() {

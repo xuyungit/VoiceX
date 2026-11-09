@@ -127,13 +127,7 @@ impl SessionCoordinator {
             // Own the state inside the loop to avoid external locking.
             let mut state = AppState::new();
             while let Some(msg) = rx.recv().await {
-                // Installation and starting a session must not pass each other
-                // between the idle check and the actor's state transition.
-                let Some(_work) = controller.work_gate.try_work() else {
-                    log::info!("Session message ignored while update installation owns the app");
-                    continue;
-                };
-                controller.handle_message(&mut state, msg);
+                controller.handle_coordinated_message(&mut state, msg);
                 // Every transition passes through here, so this is the one
                 // place that can mirror recording status out of the actor for
                 // other subsystems (TTS mutual exclusion) to read.
@@ -337,6 +331,21 @@ impl SessionController {
                 log::warn!("Failed to set preferred audio device: {}", err);
             }
         }
+    }
+
+    fn handle_coordinated_message(&self, state: &mut AppState, msg: SessionMessage) {
+        // Configuration and cancellation do not admit new work. They must
+        // remain effective even if an installation subsequently fails.
+        let _work = if matches!(&msg, SessionMessage::ApplySettings { .. } | SessionMessage::CancelSession(_)) {
+            None
+        } else {
+            let Some(work) = self.work_gate.try_work() else {
+                log::info!("Session work ignored while update installation owns the app");
+                return;
+            };
+            Some(work)
+        };
+        self.handle_message(state, msg);
     }
 
     /// Message dispatcher: update state inside the coordinator loop.
@@ -1563,6 +1572,40 @@ mod asr_regression_tests;
 mod tests {
     use super::*;
     use crate::state::HotkeySessionState;
+
+    #[test]
+    fn settings_and_cancellation_survive_an_installation_failure() {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _post_edit_guard = crate::post_edit::diagnostics::TEST_LOCK.lock().unwrap();
+        let gate = crate::work_gate::WorkGate::default();
+        let controller = SessionController::with_work_gate(gate.clone());
+        let install = gate.try_install().unwrap();
+        let mut state = AppState::new();
+        controller.handle_coordinated_message(&mut state, SessionMessage::ApplySettings {
+            hold_threshold_ms: 410, max_recording_minutes: 12,
+            text_injection_mode: "clipboard".into(), text_injection_overrides: vec![],
+            input_device_uid: None, remove_trailing_punctuation: true,
+            short_sentence_threshold: 27, replacement_rules: vec![],
+            translation_enabled: true, translation_trigger_mode: "double_tap".into(),
+            double_tap_window_ms: 320,
+        });
+        assert_eq!(state.hold_threshold_ms, 410);
+        assert_eq!(state.max_recording_minutes, 12);
+        assert!(state.remove_trailing_punctuation);
+        assert_eq!(state.short_sentence_threshold, 27);
+        assert!(state.translation_enabled);
+        assert_eq!(state.double_tap_window_ms, 320);
+        controller.handle_coordinated_message(&mut state, SessionMessage::HotkeyPressed);
+        assert_eq!(state.session_state, HotkeySessionState::Idle);
+        state.handle_hotkey_pressed();
+        controller.handle_coordinated_message(&mut state, SessionMessage::CancelSession(CancelReason::EscapeKey));
+        assert_eq!(state.session_state, HotkeySessionState::Idle);
+        drop(install);
+        assert_eq!(state.hold_threshold_ms, 410);
+        controller.handle_coordinated_message(&mut state, SessionMessage::HotkeyPressed);
+        assert_ne!(state.session_state, HotkeySessionState::Idle);
+        controller.handle_coordinated_message(&mut state, SessionMessage::CancelSession(CancelReason::EscapeKey));
+    }
 
     #[test]
     fn updates_stay_blocked_after_key_up_until_dictation_finishes() {

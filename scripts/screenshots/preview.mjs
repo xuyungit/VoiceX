@@ -163,6 +163,7 @@ function installFixture(usage) {
           return { editedText: record.editedText }
         }
         case 'delete_history_record': history.splice(history.findIndex(row => row.id === args.id), 1); return
+        case 'get_build_info': return { version: '0.0.0', profile: 'release', commit: 'fixture', builtAt: '0' }
         case 'get_update_status': return { enabled: false, phase: 'idle', available: null, downloaded: 0, total: null, error: null, lastCheckedAt: null }
         case 'get_post_edit_settings': return { mode: 'off' }
         case 'get_sync_state': return { state: { status: 'live' }, deviceId: 'demo' }
