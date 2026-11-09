@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.19.0] - 2026-11-09
+
+### Added
+
+- **Managed local recognition** — Apple Silicon Mac builds bundle the Qwen3-ASR engine, so no separate CLI installation is needed. Download the 0.6B or 1.7B model from ModelScope or Hugging Face in ASR settings, pause and resume across app restarts, or switch sources while paused. Completed files are verified with SHA-256. Settings show model, cache and partial-download storage, with actions to download again, clear partial files, or delete a model and its cache.
+
+### Changed
+
+- Local models use VoiceX's managed app data directory; previously configured external model directories are not imported automatically. Engine updates ship with the app; managed models remain across app updates. Windows and Intel Macs do not offer local Qwen recognition.
+- History search cancels superseded requests and runs independently of ordinary history access, keeping the window responsive while searching large histories.
+
+### Fixed
+
+- Switching or stopping history playback cancels pending audio loads, preventing an older recording from starting later.
+- Sending dictated text in chat apps no longer lets a sudden replacement by input hints overwrite the captured edit. Earlier confirmed edits are retained when the replacement is ambiguous.
+- Stopping hands-free dictation or double-tapping for translation no longer restarts the HUD entrance animation.
+- Update installation checks again after downloading and proceeds only when dictation, reading and history work have finished. A busy refusal keeps the verified package for another attempt; repeated checks keep it only while the signed package is unchanged. Settings and cancellation remain effective if installation fails.
+- Local model status and download progress avoid repeated storage scans; unavailable model storage does not prevent unrelated cloud recognition from starting.
+
 ## [0.18.5] - 2026-11-08
 
 ### Added

@@ -46,7 +46,11 @@ There is no Intel Mac build yet; you can [build from source](./docs/development.
 
 **Windows (x64)**
 
-Run `VoiceX_x.y.z_x64-setup.exe` (or the `.msi`). If SmartScreen warns about an unrecognized app, choose **More info → Run anyway**.
+Run `VoiceX_x.y.z_x64-setup.exe`. If SmartScreen warns about an unrecognized app, choose **More info → Run anyway**. If you previously installed the MSI, uninstall it and install the EXE to receive in-app updates.
+
+**In-app updates**
+
+Official builds can check for and install updates from About or the tray menu. Updates prefer the download mirror and verify package signatures. Installation checks that dictation, reading and history processing have finished. On Apple Silicon Macs, the local recognition engine updates with the app; downloaded models are kept.
 
 ## First launch
 
@@ -237,6 +241,8 @@ Choose **ASR → Qwen3-ASR (Local)**, select a model and download source, then d
 - **ModelScope and Hugging Face** provide identical models. Pause and resume across app restarts, or pause to switch sources and continue. Completed files are verified with SHA-256.
 - Use “More” to download again, clear a partial download, or delete a model and its cache. A working model is kept until its replacement is fully downloaded.
 - Engine updates ship with VoiceX. Models stay in the app data directory across app updates; there is no separate model update check.
+
+Previously configured model directories are not imported automatically; download the model you need in Settings.
 
 Force Language defaults to Chinese; auto-detect can switch to English mid-sentence. Dictionary biasing is enabled by default and passes up to 60 entries in the prompt. Text appears after releasing the hotkey. Spoken numbers are not automatically converted to digits.
 

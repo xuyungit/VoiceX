@@ -32,5 +32,6 @@
    也可以在第 3 步传入 `--publish`，由脚本上传后发布。发布事件会触发 Windows CI；不要提前发布再上传 macOS 清单，以免两个平台同时修改 `latest.json`。
 5. 等待 `.github/workflows/windows-release.yml` 完成。CI 构建并上传签名的 Windows x64 `.exe` 和 `.sig`，将 Windows 条目合并进 `latest.json`。正式版不再提供 MSI。
 6. 核对发布状态、工作流结果和全部产物：macOS DMG、macOS 更新包及签名、Windows EXE 及签名，以及 `latest.json` 中的版本、两个平台的下载地址和签名。确认公开的 latest 更新入口返回正确清单；可行时从上一正式版本验证应用内更新。
+7. 检查 `https://dl.wddgxs.com/latest.json` 已同步为新版本，并包含 macOS 和 Windows 条目。镜像服务每 10 分钟自动同步最新正式 Release，无需手工上传；Windows CI 完成后通常在下一轮同步补齐 Windows 产物。镜像清单中的下载地址应指向镜像，签名应与 GitHub 清单一致；若尚未同步，检查镜像服务状态或按运维流程手动触发同步。
 
 发布后、Windows CI 完成前，清单暂时只有 macOS 条目；Windows 用户在此期间不会收到该版本的更新。macOS 产物使用本地证书签名，未经过 Apple 公证。
