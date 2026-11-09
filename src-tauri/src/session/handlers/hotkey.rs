@@ -83,9 +83,13 @@ impl SessionController {
             } else {
                 self.emit_transcript("", false);
             }
+            // Only the press that starts a session shows the HUD. Showing it
+            // again — on the press that stops a hands-free recording, or the
+            // second tap of a translation upgrade — restarts the capsule's
+            // entrance under a capsule already on screen, and it flickers.
+            self.show_hud();
         }
 
-        self.show_hud();
         if let Some(threshold) = start_hold_timer {
             self.start_hold_timer(threshold);
         }
