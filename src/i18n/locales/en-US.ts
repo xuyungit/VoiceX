@@ -993,7 +993,7 @@ const enUS = {
     updateErrors: {
       disabled: 'Only official release builds check for updates.',
       inProgress: 'An update check or install is already in progress.',
-      busy: 'Finish the current recording or reading first.',
+      busy: 'Wait for dictation, text processing or reading to finish, then install again.',
       noUpdate: 'There is no update to install. Check again.'
     }
   },

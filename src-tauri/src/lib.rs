@@ -27,6 +27,7 @@ pub mod tray;
 pub mod tts;
 pub mod ui_locale;
 pub mod updater;
+mod work_gate;
 #[cfg(target_os = "windows")]
 mod win_clipboard;
 
@@ -159,9 +160,9 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let app = app.handle().clone();
         tts_controller.set_activity_listener(move || tray::reading_state_changed(&app));
     }
-    // An update must not replace the app in the middle of a recording.
+    // Protect the whole dictation, including ASR, correction and injection.
     app.state::<updater::UpdateService>()
-        .attach_recording_flag(session_coordinator.recording_flag());
+        .attach_session_flag(session_coordinator.activity_flag());
     // A tray-menu read on Windows has to find the window the menu took the
     // foreground from.
     #[cfg(target_os = "windows")]
@@ -241,6 +242,8 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let updates = updater::UpdateService::default();
+    let work_gate = updates.work_gate();
     tauri::Builder::default()
         // Prevent Tauri from capturing DeviceEvent on Windows, which would
         // interfere with rdev's low-level keyboard hook when the main window is focused.
@@ -268,10 +271,10 @@ pub fn run() {
         .manage(audio::AudioService::default())
         .manage(AsrDebugService::default())
         .manage(HotkeyManager::default())
-        .manage(SessionController::default())
+        .manage(SessionController::with_work_gate(work_gate.clone()))
         .manage(SyncService::default())
-        .manage(TtsController::default())
-        .manage(updater::UpdateService::default())
+        .manage(TtsController::with_work_gate(work_gate))
+        .manage(updates)
         .manage(commands::history_translation::HistoryTranslationState::default())
         .on_window_event(|window, event| {
             // Keep the process alive when the main window is closed; just hide it.

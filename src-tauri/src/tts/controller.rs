@@ -211,6 +211,7 @@ fn is_cloud_provider(provider: &str) -> bool {
 
 #[derive(Default)]
 struct ControllerInner {
+    work_gate: crate::work_gate::WorkGate,
     app: Mutex<Option<AppHandle>>,
     /// Compact macOS voices via AVSpeechSynthesizer. Absent on other platforms.
     system: Mutex<Option<Arc<dyn TtsBackend>>>,
@@ -257,6 +258,15 @@ pub struct TtsController {
 }
 
 impl TtsController {
+    pub(crate) fn with_work_gate(work_gate: crate::work_gate::WorkGate) -> Self {
+        Self {
+            inner: Arc::new(ControllerInner {
+                work_gate,
+                ..ControllerInner::default()
+            }),
+        }
+    }
+
     pub fn init_with_handle(&self, app: &AppHandle) {
         if let Ok(mut slot) = self.inner.app.lock() {
             *slot = Some(app.clone());
@@ -684,6 +694,11 @@ impl TtsController {
     ///
     /// Blocking, and hops to the main thread — never call from there.
     pub fn speak_preview(&self, text: String) -> Result<(), TtsError> {
+        let _work = self
+            .inner
+            .work_gate
+            .try_work()
+            .ok_or_else(|| TtsError::Backend("update installation is in progress".into()))?;
         if self.is_recording() {
             return Err(TtsError::Backend("dictation is recording".to_string()));
         }
@@ -888,6 +903,10 @@ impl TtsController {
     }
 
     fn start(&self, kind: ReadKind, target: SelectionTarget) {
+        let Some(_work) = self.inner.work_gate.try_work() else {
+            log_event("speak_err", &[("error", "update_installing".into())]);
+            return;
+        };
         if self.is_recording() {
             // Dictation wins: reading aloud during recording would feed the
             // speech straight back into the microphone.

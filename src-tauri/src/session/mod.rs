@@ -112,6 +112,7 @@ impl AsrAudioBridge {
 pub struct SessionCoordinator {
     sender: UnboundedSender<SessionMessage>,
     recording: Arc<AtomicBool>,
+    active: Arc<AtomicBool>,
 }
 
 impl SessionCoordinator {
@@ -120,21 +121,31 @@ impl SessionCoordinator {
         controller.attach_sender(tx.clone());
         let recording = Arc::new(AtomicBool::new(false));
         let recording_mirror = recording.clone();
+        let active = Arc::new(AtomicBool::new(false));
+        let active_mirror = active.clone();
         tauri::async_runtime::spawn(async move {
             // Own the state inside the loop to avoid external locking.
             let mut state = AppState::new();
             while let Some(msg) = rx.recv().await {
+                // Installation and starting a session must not pass each other
+                // between the idle check and the actor's state transition.
+                let Some(_work) = controller.work_gate.try_work() else {
+                    log::info!("Session message ignored while update installation owns the app");
+                    continue;
+                };
                 controller.handle_message(&mut state, msg);
                 // Every transition passes through here, so this is the one
                 // place that can mirror recording status out of the actor for
                 // other subsystems (TTS mutual exclusion) to read.
                 recording_mirror.store(state.is_recording, Ordering::SeqCst);
+                active_mirror.store(session_is_active(&state), Ordering::SeqCst);
             }
         });
 
         Self {
             sender: tx,
             recording,
+            active,
         }
     }
 
@@ -146,10 +157,23 @@ impl SessionCoordinator {
     pub fn recording_flag(&self) -> Arc<AtomicBool> {
         self.recording.clone()
     }
+
+    pub fn activity_flag(&self) -> Arc<AtomicBool> {
+        self.active.clone()
+    }
+}
+
+fn session_is_active(state: &AppState) -> bool {
+    state.session_state != HotkeySessionState::Idle
+        || state.is_recording
+        || state.is_correcting
+        || state.injection_in_progress
+        || state.asr_refinement_in_progress
 }
 
 #[derive(Clone)]
 pub struct SessionController {
+    work_gate: crate::work_gate::WorkGate,
     hud_service: Arc<Mutex<Option<HudService>>>,
     audio_manager: Arc<Mutex<Option<AudioManager>>>,
     countdown_service: Arc<Mutex<Option<CountdownService>>>,
@@ -168,6 +192,13 @@ pub struct SessionController {
 }
 
 impl SessionController {
+    pub(crate) fn with_work_gate(work_gate: crate::work_gate::WorkGate) -> Self {
+        Self {
+            work_gate,
+            ..Self::default()
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -1505,6 +1536,7 @@ impl SessionController {
 impl Default for SessionController {
     fn default() -> Self {
         Self {
+            work_gate: crate::work_gate::WorkGate::default(),
             hud_service: Arc::new(Mutex::new(None)),
             audio_manager: Arc::new(Mutex::new(None)),
             countdown_service: Arc::new(Mutex::new(None)),
@@ -1532,6 +1564,22 @@ mod tests {
     use super::*;
     use crate::state::HotkeySessionState;
 
+    #[test]
+    fn updates_stay_blocked_after_key_up_until_dictation_finishes() {
+        let mut state = AppState::new();
+        state.handle_hotkey_pressed();
+        state.on_hold_threshold_reached();
+        state.handle_hotkey_released();
+        assert!(!state.is_recording);
+        assert!(session_is_active(&state));
+        state.reset();
+        assert!(!session_is_active(&state));
+        state.is_correcting = true;
+        assert!(session_is_active(&state));
+        state.is_correcting = false;
+        state.injection_in_progress = true;
+        assert!(session_is_active(&state));
+    }
     fn ms(value: u64) -> Duration {
         Duration::from_millis(value)
     }

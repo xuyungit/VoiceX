@@ -993,7 +993,7 @@ const zhCN = {
     updateErrors: {
       disabled: '仅正式发布版本会检查更新。',
       inProgress: '正在检查或安装更新。',
-      busy: '请先结束当前的录音或朗读。',
+      busy: '请等待当前听写、文字处理或朗读结束，再点击安装。',
       noUpdate: '没有可安装的更新，请重新检查。'
     }
   },

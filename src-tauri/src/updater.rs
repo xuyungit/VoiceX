@@ -20,6 +20,7 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::commands::settings::AppSettings;
 use crate::tts::TtsController;
+use crate::work_gate::{InstallPermit, WorkGate};
 
 const STATUS_EVENT: &str = "update:status";
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(15);
@@ -64,7 +65,10 @@ pub enum Phase {
 
 impl Phase {
     fn is_working(self) -> bool {
-        matches!(self, Phase::Checking | Phase::Downloading | Phase::Installing)
+        matches!(
+            self,
+            Phase::Checking | Phase::Downloading | Phase::Installing
+        )
     }
 }
 
@@ -95,13 +99,15 @@ pub struct UpdateStatus {
 #[derive(Default)]
 pub struct UpdateService {
     inner: Mutex<Inner>,
-    recording: Mutex<Option<Arc<AtomicBool>>>,
+    session: Mutex<Option<Arc<AtomicBool>>>,
+    work_gate: WorkGate,
 }
 
 #[derive(Default)]
 struct Inner {
     status: UpdateStatus,
     pending: Option<Update>,
+    downloaded_package: Option<Arc<Vec<u8>>>,
 }
 
 impl UpdateService {
@@ -110,20 +116,41 @@ impl UpdateService {
     }
 
     pub fn available_version(&self) -> Option<String> {
-        self.lock().status.available.as_ref().map(|a| a.version.clone())
+        self.lock()
+            .status
+            .available
+            .as_ref()
+            .map(|a| a.version.clone())
     }
 
-    /// The session's recording flag; an install is refused while it is set.
-    pub fn attach_recording_flag(&self, flag: Arc<AtomicBool>) {
-        *self.recording.lock().unwrap_or_else(|e| e.into_inner()) = Some(flag);
+    pub(crate) fn work_gate(&self) -> WorkGate {
+        self.work_gate.clone()
     }
 
-    fn is_recording(&self) -> bool {
-        self.recording
+    /// Includes ASR finalization, correction and text injection after key-up.
+    pub fn attach_session_flag(&self, flag: Arc<AtomicBool>) {
+        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(flag);
+    }
+
+    fn session_active(&self) -> bool {
+        self.session
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
+    fn begin_install(
+        &self,
+        reading_active: impl FnOnce() -> bool,
+    ) -> Result<InstallPermit, String> {
+        // Admission closes before checking the session mirrors. A new hotkey
+        // or reading request cannot sneak in after this idle check.
+        let permit = self.work_gate.try_install().ok_or(ERR_BUSY)?;
+        if self.session_active() || reading_active() {
+            return Err(ERR_BUSY.into());
+        }
+        Ok(permit)
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -199,20 +226,20 @@ fn background_check_due(app: &AppHandle) -> bool {
 /// Ask the update endpoint whether a newer version exists.
 pub async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
     let service = app.state::<UpdateService>();
-    {
-        let inner = service.lock();
+    let offered_before = {
+        let mut inner = service.lock();
         if !inner.status.enabled {
             return Err(ERR_DISABLED.into());
         }
         if inner.status.phase.is_working() {
             return Err(ERR_IN_PROGRESS.into());
         }
-    }
-    let offered_before = service.available_version();
-    service.update(app, |inner| {
+        let offered = inner.status.available.as_ref().map(|a| a.version.clone());
         inner.status.phase = Phase::Checking;
         inner.status.error = None;
-    });
+        offered
+    };
+    service.update(app, |_| {});
 
     // The update returned by the check keeps this client setup for its download.
     let result = match app
@@ -245,6 +272,7 @@ pub async fn check(app: &AppHandle) -> Result<UpdateStatus, String> {
                 inner.status.phase = Phase::Available;
                 inner.status.last_checked_at = Some(now_secs());
                 inner.pending = Some(update);
+                inner.downloaded_package = None;
             });
             Ok(())
         }
@@ -288,6 +316,7 @@ fn mark_up_to_date(app: &AppHandle, service: &UpdateService) {
         inner.status.available = None;
         inner.status.last_checked_at = Some(now_secs());
         inner.pending = None;
+        inner.downloaded_package = None;
     });
 }
 
@@ -297,63 +326,118 @@ pub async fn install(app: &AppHandle) -> Result<(), String> {
     let service = app.state::<UpdateService>();
     // Replacing the app mid-dictation would lose the recording; mid-reading
     // it would cut the speech off.
-    if service.is_recording() || app.state::<TtsController>().is_active() {
+    if service.session_active() || app.state::<TtsController>().is_active() {
         return Err(ERR_BUSY.into());
     }
-    let update = {
-        let inner = service.lock();
+    let (update, cached) = {
+        let mut inner = service.lock();
         if !inner.status.enabled {
             return Err(ERR_DISABLED.into());
         }
         if inner.status.phase.is_working() {
             return Err(ERR_IN_PROGRESS.into());
         }
-        inner.pending.clone().ok_or_else(|| ERR_NO_UPDATE.to_string())?
-    };
-    log::info!("Installing update {}", update.version);
-    service.update(app, |inner| {
+        let update = inner
+            .pending
+            .clone()
+            .ok_or_else(|| ERR_NO_UPDATE.to_string())?;
         inner.status.phase = Phase::Downloading;
-        inner.status.downloaded = 0;
-        inner.status.total = None;
         inner.status.error = None;
-    });
+        if inner.downloaded_package.is_none() {
+            inner.status.downloaded = 0;
+            inner.status.total = None;
+        }
+        (update, inner.downloaded_package.clone())
+    };
+    service.update(app, |_| {});
 
-    let mut downloaded: u64 = 0;
-    let mut last_emit: Option<Instant> = None;
-    let result = update
-        .download_and_install(
-            |chunk, total| {
-                downloaded += chunk as u64;
-                let now = Instant::now();
-                let complete = total.is_some_and(|t| downloaded >= t);
-                if complete || last_emit.is_none_or(|t| now - t >= PROGRESS_EMIT_INTERVAL) {
-                    last_emit = Some(now);
-                    service.update(app, |inner| {
-                        inner.status.downloaded = downloaded;
-                        inner.status.total = total;
-                    });
-                }
-            },
-            || {
-                service.update(app, |inner| inner.status.phase = Phase::Installing);
-            },
-        )
-        .await;
+    let result = async {
+        let bytes = if let Some(bytes) = cached {
+            bytes
+        } else {
+            log::info!("Downloading update {}", update.version);
+            let mut downloaded: u64 = 0;
+            let mut last_emit: Option<Instant> = None;
+            let bytes = update
+                .download(
+                    |chunk, total| {
+                        downloaded += chunk as u64;
+                        let now = Instant::now();
+                        let complete = total.is_some_and(|t| downloaded >= t);
+                        if complete || last_emit.is_none_or(|t| now - t >= PROGRESS_EMIT_INTERVAL) {
+                            last_emit = Some(now);
+                            service.update(app, |inner| {
+                                inner.status.downloaded = downloaded;
+                                inner.status.total = total;
+                            });
+                        }
+                    },
+                    || {},
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+            // download() verifies the signature before returning these bytes.
+            let bytes = Arc::new(bytes);
+            service.lock().downloaded_package = Some(bytes.clone());
+            bytes
+        };
+
+        let permit = service.begin_install(|| app.state::<TtsController>().is_active())?;
+        service.update(app, |inner| inner.status.phase = Phase::Installing);
+        let app = app.clone();
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            // Keep admission closed through replacement AND restart, including
+            // Windows where the installer exits the process itself.
+            let _permit = permit;
+            log::info!("Installing update {}", update.version);
+            update
+                .install(bytes.as_slice())
+                .map_err(|err| err.to_string())?;
+            app.restart()
+        })
+        .await
+        .map_err(|err| err.to_string())?
+    }
+    .await;
 
     match result {
-        Ok(()) => {
-            log::info!("Update {} installed; restarting", update.version);
-            app.restart();
-        }
+        Ok(()) => Ok(()),
         Err(err) => {
             let message = err.to_string();
-            log::error!("Update {} failed to install: {message}", update.version);
+            log::warn!("Update installation did not complete: {message}");
             service.update(app, |inner| {
-                inner.status.phase = Phase::Error;
+                inner.status.phase = if message == ERR_BUSY {
+                    Phase::Available
+                } else {
+                    Phase::Error
+                };
                 inner.status.error = Some(message.clone());
             });
             Err(message)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn busy_after_download_keeps_installation_out_until_session_and_saves_finish() {
+        let service = UpdateService::default();
+        let active = Arc::new(AtomicBool::new(true));
+        service.attach_session_flag(active.clone());
+        assert!(service.begin_install(|| false).is_err());
+        assert!(service.work_gate.try_work().is_some());
+        active.store(false, Ordering::SeqCst);
+        let save = service.work_gate.try_work().unwrap();
+        assert!(service.begin_install(|| false).is_err());
+        drop(save);
+        assert!(service.begin_install(|| true).is_err());
+        let install = service.begin_install(|| false).unwrap();
+        assert!(service.work_gate.try_work().is_none());
+        drop(install);
+        assert!(service.work_gate.try_work().is_some());
     }
 }
 

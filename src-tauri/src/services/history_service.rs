@@ -79,11 +79,13 @@ impl HistoryService {
         llm_model_name: Option<String>,
         app_handle: Option<AppHandle>,
     ) {
-        let _ = self.persist_with_id(
+        if let Err(err) = self.persist_with_id(
             Uuid::new_v4(), final_text, original_text, ai_correction_applied,
             llm_invoked, mode, duration_ms, audio_path, asr_model_name,
             llm_model_name, app_handle,
-        );
+        ) {
+            log::error!("History not persisted: {err}");
+        }
     }
 
     pub fn persist_with_id(
@@ -129,7 +131,7 @@ impl HistoryService {
         };
 
         let behavior = Self::behavior_for_mode(&record.mode, &settings);
-        Ok(self.persist_record(record, behavior, app_handle))
+        self.persist_record(record, behavior, app_handle)
     }
 
     pub fn persist_failed_asr(
@@ -177,7 +179,10 @@ impl HistoryService {
             edited_text: None,
         };
 
-        let _ = self.persist_record(record, Self::local_failure_behavior(&settings), app_handle);
+        if let Err(err) = self.persist_record(record, Self::local_failure_behavior(&settings), app_handle)
+        {
+            log::error!("Failed ASR history not persisted: {err}");
+        }
     }
 
     pub fn get_recent_history(&self, limit: u32) -> Vec<String> {
@@ -229,10 +234,22 @@ impl HistoryService {
         record: HistoryRecord,
         behavior: PersistBehavior,
         app_handle: Option<AppHandle>,
-    ) -> tauri::async_runtime::JoinHandle<Result<bool, String>> {
+    ) -> Result<tauri::async_runtime::JoinHandle<Result<bool, String>>, String> {
+        // A session may reset the HUD before this database task runs. Keep
+        // the updater out until its text and outbox entry are safely stored.
+        let work = app_handle
+            .as_ref()
+            .map(|app| {
+                app.state::<crate::updater::UpdateService>()
+                    .work_gate()
+                    .try_work()
+                    .ok_or_else(|| "Update installation is in progress".to_string())
+            })
+            .transpose()?;
         let handle_for_emit = app_handle;
 
-        tauri::async_runtime::spawn_blocking(move || {
+        Ok(tauri::async_runtime::spawn_blocking(move || {
+            let _work = work;
             let mut record = record;
             if record.source_device_id.is_none() {
                 if let Ok(device_id) = storage::get_or_create_device_id() {
@@ -281,7 +298,7 @@ impl HistoryService {
                 let _ = app.emit("history:updated", json!({ "id": record.id }));
             }
             Ok(true)
-        })
+        }))
     }
 
     fn completed_behavior(settings: &AppSettings) -> PersistBehavior {
