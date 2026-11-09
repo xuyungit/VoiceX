@@ -77,6 +77,10 @@ export const useHistoryStore = defineStore('history', () => {
     const pageSize = 20
     let refreshQueued = false
     let searchGeneration = 0
+    let backendSearchId: number | null = null
+    // Register resets in order even when a previous IPC reply is delayed.
+    // Registration only bumps an atomic counter; it never waits for SQL.
+    let registration = Promise.resolve()
     // True from a new search until its first page arrives; the previous
     // results stay on screen meanwhile.
     const searching = ref(false)
@@ -163,15 +167,19 @@ export const useHistoryStore = defineStore('history', () => {
             // A refresh keeps the depth already loaded; a new search starts at one page.
             const limit = reset && !searching.value ? Math.max(pageSize, loaded) : pageSize
 
-            const filters = { query: searchQuery.value, recordType: recordType.value }
-            const counting = reset && hasFilters.value
-                ? invoke<number>('count_history', filters).catch(error => {
-                    console.error('Failed to count history:', error)
-                    return null
-                })
-                : null
+            if (reset || backendSearchId === null) {
+                backendSearchId = null
+                const next = registration.then(() => invoke<number>('begin_history_search'))
+                // loadHistory handles this request's error; later registrations
+                // must still be allowed to run after a failed request.
+                registration = next.then(() => undefined, () => undefined)
+                const id = await next
+                if (generation !== searchGeneration) return
+                backendSearchId = id
+            }
+            const searchId = backendSearchId
+            const filters = { searchId, query: searchQuery.value, recordType: recordType.value }
             const result = await invoke<HistoryRecord[]>('get_history', { limit, offset, ...filters })
-            const count = counting ? await counting : null
             if (generation !== searchGeneration) return
 
             const existing = new Map(records.value.map(record => [record.id, record]))
@@ -186,7 +194,7 @@ export const useHistoryStore = defineStore('history', () => {
             })
 
             if (reset) {
-                total.value = count
+                total.value = null
                 const returned = new Set(updated.map(record => record.id))
                 const kept = records.value.filter(record => pinned.has(record.id) && !returned.has(record.id))
                 extras.clear()
@@ -198,6 +206,25 @@ export const useHistoryStore = defineStore('history', () => {
 
             hasMore.value = result.length === limit
             loadError.value = null
+            // Show the page now. Counts scan every matching text version and
+            // run independently, including while the user loads another page.
+            if (reset && hasFilters.value) {
+                if (result.length < limit) {
+                    // The first page already contains every match. In
+                    // particular, an empty search must not scan twice.
+                    total.value = result.length
+                } else {
+                    void invoke<number>('count_history', filters).then(count => {
+                        if (generation === searchGeneration && searchId === backendSearchId) {
+                            total.value = count
+                        }
+                    }).catch(error => {
+                        if (generation === searchGeneration && searchId === backendSearchId) {
+                            console.error('Failed to count history:', error)
+                        }
+                    })
+                }
+            }
         } catch (error) {
             if (generation !== searchGeneration) return
             console.error('Failed to load history:', error)
@@ -241,7 +268,9 @@ export const useHistoryStore = defineStore('history', () => {
         if (total.value !== null && !extras.has(id)) total.value--
         pinned.delete(id)
         extras.delete(id)
-        await loadStats()
+        // A count may still be reading a snapshot from before the deletion.
+        // Refresh filtered results under a new search ID, cancelling that count.
+        await Promise.all([loadStats(), hasFilters.value ? loadHistory(true) : Promise.resolve()])
     }
 
     /** Saves a dictation's final text; returns once the change is stored. */

@@ -70,7 +70,7 @@ async fn run_regressions(directory: &Path) {
         .contains("无法加载识别设置"));
     controller.on_error_display_done_state(&mut state);
 
-    crate::storage::init_database(Path::new(":memory:")).unwrap();
+    crate::storage::init_database(&directory.join("history.db")).unwrap();
     let mut settings = AppSettings::default();
     settings.asr_provider_type = "openai".into();
     settings.openai_asr_mode = "batch".into();

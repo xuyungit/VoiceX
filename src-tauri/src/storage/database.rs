@@ -21,6 +21,16 @@ const MAX_RECENT_TARGET_APPS: usize = 5;
 /// Initialize the database
 pub fn init_database(path: &Path) -> Result<(), StorageError> {
     let conn = Connection::open(path).map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
+    // History searches use separate readers. WAL lets their snapshots coexist
+    // with recording/settings writes instead of holding up the writer.
+    let journal: String = conn
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
+    if journal != "wal" {
+        return Err(StorageError::ConnectionFailed(format!(
+            "Expected WAL journal mode, got {journal}"
+        )));
+    }
 
     // Create tables
     conn.execute_batch(r#"
@@ -152,6 +162,7 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     migrate_settings_blob(&conn);
 
     crate::post_edit::records::create_schema(&conn)?;
+    super::history_search::init(path)?;
     let _ = DB.set(Mutex::new(conn));
     log::info!("Database initialized at {:?}", path);
     Ok(())
@@ -469,11 +480,6 @@ pub fn search_history(
     with_db(|conn| search_history_in(conn, limit, offset, query, record_type))
 }
 
-/// How many records a search matches in all, for the result count.
-pub fn count_history(query: &str, record_type: HistoryRecordType) -> Result<u32, StorageError> {
-    with_db(|conn| count_history_in(conn, query, record_type))
-}
-
 /// The `WHERE` clause shared by a search's pages and its count, with the
 /// values it binds; its placeholders are numbered from `first_param`.
 fn history_filter(
@@ -519,7 +525,7 @@ fn history_filter(
     (sql, values)
 }
 
-fn search_history_in(
+pub(super) fn search_history_in(
     conn: &Connection,
     limit: u32,
     offset: u32,
@@ -547,7 +553,7 @@ fn search_history_in(
         .map_err(|e| StorageError::QueryFailed(e.to_string()))
 }
 
-fn count_history_in(
+pub(super) fn count_history_in(
     conn: &Connection,
     query: &str,
     record_type: HistoryRecordType,

@@ -62,6 +62,7 @@ function installFixture(usage) {
     )
   }
   let nextId = 0
+  let historySearchId = 0
   const callbacks = new Map()
   const listeners = new Map()
   const emit = (event, payload) => {
@@ -94,6 +95,7 @@ function installFixture(usage) {
           return { kind: params.get('kind') || 'accessibility', appPath: '/Applications/VoiceX.app', isAppBundle: true }
         case 'get_usage_stats': return structuredClone(usage.total)
         case 'get_local_usage_stats': return structuredClone(usage.local)
+        case 'begin_history_search': return ++historySearchId
         case 'get_history':
         case 'count_history': {
           const words = (args.query || '').toLowerCase().split(/\s+/u).filter(Boolean)

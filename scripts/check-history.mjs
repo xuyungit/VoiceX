@@ -14,6 +14,8 @@ try {
   await checkHistorySearchRequests()
   const { checkHistorySearchContinuity } = await server.ssrLoadModule('/src/stores/history.spec.ts')
   await checkHistorySearchContinuity()
+  const { checkHistoryDeferredCounts } = await server.ssrLoadModule('/src/stores/history.spec.ts')
+  await checkHistoryDeferredCounts()
   const { checkHistorySearchPreview } = await server.ssrLoadModule('/src/utils/historySearch.spec.ts')
   checkHistorySearchPreview()
   const { checkHistoryPlayback } = await server.ssrLoadModule('/src/utils/historyPlayback.spec.ts')

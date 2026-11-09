@@ -43,6 +43,7 @@ const fixture = `
   if (scenario !== 'many') history.push({ ...history[0] ?? {}, id: 'plain', timestamp: new Date(now - 7200000).toISOString(),
     text: '明天下午三点开会，记得带上季度报表。', mode: 'assistant_raw', durationMs: 3100, errorCode: 0, editedText: null,
     audioPath: null, sourceDeviceId: null, sourceDeviceName: null, originalText: null, asrModelName: 'Fixture ASR', llmModelName: null });
+  let historySearchId = 0;
   const emit = () => {
     for (const [id, listener] of listeners) if (listener.event === 'post-edit:updated' || listener.event === 'history:updated') {
       callbacks.get(listener.handler)?.({ event: listener.event, id, payload: null });
@@ -79,6 +80,7 @@ const fixture = `
         emit();
         return { editedText: row?.editedText ?? null };
       }
+      if (command === 'begin_history_search') return ++historySearchId;
       if (command === 'get_history') return history.slice(args.offset, args.offset + args.limit);
       if (command === 'get_settings') return { uiLanguage: 'zh-CN' };
       if (command === 'get_resolved_ui_locale') return 'zh-CN';

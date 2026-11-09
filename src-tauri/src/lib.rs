@@ -401,6 +401,7 @@ pub fn run() {
             commands::settings::set_soniox_debug_fault_mode,
             commands::settings::clear_soniox_debug_overrides,
             commands::history::get_history,
+            commands::history::begin_history_search,
             commands::history::delete_history_record,
             commands::history::get_usage_stats,
             commands::history::get_local_usage_stats,
