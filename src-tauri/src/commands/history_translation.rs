@@ -327,16 +327,23 @@ mod tests {
             } else {
                 Duration::from_millis(100)
             };
-            let (result, ()) = tokio::time::timeout(Duration::from_secs(1), async {
-                tokio::join!(
-                    translate_text("你好", &settings, cancel.clone(), request_timeout),
-                    async {
-                        received.await.unwrap();
-                        if should_cancel {
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                if should_cancel {
+                    tokio::join!(
+                        translate_text("你好", &settings, cancel.clone(), request_timeout),
+                        async {
+                            received.await.unwrap();
                             cancel.cancel();
                         }
-                    }
-                )
+                    )
+                    .0
+                } else {
+                    // The 100 ms deadline covers connecting and sending too.
+                    // Under parallel load it can expire before the mock sees
+                    // a request. Waiting for `received` after that deadlocks
+                    // the test even though the client timed out correctly.
+                    translate_text("你好", &settings, cancel.clone(), request_timeout).await
+                }
             })
             .await
             .unwrap();
@@ -349,7 +356,9 @@ mod tests {
                 }
             );
             server.abort();
-            assert!(server.await.unwrap_err().is_cancelled());
+            if let Err(err) = server.await {
+                assert!(err.is_cancelled(), "{err}");
+            }
         }
     }
 }

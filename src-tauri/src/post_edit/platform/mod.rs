@@ -253,7 +253,12 @@ impl ObserverWorker {
                         };
                         log::debug!("Post-edit native operation: generation={}, operation={}, elapsed_us={}, outcome={:?}", id, operation, started.elapsed().as_micros(), result.as_ref().map(|_| ()).map_err(|e| *e));
                         if current.load(Ordering::SeqCst) == id {
+                            // Receiving the reply lets the caller immediately
+                            // request another read. Publish availability first;
+                            // otherwise that read can spuriously see WorkerBusy.
+                            worker_busy.store(false, Ordering::SeqCst);
                             let _ = reply.try_send(result);
+                            continue;
                         } else {
                             reader.clear();
                         }
@@ -454,6 +459,27 @@ mod tests {
         }
         fn clear(&mut self) {
             let _ = self.cleared.send(());
+        }
+    }
+
+    #[test]
+    fn completed_reads_release_the_worker_before_replying() {
+        let (started, _started_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let (cleared, _cleared_rx) = mpsc::channel();
+        let worker = ObserverWorker::start_with(move || BlockingReader {
+            started,
+            release: release_rx,
+            cleared,
+        })
+        .unwrap();
+        for _ in 0..1_000 {
+            release.send(()).unwrap();
+            worker.capture(0, 1, Duration::from_secs(1)).unwrap();
+            assert!(
+                !worker.busy.load(Ordering::SeqCst),
+                "reply published before worker became available"
+            );
         }
     }
 

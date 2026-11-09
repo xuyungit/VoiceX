@@ -610,6 +610,10 @@ mod tests {
                         Err(error) => panic!("{error}"),
                     }
                 };
+                // Accepted sockets can inherit O_NONBLOCK on macOS. The
+                // fixture reads headers synchronously, so it must explicitly
+                // restore blocking mode before the client starts sending.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
