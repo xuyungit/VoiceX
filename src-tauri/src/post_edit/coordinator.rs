@@ -1071,6 +1071,9 @@ mod tests {
         }
     }
     fn scripted_run(steps: Vec<Step>) -> Option<super::super::records::Record> {
+        scripted_run_for("支座返力", steps)
+    }
+    fn scripted_run_for(injected: &str, steps: Vec<Step>) -> Option<super::super::records::Record> {
         let clock = VirtualClock(Arc::new(Mutex::new(Instant::now())));
         let start = clock.now();
         let stop = Arc::new(Mutex::new(None));
@@ -1092,7 +1095,7 @@ mod tests {
             rx,
             stop,
             receipt(start),
-            "支座返力".into(),
+            injected.into(),
             [
                 Duration::from_secs(1),
                 Duration::from_secs(2),
@@ -1313,6 +1316,37 @@ mod tests {
             assert_eq!(record.substitutions, Some(1));
             assert_eq!(record.end_reason, "field_cleared");
             assert!(record.stable && !record.complete);
+        }
+        diagnostics::set_enabled(false);
+    }
+
+    #[test]
+    fn composer_hints_never_replace_the_dictation_or_its_confirmed_correction() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        let original = "按照你的审核意见，我们又更新了一版补丁，你再来 review 一下。";
+        let corrected = "根据你的审核意见，我们又更新了一版补丁，你再来 review 一下。";
+        let hint = "\n今天帮你做些什么？@ 添加上下文，/调用技能与指令";
+        for changed in [false, true] {
+            let text = if changed { corrected } else { original };
+            let record = scripted_run_for(
+                original,
+                vec![
+                    Step::Text(original),
+                    Step::Text(text),
+                    Step::TextThenNotify(text),
+                    Step::Text(hint),
+                ],
+            );
+            if changed {
+                let record = record.expect("retain the correction made before sending");
+                assert_eq!(record.edited_text, corrected);
+                assert!(record.stable && !record.complete && record.has_newer_unconfirmed_input);
+                assert_eq!(record.end_reason, "range_ambiguous");
+            } else {
+                assert!(record.is_none(), "hints must not create an edit record");
+            }
+            assert_eq!(diagnostics::snapshot().reason, Reason::RangeAmbiguous);
         }
         diagnostics::set_enabled(false);
     }

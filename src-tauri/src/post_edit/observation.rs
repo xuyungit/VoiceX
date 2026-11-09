@@ -6,6 +6,7 @@ use super::range::{RangeError, RangeTracker, Snapshot};
 
 const STABLE_FOR: Duration = Duration::from_millis(800);
 const MAX_READS: usize = 90;
+const MIN_REPLACED_GRAPHEMES: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndReason {
@@ -126,6 +127,21 @@ impl Observation {
                 return Err(SampleError::Range(error));
             }
         };
+        if self.last != slice {
+            // Some composers include non-editable hints in their accessible
+            // text after sending. Stability alone cannot attribute a wholesale
+            // replacement to the user. Keep short word corrections and gradual
+            // edits, but retain earlier evidence when most text changes at once.
+            let edits = diff::analyze(&self.last, slice).map_err(|_| {
+                self.unresolved_input();
+                SampleError::Range(RangeError::BudgetExceeded)
+            })?;
+            let replaced = edits.deletions + edits.substitutions;
+            if replaced >= MIN_REPLACED_GRAPHEMES && replaced > edits.baseline_graphemes / 2 {
+                self.unresolved_input();
+                return Err(SampleError::Range(RangeError::Ambiguous));
+            }
+        }
         if self.last != slice || self.unresolved {
             self.stable_since = read_at;
         }
@@ -322,6 +338,87 @@ mod tests {
             RangeTracker::from_before_after(&before, &after, "返利").unwrap(),
             now,
         )
+    }
+
+    fn whole_field(now: Instant, text: &str) -> Observation {
+        Observation::new(
+            5,
+            RangeTracker::from_before_after(&snapshot(""), &snapshot(text), text).unwrap(),
+            now,
+        )
+    }
+
+    #[test]
+    fn stable_wholesale_replacements_stay_ambiguous_and_allow_recovery() {
+        let now = Instant::now();
+        let mut o = whole_field(now, "请检查这段听写原文");
+        for seconds in [1, 2] {
+            o.sample(
+                5,
+                &snapshot("请检查这段听写正文"),
+                now + Duration::from_secs(seconds),
+            )
+            .unwrap();
+        }
+        for seconds in [3, 4, 5] {
+            assert_eq!(
+                o.sample(
+                    5,
+                    &snapshot("输入你的问题"),
+                    now + Duration::from_secs(seconds)
+                ),
+                Err(SampleError::Range(RangeError::Ambiguous))
+            );
+        }
+        let result = o.finish(EndReason::Timeout);
+        assert_eq!(result.status, ObservationStatus::Partial);
+        assert!(result.has_newer_unconfirmed_input);
+        assert_eq!(result.confirmed.unwrap().text, "请检查这段听写正文");
+        // A rejected reset must neither become the comparison text nor prevent
+        // a later, attributable correction from being confirmed.
+        for seconds in [6, 7] {
+            o.sample(
+                5,
+                &snapshot("请检查这段听写内容"),
+                now + Duration::from_secs(seconds),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            o.finish(EndReason::Timeout).confirmed.unwrap().text,
+            "请检查这段听写内容"
+        );
+        assert!(o.is_stable());
+    }
+
+    #[test]
+    fn short_corrections_and_gradual_rewrites_keep_their_continuity() {
+        let now = Instant::now();
+        let mut o = whole_field(now, "abcdefgh");
+        for (index, text) in ["ABcdefgh", "ABCDefgh", "ABCDEFgh", "ABCDEFGH", "ABCDEFGH"]
+            .into_iter()
+            .enumerate()
+        {
+            o.sample(
+                5,
+                &snapshot(text),
+                now + Duration::from_secs(index as u64 + 1),
+            )
+            .unwrap();
+        }
+        let result = o.finish(EndReason::Timeout);
+        assert_eq!(result.status, ObservationStatus::ObservedEdited);
+        assert_eq!(result.confirmed.unwrap().text, "ABCDEFGH");
+        // Even a complete replacement of a short word can be a correction.
+        let mut o = whole_field(now, "返利");
+        for seconds in [1, 2] {
+            o.sample(5, &snapshot("反力"), now + Duration::from_secs(seconds))
+                .unwrap();
+        }
+        assert_eq!(
+            o.finish(EndReason::Timeout).status,
+            ObservationStatus::ObservedEdited
+        );
     }
 
     #[test]
