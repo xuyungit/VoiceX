@@ -38,8 +38,8 @@ const sourceOptions = computed(() => [
 ])
 const moreOptions = computed(() => [
   { key: 'redownload', label: t('asr.managedRedownload'), disabled: anyDownload.value || busy.value },
-  { key: 'clear', label: t('asr.managedClearDownload'), disabled: anyDownload.value || busy.value || !model.value?.downloadedBytes },
-  { key: 'delete', label: t('asr.managedDelete'), disabled: anyDownload.value || busy.value || model.value?.inUse || !model.value?.diskBytes }
+  { key: 'clear', label: t('asr.managedClearDownload'), disabled: downloading.value || busy.value || !model.value?.downloadedBytes },
+  { key: 'delete', label: t('asr.managedDelete'), disabled: downloading.value || busy.value || model.value?.inUse || !model.value?.diskBytes }
 ])
 const qwenLocalLanguage = computed({
   get: () => settingsStore.settings.qwenLocalLanguage,
@@ -60,7 +60,8 @@ function message(reason: unknown) {
   const known: Record<string, string> = {
     model_in_use: 'asr.managedInUse', download_in_progress: 'asr.managedOtherDownload',
     unsupported_platform: 'asr.managedUnsupported',
-    model_not_installed: 'asr.managedNotInstalled', insufficient_space: 'asr.managedInsufficientSpace'
+    model_not_installed: 'asr.managedNotInstalled', insufficient_space: 'asr.managedInsufficientSpace',
+    update_installing: 'about.updateInstalling'
   }
   return known[code] ? t(known[code]) : code
 }

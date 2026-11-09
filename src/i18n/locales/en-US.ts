@@ -863,7 +863,7 @@ const enUS = {
     managedEngineHelp: 'Uses the bundled qwen-asr automatically; no path setting is needed. Updated with VoiceX. Downloaded models are kept.',
     managedPhase: {
       missing: 'Not downloaded', ready: 'Installed', downloading: 'Downloading', pausing: 'Pausing',
-      paused: 'Paused; ready to resume', verifying: 'Verifying downloaded files', waitingForIdle: 'Files ready; waiting for recognition to finish', error: 'Download or file check failed'
+      paused: 'Paused; ready to resume', verifying: 'Verifying downloaded files', waitingForIdle: 'Files ready; waiting for the app to be idle', error: 'Download or file check failed'
     },
     qwenLocalLanguage: 'Force language',
     qwenLocalLanguageNote: 'Strongly recommended to pin this. In testing, leaving it on auto made the model switch to English mid-utterance (transcribing a Chinese sentence as an English one) — far worse for an input method than a few wrong characters.',

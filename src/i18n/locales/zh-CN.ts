@@ -863,7 +863,7 @@ const zhCN = {
     managedEngineHelp: '自动使用应用自带的 qwen-asr，无需配置路径。引擎随 VoiceX 更新，已下载模型会保留。',
     managedPhase: {
       missing: '未下载', ready: '已安装', downloading: '正在下载', pausing: '正在暂停',
-      paused: '已暂停，可继续下载', verifying: '正在校验已下载文件', waitingForIdle: '文件已就绪，正在等待识别结束', error: '下载或文件检查失败'
+      paused: '已暂停，可继续下载', verifying: '正在校验已下载文件', waitingForIdle: '文件已就绪，等待应用空闲', error: '下载或文件检查失败'
     },
     qwenLocalLanguage: '强制语种',
     qwenLocalLanguageNote: '强烈建议固定为中文。实测不指定语种时，模型会在中途整句切换成英文输出（例如把「这次一共处理了一千两百三十条记录」识别成英文句子）——这对输入法比识别错几个字严重得多。',

@@ -69,6 +69,18 @@ pub fn supported() -> bool {
     cfg!(all(target_os = "macos", target_arch = "aarch64"))
 }
 
+pub fn recognition_error_message(error: &str) -> String {
+    match error {
+        "unsupported_platform" => "本地识别仅支持 Apple Silicon Mac，请选择其他识别服务。 / Local recognition requires an Apple Silicon Mac; select another provider.".into(),
+        "bundled_engine_missing" if cfg!(debug_assertions) => "开发引擎缺失，请用 pnpm tauri dev 重新启动。 / The development engine is missing; restart with pnpm tauri dev.".into(),
+        "bundled_engine_missing" => "内置识别引擎缺失，请重新安装完整的 VoiceX。 / The bundled engine is missing; reinstall the complete VoiceX app.".into(),
+        "model_in_use" => "本地模型正在切换，请稍后重试。 / The local model is being replaced; try again shortly.".into(),
+        "model_not_installed" => "本地模型尚未安装，请在 ASR 设置中下载模型。 / Download the local model in ASR settings.".into(),
+        "unknown_model" => "请选择有效的本地模型。 / Select an available local model.".into(),
+        _ => format!("本地模型检查失败 / Local model check failed: {error}"),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum Source {
@@ -135,10 +147,22 @@ struct Service {
     root: PathBuf,
     engine: PathBuf,
     app: Option<AppHandle>,
+    work_gate: crate::work_gate::WorkGate,
     inner: Mutex<Inner>,
+}
+#[derive(Clone, Default)]
+struct ModelFiles {
+    installed: bool,
+    installed_bytes: u64,
+    downloaded_bytes: u64,
+    partial_bytes: u64,
+    error: Option<String>,
 }
 #[derive(Default)]
 struct Inner {
+    initialized: bool,
+    engine_available: bool,
+    files: HashMap<String, ModelFiles>,
     job: Option<Job>,
     states: HashMap<String, (Phase, Option<String>, u64)>,
     leases: HashMap<String, usize>,
@@ -158,6 +182,10 @@ pub struct ModelLease {
 impl Drop for ModelLease {
     fn drop(&mut self) {
         let mut state = self.manager.0.inner.lock().unwrap();
+        if let Err(error) = self.manager.refresh_model(&mut state, &self.id) {
+            log::warn!("Cannot refresh local model after recognition: {error}");
+            state.files.entry(self.id.clone()).or_default().error = Some(error);
+        }
         *state.leases.get_mut(&self.id).expect("active model lease") -= 1;
         drop(state);
         // Inference may have created a large cache beside the model weights.
@@ -225,6 +253,44 @@ fn available_space(_: &Path) -> Result<u64, String> {
 
 impl ManagedModels {
     pub fn open(root: PathBuf, engine: PathBuf) -> Result<Self, String> {
+        let manager = Self::new(root, engine);
+        manager.refresh_storage()?;
+        Ok(manager)
+    }
+
+    // App setup only constructs the service. Optional local-ASR storage is
+    // opened on first use, so a broken model folder cannot block cloud ASR.
+    fn new(root: PathBuf, engine: PathBuf) -> Self {
+        Self(Arc::new(Service {
+            root,
+            engine,
+            app: None,
+            work_gate: Default::default(),
+            inner: Mutex::new(Inner::default()),
+        }))
+    }
+
+    fn refresh_storage(&self) -> Result<(), String> {
+        let mut state = self.0.inner.lock().unwrap();
+        self.refresh_locked(&mut state)
+    }
+
+    fn refresh_locked(&self, state: &mut Inner) -> Result<(), String> {
+        if !state.initialized {
+            self.prepare_storage(state)?;
+        }
+        let mut files = HashMap::new();
+        for spec in &catalog().models {
+            files.insert(spec.id.clone(), self.read_model_files(spec)?);
+        }
+        state.files = files;
+        state.engine_available = supported() && self.0.engine.is_file();
+        state.initialized = true;
+        Ok(())
+    }
+
+    fn prepare_storage(&self, state: &mut Inner) -> Result<(), String> {
+        let root = &self.0.root;
         fs::create_dir_all(root.join(".downloads")).map_err(|e| e.to_string())?;
         // Recover an interrupted directory replacement before admitting reads.
         for spec in &catalog().models {
@@ -237,22 +303,14 @@ impl ManagedModels {
                 }
             }
         }
-        let source = match fs::read(root.join("source.json")) {
+        state.source = match fs::read(root.join("source.json")) {
             Ok(data) => {
                 serde_json::from_slice(&data).map_err(|e| format!("Download preference: {e}"))?
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Source::default(),
             Err(e) => return Err(e.to_string()),
         };
-        Ok(Self(Arc::new(Service {
-            root,
-            engine,
-            app: None,
-            inner: Mutex::new(Inner {
-                source,
-                ..Inner::default()
-            }),
-        })))
+        Ok(())
     }
 
     pub fn init(app: &AppHandle) -> Result<(), String> {
@@ -265,14 +323,16 @@ impl ManagedModels {
                 .ok_or("No executable directory")?
                 .join("qwen-asr")
         };
-        let mut manager = Self::open(
+        let mut manager = Self::new(
             app.path()
                 .app_data_dir()
                 .map_err(|e| e.to_string())?
                 .join("models/qwen3-asr"),
             engine,
-        )?;
-        Arc::get_mut(&mut manager.0).expect("new model service").app = Some(app.clone());
+        );
+        let service = Arc::get_mut(&mut manager.0).expect("new model service");
+        service.work_gate = app.state::<crate::updater::UpdateService>().work_gate();
+        service.app = Some(app.clone());
         GLOBAL
             .set(manager.clone())
             .map_err(|_| "Local models already initialized")?;
@@ -324,77 +384,104 @@ impl ManagedModels {
         }
         Ok(true)
     }
+    fn read_model_files(&self, spec: &ModelSpec) -> Result<ModelFiles, String> {
+        let (installed, error) = match self.installed(spec) {
+            Ok(value) => (value, None),
+            Err(error) => (false, Some(error)),
+        };
+        let mut downloaded_bytes = 0;
+        for file in &spec.files {
+            downloaded_bytes +=
+                metadata_len(&self.staging(&spec.id).join(&file.name))?.min(file.bytes);
+        }
+        Ok(ModelFiles {
+            installed,
+            error,
+            downloaded_bytes,
+            installed_bytes: disk_bytes(&self.directory(&spec.id))?,
+            partial_bytes: disk_bytes(&self.staging(&spec.id))?,
+        })
+    }
+
+    fn refresh_model(&self, state: &mut Inner, id: &str) -> Result<(), String> {
+        state
+            .files
+            .insert(id.to_owned(), self.read_model_files(model(id)?)?);
+        Ok(())
+    }
+
     pub fn status(&self) -> Result<Status, String> {
+        // Unsupported platforms expose the platform notice without touching
+        // a model directory. Explicit UI refreshes re-read disk metadata.
+        if supported() {
+            self.refresh_storage()?;
+        }
+        Ok(self.snapshot())
+    }
+
+    fn snapshot(&self) -> Status {
         let state = self.0.inner.lock().unwrap();
         let mut models = Vec::new();
         for spec in &catalog().models {
-            let (installed, invalid) = match self.installed(spec) {
-                Ok(value) => (value, None),
-                Err(e) => (false, Some(e)),
-            };
-            let mut downloaded = 0;
-            for file in &spec.files {
-                downloaded +=
-                    metadata_len(&self.staging(&spec.id).join(&file.name))?.min(file.bytes);
-            }
-            let default_phase = if invalid.is_some() {
+            let files = state.files.get(&spec.id).cloned().unwrap_or_default();
+            let default_phase = if files.error.is_some() {
                 Phase::Error
-            } else if downloaded > 0 {
+            } else if files.downloaded_bytes > 0 {
                 Phase::Paused
-            } else if installed {
+            } else if files.installed {
                 Phase::Ready
             } else {
                 Phase::Missing
             };
-            let (phase, error, speed) =
+            let (mut phase, error, speed) =
                 state
                     .states
                     .get(&spec.id)
                     .cloned()
-                    .unwrap_or((default_phase, invalid, 0));
+                    .unwrap_or((default_phase, None, 0));
+            if files.error.is_some() && !state.job.as_ref().is_some_and(|job| job.id == spec.id) {
+                phase = Phase::Error;
+            }
             models.push(ModelStatus {
                 id: spec.id.clone(),
                 label: spec.label.clone(),
                 phase,
-                installed,
+                installed: files.installed,
                 download_bytes: spec.files.iter().map(|f| f.bytes).sum(),
-                downloaded_bytes: downloaded,
-                disk_bytes: disk_bytes(&self.directory(&spec.id))?
-                    + disk_bytes(&self.staging(&spec.id))?,
+                downloaded_bytes: files.downloaded_bytes,
+                disk_bytes: files.installed_bytes + files.partial_bytes,
                 speed_bytes_per_second: speed,
                 in_use: state.leases.get(&spec.id).copied().unwrap_or(0) > 0,
-                error,
+                error: error.or(files.error),
             });
         }
-        Ok(Status {
+        Status {
             supported: supported(),
             platform: std::env::consts::OS,
             architecture: std::env::consts::ARCH,
-            engine_available: supported() && self.0.engine.is_file(),
+            engine_available: state.engine_available,
             engine_version: catalog().engine.version.clone(),
             source: state.source,
             models,
-        })
+        }
     }
     fn emit(&self) {
         if let Some(app) = &self.0.app {
-            match self.status() {
-                Ok(status) => {
-                    if let Err(e) = app.emit(EVENT, status) {
-                        log::warn!("Model status event failed: {e}");
-                    }
-                }
-                Err(e) => log::error!("Cannot read local model status: {e}"),
+            if let Err(e) = app.emit(EVENT, self.snapshot()) {
+                log::warn!("Model status event failed: {e}");
             }
         }
     }
-    fn progress(&self, id: &str, phase: Phase, speed: u64) {
-        self.0
-            .inner
-            .lock()
-            .unwrap()
-            .states
-            .insert(id.into(), (phase, None, speed));
+    fn progress(&self, id: &str, phase: Phase, speed: u64, downloaded: u64) {
+        let mut state = self.0.inner.lock().unwrap();
+        let files = state.files.entry(id.into()).or_default();
+        // Hash verification reads existing bytes again; it must not lower
+        // progress or count those bytes twice. No filesystem work per tick.
+        let added = downloaded.saturating_sub(files.downloaded_bytes);
+        files.downloaded_bytes += added;
+        files.partial_bytes += added;
+        state.states.insert(id.into(), (phase, None, speed));
+        drop(state);
         self.emit();
     }
     pub async fn start(&self, id: &str, source: Source, restart: bool) -> Result<(), String> {
@@ -404,6 +491,9 @@ impl ManagedModels {
         let done = CancellationToken::new();
         {
             let mut state = self.0.inner.lock().unwrap();
+            if !state.initialized {
+                self.refresh_locked(&mut state)?;
+            }
             if state.job.is_some() {
                 return Err("download_in_progress".into());
             }
@@ -421,6 +511,7 @@ impl ManagedModels {
                 remove_directory(&self.staging(id))?;
             }
             fs::create_dir_all(self.staging(id)).map_err(|e| e.to_string())?;
+            self.refresh_model(&mut state, id)?;
             write_json(&self.0.root.join("source.json"), &source)?;
             state.source = source;
             state
@@ -438,6 +529,7 @@ impl ManagedModels {
             let result = manager.download(spec, source, &cancel).await;
             {
                 let mut state = manager.0.inner.lock().unwrap();
+                let result = manager.refresh_locked(&mut state).and(result);
                 state.job = None;
                 let status = match result {
                     Ok(()) => (Phase::Ready, None, 0),
@@ -460,7 +552,7 @@ impl ManagedModels {
             let mut state = self.0.inner.lock().unwrap();
             let Some(job) = &state.job else { return Ok(()) };
             if job.id != id {
-                return Err("download_in_progress".into());
+                return Ok(());
             }
             job.cancel.cancel();
             let done = job.done.clone();
@@ -477,28 +569,22 @@ impl ManagedModels {
         }
         model(id)?;
         let mut state = self.0.inner.lock().unwrap();
+        if !state.initialized {
+            self.refresh_locked(&mut state)?;
+        }
         if state.job.as_ref().is_some_and(|job| job.id == id) {
             return Err("download_in_progress".into());
         }
         if !partial_only && state.leases.get(id).copied().unwrap_or(0) > 0 {
             return Err("model_in_use".into());
         }
-        let _work = self
-            .0
-            .app
-            .as_ref()
-            .map(|app| {
-                app.state::<crate::updater::UpdateService>()
-                    .work_gate()
-                    .try_work()
-                    .ok_or("update_installing")
-            })
-            .transpose()?;
+        let _work = self.0.work_gate.try_work().ok_or("update_installing")?;
         if !partial_only {
             remove_directory(&self.directory(id))?;
         }
         remove_directory(&self.staging(id))?;
         state.states.remove(id);
+        self.refresh_model(&mut state, id)?;
         drop(state);
         self.emit();
         Ok(())
@@ -506,6 +592,9 @@ impl ManagedModels {
     pub fn lease(&self, id: &str) -> Result<ModelLease, String> {
         let spec = model(id)?;
         let mut state = self.0.inner.lock().unwrap();
+        if !state.initialized {
+            self.refresh_locked(&mut state)?;
+        }
         if matches!(
             state.states.get(id).map(|s| s.0),
             Some(Phase::WaitingForIdle)
@@ -515,6 +604,9 @@ impl ManagedModels {
         if !self.installed(spec)? {
             return Err("model_not_installed".into());
         }
+        let files = state.files.entry(id.into()).or_default();
+        files.installed = true;
+        files.error = None;
         *state.leases.entry(id.into()).or_default() += 1;
         drop(state);
         self.emit();
@@ -523,6 +615,31 @@ impl ManagedModels {
             id: id.into(),
             path: self.directory(id),
         })
+    }
+
+    /// Preflight uses cached metadata without taking an inference lease or
+    /// emitting UI events. The actual lease revalidates the selected files.
+    pub fn check_ready(&self, id: &str) -> Result<(), String> {
+        self.engine()?;
+        model(id)?;
+        let mut state = self.0.inner.lock().unwrap();
+        if !state.initialized {
+            self.refresh_locked(&mut state)?;
+        }
+        if matches!(
+            state.states.get(id).map(|s| s.0),
+            Some(Phase::WaitingForIdle)
+        ) {
+            return Err("model_in_use".into());
+        }
+        let files = state.files.get(id).expect("initialized model metadata");
+        if let Some(error) = &files.error {
+            return Err(error.clone());
+        }
+        if !files.installed {
+            return Err("model_not_installed".into());
+        }
+        Ok(())
     }
     async fn download(
         &self,
@@ -536,9 +653,11 @@ impl ManagedModels {
             .read_timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| e.to_string())?;
+        let mut completed = 0;
         for file in &spec.files {
             let mut last = Instant::now();
-            let mut last_bytes = metadata_len(&self.staging(&spec.id).join(&file.name))?;
+            let offset = metadata_len(&self.staging(&spec.id).join(&file.name))?;
+            let mut last_bytes = offset;
             super::model_download::download_file(
                 &client,
                 &source.url(spec, file),
@@ -561,6 +680,7 @@ impl ManagedModels {
                                 Phase::Downloading
                             },
                             speed,
+                            completed + bytes.max(offset),
                         );
                         last = Instant::now();
                         last_bytes = bytes;
@@ -568,29 +688,37 @@ impl ManagedModels {
                 },
             )
             .await?;
+            completed += file.bytes;
         }
-        self.progress(&spec.id, Phase::WaitingForIdle, 0);
+        self.publish_when_idle(spec, cancel).await
+    }
+
+    async fn publish_when_idle(
+        &self,
+        spec: &ModelSpec,
+        cancel: &CancellationToken,
+    ) -> Result<(), String> {
+        self.progress(
+            &spec.id,
+            Phase::WaitingForIdle,
+            0,
+            spec.files.iter().map(|f| f.bytes).sum(),
+        );
         loop {
             if cancel.is_cancelled() {
                 return Err("cancelled".into());
             }
             {
-                let state = self.0.inner.lock().unwrap();
+                let mut state = self.0.inner.lock().unwrap();
                 if state.leases.get(&spec.id).copied().unwrap_or(0) == 0 {
-                    // Keep the app updater out of the short directory transaction.
-                    let _work = self
-                        .0
-                        .app
-                        .as_ref()
-                        .map(|app| {
-                            app.state::<crate::updater::UpdateService>()
-                                .work_gate()
-                                .try_work()
-                                .ok_or("update_installing")
-                        })
-                        .transpose()?;
-                    self.publish(spec)?;
-                    return Ok(());
+                    // If installation fails, its permit is released and this
+                    // loop publishes the already verified files without hashing
+                    // or downloading them again. Success restarts the process.
+                    if let Some(_work) = self.0.work_gate.try_work() {
+                        self.publish(spec)?;
+                        self.refresh_model(&mut state, &spec.id)?;
+                        return Ok(());
+                    }
                 }
             }
             tokio::select! { _ = cancel.cancelled() => return Err("cancelled".into()), _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
@@ -622,6 +750,168 @@ impl ManagedModels {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constructing_the_app_service_does_not_open_broken_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("models");
+        fs::write(&root, b"not a directory").unwrap();
+        let service = ManagedModels::new(root.clone(), directory.path().join("engine"));
+        assert!(!service.0.inner.lock().unwrap().initialized);
+        assert!(service.refresh_storage().is_err());
+        fs::remove_file(&root).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("source.json"), b"invalid json").unwrap();
+        assert!(service
+            .refresh_storage()
+            .unwrap_err()
+            .contains("Download preference"));
+        fs::write(root.join("source.json"), b"\"huggingface\"").unwrap();
+        service.refresh_storage().unwrap();
+        assert_eq!(service.snapshot().source, Source::Huggingface);
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[test]
+    fn unsupported_platform_status_never_creates_model_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("models");
+        let service = ManagedModels::new(root.clone(), directory.path().join("engine"));
+        assert!(!service.status().unwrap().supported);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn progress_and_event_snapshots_do_not_need_access_to_model_folders() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("models");
+        let service = ManagedModels::open(root.clone(), directory.path().join("engine")).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        fs::write(&root, b"filesystem access would fail").unwrap();
+        let id = &catalog().models[0].id;
+        service.progress(id, Phase::Downloading, 100, 1000);
+        service.progress(id, Phase::Verifying, 0, 500);
+        let status = service.snapshot();
+        assert_eq!(status.models[0].downloaded_bytes, 1000);
+        assert_eq!(status.models[0].disk_bytes, 1000);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn preflight_is_cached_but_the_actual_lease_revalidates_files() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = root.path().join("engine");
+        fs::write(&engine, b"engine").unwrap();
+        let service = ManagedModels::open(root.path().into(), engine).unwrap();
+        let spec = &catalog().models[0];
+        staged_files(&service, spec);
+        service.publish(spec).unwrap();
+        service.status().unwrap();
+        fs::remove_file(service.directory(&spec.id).join("voicex-model.json")).unwrap();
+        service.check_ready(&spec.id).unwrap();
+        assert!(service.0.inner.lock().unwrap().leases.is_empty());
+        assert_eq!(
+            service.lease(&spec.id).err().unwrap(),
+            "model_not_installed"
+        );
+        service
+            .0
+            .inner
+            .lock()
+            .unwrap()
+            .states
+            .insert(spec.id.clone(), (Phase::WaitingForIdle, None, 0));
+        let error = service.check_ready(&spec.id).unwrap_err();
+        assert_eq!(error, "model_in_use");
+        assert!(!recognition_error_message(&error).contains("Download"));
+        assert!(recognition_error_message("permission denied").contains("permission denied"));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn deleting_another_model_leaves_the_current_download_running() {
+        let root = tempfile::tempdir().unwrap();
+        let service = ManagedModels::open(root.path().into(), root.path().join("engine")).unwrap();
+        let a = &catalog().models[0];
+        let b = &catalog().models[1];
+        staged_files(&service, a);
+        service.publish(a).unwrap();
+        for spec in [a, b] {
+            fs::create_dir_all(service.staging(&spec.id)).unwrap();
+            fs::write(service.staging(&spec.id).join("config.json"), b"partial").unwrap();
+        }
+        let cancel = CancellationToken::new();
+        service.0.inner.lock().unwrap().job = Some(Job {
+            id: b.id.clone(),
+            cancel: cancel.clone(),
+            done: CancellationToken::new(),
+        });
+        service.pause(&a.id).await.unwrap();
+        service.remove(&a.id, true).unwrap();
+        assert!(service.installed(a).unwrap());
+        service.remove(&a.id, false).unwrap();
+        assert!(!service.directory(&a.id).exists());
+        assert!(!cancel.is_cancelled());
+        assert_eq!(
+            fs::read(service.staging(&b.id).join("config.json")).unwrap(),
+            b"partial"
+        );
+        assert_eq!(
+            service.0.inner.lock().unwrap().job.as_ref().unwrap().id,
+            b.id
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_publication_waits_for_installation_and_can_be_cancelled() {
+        for should_cancel in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let service =
+                ManagedModels::open(root.path().into(), root.path().join("engine")).unwrap();
+            let spec = &catalog().models[0];
+            // Sparse weights are deliberately not checksum-valid: this tests
+            // publishing already-verified files, with no second hash/download.
+            staged_files(&service, spec);
+            let install = service.0.work_gate.try_install().unwrap();
+            let cancel = CancellationToken::new();
+            let task_service = service.clone();
+            let task_cancel = cancel.clone();
+            let task =
+                tokio::spawn(
+                    async move { task_service.publish_when_idle(spec, &task_cancel).await },
+                );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while service.snapshot().models[0].phase != Phase::WaitingForIdle {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!task.is_finished());
+            assert!(service.staging(&spec.id).exists());
+            if should_cancel {
+                cancel.cancel();
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(2), task)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap_err(),
+                    "cancelled"
+                );
+                assert!(service.staging(&spec.id).exists());
+            } else {
+                drop(install);
+                tokio::time::timeout(Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(service.installed(spec).unwrap());
+                assert!(!service.staging(&spec.id).exists());
+            }
+        }
+    }
     #[test]
     fn catalog_pins_all_files_and_both_sources_to_revisions() {
         for spec in &catalog().models {

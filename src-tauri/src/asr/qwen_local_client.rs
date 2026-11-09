@@ -45,8 +45,13 @@ impl QwenLocalAsrClient {
     pub async fn transcribe_file(&self, path: &Path) -> Result<String, AsrError> {
         let models =
             super::managed_models::ManagedModels::global().map_err(AsrError::ConnectionFailed)?;
-        let program = models.engine().map_err(AsrError::ConnectionFailed)?;
-        let lease = models.lease(&self.config.qwen_local_model).map_err(|e| AsrError::ConnectionFailed(format!("本地模型不可用，请在 ASR 设置中下载或重新下载模型 / Download the local model in ASR settings: {e}")))?;
+        let local_error = |error: String| {
+            AsrError::ConnectionFailed(super::managed_models::recognition_error_message(&error))
+        };
+        let program = models.engine().map_err(local_error)?;
+        let lease = models
+            .lease(&self.config.qwen_local_model)
+            .map_err(local_error)?;
         let model_dir = &lease.path;
 
         // VoiceX records OGG/Opus, and the probe ships an .ogg sample, but the

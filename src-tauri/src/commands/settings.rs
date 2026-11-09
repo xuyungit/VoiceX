@@ -1432,12 +1432,6 @@ pub fn save_settings(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn list_local_qwen_models(configured: String) -> Result<Vec<crate::asr::local_models::LocalModel>, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::asr::local_models::discover(&configured))
-        .await.map_err(|e| e.to_string())?
-}
-
 /// List IDs visible to the configured account. The Models API does not report
 /// which endpoint each ID supports, so callers must not present this as a list
 /// of verified chat models.

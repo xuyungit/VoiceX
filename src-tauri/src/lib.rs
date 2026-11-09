@@ -392,7 +392,6 @@ pub fn run() {
             commands::settings::get_resolved_ui_locale,
             commands::settings::save_settings,
             commands::settings::probe_local_asr,
-            commands::settings::list_local_qwen_models,
             commands::local_models::get_local_model_status,
             commands::local_models::download_local_model,
             commands::local_models::pause_local_model_download,
