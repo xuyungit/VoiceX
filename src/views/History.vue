@@ -15,6 +15,7 @@ import InlineTextEditor from '../components/InlineTextEditor.vue'
 import LoadMoreSentinel from '../components/LoadMoreSentinel.vue'
 import HistorySearchText from '../components/HistorySearchText.vue'
 import { hiddenSearchMatches } from '../utils/historySearch'
+import { useHistoryPlayback } from '../utils/historyPlayback'
 
 const activeTab = ref('dictations')
 const historyStore = useHistoryStore()
@@ -163,9 +164,13 @@ const reTranscribeVisible = ref(false)
 const reTranscribeRecord = ref<HistoryRecord | null>(null)
 const translationVisible = ref(false)
 const translationRecord = ref<HistoryRecord | null>(null)
-const audioPlayer = ref<HTMLAudioElement | null>(null)
-const playingId = ref<string | null>(null)
-const objectUrl = ref<string | null>(null)
+const { playingId, togglePlayback: toggleRecording, stopPlayback } = useHistoryPlayback(error => {
+  console.error('Failed to play audio:', error)
+  dialog.error({
+    title: t('history.playbackFailedTitle'),
+    content: t('history.playbackFailed')
+  })
+})
 onMounted(async () => {
   // Settings are loaded once by App.vue; reloading here re-applied the global hotkey on every visit.
   await Promise.all([
@@ -261,7 +266,7 @@ function formatDevice(record: HistoryRecord): string {
   return t('common.thisDevice')
 }
 
-async function togglePlayback(record: HistoryRecord) {
+function togglePlayback(record: HistoryRecord) {
   if (!record.audioPath) {
     dialog.warning({
       title: t('history.audioMissingTitle'),
@@ -271,57 +276,7 @@ async function togglePlayback(record: HistoryRecord) {
     return
   }
 
-  if (playingId.value === record.id) {
-    stopPlayback()
-    return
-  }
-
-  try {
-    stopPlayback()
-    // Raw IPC responses arrive as an ArrayBuffer over the custom protocol, but
-    // as a JSON number array when Tauri falls back to postMessage.
-    const raw = await invoke<ArrayBuffer | number[]>('load_history_audio', { recordId: record.id })
-    const bytes = raw instanceof ArrayBuffer ? raw : new Uint8Array(raw)
-    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/ogg' }))
-    objectUrl.value = url
-    const audio = new Audio(url)
-    audioPlayer.value = audio
-    playingId.value = record.id
-    audio.onended = () => {
-      playingId.value = null
-      audioPlayer.value = null
-      if (objectUrl.value) {
-        URL.revokeObjectURL(objectUrl.value)
-        objectUrl.value = null
-      }
-    }
-    await audio.play()
-  } catch (error) {
-    console.error('Failed to play audio:', error)
-    dialog.error({
-      title: t('history.playbackFailedTitle'),
-      content: t('history.playbackFailed')
-    })
-    playingId.value = null
-    audioPlayer.value = null
-    if (objectUrl.value) {
-      URL.revokeObjectURL(objectUrl.value)
-      objectUrl.value = null
-    }
-  }
-}
-
-function stopPlayback() {
-  if (audioPlayer.value) {
-    audioPlayer.value.pause()
-    audioPlayer.value.currentTime = 0
-    audioPlayer.value = null
-  }
-  playingId.value = null
-  if (objectUrl.value) {
-    URL.revokeObjectURL(objectUrl.value)
-    objectUrl.value = null
-  }
+  void toggleRecording(record.id)
 }
 
 function openDetails(record: HistoryRecord) {

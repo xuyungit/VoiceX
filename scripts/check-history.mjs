@@ -16,7 +16,9 @@ try {
   await checkHistorySearchContinuity()
   const { checkHistorySearchPreview } = await server.ssrLoadModule('/src/utils/historySearch.spec.ts')
   checkHistorySearchPreview()
-  console.log('History lifecycle, search races, pagination, and match preview checks passed.')
+  const { checkHistoryPlayback } = await server.ssrLoadModule('/src/utils/historyPlayback.spec.ts')
+  await checkHistoryPlayback()
+  console.log('History lifecycle, search races, pagination, match preview, and playback checks passed.')
 } finally {
   await server.close()
 }
