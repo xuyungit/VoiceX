@@ -9,6 +9,7 @@
     "test:i18n": "node scripts/check-i18n.mjs",
     "test:history": "node scripts/check-history.mjs",
     "test:diff": "node scripts/check-text-diff.mjs",
+    "test:updates": "node scripts/check-updates.mjs",
     "preview": "vite preview",
     "tauri": "node scripts/tauri.mjs",
     "mac:setup-signing": "bash ./scripts/setup-macos-local-signing.sh",

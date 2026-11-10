@@ -1022,11 +1022,12 @@ const enUS = {
     updateNotesTitle: 'What\'s new in {version}',
     updatePublished: 'Published {time}',
     updateInstall: 'Install and restart',
+    updateRefreshed: 'Update information has been refreshed. Review the latest version and release notes, then click install again.',
     updateDownloadingPercent: 'Downloading… {percent}%',
     updateDownloadingMb: 'Downloading… {mb} MB',
     updateInstalling: 'Installing…',
     updateAutoCheck: 'Check for updates automatically',
-    updateAutoCheckHint: 'Checks once a day. An update is installed only when you choose to install it.',
+    updateAutoCheckHint: 'Checks daily in the background, even when an update is available. Also checks when you open this page and before installing. Updates are installed only when you choose to install them.',
     updateSidebarHint: 'An update is available',
     updateErrors: {
       disabled: 'Only official release builds check for updates.',

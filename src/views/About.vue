@@ -126,8 +126,12 @@ async function checkForUpdate() {
 }
 
 async function installUpdate() {
+  const expectedVersion = available.value?.version
+  if (!expectedVersion) return
   try {
-    await updatesStore.install()
+    const outcome = await updatesStore.install(expectedVersion)
+    if (outcome === 'refreshed') message.info(t('about.updateRefreshed'))
+    if (outcome === 'upToDate') message.info(t('about.updateUpToDate'))
   } catch (error) {
     reportActionError(error)
   }
@@ -142,6 +146,7 @@ async function openLogsFolder() {
 }
 
 onMounted(async () => {
+  updatesStore.refresh().catch(reportActionError)
   try {
     const info = await invoke<BuildInfo>('get_build_info')
     version.value = info.version

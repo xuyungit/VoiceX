@@ -191,6 +191,9 @@ windows = { version = "0.61", features = [
     "Win32_Devices_FunctionDiscovery",
 ] }
 
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
 # MP3 encoding for MiMo batch ASR. Excluded on Windows: mp3lame-sys builds
 # libmp3lame via autotools, which is unreliable on the GitHub Actions Windows
 # runners. Windows falls back to 16 kHz mono WAV (see asr/mimo_client.rs).

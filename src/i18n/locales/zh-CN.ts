@@ -1022,11 +1022,12 @@ const zhCN = {
     updateNotesTitle: '{version} 更新内容',
     updatePublished: '发布于 {time}',
     updateInstall: '安装并重启',
+    updateRefreshed: '更新信息已刷新，请查看最新版本及更新内容，再次点击安装。',
     updateDownloadingPercent: '正在下载… {percent}%',
     updateDownloadingMb: '正在下载… {mb} MB',
     updateInstalling: '正在安装…',
     updateAutoCheck: '自动检查更新',
-    updateAutoCheckHint: '每天检查一次。只有在你选择安装时才会安装更新。',
+    updateAutoCheckHint: '后台每天检查一次，即使已有可用更新也会继续检查。进入本页和安装前也会检查。只有在你选择安装时才会安装更新。',
     updateSidebarHint: '有可用更新',
     updateErrors: {
       disabled: '仅正式发布版本会检查更新。',

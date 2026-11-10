@@ -2,7 +2,7 @@
 
 use tauri::{AppHandle, State};
 
-use crate::updater::{UpdateService, UpdateStatus};
+use crate::updater::{InstallOutcome, UpdateService, UpdateStatus};
 
 #[tauri::command]
 pub fn get_update_status(service: State<'_, UpdateService>) -> UpdateStatus {
@@ -15,6 +15,9 @@ pub async fn check_for_update(app: AppHandle) -> Result<UpdateStatus, String> {
 }
 
 #[tauri::command]
-pub async fn install_update(app: AppHandle) -> Result<(), String> {
-    crate::updater::install(&app).await
+pub async fn install_update(
+    app: AppHandle,
+    expected_version: String,
+) -> Result<InstallOutcome, String> {
+    crate::updater::install(&app, &expected_version).await
 }
