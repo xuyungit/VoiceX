@@ -1,13 +1,14 @@
 use std::time::Instant;
-use windows::core::Interface;
+use windows::core::{Interface, BSTR};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
+use windows::Win32::System::Variant::{VariantClear, VT_BOOL};
 use windows::Win32::UI::Accessibility::{
     CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
     IUIAutomationTextEditPattern, IUIAutomationTextPattern, IUIAutomationTextRange,
     TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start, TextUnit_Character,
-    UIA_EditControlTypeId, UIA_TextEditPatternId, UIA_TextPatternId,
+    UIA_EditControlTypeId, UIA_IsReadOnlyAttributeId, UIA_TextEditPatternId, UIA_TextPatternId,
 };
 
 use super::{OwnedSnapshot, ReadError};
@@ -244,11 +245,50 @@ impl NativeReader {
         if composition_after == super::CompositionState::Active {
             return Err(ReadError::CompositionActive);
         }
+        let selection_utf16 = start_text.encode_utf16().count()..end_text.encode_utf16().count();
+        if self.clipped_edges == (false, false)
+            && super::empty_caret_prefix(&text, &selection_utf16)
+            && !text.trim().is_empty()
+        {
+            // A mixed/unsupported attribute does not establish a reset. Require
+            // a caret before an explicitly read-only text range, not after an
+            // atomic mention or alongside ordinary editable text.
+            // Exclude generated surrounding line breaks, whose editability can
+            // differ from the hint. Search only the bounded, whole-field window.
+            let needle = BSTR::from(text.trim());
+            let mut raw = std::ptr::null_mut();
+            // S_OK + null means that a concurrent edit removed the text. The
+            // generated wrapper cannot represent that successful no-match.
+            unsafe {
+                (window.vtable().FindText)(
+                    window.as_raw(),
+                    std::mem::transmute_copy(&needle),
+                    false.into(),
+                    false.into(),
+                    &mut raw,
+                )
+            }
+            .ok()
+            .map_err(native)?;
+            if raw.is_null() {
+                return Err(ReadError::WindowChanged);
+            }
+            let display = unsafe { IUIAutomationTextRange::from_raw(raw) };
+            let mut value =
+                unsafe { display.GetAttributeValue(UIA_IsReadOnlyAttributeId) }.map_err(native)?;
+            let read_only = unsafe { value.Anonymous.Anonymous.vt } == VT_BOOL
+                && unsafe { value.Anonymous.Anonymous.Anonymous.boolVal }.as_bool();
+            // Mixed/unsupported attributes can hold COM sentinel objects.
+            unsafe { VariantClear(&mut value) }.map_err(native)?;
+            if read_only {
+                return Err(ReadError::FieldCleared);
+            }
+        }
         Ok(OwnedSnapshot {
             target: *token,
             process_id: unsafe { element.CurrentProcessId() }.map_err(native)? as u32,
             text,
-            selection_utf16: start_text.encode_utf16().count()..end_text.encode_utf16().count(),
+            selection_utf16,
             read_at: Instant::now(),
             event_driven: false,
             composition: if composition_before == composition_after {

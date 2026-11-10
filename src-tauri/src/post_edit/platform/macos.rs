@@ -217,6 +217,7 @@ struct Target {
     element: Element,
     kind: TextKind,
     composition: CompositionReader,
+    chromium_text: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -398,6 +399,7 @@ impl NativeReader {
                 }
                 let kind = check_control(&focused, chromium)?;
                 let composition = probe_composition_reader(&focused)?;
+                let chromium_text = chromium && verified_chromium_web_node(&focused)?;
                 self.observer = match Subscription::new(
                     expected_pid,
                     &focused,
@@ -418,6 +420,7 @@ impl NativeReader {
                     element: focused,
                     kind,
                     composition,
+                    chromium_text,
                 });
                 self.read_inner(generation, lookbehind)
             })
@@ -478,6 +481,12 @@ impl NativeReader {
         if composition_after == super::CompositionState::Active {
             return Err(ReadError::CompositionActive);
         }
+        if target.chromium_text
+            && super::empty_caret_prefix(&local.text, &local.selection_utf16)
+            && non_editable_text_only(element)?
+        {
+            return Err(ReadError::FieldCleared);
+        }
         Ok(OwnedSnapshot {
             target: target.token,
             process_id: target.pid,
@@ -492,6 +501,68 @@ impl NativeReader {
             },
         })
     }
+}
+
+/// Chromium exposes inherited editability through whether a text node's
+/// AXSelectedTextRange is settable. A contenteditable=false hint can occur in
+/// AXStringForRange even though the editor contains no editable text. Inspect
+/// metadata only, and require positive evidence for every text leaf. An
+/// incomplete/large tree is not evidence of a reset.
+fn non_editable_text_only(root: &Element) -> Result<bool, ReadError> {
+    const MAX_NODES: usize = 64;
+    let mut pending = vec![Element(
+        unsafe { core_foundation::base::CFRetain(root.0 as CFTypeRef) } as ElementRef,
+    )];
+    let mut visited = 0;
+    let mut saw_text = false;
+    while let Some(node) = pending.pop() {
+        visited += 1;
+        if visited > MAX_NODES {
+            return Ok(false);
+        }
+        let role = reject_protected(&node)?;
+        if role == "AXStaticText" {
+            let mut settable = 0u8;
+            attribute_query();
+            status(unsafe {
+                AXUIElementIsAttributeSettable(
+                    node.0,
+                    CFString::new("AXSelectedTextRange").as_concrete_TypeRef(),
+                    &mut settable,
+                )
+            })?;
+            if settable != 0 {
+                return Ok(false);
+            }
+            saw_text = true;
+            continue;
+        }
+        if node.0 != root.0 && matches!(role.as_str(), "AXTextField" | "AXTextArea" | "AXWebArea") {
+            return Ok(false);
+        }
+        let children = match attribute(&node, "AXChildren") {
+            Ok(children) => children,
+            Err(ReadError::NoValue | ReadError::Native(-25205)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if unsafe { CFGetTypeID(children.as_CFTypeRef()) } != CFArray::<CFType>::type_id() {
+            return Err(ReadError::Unsupported);
+        }
+        let children: CFArray<CFType> =
+            unsafe { CFArray::wrap_under_get_rule(children.as_CFTypeRef() as CFArrayRef) };
+        if visited + pending.len() + children.len() as usize > MAX_NODES {
+            return Ok(false);
+        }
+        for child in children.iter() {
+            if unsafe { CFGetTypeID(child.as_CFTypeRef()) } != unsafe { AXUIElementGetTypeID() } {
+                return Err(ReadError::Unsupported);
+            }
+            pending.push(Element(
+                unsafe { core_foundation::base::CFRetain(child.as_CFTypeRef()) } as ElementRef,
+            ));
+        }
+    }
+    Ok(saw_text)
 }
 
 struct LocalText {

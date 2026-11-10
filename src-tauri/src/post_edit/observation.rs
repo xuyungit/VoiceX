@@ -6,7 +6,6 @@ use super::range::{RangeError, RangeTracker, Snapshot};
 
 const STABLE_FOR: Duration = Duration::from_millis(800);
 const MAX_READS: usize = 90;
-const MIN_REPLACED_GRAPHEMES: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndReason {
@@ -127,21 +126,6 @@ impl Observation {
                 return Err(SampleError::Range(error));
             }
         };
-        if self.last != slice {
-            // Some composers include non-editable hints in their accessible
-            // text after sending. Stability alone cannot attribute a wholesale
-            // replacement to the user. Keep short word corrections and gradual
-            // edits, but retain earlier evidence when most text changes at once.
-            let edits = diff::analyze(&self.last, slice).map_err(|_| {
-                self.unresolved_input();
-                SampleError::Range(RangeError::BudgetExceeded)
-            })?;
-            let replaced = edits.deletions + edits.substitutions;
-            if replaced >= MIN_REPLACED_GRAPHEMES && replaced > edits.baseline_graphemes / 2 {
-                self.unresolved_input();
-                return Err(SampleError::Range(RangeError::Ambiguous));
-            }
-        }
         if self.last != slice || self.unresolved {
             self.stable_since = read_at;
         }
@@ -349,46 +333,25 @@ mod tests {
     }
 
     #[test]
-    fn stable_wholesale_replacements_stay_ambiguous_and_allow_recovery() {
+    fn whole_rewrites_and_literal_hint_text_are_valid_edits() {
         let now = Instant::now();
-        let mut o = whole_field(now, "请检查这段听写原文");
-        for seconds in [1, 2] {
-            o.sample(
-                5,
-                &snapshot("请检查这段听写正文"),
-                now + Duration::from_secs(seconds),
-            )
-            .unwrap();
+        for (original, edited) in [
+            ("abcdefgh", "ABCDEFGH"),
+            (
+                "有些 release 版本和 Debug 版本，好像差异挺大的。",
+                "和 Codex 一起工作\n",
+            ),
+        ] {
+            let mut o = whole_field(now, original);
+            for seconds in [1, 2] {
+                o.sample(5, &snapshot(edited), now + Duration::from_secs(seconds))
+                    .unwrap();
+            }
+            let result = o.finish(EndReason::Timeout);
+            assert_eq!(result.status, ObservationStatus::ObservedEdited);
+            assert_eq!(result.confirmed.unwrap().text, edited);
+            assert!(!result.has_newer_unconfirmed_input);
         }
-        for seconds in [3, 4, 5] {
-            assert_eq!(
-                o.sample(
-                    5,
-                    &snapshot("输入你的问题"),
-                    now + Duration::from_secs(seconds)
-                ),
-                Err(SampleError::Range(RangeError::Ambiguous))
-            );
-        }
-        let result = o.finish(EndReason::Timeout);
-        assert_eq!(result.status, ObservationStatus::Partial);
-        assert!(result.has_newer_unconfirmed_input);
-        assert_eq!(result.confirmed.unwrap().text, "请检查这段听写正文");
-        // A rejected reset must neither become the comparison text nor prevent
-        // a later, attributable correction from being confirmed.
-        for seconds in [6, 7] {
-            o.sample(
-                5,
-                &snapshot("请检查这段听写内容"),
-                now + Duration::from_secs(seconds),
-            )
-            .unwrap();
-        }
-        assert_eq!(
-            o.finish(EndReason::Timeout).confirmed.unwrap().text,
-            "请检查这段听写内容"
-        );
-        assert!(o.is_stable());
     }
 
     #[test]

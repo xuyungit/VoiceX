@@ -32,11 +32,16 @@ pub enum ReadError {
     SecurityUnknown,
     TargetChanged,
     NoValue,
+    /// The retained editor now contains only non-editable display text.
+    /// This is an observation boundary, not evidence of a particular send key.
+    FieldCleared,
     TooLarge,
     WindowChanged,
     Native(i32),
     WorkerBusy,
-    TimedOut { invalidated_generation: u64 },
+    TimedOut {
+        invalidated_generation: u64,
+    },
     CompositionActive,
     StaleGeneration,
 }
@@ -59,6 +64,18 @@ pub struct OwnedSnapshot {
     pub read_at: Instant,
     pub event_driven: bool,
     pub composition: CompositionState,
+}
+
+/// Empty composers leave the caret before their non-editable hints. A caret
+/// after an atomic mention, or a text selection, is not a reset signal.
+pub(super) fn empty_caret_prefix(text: &str, selection: &Range<usize>) -> bool {
+    selection.start == selection.end
+        && selection.start
+            <= text
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .map(char::len_utf16)
+                .sum::<usize>()
 }
 
 pub const TEXT_CHANGED: u8 = 1;
@@ -426,6 +443,14 @@ impl ObserverWorker {
 #[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
 mod tests {
     use super::*;
+    #[test]
+    fn reset_caret_must_precede_the_display_text() {
+        assert!(empty_caret_prefix("和 Codex 一起工作", &(0..0)));
+        assert!(empty_caret_prefix(" \n提示", &(2..2)));
+        assert!(!empty_caret_prefix("提示", &(0..2)));
+        assert!(!empty_caret_prefix("提示", &(2..2)));
+        assert!(!empty_caret_prefix(" \n提示", &(3..3)));
+    }
 
     struct BlockingReader {
         started: mpsc::Sender<()>,

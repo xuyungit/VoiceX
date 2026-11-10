@@ -1,0 +1,60 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>VoiceX isolated composer test</title>
+<style>#editor { border: 1px solid; min-height: 100px; white-space: pre-wrap; }</style>
+<div id="editor" role="textbox" aria-multiline="true" contenteditable="true"></div>
+<button id="send">Send in fixture</button>
+<script>
+const original = '有些 release 版本和 Debug 版本，好像差异挺大的。';
+const corrected = '有些 release 版本和 Debug 版本，好像差异很大的。';
+const hint = '和 Codex 一起工作';
+const editor = document.getElementById('editor');
+const scenario = location.hash.slice(1);
+function caret(end) {
+  editor.focus();
+  getSelection().selectAllChildren(editor);
+  if (end) getSelection().collapseToEnd();
+  else getSelection().collapseToStart();
+}
+function edit(text) {
+  editor.textContent = text;
+  if (scenario === 'mixed') {
+    const decoration = document.createElement('span');
+    decoration.contentEditable = 'false'; decoration.textContent = '提示';
+    editor.prepend(decoration);
+  }
+  caret(true);
+}
+function submit() {
+  editor.innerHTML = `<p><span contenteditable="false">${hint}</span><br></p>`;
+  caret(false);
+  // A new draft in the same element must not enter the old observation.
+  setTimeout(() => edit('下一条输入'), 2000);
+}
+document.getElementById('send').onclick = submit;
+editor.onkeydown = event => {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  if (event.shiftKey) edit(original.replace('，', '，\n'));
+  else submit();
+};
+let started = false;
+editor.addEventListener('input', () => {
+  if (started || editor.textContent !== original) return;
+  started = true;
+  setTimeout(() => {
+    if (scenario === 'rewrite') edit(hint);
+    else if (scenario === 'shift-enter') editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true }));
+    else edit(corrected);
+  }, 1300);
+  if (scenario === 'enter' || scenario === 'button') {
+    setTimeout(() => {
+      if (scenario === 'button') document.getElementById('send').click();
+      else editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    }, 3500);
+  }
+});
+if (scenario === 'mixed') { edit(original); caret(false); }
+else if (scenario === 'chip') { editor.innerHTML = `<span contenteditable="false">${hint}</span>`; caret(true); }
+else caret(true);
+</script>

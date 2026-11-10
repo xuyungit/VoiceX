@@ -361,6 +361,7 @@ fn establish_baseline(
         Ok(Ok(snapshot)) => Some(snapshot),
         Ok(Err(
             ReadError::NoValue
+            | ReadError::FieldCleared
             | ReadError::CompositionActive
             | ReadError::TooLarge
             | ReadError::WindowChanged,
@@ -411,14 +412,16 @@ fn establish_baseline(
                 READ_TIMEOUT,
             )
         };
-        let after =
-            match read {
-                Ok(snapshot) => snapshot,
-                Err(
-                    ReadError::NoValue | ReadError::CompositionActive | ReadError::WindowChanged,
-                ) if delay < 700 => continue,
-                Err(error) => return Err(BaselineFailure::read(worker, generation, error)),
-            };
+        let after = match read {
+            Ok(snapshot) => snapshot,
+            Err(
+                ReadError::NoValue
+                | ReadError::FieldCleared
+                | ReadError::CompositionActive
+                | ReadError::WindowChanged,
+            ) if delay < 700 => continue,
+            Err(error) => return Err(BaselineFailure::read(worker, generation, error)),
+        };
         if !current(worker, generation, attempt) {
             return Err(BaselineFailure::new(generation, Reason::Interrupted));
         }
@@ -578,6 +581,9 @@ fn observe(
         }
         let snapshot = match read {
             Ok(snapshot) => snapshot,
+            Err(ReadError::FieldCleared) => {
+                return Completion::cached(observation, generation, EndReason::FieldCleared);
+            }
             Err(error @ (ReadError::CompositionActive | ReadError::WindowChanged)) => {
                 observation.unresolved_input();
                 if stop_reason.is_some() || clock.now() >= end {
@@ -915,6 +921,7 @@ fn error_details(error: ReadError, has_baseline: bool) -> (Status, Reason, Optio
             Reason::NoValue,
             None,
         ),
+        ReadError::FieldCleared => (partial, Reason::FieldCleared, None),
         ReadError::TooLarge => (partial, Reason::TooLarge, None),
         ReadError::WindowChanged => (Status::Ambiguous, Reason::RangeAmbiguous, None),
         ReadError::CompositionActive => (partial, Reason::CompositionActive, None),
@@ -973,6 +980,7 @@ mod tests {
         Text(&'static str),
         TextThenNotify(&'static str),
         TextThenFocus(&'static str),
+        Reset,
         Composing,
         WindowChanged,
         Cancel,
@@ -1026,6 +1034,7 @@ mod tests {
                         .notify(generation, FOCUS_CHANGED);
                     Ok(snapshot(text, self.clock.now()))
                 }
+                Step::Reset => Err(ReadError::FieldCleared),
                 Step::Composing => Err(ReadError::CompositionActive),
                 Step::WindowChanged => Err(ReadError::WindowChanged),
                 Step::Cancel => {
@@ -1326,7 +1335,6 @@ mod tests {
         diagnostics::set_enabled(true);
         let original = "按照你的审核意见，我们又更新了一版补丁，你再来 review 一下。";
         let corrected = "根据你的审核意见，我们又更新了一版补丁，你再来 review 一下。";
-        let hint = "\n今天帮你做些什么？@ 添加上下文，/调用技能与指令";
         for changed in [false, true] {
             let text = if changed { corrected } else { original };
             let record = scripted_run_for(
@@ -1335,18 +1343,47 @@ mod tests {
                     Step::Text(original),
                     Step::Text(text),
                     Step::TextThenNotify(text),
-                    Step::Text(hint),
+                    Step::Reset,
+                    // The next draft must not be read by this observation.
+                    Step::Text("和 Codex 一起工作\n"),
                 ],
             );
             if changed {
                 let record = record.expect("retain the correction made before sending");
                 assert_eq!(record.edited_text, corrected);
-                assert!(record.stable && !record.complete && record.has_newer_unconfirmed_input);
-                assert_eq!(record.end_reason, "range_ambiguous");
+                assert!(record.stable && !record.complete);
+                assert_eq!(record.end_reason, "field_cleared");
             } else {
                 assert!(record.is_none(), "hints must not create an edit record");
             }
-            assert_eq!(diagnostics::snapshot().reason, Reason::RangeAmbiguous);
+            assert_eq!(diagnostics::snapshot().reason, Reason::FieldCleared);
+        }
+        diagnostics::set_enabled(false);
+    }
+
+    #[test]
+    fn whole_rewrites_and_newlines_are_retained_before_the_editor_resets() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        let original = "有些 release 版本和 Debug 版本，好像差异挺大的。";
+        for edited in [
+            "和 Codex 一起工作\n",
+            "有些 release 版本和 Debug 版本，\n好像差异挺大的。",
+        ] {
+            let record = scripted_run_for(
+                original,
+                vec![
+                    Step::Text(original),
+                    Step::Text(edited),
+                    Step::TextThenNotify(edited),
+                    Step::Reset,
+                    Step::Text("下一条输入"),
+                ],
+            )
+            .unwrap();
+            assert_eq!(record.edited_text, edited);
+            assert_eq!(record.end_reason, "field_cleared");
+            assert!(record.stable && !record.complete);
         }
         diagnostics::set_enabled(false);
     }
@@ -1360,17 +1397,19 @@ mod tests {
             Step::Composing,
             Step::WindowChanged,
         ] {
-            let record = scripted_run(vec![
-                Step::Text("支座返力"),
-                Step::Text("支座反力"),
-                Step::TextThenNotify("支座反力"),
-                newer,
-                Step::Text(""),
-            ])
-            .unwrap();
-            assert_eq!(record.edited_text, "支座反力");
-            assert!(record.stable && !record.complete && record.has_newer_unconfirmed_input);
-            assert_eq!(record.end_reason, "field_cleared");
+            for cleared in [Step::Text(""), Step::Reset] {
+                let record = scripted_run(vec![
+                    Step::Text("支座返力"),
+                    Step::Text("支座反力"),
+                    Step::TextThenNotify("支座反力"),
+                    newer,
+                    cleared,
+                ])
+                .unwrap();
+                assert_eq!(record.edited_text, "支座反力");
+                assert!(record.stable && !record.complete && record.has_newer_unconfirmed_input);
+                assert_eq!(record.end_reason, "field_cleared");
+            }
         }
         diagnostics::set_enabled(false);
     }

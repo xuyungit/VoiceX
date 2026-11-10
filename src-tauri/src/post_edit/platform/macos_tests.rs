@@ -505,6 +505,110 @@ fn live_appkit_marked_text() {
 }
 
 #[test]
+#[ignore = "isolated foreground Chromium composer; requires Accessibility"]
+fn live_chromium_composer() {
+    let _ = env_logger::try_init();
+    let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+    let pid: u32 = std::env::var("VOICEX_POST_EDIT_FIXTURE_PID")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let scenario = std::env::var("VOICEX_POST_EDIT_COMPOSER_SCENARIO").unwrap();
+    let original = "有些 release 版本和 Debug 版本，好像差异挺大的。";
+    let probe = ObserverWorker::start().unwrap();
+    let empty = probe
+        .capture(0, pid, Duration::from_secs(3))
+        .expect("initialize the isolated browser's accessibility tree");
+    if scenario == "mixed" {
+        assert_eq!(empty.text, format!("提示{original}"));
+        return;
+    }
+    if scenario == "chip" {
+        assert_eq!(empty.text, "和 Codex 一起工作");
+        return;
+    }
+    assert!(empty.text.trim().is_empty());
+    drop(probe);
+    diagnostics::set_enabled(true);
+    let attempt = coordinator::begin_attempt();
+    let (tx, rx) = mpsc::sync_channel(1);
+    let receipt = injector::inject_serialized_with_receipt(
+        original,
+        InjectionGuard::default(),
+        AttemptIdentity {
+            session_id: uuid::Uuid::new_v4(),
+            record_id: uuid::Uuid::new_v4(),
+            injection_epoch: 1,
+        },
+        || {
+            tx.send(coordinator::prepare(attempt, pid).unwrap())
+                .unwrap();
+            (
+                TextInjector::with_mode(TextInjectionMode::Typing, false),
+                Some(ResolvedApp {
+                    process_id: pid,
+                    remote_bridge: false,
+                    app_name: Some("Composer fixture".into()),
+                }),
+            )
+        },
+    );
+    assert_eq!(receipt.outcome, injector::DispatchOutcome::CommandsPosted);
+    let handle = rx
+        .recv()
+        .unwrap()
+        .dispatched_with_schedule(
+            receipt,
+            original.into(),
+            [
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(7),
+            ],
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !handle.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "composer observation did not end: {:?}",
+            diagnostics::snapshot()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let record = handle.join().unwrap().unwrap_or_else(|| {
+        panic!(
+            "retain the confirmed correction: {:?}",
+            diagnostics::snapshot()
+        )
+    });
+    assert_eq!(record.original_text, original);
+    match scenario.as_str() {
+        "enter" | "button" => {
+            assert_eq!(
+                record.edited_text,
+                "有些 release 版本和 Debug 版本，好像差异很大的。"
+            );
+            assert_eq!(record.end_reason, "field_cleared");
+            assert!(!record.complete);
+        }
+        "rewrite" => {
+            assert_eq!(record.edited_text, "和 Codex 一起工作");
+            assert_eq!(record.end_reason, "timeout");
+            assert!(record.complete);
+        }
+        "shift-enter" => {
+            assert_eq!(record.edited_text, original.replace('，', "，\n"));
+            assert_eq!(record.end_reason, "timeout");
+            assert!(record.complete);
+        }
+        _ => panic!("unknown synthetic scenario"),
+    }
+    assert!(record.stable);
+    diagnostics::set_enabled(false);
+}
+
+#[test]
 #[ignore = "reads user-prepared synthetic drafts in named editors; requires foreground interaction"]
 fn live_macos_editors() {
     use crate::post_edit::{
