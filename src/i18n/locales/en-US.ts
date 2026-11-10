@@ -1027,7 +1027,7 @@ const enUS = {
     updateDownloadingMb: 'Downloading… {mb} MB',
     updateInstalling: 'Installing…',
     updateAutoCheck: 'Check for updates automatically',
-    updateAutoCheckHint: 'Checks daily in the background, even when an update is available. Also checks when you open this page and before installing. Updates are installed only when you choose to install them.',
+    updateAutoCheckHint: 'Checks once a day, also while an update is waiting, so the release notes stay current. An update is installed only when you choose to install it.',
     updateSidebarHint: 'An update is available',
     updateErrors: {
       disabled: 'Only official release builds check for updates.',

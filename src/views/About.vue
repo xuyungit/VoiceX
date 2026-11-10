@@ -146,7 +146,6 @@ async function openLogsFolder() {
 }
 
 onMounted(async () => {
-  updatesStore.refresh().catch(reportActionError)
   try {
     const info = await invoke<BuildInfo>('get_build_info')
     version.value = info.version

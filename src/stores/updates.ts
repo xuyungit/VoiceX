@@ -29,7 +29,6 @@ export interface UpdateStatus {
 }
 
 export type InstallOutcome = 'installed' | 'refreshed' | 'upToDate'
-const ABOUT_REFRESH_INTERVAL_SECONDS = 60
 
 // Error codes the backend returns for its own refusals; anything else is the
 // updater's message and is shown as is.
@@ -38,8 +37,6 @@ export const UPDATE_ERROR_CODES = ['disabled', 'inProgress', 'busy', 'noUpdate']
 export const useUpdatesStore = defineStore('updates', () => {
   const status = ref<UpdateStatus | null>(null)
   let unlisten: UnlistenFn | null = null
-  let initializing: Promise<void> | null = null
-  let checking: Promise<void> | null = null
 
   const working = computed(() => {
     const phase = status.value?.phase
@@ -48,48 +45,26 @@ export const useUpdatesStore = defineStore('updates', () => {
 
   const hasUpdate = computed(() => Boolean(status.value?.available))
 
-  function init(): Promise<void> {
-    if (!initializing) {
-      initializing = (async () => {
-        if (!unlisten) {
-          unlisten = await listen<UpdateStatus>('update:status', (event) => {
-            status.value = event.payload
-          })
-        }
-        status.value = await invoke<UpdateStatus>('get_update_status')
-      })().catch(error => {
-        initializing = null
-        throw error
+  async function init() {
+    if (!unlisten) {
+      unlisten = await listen<UpdateStatus>('update:status', (event) => {
+        status.value = event.payload
       })
     }
-    return initializing
+    status.value = await invoke<UpdateStatus>('get_update_status')
   }
 
   // Both reject with an error code or message; the status event carries the
   // resulting state, so callers only need to show the rejection.
-  function check(): Promise<void> {
-    if (!checking) {
-      checking = (async () => {
-        status.value = await invoke<UpdateStatus>('check_for_update')
-      })().finally(() => { checking = null })
-    }
-    return checking
+  async function check() {
+    status.value = await invoke<UpdateStatus>('check_for_update')
   }
 
-  // About can mount before App's initialization completes. Share that work,
-  // then avoid duplicate requests on rapid navigation or during an install.
-  async function refresh() {
-    await init()
-    const current = status.value
-    if (!current?.enabled || working.value) return
-    if (current.lastCheckedAt !== null && !current.error &&
-        Date.now() / 1000 - current.lastCheckedAt < ABOUT_REFRESH_INTERVAL_SECONDS) return
-    await check()
-  }
-
+  // 'refreshed' means a newer version replaced the clicked one; nothing was
+  // downloaded and the user reviews its notes before clicking again.
   async function install(expectedVersion: string) {
     return await invoke<InstallOutcome>('install_update', { expectedVersion })
   }
 
-  return { status, working, hasUpdate, init, check, refresh, install }
+  return { status, working, hasUpdate, init, check, install }
 })

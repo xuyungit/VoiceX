@@ -1027,7 +1027,7 @@ const zhCN = {
     updateDownloadingMb: '正在下载… {mb} MB',
     updateInstalling: '正在安装…',
     updateAutoCheck: '自动检查更新',
-    updateAutoCheckHint: '后台每天检查一次，即使已有可用更新也会继续检查。进入本页和安装前也会检查。只有在你选择安装时才会安装更新。',
+    updateAutoCheckHint: '每天检查一次；已有可用更新时也会检查，以便更新说明保持最新。只有在你选择安装时才会安装更新。',
     updateSidebarHint: '有可用更新',
     updateErrors: {
       disabled: '仅正式发布版本会检查更新。',

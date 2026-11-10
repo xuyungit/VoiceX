@@ -137,6 +137,14 @@ struct PreparedDownload {
     cached: Option<DownloadedPackage>,
 }
 
+enum InstallStart {
+    /// The clicked version is no longer the offer; the UI is refreshed.
+    Stale,
+    Ready(PreparedDownload),
+    /// Check the manifest first; carries the version offered before it.
+    Check(Option<String>),
+}
+
 impl From<&Update> for PackageIdentity {
     fn from(update: &Update) -> Self {
         Self {
@@ -247,20 +255,34 @@ impl Inner {
         self.status.error = (message != ERR_BUSY).then(|| message.to_owned());
     }
 
-    fn download_refresh_outcome(
-        &self,
-        failed_update: &Update,
-        download_error: &str,
-    ) -> Result<InstallOutcome, String> {
-        if self.pending.as_ref().is_some_and(|update| {
-            PackageIdentity::from(update) == PackageIdentity::from(failed_update)
-        }) {
-            // The server still advertises the same broken package. Keep the
-            // download failure visible instead of claiming recovery.
-            Err(download_error.into())
-        } else {
-            Ok(refreshed_outcome(&self.status))
+    /// Decide how a click proceeds. A stale click never installs. A verified
+    /// package for the clicked version installs without network access; only
+    /// a missing package needs a check (which also refreshes the notes).
+    fn start_install(&mut self, expected_version: &str) -> Result<InstallStart, String> {
+        if !self.status.enabled {
+            return Err(ERR_DISABLED.into());
         }
+        if self.status.phase.is_working() {
+            return Err(ERR_IN_PROGRESS.into());
+        }
+        let update = self
+            .pending
+            .as_ref()
+            .ok_or_else(|| ERR_NO_UPDATE.to_string())?;
+        if update.version != expected_version {
+            return Ok(InstallStart::Stale);
+        }
+        // retain_package keeps a package only while it matches the offer.
+        if let Some(package) = self.downloaded_package.clone() {
+            let update = update.clone();
+            self.status.phase = Phase::Downloading;
+            self.status.error = None;
+            return Ok(InstallStart::Ready(PreparedDownload {
+                update,
+                cached: Some(package),
+            }));
+        }
+        self.begin_check().map(InstallStart::Check)
     }
 }
 
@@ -348,6 +370,14 @@ pub fn init(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 fn spawn_background_checks(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(FIRST_CHECK_DELAY).await;
+        // By now the installer that started this launch has exited.
+        if !app.state::<UpdateService>().status().phase.is_working() {
+            let removed =
+                remove_installer_leftovers(&std::env::temp_dir(), &app.package_info().name);
+            if removed > 0 {
+                log::info!("Removed {removed} leftover update installer folder(s)");
+            }
+        }
         loop {
             if background_check_due(&app) {
                 if let Err(err) = check(&app).await {
@@ -357,6 +387,35 @@ fn spawn_background_checks(app: AppHandle) {
             tokio::time::sleep(WAKE_INTERVAL).await;
         }
     });
+}
+
+/// The Windows updater writes each installer to
+/// `%TEMP%/<app>-<version>-updater-*` and exits into it, so nothing removes
+/// the folder. Delete them on a later launch; one still in use fails to delete
+/// and is retried next time. macOS uses self-cleaning folders, so none match.
+fn remove_installer_leftovers(temp: &std::path::Path, app_name: &str) -> usize {
+    let prefix = format!("{app_name}-");
+    let Ok(entries) = std::fs::read_dir(temp) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let matches = name
+            .to_str()
+            .is_some_and(|name| name.starts_with(&prefix) && name.contains("-updater-"));
+        if !matches || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        match std::fs::remove_dir_all(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(err) => log::debug!(
+                "Leftover update installer {} not removed: {err}",
+                entry.path().display()
+            ),
+        }
+    }
+    removed
 }
 
 fn background_check_due(app: &AppHandle) -> bool {
@@ -418,9 +477,11 @@ async fn finish_refresh(
     outcome
 }
 
-/// Recheck before downloading. If the offered version changed, leave its
-/// notes visible and require another click. Windows closes the app itself
-/// during installation; other platforms restart after replacement.
+/// Install the version the user clicked. A downloaded package is installed
+/// as is, even offline. Otherwise one manifest check precedes the download:
+/// if a newer version appeared, its notes replace the offer and the user
+/// clicks again, so an older package is never downloaded. Windows closes the
+/// app itself during installation; other platforms restart after replacement.
 pub async fn install(app: &AppHandle, expected_version: &str) -> Result<InstallOutcome, String> {
     let service = app.state::<UpdateService>();
     // Replacing the app mid-dictation would lose the recording; mid-reading
@@ -428,15 +489,14 @@ pub async fn install(app: &AppHandle, expected_version: &str) -> Result<InstallO
     if service.session_active() || app.state::<TtsController>().is_active() {
         return Err(ERR_BUSY.into());
     }
-    let offered_before = service.update(app, |inner| {
-        if inner.pending.is_none() && !inner.status.phase.is_working() && inner.status.enabled {
-            return Err(ERR_NO_UPDATE.into());
+    let prepared = match service.update(app, |inner| inner.start_install(expected_version))? {
+        InstallStart::Stale => None,
+        InstallStart::Ready(prepared) => Some(prepared),
+        InstallStart::Check(offered_before) => {
+            finish_refresh(app, offered_before, Some(expected_version)).await?
         }
-        inner.begin_check()
-    })?;
-    let Some(PreparedDownload { update, cached }) =
-        finish_refresh(app, offered_before, Some(expected_version)).await?
-    else {
+    };
+    let Some(PreparedDownload { update, cached }) = prepared else {
         return Ok(refreshed_outcome(&service.status()));
     };
 
@@ -447,7 +507,7 @@ pub async fn install(app: &AppHandle, expected_version: &str) -> Result<InstallO
             log::info!("Downloading update {}", update.version);
             let mut downloaded: u64 = 0;
             let mut last_emit: Option<Instant> = None;
-            let result = update
+            let bytes = update
                 .download(
                     |chunk, total| {
                         downloaded += chunk as u64;
@@ -463,13 +523,8 @@ pub async fn install(app: &AppHandle, expected_version: &str) -> Result<InstallO
                     },
                     || {},
                 )
-                .await;
-            let bytes = match result {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    return refresh_after_download_failure(app, &update, &err.to_string()).await;
-                }
-            };
+                .await
+                .map_err(|err| err.to_string())?;
             // download() verifies the signature before returning these bytes.
             let bytes = Arc::new(bytes);
             service.lock().downloaded_package = Some(DownloadedPackage {
@@ -494,7 +549,7 @@ pub async fn install(app: &AppHandle, expected_version: &str) -> Result<InstallO
         })
         .await
         .map_err(|err| err.to_string())??;
-        Ok(InstallOutcome::Installed)
+        Ok::<_, String>(InstallOutcome::Installed)
     }
     .await;
 
@@ -519,42 +574,15 @@ fn refreshed_outcome(status: &UpdateStatus) -> InstallOutcome {
     }
 }
 
-/// Re-read the manifest once after a failed download, including a package
-/// removed by mirror retention. Do not automatically retry or install the
-/// replacement. Checking all download errors avoids relying on the plugin's
-/// HTTP status text (it does not expose a structured download status code).
-async fn refresh_after_download_failure(
-    app: &AppHandle,
-    failed_update: &Update,
-    download_error: &str,
-) -> Result<InstallOutcome, String> {
-    log::warn!("Update download failed; refreshing the manifest: {download_error}");
-    let service = app.state::<UpdateService>();
-    service.update(app, |inner| {
-        inner.status.phase = Phase::Checking;
-        inner.status.downloaded = 0;
-        inner.status.total = None;
-    });
-    finish_refresh(app, Some(failed_update.version.clone()), None)
-        .await
-        .map_err(|err| format!("{download_error}\nUpdate refresh failed: {err}"))?;
-    let outcome = service
-        .lock()
-        .download_refresh_outcome(failed_update, download_error);
-    outcome
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// A mutable local mirror: manifests can advance while an old package
-    /// disappears. Downloads never return an installable package.
+    /// A local mirror whose manifest can advance. It serves no packages.
     struct Mirror {
         endpoint: String,
         version: Arc<Mutex<String>>,
-        package_status: Arc<Mutex<u16>>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -564,9 +592,7 @@ mod tests {
             let base = format!("http://{}", listener.local_addr().unwrap());
             let endpoint = format!("{base}/latest.json");
             let version = Arc::new(Mutex::new("0.2.0".to_owned()));
-            let package_status = Arc::new(Mutex::new(404));
             let current = version.clone();
-            let status = package_status.clone();
             let task = tokio::spawn(async move {
                 loop {
                     let (mut stream, _) = listener.accept().await.unwrap();
@@ -584,7 +610,7 @@ mod tests {
                             }
                         }).to_string())
                     } else {
-                        (*status.lock().unwrap(), "Package removed".into())
+                        (404, "Not found".into())
                     };
                     let response = format!(
                         "HTTP/1.1 {code} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -596,7 +622,6 @@ mod tests {
             Self {
                 endpoint,
                 version,
-                package_status,
                 task,
             }
         }
@@ -708,59 +733,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn removed_packages_refresh_the_offer_and_preserve_unresolved_errors() {
-        let mirror = Mirror::start().await;
-        let app = mock_app();
-        for code in [404, 410] {
-            *mirror.package_status.lock().unwrap() = code;
-            *mirror.version.lock().unwrap() = "0.2.0".into();
-            let mut inner = enabled_inner();
-            inner.begin_check().unwrap();
-            let ready = inner
-                .finish_check(
-                    mirror_check(&app, &mirror, "darwin-aarch64").await,
-                    Some("0.2.0"),
-                )
-                .unwrap()
-                .unwrap();
-            let error = ready
-                .update
-                .download(|_, _| {}, || {})
-                .await
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(&code.to_string()));
-            inner.status.phase = Phase::Checking;
-            inner
-                .finish_check(mirror_check(&app, &mirror, "darwin-aarch64").await, None)
-                .unwrap();
-            assert_eq!(
-                inner
-                    .download_refresh_outcome(&ready.update, &error)
-                    .unwrap_err(),
-                error
-            );
-            *mirror.version.lock().unwrap() = "0.5.0".into();
-            inner.begin_check().unwrap();
-            inner
-                .finish_check(mirror_check(&app, &mirror, "darwin-aarch64").await, None)
-                .unwrap();
-            assert_eq!(
-                inner
-                    .download_refresh_outcome(&ready.update, &error)
-                    .unwrap(),
-                InstallOutcome::Refreshed
-            );
-            assert_eq!(inner.status.phase, Phase::Available);
-            assert_eq!(
-                inner.status.available.as_ref().unwrap().notes.as_deref(),
-                Some("Notes for 0.5.0")
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn failed_preflight_blocks_installation_and_withdrawn_offers_clear_the_cache() {
+    async fn failed_checks_keep_the_offer_and_empty_manifests_clear_the_cache() {
         let mirror = Mirror::start().await;
         let app = mock_app();
         let update = mirror_check(&app, &mirror, "darwin-aarch64")
@@ -809,6 +782,79 @@ mod tests {
             },
             bytes: Arc::new(vec![1, 2, 3]),
         }
+    }
+
+    #[tokio::test]
+    async fn downloaded_packages_install_offline_and_stale_clicks_never_install() {
+        let mirror = Mirror::start().await;
+        let app = mock_app();
+        let update = mirror_check(&app, &mirror, "darwin-aarch64")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut inner = enabled_inner();
+        assert_eq!(inner.start_install("0.2.0").err().unwrap(), ERR_NO_UPDATE);
+        inner.offer(update.clone());
+        // No package yet: one check precedes the download.
+        assert!(matches!(
+            inner.start_install("0.2.0").unwrap(),
+            InstallStart::Check(Some(version)) if version == "0.2.0"
+        ));
+        assert_eq!(inner.start_install("0.2.0").err().unwrap(), ERR_IN_PROGRESS);
+        inner.status.phase = Phase::Available;
+        let package = DownloadedPackage {
+            identity: PackageIdentity::from(&update),
+            bytes: Arc::new(vec![1, 2, 3]),
+        };
+        let bytes = package.bytes.clone();
+        inner.downloaded_package = Some(package);
+        assert!(matches!(
+            inner.start_install("0.1.0").unwrap(),
+            InstallStart::Stale
+        ));
+        assert_eq!(inner.status.phase, Phase::Available);
+        let InstallStart::Ready(ready) = inner.start_install("0.2.0").unwrap() else {
+            panic!("a downloaded package must install without a check");
+        };
+        assert!(Arc::ptr_eq(&bytes, &ready.cached.unwrap().bytes));
+        assert_eq!(inner.status.phase, Phase::Downloading);
+    }
+
+    #[test]
+    fn only_this_apps_installer_folders_are_removed() {
+        let temp =
+            std::env::temp_dir().join(format!("voicex-updater-test-{}", uuid::Uuid::new_v4()));
+        for dir in [
+            "VoiceX-0.19.0-updater-a1b2c3",
+            "VoiceX-0.20.0-beta.1-updater-d4e5f6",
+            "VoiceXTool-0.1.0-updater-zzz",
+            "Other-0.1.0-updater-xyz",
+            "VoiceX-models",
+        ] {
+            std::fs::create_dir_all(temp.join(dir)).unwrap();
+        }
+        std::fs::write(
+            temp.join("VoiceX-0.19.0-updater-a1b2c3/VoiceX-0.19.0-installer.exe"),
+            b"MZ",
+        )
+        .unwrap();
+        std::fs::write(temp.join("VoiceX-0.1.0-updater-file"), b"not a folder").unwrap();
+        assert_eq!(remove_installer_leftovers(&temp, "VoiceX"), 2);
+        let mut left: Vec<_> = std::fs::read_dir(&temp)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "Other-0.1.0-updater-xyz",
+                "VoiceX-0.1.0-updater-file",
+                "VoiceX-models",
+                "VoiceXTool-0.1.0-updater-zzz",
+            ]
+        );
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
