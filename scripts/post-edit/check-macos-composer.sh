@@ -9,7 +9,7 @@ cleanup() {
 }
 trap cleanup EXIT
 test_binary="${VOICEX_POST_EDIT_TEST_BINARY:?compile the lib tests and set VOICEX_POST_EDIT_TEST_BINARY}"
-for scenario in ${VOICEX_POST_EDIT_COMPOSER_SCENARIOS:-enter button rewrite shift-enter mixed chip}; do
+for scenario in ${VOICEX_POST_EDIT_COMPOSER_SCENARIOS:-enter button pseudo rewrite shift-enter mixed chip}; do
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
     --user-data-dir="$fixture_dir/$scenario" --no-first-run --no-default-browser-check \
     --force-renderer-accessibility "file://$PWD/scripts/post-edit/composer-fixture.html#$scenario" \

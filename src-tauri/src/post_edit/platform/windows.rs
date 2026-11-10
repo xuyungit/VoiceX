@@ -3,7 +3,7 @@ use windows::core::{Interface, BSTR};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
 };
-use windows::Win32::System::Variant::{VariantClear, VT_BOOL};
+use windows::Win32::System::Variant::{VariantClear, VT_BOOL, VT_UNKNOWN};
 use windows::Win32::UI::Accessibility::{
     CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
     IUIAutomationTextEditPattern, IUIAutomationTextPattern, IUIAutomationTextRange,
@@ -246,7 +246,12 @@ impl NativeReader {
             return Err(ReadError::CompositionActive);
         }
         let selection_utf16 = start_text.encode_utf16().count()..end_text.encode_utf16().count();
-        if self.clipped_edges == (false, false)
+        // Resets are only recognised in a whole, bounded field whose provider
+        // reports per-range editability; otherwise the observation keeps its
+        // wholesale-replacement guard.
+        let reset_detection = self.clipped_edges == (false, false)
+            && read_only_attribute(automation, window)? != ReadOnly::Unsupported;
+        if reset_detection
             && super::empty_caret_prefix(&text, &selection_utf16)
             && !text.trim().is_empty()
         {
@@ -274,13 +279,7 @@ impl NativeReader {
                 return Err(ReadError::WindowChanged);
             }
             let display = unsafe { IUIAutomationTextRange::from_raw(raw) };
-            let mut value =
-                unsafe { display.GetAttributeValue(UIA_IsReadOnlyAttributeId) }.map_err(native)?;
-            let read_only = unsafe { value.Anonymous.Anonymous.vt } == VT_BOOL
-                && unsafe { value.Anonymous.Anonymous.Anonymous.boolVal }.as_bool();
-            // Mixed/unsupported attributes can hold COM sentinel objects.
-            unsafe { VariantClear(&mut value) }.map_err(native)?;
-            if read_only {
+            if read_only_attribute(automation, &display)? == ReadOnly::Yes {
                 return Err(ReadError::FieldCleared);
             }
         }
@@ -296,6 +295,7 @@ impl NativeReader {
             } else {
                 super::CompositionState::Unknown
             },
+            reset_detection,
         })
     }
 }
@@ -309,6 +309,46 @@ impl Drop for NativeReader {
             unsafe { CoUninitialize() };
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadOnly {
+    Yes,
+    No,
+    Mixed,
+    Unsupported,
+}
+
+fn read_only_attribute(
+    automation: &IUIAutomation,
+    range: &IUIAutomationTextRange,
+) -> Result<ReadOnly, ReadError> {
+    let mut value =
+        unsafe { range.GetAttributeValue(UIA_IsReadOnlyAttributeId) }.map_err(native)?;
+    let inner = unsafe { &value.Anonymous.Anonymous };
+    let attribute = if inner.vt == VT_BOOL {
+        if unsafe { inner.Anonymous.boolVal }.as_bool() {
+            ReadOnly::Yes
+        } else {
+            ReadOnly::No
+        }
+    } else if inner.vt == VT_UNKNOWN {
+        // Mixed and not-supported are both COM sentinels, told apart by identity.
+        let mixed = unsafe { automation.ReservedMixedAttributeValue() }.map_err(native)?;
+        let sentinel = unsafe { &inner.Anonymous.punkVal };
+        if sentinel
+            .as_ref()
+            .is_some_and(|value| value.as_raw() == mixed.as_raw())
+        {
+            ReadOnly::Mixed
+        } else {
+            ReadOnly::Unsupported
+        }
+    } else {
+        ReadOnly::Unsupported
+    };
+    unsafe { VariantClear(&mut value) }.map_err(native)?;
+    Ok(attribute)
 }
 
 fn local_window(

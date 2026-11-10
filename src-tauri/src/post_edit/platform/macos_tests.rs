@@ -584,7 +584,7 @@ fn live_chromium_composer() {
     });
     assert_eq!(record.original_text, original);
     match scenario.as_str() {
-        "enter" | "button" => {
+        "enter" | "button" | "pseudo" => {
             assert_eq!(
                 record.edited_text,
                 "有些 release 版本和 Debug 版本，好像差异很大的。"

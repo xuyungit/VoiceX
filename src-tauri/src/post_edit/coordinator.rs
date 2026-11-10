@@ -980,6 +980,8 @@ mod tests {
         Text(&'static str),
         TextThenNotify(&'static str),
         TextThenFocus(&'static str),
+        /// Text from a reader that cannot report composer resets.
+        Undetected(&'static str),
         Reset,
         Composing,
         WindowChanged,
@@ -1002,6 +1004,7 @@ mod tests {
             read_at: at,
             event_driven: false,
             composition: CompositionState::Inactive,
+            reset_detection: true,
         }
     }
     impl Reader for ScriptedReader {
@@ -1034,6 +1037,10 @@ mod tests {
                         .notify(generation, FOCUS_CHANGED);
                     Ok(snapshot(text, self.clock.now()))
                 }
+                Step::Undetected(text) => Ok(OwnedSnapshot {
+                    reset_detection: false,
+                    ..snapshot(text, self.clock.now())
+                }),
                 Step::Reset => Err(ReadError::FieldCleared),
                 Step::Composing => Err(ReadError::CompositionActive),
                 Step::WindowChanged => Err(ReadError::WindowChanged),
@@ -1358,6 +1365,28 @@ mod tests {
             }
             assert_eq!(diagnostics::snapshot().reason, Reason::FieldCleared);
         }
+        diagnostics::set_enabled(false);
+    }
+
+    #[test]
+    fn undetected_hints_after_sending_do_not_replace_the_confirmed_edit() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        let original = "按照你的审核意见，我们又更新了一版补丁，你再来 review 一下。";
+        let corrected = "根据你的审核意见，我们又更新了一版补丁，你再来 review 一下。";
+        let record = scripted_run_for(
+            original,
+            vec![
+                Step::Undetected(original),
+                Step::Undetected(corrected),
+                Step::Undetected(corrected),
+                Step::Undetected("\n今天帮你做些什么？@ 添加上下文，/调用技能与指令"),
+            ],
+        )
+        .expect("retain the correction made before sending");
+        assert_eq!(record.edited_text, corrected);
+        assert!(record.stable && !record.complete && record.has_newer_unconfirmed_input);
+        assert_eq!(record.end_reason, "range_ambiguous");
         diagnostics::set_enabled(false);
     }
 

@@ -6,6 +6,7 @@ use super::range::{RangeError, RangeTracker, Snapshot};
 
 const STABLE_FOR: Duration = Duration::from_millis(800);
 const MAX_READS: usize = 90;
+const MIN_REPLACED_GRAPHEMES: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndReason {
@@ -74,6 +75,8 @@ pub struct Observation {
     reads: usize,
     unresolved: bool,
     confirmed: Option<ConfirmedSnapshot>,
+    /// Whether the latest read came from a reader that reports composer resets.
+    reset_detection: bool,
 }
 
 impl Observation {
@@ -88,6 +91,7 @@ impl Observation {
             reads: 0,
             unresolved: false,
             confirmed: None,
+            reset_detection: false,
         }
     }
 
@@ -126,6 +130,20 @@ impl Observation {
                 return Err(SampleError::Range(error));
             }
         };
+        if !self.reset_detection && self.last != slice {
+            // Without a native reset signal, a composer that shows its hint
+            // after sending looks like a whole rewrite. Keep short corrections
+            // and gradual edits, but not most of the text changing at once.
+            let edits = diff::analyze(&self.last, slice).map_err(|_| {
+                self.unresolved_input();
+                SampleError::Range(RangeError::BudgetExceeded)
+            })?;
+            let replaced = edits.deletions + edits.substitutions;
+            if replaced >= MIN_REPLACED_GRAPHEMES && replaced > edits.baseline_graphemes / 2 {
+                self.unresolved_input();
+                return Err(SampleError::Range(RangeError::Ambiguous));
+            }
+        }
         if self.last != slice || self.unresolved {
             self.stable_since = read_at;
         }
@@ -182,6 +200,7 @@ impl Observation {
             self.unresolved_input();
             return Err(SampleError::CompositionActive);
         }
+        self.reset_detection = snapshot.reset_detection;
         self.sample_with_composition(
             generation,
             &Snapshot {
@@ -332,8 +351,25 @@ mod tests {
         )
     }
 
+    fn read(
+        text: &str,
+        at: Instant,
+        reset_detection: bool,
+    ) -> super::super::platform::OwnedSnapshot {
+        super::super::platform::OwnedSnapshot {
+            target: 1,
+            process_id: 1,
+            text: text.into(),
+            selection_utf16: 0..0,
+            read_at: at,
+            event_driven: false,
+            composition: CompositionState::Inactive,
+            reset_detection,
+        }
+    }
+
     #[test]
-    fn whole_rewrites_and_literal_hint_text_are_valid_edits() {
+    fn whole_rewrites_are_valid_edits_when_the_reader_reports_resets() {
         let now = Instant::now();
         for (original, edited) in [
             ("abcdefgh", "ABCDEFGH"),
@@ -344,7 +380,7 @@ mod tests {
         ] {
             let mut o = whole_field(now, original);
             for seconds in [1, 2] {
-                o.sample(5, &snapshot(edited), now + Duration::from_secs(seconds))
+                o.sample_read(5, &read(edited, now + Duration::from_secs(seconds), true))
                     .unwrap();
             }
             let result = o.finish(EndReason::Timeout);
@@ -352,6 +388,54 @@ mod tests {
             assert_eq!(result.confirmed.unwrap().text, edited);
             assert!(!result.has_newer_unconfirmed_input);
         }
+    }
+
+    #[test]
+    fn wholesale_replacements_stay_ambiguous_without_reset_detection() {
+        let now = Instant::now();
+        let mut o = whole_field(now, "请检查这段听写原文");
+        for seconds in [1, 2] {
+            o.sample_read(
+                5,
+                &read(
+                    "请检查这段听写正文",
+                    now + Duration::from_secs(seconds),
+                    false,
+                ),
+            )
+            .unwrap();
+        }
+        for seconds in [3, 4, 5] {
+            assert_eq!(
+                o.sample_read(
+                    5,
+                    &read("输入你的问题", now + Duration::from_secs(seconds), false)
+                ),
+                Err(SampleError::Range(RangeError::Ambiguous))
+            );
+        }
+        let result = o.finish(EndReason::Timeout);
+        assert_eq!(result.status, ObservationStatus::Partial);
+        assert!(result.has_newer_unconfirmed_input);
+        assert_eq!(result.confirmed.unwrap().text, "请检查这段听写正文");
+        // A rejected hint must neither become the comparison text nor prevent
+        // a later, attributable correction from being confirmed.
+        for seconds in [6, 7] {
+            o.sample_read(
+                5,
+                &read(
+                    "请检查这段听写内容",
+                    now + Duration::from_secs(seconds),
+                    false,
+                ),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            o.finish(EndReason::Timeout).confirmed.unwrap().text,
+            "请检查这段听写内容"
+        );
+        assert!(o.is_stable());
     }
 
     #[test]

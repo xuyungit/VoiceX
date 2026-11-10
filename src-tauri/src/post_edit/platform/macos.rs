@@ -499,6 +499,7 @@ impl NativeReader {
             } else {
                 super::CompositionState::Unknown
             },
+            reset_detection: target.chromium_text,
         })
     }
 }
@@ -510,6 +511,8 @@ impl NativeReader {
 /// incomplete/large tree is not evidence of a reset.
 fn non_editable_text_only(root: &Element) -> Result<bool, ReadError> {
     const MAX_NODES: usize = 64;
+    let mut expected_pid = 0;
+    status(unsafe { AXUIElementGetPid(root.0, &mut expected_pid) })?;
     let mut pending = vec![Element(
         unsafe { core_foundation::base::CFRetain(root.0 as CFTypeRef) } as ElementRef,
     )];
@@ -518,6 +521,14 @@ fn non_editable_text_only(root: &Element) -> Result<bool, ReadError> {
     while let Some(node) = pending.pop() {
         visited += 1;
         if visited > MAX_NODES {
+            return Ok(false);
+        }
+        // Children do not inherit the bounded timeout; a stalled renderer
+        // would otherwise hold the single worker for the system default.
+        status(unsafe { AXUIElementSetMessagingTimeout(node.0, 0.1) })?;
+        let mut pid = 0;
+        status(unsafe { AXUIElementGetPid(node.0, &mut pid) })?;
+        if pid != expected_pid {
             return Ok(false);
         }
         let role = reject_protected(&node)?;

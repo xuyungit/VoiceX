@@ -1,7 +1,11 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>VoiceX isolated composer test</title>
-<style>#editor { border: 1px solid; min-height: 100px; white-space: pre-wrap; }</style>
+<style>
+#editor { border: 1px solid; min-height: 100px; white-space: pre-wrap; }
+/* ProseMirror/TipTap-style placeholder: CSS generated content, no DOM text. */
+#editor p[data-placeholder]::before { content: attr(data-placeholder); color: gray; }
+</style>
 <div id="editor" role="textbox" aria-multiline="true" contenteditable="true"></div>
 <button id="send">Send in fixture</button>
 <script>
@@ -26,7 +30,9 @@ function edit(text) {
   caret(true);
 }
 function submit() {
-  editor.innerHTML = `<p><span contenteditable="false">${hint}</span><br></p>`;
+  editor.innerHTML = scenario === 'pseudo'
+    ? `<p data-placeholder="${hint}"><br></p>`
+    : `<p><span contenteditable="false">${hint}</span><br></p>`;
   caret(false);
   // A new draft in the same element must not enter the old observation.
   setTimeout(() => edit('下一条输入'), 2000);
@@ -47,7 +53,7 @@ editor.addEventListener('input', () => {
     else if (scenario === 'shift-enter') editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true }));
     else edit(corrected);
   }, 1300);
-  if (scenario === 'enter' || scenario === 'button') {
+  if (scenario === 'enter' || scenario === 'button' || scenario === 'pseudo') {
     setTimeout(() => {
       if (scenario === 'button') document.getElementById('send').click();
       else editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));

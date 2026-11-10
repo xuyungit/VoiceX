@@ -64,6 +64,9 @@ pub struct OwnedSnapshot {
     pub read_at: Instant,
     pub event_driven: bool,
     pub composition: CompositionState,
+    /// The reader can positively identify a reset to non-editable display
+    /// text for this target, and would report it as `FieldCleared`.
+    pub reset_detection: bool,
 }
 
 /// Empty composers leave the caret before their non-editable hints. A caret
@@ -474,6 +477,7 @@ mod tests {
                 read_at: Instant::now(),
                 event_driven: false,
                 composition: CompositionState::Unknown,
+                reset_detection: false,
             })
         }
         fn read(&mut self, _: u64) -> Result<OwnedSnapshot, ReadError> {
