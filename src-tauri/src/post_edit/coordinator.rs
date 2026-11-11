@@ -584,7 +584,14 @@ fn observe(
             Err(ReadError::FieldCleared) => {
                 return Completion::cached(observation, generation, EndReason::FieldCleared);
             }
-            Err(error @ (ReadError::CompositionActive | ReadError::WindowChanged)) => {
+            // Chromium editors briefly report no value while they re-render
+            // after a keystroke; the next read is normal again. Like an active
+            // IME or a shifted window, this leaves the input unresolved.
+            Err(
+                error @ (ReadError::CompositionActive
+                | ReadError::WindowChanged
+                | ReadError::NoValue),
+            ) => {
                 observation.unresolved_input();
                 if stop_reason.is_some() || clock.now() >= end {
                     let mut done = Completion::cached(
@@ -592,13 +599,15 @@ fn observe(
                         generation,
                         stop_reason.unwrap_or(EndReason::Timeout),
                     );
-                    done.reason = if error == ReadError::WindowChanged {
-                        if done.result.confirmed.is_none() {
-                            done.result.status = ObservationStatus::Ambiguous;
+                    done.reason = match error {
+                        ReadError::WindowChanged => {
+                            if done.result.confirmed.is_none() {
+                                done.result.status = ObservationStatus::Ambiguous;
+                            }
+                            Reason::RangeAmbiguous
                         }
-                        Reason::RangeAmbiguous
-                    } else {
-                        Reason::CompositionActive
+                        ReadError::NoValue => Reason::NoValue,
+                        _ => Reason::CompositionActive,
                     };
                     return done;
                 }
@@ -983,6 +992,7 @@ mod tests {
         /// Text from a reader that cannot report composer resets.
         Undetected(&'static str),
         Reset,
+        NoValue,
         Composing,
         WindowChanged,
         Cancel,
@@ -1042,6 +1052,7 @@ mod tests {
                     ..snapshot(text, self.clock.now())
                 }),
                 Step::Reset => Err(ReadError::FieldCleared),
+                Step::NoValue => Err(ReadError::NoValue),
                 Step::Composing => Err(ReadError::CompositionActive),
                 Step::WindowChanged => Err(ReadError::WindowChanged),
                 Step::Cancel => {
@@ -1469,6 +1480,7 @@ mod tests {
         for middle in [
             Step::Composing,
             Step::WindowChanged,
+            Step::NoValue,
             Step::Text("支座返fan"),
         ] {
             let record = scripted_run(vec![

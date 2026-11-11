@@ -520,6 +520,71 @@ fn live_empty_composer_is_a_reset() {
     }
 }
 
+/// Read-only: print what the reader sees in the focused field of a real app.
+#[test]
+#[ignore = "reads the focused field of VOICEX_POST_EDIT_FIXTURE_PID; requires Accessibility"]
+fn live_print_focused_field() {
+    let pid: u32 = std::env::var("VOICEX_POST_EDIT_FIXTURE_PID")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let probe = ObserverWorker::start().unwrap();
+    for attempt in 0..3 {
+        let result = probe.capture(0, pid, Duration::from_secs(3));
+        println!("capture #{attempt}: {result:#?}");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Read-only: wait up to 20 s for the app to come to the front, then trace the
+/// reader for 30 s while a person edits the focused field.
+#[test]
+#[ignore = "traces the focused field of VOICEX_POST_EDIT_FIXTURE_PID; requires Accessibility"]
+fn live_trace_focused_field() {
+    let pid: u32 = std::env::var("VOICEX_POST_EDIT_FIXTURE_PID")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let probe = ObserverWorker::start().unwrap();
+    let start = Instant::now();
+    let mut last = String::new();
+    loop {
+        let line = match probe.capture(0, pid, Duration::from_secs(1)) {
+            Ok(_) => break,
+            Err(error) => format!("waiting for the app: {error:?}"),
+        };
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the app never came to the front"
+        );
+        if line != last {
+            println!("{:>6} ms {line}", start.elapsed().as_millis());
+            last = line;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    println!(
+        "{:>6} ms captured; tracing for 30 s",
+        start.elapsed().as_millis()
+    );
+    let traced = Instant::now();
+    last.clear();
+    while traced.elapsed() < Duration::from_secs(30) {
+        let line = match probe.read(0, Duration::from_millis(300)) {
+            Ok(s) => format!(
+                "text={:?} sel={:?} composition={:?}",
+                s.text, s.selection_utf16, s.composition
+            ),
+            Err(error) => format!("ERROR {error:?}"),
+        };
+        if line != last {
+            println!("{:>6} ms {line}", start.elapsed().as_millis());
+            last = line;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
 #[test]
 #[ignore = "isolated foreground Chromium composer; requires Accessibility"]
 fn live_chromium_composer() {
