@@ -125,7 +125,7 @@ Select text in **any application** and press a hotkey to hear it:
 | **⌥⌘R** Read (Windows: Ctrl + Alt + Win + R) | Reads the selection aloud |
 | **⌥⌘T** Translate and read (Windows: Ctrl + Alt + Win + T) | An LLM translates the selection into the target language (English by default), then it is read aloud. Text already in the target language is tidied, not translated |
 
-Press either reading key again, or **Escape**, to stop. You can also choose **Read Selection**, **Translate and Read**, or **Stop Reading** from the tray menu.
+Press either reading key again, or **Escape**, to stop. You can also choose **Read Aloud** or **Read Translation** from the tray menu; while reading, the menu offers **Stop Reading** instead.
 
 Engines that report progress show each sentence as a large caption:
 

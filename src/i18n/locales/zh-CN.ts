@@ -401,7 +401,7 @@ const zhCN = {
     diagnosticsHint: '点击后请在 5 秒内切回目标应用并选中一段文字。报告只含取词过程的信息，不含你选中的文字。',
     diagnosticsCountdown: '{seconds} 秒后读取…',
     unsupportedPlatform: '当前平台暂不支持选中朗读——从其他应用取词目前只在 macOS 和 Windows 上实现。下面的热键在这里不会注册，按下时仍然交给前台应用。',
-    translateTitle: '翻译并朗读',
+    translateTitle: '朗读译文',
     lengthTitle: '朗读长度',
     lengthNote: '限制单次选区或剪贴板文本的字符数，空格、制表符和换行也计入。1K = 1000 个字符，不是模型的 token 数；超限时提示，不截断文字。',
     lengthUnlimited: '不限',

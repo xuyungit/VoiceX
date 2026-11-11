@@ -5,9 +5,12 @@
 //! reads, for when there is a mouse at hand and no keyboard. They read the
 //! selection of the application the user was in before opening the menu —
 //! which on Windows is no longer in front by then (see
-//! [`crate::selection::SelectionTarget::BeforeTrayMenu`]).
+//! [`crate::selection::SelectionTarget::BeforeTrayMenu`]). While a read is
+//! under way, the two reads give way to a single item that stops it.
 //!
 //! When a check has found a newer version, an item at the top leads to it.
+//!
+//! Every item answers to a key while the menu is open (see [`item_key`]).
 
 use std::sync::Mutex;
 
@@ -21,6 +24,8 @@ use crate::tts::TtsController;
 use crate::ui_locale::resolve_ui_locale;
 use crate::updater::UpdateService;
 
+const TRAY_ID: &str = "main";
+
 const READ_SELECTION: &str = "read_selection";
 const TRANSLATE_SELECTION: &str = "translate_selection";
 const STOP_READING: &str = "stop_reading";
@@ -32,105 +37,191 @@ const UPDATE_AVAILABLE: &str = "update_available";
 /// Reading needs a selection reader, which exists on macOS and Windows only.
 const SELECTION_READING_SUPPORTED: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
-/// The reading items of the attached menu, kept so they can follow the
-/// reading session without the menu being rebuilt.
-struct ReadingItems {
-    /// `None` when that read is switched off in the settings.
-    read: Option<MenuItem<Wry>>,
-    translate: Option<MenuItem<Wry>>,
-    stop: MenuItem<Wry>,
+/// The settings the menu is built from.
+#[derive(Clone)]
+struct MenuSpec {
+    locale: String,
+    /// Whether each read is offered; a read that is switched off is left out
+    /// of the menu, the way its hotkey is left unbound.
+    read: bool,
+    translate: bool,
 }
 
-static READING_ITEMS: Mutex<Option<ReadingItems>> = Mutex::new(None);
+struct MenuState {
+    spec: MenuSpec,
+    /// Whether the attached menu was built for a read under way; `None`
+    /// until a menu has been built for the current `spec`.
+    built_for_active: Option<bool>,
+}
+
+static MENU_STATE: Mutex<Option<MenuState>> = Mutex::new(None);
 
 /// Build the menu for `settings` and attach it to the tray icon. Called at
 /// startup and whenever a setting it depends on changes: the UI language,
-/// and the two reading switches — a read that is switched off is left out of
-/// the menu, the way its hotkey is left unbound.
+/// and the two reading switches.
+///
+/// The menu itself is built on the main thread, like every rebuild that
+/// follows the reading session, so that the last build to run always sees
+/// both the latest settings and the latest session state.
 pub fn apply_menu(app: &AppHandle, settings: &AppSettings) -> Result<(), String> {
-    let locale = resolve_ui_locale(&settings.ui_language);
-    let label = |key: &str| tray_label(&locale, key);
-    let item = |id: &str| {
-        MenuItem::with_id(app, id, label(id), true, None::<&str>).map_err(|err| err.to_string())
+    if app.tray_by_id(TRAY_ID).is_none() {
+        return Err(format!("Tray icon '{TRAY_ID}' not found"));
+    }
+    let spec = MenuSpec {
+        locale: resolve_ui_locale(&settings.ui_language),
+        read: SELECTION_READING_SUPPORTED && settings.tts_enabled,
+        translate: SELECTION_READING_SUPPORTED && settings.tts_translate_enabled,
     };
+    {
+        let mut slot = MENU_STATE.lock().map_err(|err| err.to_string())?;
+        *slot = Some(MenuState {
+            spec,
+            built_for_active: None,
+        });
+    }
+    queue_rebuild(app)
+}
 
-    let read = (SELECTION_READING_SUPPORTED && settings.tts_enabled)
-        .then(|| item(READ_SELECTION))
-        .transpose()?;
-    let translate = (SELECTION_READING_SUPPORTED && settings.tts_translate_enabled)
-        .then(|| item(TRANSLATE_SELECTION))
-        .transpose()?;
-    let reading = if read.is_some() || translate.is_some() {
-        Some(ReadingItems {
-            read,
-            translate,
-            stop: item(STOP_READING)?,
-        })
-    } else {
-        None
-    };
+/// Swap the reads for the stop item, or back, when a read starts or ends.
+///
+/// Called from any thread, any number of times, possibly out of order. Each
+/// rebuild reads the session state when it runs on the main thread rather
+/// than being told it, so whichever runs last — after the last change — is
+/// right.
+pub fn reading_state_changed(app: &AppHandle) {
+    if let Err(err) = queue_rebuild(app) {
+        log::warn!("Failed to queue the tray menu update: {err}");
+    }
+}
+
+fn queue_rebuild(app: &AppHandle) -> Result<(), String> {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let active = handle.state::<TtsController>().is_active();
+        let mut slot = match MENU_STATE.lock() {
+            Ok(slot) => slot,
+            Err(err) => {
+                log::warn!("Failed to lock the tray menu state: {err}");
+                return;
+            }
+        };
+        // Nothing to do before the first `apply_menu`.
+        let Some(state) = slot.as_mut() else {
+            return;
+        };
+        // Replacing the menu while it is open is best avoided, so a session
+        // change that does not change the menu leaves it alone.
+        if state.built_for_active == Some(active) {
+            return;
+        }
+        match attach_menu(&handle, &state.spec, active) {
+            Ok(()) => state.built_for_active = Some(active),
+            Err(err) => log::warn!("Failed to build the tray menu: {err}"),
+        }
+    })
+    .map_err(|err| err.to_string())
+}
+
+fn attach_menu(app: &AppHandle, spec: &MenuSpec, reading_active: bool) -> Result<(), String> {
+    let label = |key: &str| tray_label(&spec.locale, key);
+    let item = |id: &str, text: &str| menu_item(app, id, text);
 
     let mut builder = MenuBuilder::new(app);
     if let Some(version) = app.state::<UpdateService>().available_version() {
         let text = format!("{} (v{version})", label(UPDATE_AVAILABLE));
-        builder = builder.text(UPDATE_AVAILABLE, text).separator();
+        builder = builder.item(&item(UPDATE_AVAILABLE, &text)?).separator();
     }
-    if let Some(items) = reading.as_ref() {
-        if let Some(read) = items.read.as_ref() {
-            builder = builder.item(read);
+
+    let reading_ids: Vec<&str> = if reading_active {
+        vec![STOP_READING]
+    } else {
+        [(spec.read, READ_SELECTION), (spec.translate, TRANSLATE_SELECTION)]
+            .into_iter()
+            .filter_map(|(offered, id)| offered.then_some(id))
+            .collect()
+    };
+    if !reading_ids.is_empty() {
+        for id in reading_ids {
+            builder = builder.item(&item(id, label(id))?);
         }
-        if let Some(translate) = items.translate.as_ref() {
-            builder = builder.item(translate);
-        }
-        builder = builder.item(&items.stop).separator();
+        builder = builder.separator();
     }
+
     let menu = builder
-        .text(COPY_LAST_DICTATION, label(COPY_LAST_DICTATION))
-        .text(SHOW_MAIN_WINDOW, label(SHOW_MAIN_WINDOW))
+        .item(&item(COPY_LAST_DICTATION, label(COPY_LAST_DICTATION))?)
         .separator()
-        .text(QUIT_APP, label(QUIT_APP))
+        .item(&item(SHOW_MAIN_WINDOW, label(SHOW_MAIN_WINDOW))?)
+        .item(&item(QUIT_APP, label(QUIT_APP))?)
         .build()
         .map_err(|err| err.to_string())?;
 
-    let Some(tray) = app.tray_by_id("main") else {
-        return Err("Tray icon 'main' not found".to_string());
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return Err(format!("Tray icon '{TRAY_ID}' not found"));
     };
-    tray.set_menu(Some(menu)).map_err(|err| err.to_string())?;
-
-    if let Ok(mut slot) = READING_ITEMS.lock() {
-        *slot = reading;
-    }
-    // A read may be under way while the menu is rebuilt.
-    reading_state_changed(app);
-    Ok(())
+    tray.set_menu(Some(menu)).map_err(|err| err.to_string())
 }
 
-/// Grey out whichever of reading and stopping does not apply right now.
-///
-/// Called from any thread, any number of times, possibly out of order. Each
-/// call reads the session state when it runs on the main thread rather than
-/// being told it, so whichever runs last — after the last change — is right.
-pub fn reading_state_changed(app: &AppHandle) {
-    let handle = app.clone();
-    let queued = app.run_on_main_thread(move || {
-        let active = handle.state::<TtsController>().is_active();
-        let Ok(slot) = READING_ITEMS.lock() else {
-            return;
-        };
-        let Some(items) = slot.as_ref() else {
-            return;
-        };
-        for item in items.read.iter().chain(items.translate.iter()) {
-            if let Err(err) = item.set_enabled(!active) {
-                log::warn!("Failed to update a tray reading item: {err}");
-            }
-        }
-        if let Err(err) = items.stop.set_enabled(active) {
-            log::warn!("Failed to update the tray stop item: {err}");
-        }
-    });
-    if let Err(err) = queued {
-        log::warn!("Failed to queue the tray menu update: {err}");
+/// The keys an item answers to while the menu is open: a Command shortcut on
+/// macOS, shown at the right of the item the way menus show them, and an
+/// access key on Windows — underlined, pressed on its own — since a tray
+/// menu there does not act on accelerators.
+struct ItemKey {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    macos_accelerator: &'static str,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    windows_access_key: char,
+}
+
+fn item_key(id: &str) -> Option<ItemKey> {
+    let (macos_accelerator, windows_access_key) = match id {
+        READ_SELECTION => ("Cmd+R", 'R'),
+        TRANSLATE_SELECTION => ("Cmd+T", 'T'),
+        // ⌘. is how macOS stops things.
+        STOP_READING => ("Cmd+Period", 'S'),
+        COPY_LAST_DICTATION => ("Cmd+C", 'C'),
+        SHOW_MAIN_WINDOW => ("Cmd+O", 'O'),
+        QUIT_APP => ("Cmd+Q", 'Q'),
+        UPDATE_AVAILABLE => ("Cmd+U", 'U'),
+        _ => return None,
+    };
+    Some(ItemKey {
+        macos_accelerator,
+        windows_access_key,
+    })
+}
+
+fn menu_item(app: &AppHandle, id: &str, text: &str) -> Result<MenuItem<Wry>, String> {
+    let key = item_key(id);
+
+    #[cfg(target_os = "windows")]
+    let text = match key.as_ref() {
+        Some(key) => with_access_key(text, key.windows_access_key),
+        None => text.to_string(),
+    };
+    #[cfg(target_os = "macos")]
+    let accelerator = key.map(|key| key.macos_accelerator);
+    #[cfg(not(target_os = "macos"))]
+    let accelerator = {
+        let _ = key;
+        None::<&str>
+    };
+
+    MenuItem::with_id(app, id, text, true, accelerator).map_err(|err| err.to_string())
+}
+
+/// Mark `key` as the access key of `text`: its first occurrence is
+/// underlined when it appears in the text, as in English labels; otherwise
+/// it is added after the text in parentheses, the Windows convention for
+/// Chinese labels.
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn with_access_key(text: &str, key: char) -> String {
+    let escaped = text.replace('&', "&&");
+    match escaped
+        .char_indices()
+        .find(|(_, c)| c.eq_ignore_ascii_case(&key))
+    {
+        Some((index, _)) => format!("{}&{}", &escaped[..index], &escaped[index..]),
+        None => format!("{escaped}(&{key})"),
     }
 }
 
@@ -204,5 +295,46 @@ pub(crate) fn show_main_window(app: &AppHandle) {
             let ns_app = NSApplication::sharedApplication(mtm);
             ns_app.activate();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_key_underlines_its_first_occurrence() {
+        assert_eq!(with_access_key("Read Translation", 'T'), "Read &Translation");
+        assert_eq!(with_access_key("Open VoiceX", 'O'), "&Open VoiceX");
+    }
+
+    #[test]
+    fn access_key_missing_from_the_text_is_appended() {
+        assert_eq!(with_access_key("朗读原文", 'R'), "朗读原文(&R)");
+    }
+
+    #[test]
+    fn ampersands_in_the_text_stay_literal() {
+        assert_eq!(with_access_key("Q&A", 'X'), "Q&&A(&X)");
+    }
+
+    #[test]
+    fn access_keys_are_unique() {
+        let ids = [
+            READ_SELECTION,
+            TRANSLATE_SELECTION,
+            STOP_READING,
+            COPY_LAST_DICTATION,
+            SHOW_MAIN_WINDOW,
+            QUIT_APP,
+            UPDATE_AVAILABLE,
+        ];
+        let mut keys: Vec<char> = ids
+            .iter()
+            .map(|id| item_key(id).expect("every item has a key").windows_access_key)
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), ids.len());
     }
 }

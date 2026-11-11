@@ -401,7 +401,7 @@ const enUS = {
     diagnosticsHint: 'After clicking, switch back to the target application and select some text within 5 seconds. The report describes how the read went and never contains the text itself.',
     diagnosticsCountdown: 'Reading in {seconds}s…',
     unsupportedPlatform: 'Read selection is not available on this platform yet — reading the selection out of another application is implemented for macOS and Windows only. The hotkey below is not registered here, so it still reaches the foreground application.',
-    translateTitle: 'Translate and read',
+    translateTitle: 'Read translation',
     lengthTitle: 'Reading length',
     lengthNote: 'Limits characters per selection or clipboard read, including spaces, tabs and line breaks. 1K = 1000 characters, not model tokens. Text over the limit is rejected, never truncated.',
     lengthUnlimited: 'Unlimited',
