@@ -202,7 +202,9 @@ fn stable_correction() -> diagnostics::Snapshot {
     let first = wait(|s| s.substitutions == Some(1));
     wait(|s| {
         s.substitutions == Some(1)
-            && s.last_observed_ms.unwrap_or(0) >= first.last_observed_ms.unwrap() + 800
+            && s.last_observed_ms.unwrap_or(0)
+                >= first.last_observed_ms.unwrap()
+                    + crate::post_edit::observation::STABLE_FOR.as_millis() as u64
     })
 }
 fn assert_correction(record: Record, reason: &str, complete: bool) {

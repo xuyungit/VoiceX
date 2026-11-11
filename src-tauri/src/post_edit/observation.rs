@@ -4,8 +4,8 @@ use super::diff::{self, NetEdits};
 use super::platform::CompositionState;
 use super::range::{RangeError, RangeTracker, Snapshot};
 
-const STABLE_FOR: Duration = Duration::from_millis(800);
-const MAX_READS: usize = 90;
+pub(super) const STABLE_FOR: Duration = Duration::from_millis(400);
+pub(super) const MAX_READS: usize = 120;
 const MIN_REPLACED_GRAPHEMES: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,7 @@ pub struct Observation {
     had_intermediate_changes: bool,
     reads: usize,
     unresolved: bool,
+    notified: bool,
     confirmed: Option<ConfirmedSnapshot>,
     /// Whether the latest read came from a reader that reports composer resets.
     reset_detection: bool,
@@ -90,6 +91,7 @@ impl Observation {
             had_intermediate_changes: false,
             reads: 0,
             unresolved: false,
+            notified: false,
             confirmed: None,
             reset_detection: false,
         }
@@ -148,6 +150,7 @@ impl Observation {
             self.stable_since = read_at;
         }
         self.unresolved = false;
+        self.notified = false;
         if self.last != slice {
             self.last.clear();
             self.last.push_str(slice);
@@ -170,7 +173,7 @@ impl Observation {
 
     /// A notification alone does not tell whether this is another edit or send.
     pub fn text_changed(&mut self) {
-        self.unresolved = true;
+        self.notified = true;
     }
 
     /// A newer sample may be unusable without invalidating earlier evidence.
@@ -179,7 +182,9 @@ impl Observation {
     }
 
     pub fn is_stable(&self) -> bool {
-        !self.unresolved && self.last_valid_at.is_some_and(|at| at >= self.stable_at())
+        !self.unresolved
+            && !self.notified
+            && self.last_valid_at.is_some_and(|at| at >= self.stable_at())
     }
 
     pub fn sample_read(
@@ -646,5 +651,22 @@ mod tests {
         );
         assert_eq!(result.status, ObservationStatus::ObservedEdited);
         assert_eq!(result.edits.unwrap().substitutions, 2);
+    }
+
+    #[test]
+    fn late_text_changed_notification_for_identical_slice_does_not_reset_stability() {
+        let now = Instant::now();
+        let mut o = observation(now);
+        o.sample(5, &snapshot("前反力后"), now + Duration::from_millis(100))
+            .unwrap();
+        // A late or coalesced AXValueChanged notification arrives after the read
+        // that already saw "前反力后".
+        o.text_changed();
+        o.sample(5, &snapshot("前反力后"), now + Duration::from_millis(550))
+            .unwrap();
+        let result = o.finish(EndReason::Timeout);
+        assert_eq!(result.status, ObservationStatus::ObservedEdited);
+        assert!(!result.has_newer_unconfirmed_input);
+        assert_eq!(result.confirmed.unwrap().text, "反力");
     }
 }

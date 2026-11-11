@@ -554,7 +554,12 @@ fn non_editable_text_only(root: &Element) -> Result<bool, ReadError> {
                 Err(error) => return Err(error),
             }
         }
-        if node.0 != root.0 && matches!(role.as_str(), "AXTextField" | "AXTextArea" | "AXWebArea") {
+        if node.0 != root.0
+            && matches!(
+                role.as_str(),
+                "AXTextField" | "AXTextArea" | "AXComboBox" | "AXWebArea"
+            )
+        {
             return Ok(false);
         }
         let children = match attribute(&node, "AXChildren") {
@@ -587,21 +592,10 @@ struct LocalText {
     selection_utf16: std::ops::Range<usize>,
 }
 
-fn read_text_control(
+fn read_selected_range(
     element: &Element,
-    window_slot: &mut Option<ReadWindow>,
-    lookbehind: usize,
-) -> Result<LocalText, ReadError> {
-    let count_value = attribute(element, "AXNumberOfCharacters")?;
-    if unsafe { CFGetTypeID(count_value.as_CFTypeRef()) } != CFNumber::type_id() {
-        return Err(ReadError::Unsupported);
-    }
-    let count = unsafe { CFNumber::wrap_under_get_rule(count_value.as_CFTypeRef() as CFNumberRef) }
-        .to_i64()
-        .ok_or(ReadError::Unsupported)?;
-    if count < 0 || count > isize::MAX as i64 {
-        return Err(ReadError::Unsupported);
-    }
+    count: usize,
+) -> Result<std::ops::Range<usize>, ReadError> {
     let selection = attribute(element, "AXSelectedTextRange")?;
     if unsafe { CFGetTypeID(selection.as_CFTypeRef()) } != unsafe { AXValueGetTypeID() } {
         return Err(ReadError::Unsupported);
@@ -628,7 +622,90 @@ fn read_text_control(
     {
         return Err(ReadError::Unsupported);
     }
-    let selection = range.location as usize..(range.location + range.length) as usize;
+    Ok(range.location as usize..(range.location + range.length) as usize)
+}
+
+fn read_text_control_value(
+    element: &Element,
+    window_slot: &mut Option<ReadWindow>,
+    lookbehind: usize,
+) -> Result<LocalText, ReadError> {
+    #[cfg(test)]
+    BODY_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let value = attribute(element, "AXValue")?;
+    if unsafe { CFGetTypeID(value.as_CFTypeRef()) } != CFString::type_id() {
+        return Err(ReadError::Unsupported);
+    }
+    let native_text = unsafe { CFString::wrap_under_get_rule(value.as_CFTypeRef() as CFStringRef) };
+    if native_text.char_len() < 0 || native_text.char_len() as usize > super::window::MAX_UNITS {
+        return Err(ReadError::TooLarge);
+    }
+    let count = native_text.char_len() as usize;
+    let (selection, has_selection) = match read_selected_range(element, count) {
+        Ok(range) => (range, true),
+        Err(ReadError::NoValue | ReadError::Native(-25205)) => (0..0, count == 0),
+        Err(error) => return Err(error),
+    };
+    if window_slot.is_none() {
+        *window_slot = Some(ReadWindow::new(
+            count,
+            selection.clone(),
+            if has_selection { lookbehind } else { count },
+        )?);
+    }
+    let window = window_slot.as_mut().unwrap();
+    let mut bounds = window.range(count)?;
+    if has_selection && (selection.start < bounds.start || selection.end > bounds.end) {
+        return Err(ReadError::WindowChanged);
+    }
+    let mut units = vec![0u16; bounds.len()];
+    unsafe {
+        CFStringGetCharacters(
+            native_text.as_concrete_TypeRef(),
+            CFRange {
+                location: bounds.start as isize,
+                length: bounds.len() as isize,
+            },
+            units.as_mut_ptr(),
+        );
+    }
+    let text = window.decode(&units, &mut bounds)?;
+    if has_selection && (selection.start < bounds.start || selection.end > bounds.end) {
+        return Err(ReadError::WindowChanged);
+    }
+    window.check(&text)?;
+    Ok(LocalText {
+        text,
+        selection_utf16: if has_selection {
+            selection.start - bounds.start..selection.end - bounds.start
+        } else {
+            usize::MAX..0
+        },
+    })
+}
+
+fn read_text_control(
+    element: &Element,
+    window_slot: &mut Option<ReadWindow>,
+    lookbehind: usize,
+) -> Result<LocalText, ReadError> {
+    let count_value = match attribute(element, "AXNumberOfCharacters") {
+        Ok(value) => value,
+        Err(ReadError::Native(-25205)) => {
+            return read_text_control_value(element, window_slot, lookbehind);
+        }
+        Err(error) => return Err(error),
+    };
+    if unsafe { CFGetTypeID(count_value.as_CFTypeRef()) } != CFNumber::type_id() {
+        return Err(ReadError::Unsupported);
+    }
+    let count = unsafe { CFNumber::wrap_under_get_rule(count_value.as_CFTypeRef() as CFNumberRef) }
+        .to_i64()
+        .ok_or(ReadError::Unsupported)?;
+    if count < 0 || count > isize::MAX as i64 {
+        return Err(ReadError::Unsupported);
+    }
+    let selection = read_selected_range(element, count as usize)?;
     if window_slot.is_none() {
         *window_slot = Some(ReadWindow::new(
             count as usize,
@@ -653,8 +730,6 @@ fn read_text_control(
     let parameter = unsafe { CFType::wrap_under_create_rule(parameter) };
     let name = CFString::new("AXStringForRange");
     let mut raw: CFTypeRef = std::ptr::null();
-    #[cfg(test)]
-    BODY_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     attribute_query();
     let result = unsafe {
         AXUIElementCopyParameterizedAttributeValue(
@@ -668,8 +743,15 @@ fn read_text_control(
         if !raw.is_null() {
             unsafe { CFRelease(raw) };
         }
+        if result == -25205 {
+            return read_text_control_value(element, window_slot, lookbehind);
+        }
+        #[cfg(test)]
+        BODY_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         return status(result).and(Err(ReadError::NoValue));
     }
+    #[cfg(test)]
+    BODY_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if raw.is_null() {
         return Err(ReadError::NoValue);
     }
@@ -1081,17 +1163,15 @@ fn capture_application(pid: u32) -> Result<(Element, bool), ReadError> {
     let application = Element(application);
     status(unsafe { AXUIElementSetMessagingTimeout(application.0, 0.1) })?;
     let electron = has_electron_framework(&frontmost);
-    if electron {
-        // Electron's supported lightweight activation path: querying the app's
-        // role requests native AX APIs. Focus alone can stay an empty proxy.
-        // This does not toggle the full screen-reader mode or scan other fields.
+    let bundle = frontmost.bundleIdentifier().map(|id| id.to_string());
+    let chromium = uses_chromium_web_contract(bundle.as_deref(), electron);
+    if chromium {
+        // Chromium/Electron's supported lightweight activation path: querying
+        // the app's role requests native AX APIs. Focus alone can stay an empty
+        // proxy. This does not toggle full screen-reader mode or scan fields.
         string_attribute(&application, "AXRole")?;
     }
-    let bundle = frontmost.bundleIdentifier().map(|id| id.to_string());
-    Ok((
-        application,
-        uses_chromium_web_contract(bundle.as_deref(), electron),
-    ))
+    Ok((application, chromium))
 }
 
 fn focused_raw(application: &Element, pid: u32) -> Result<Element, ReadError> {
@@ -1129,11 +1209,20 @@ fn resolve_editable_focus(element: Element, pid: u32) -> Result<Element, ReadErr
     reject_protected(&element)?;
     let ancestor = match attribute(&element, "AXHighestEditableAncestor") {
         Ok(value) => value,
-        Err(ReadError::NoValue | ReadError::Native(-25205)) => return Ok(element),
+        Err(ReadError::NoValue | ReadError::Native(-25205)) => {
+            match attribute(&element, "AXEditableAncestor") {
+                Ok(value) => value,
+                Err(ReadError::NoValue | ReadError::Native(-25205)) => return Ok(element),
+                Err(error) => return Err(error),
+            }
+        }
         Err(error) => return Err(error),
     };
     if unsafe { CFGetTypeID(ancestor.as_CFTypeRef()) } != unsafe { AXUIElementGetTypeID() } {
         return Err(ReadError::Unsupported);
+    }
+    if unsafe { CFEqual(ancestor.as_CFTypeRef(), element.0 as CFTypeRef) } != 0 {
+        return Ok(element);
     }
     let ancestor =
         Element(unsafe { core_foundation::base::CFRetain(ancestor.as_CFTypeRef()) } as ElementRef);
@@ -1189,19 +1278,22 @@ fn check_control(element: &Element, chromium: bool) -> Result<TextKind, ReadErro
         return Err(ReadError::SecureInput);
     }
     let web_area = role == "AXWebArea" && verified_webkit_text_node(element)?;
-    if role != "AXTextField" && role != "AXTextArea" && !web_area {
+    if !matches!(role.as_str(), "AXTextField" | "AXTextArea" | "AXComboBox") && !web_area {
         return Err(ReadError::Unsupported);
     }
     match string_attribute(element, "AXSubrole") {
         Ok(subrole) if subrole == "AXSecureTextField" => return Err(ReadError::SecureInput),
         // AXSubrole is optional in the AX role contract. An explicit
-        // AttributeUnsupported means the generic role has no specialization;
-        // NoValue, wrong types, and transient errors do not establish that.
+        // AttributeUnsupported (-25205) means the generic role has no
+        // specialization; NoValue (-25212) requires a verified web/text node
+        // contract or a verified non-DOM native text control so uninitialized
+        // Chromium focus proxies remain blocked.
         Ok(_) | Err(ReadError::Native(-25205)) => {}
         Err(ReadError::NoValue)
             if web_area
                 || (chromium && verified_chromium_web_node(element)?)
-                || verified_webkit_text_node(element)? => {}
+                || verified_webkit_text_node(element)?
+                || (!chromium && verified_native_text_control(element)?) => {}
         Err(ReadError::NoValue | ReadError::Unsupported) => return Err(ReadError::SecurityUnknown),
         Err(error) => return Err(error),
     }
@@ -1220,7 +1312,10 @@ fn check_live_control(element: &Element, kind: TextKind) -> Result<(), ReadError
     let role = reject_protected(element)?;
     if !matches!(
         (kind, role.as_str()),
-        (TextKind::Control, "AXTextField" | "AXTextArea") | (TextKind::WebArea, "AXWebArea")
+        (
+            TextKind::Control,
+            "AXTextField" | "AXTextArea" | "AXComboBox"
+        ) | (TextKind::WebArea, "AXWebArea")
     ) {
         return Err(ReadError::TargetChanged);
     }
@@ -1228,17 +1323,23 @@ fn check_live_control(element: &Element, kind: TextKind) -> Result<(), ReadError
 }
 
 fn check_editable(element: &Element) -> Result<(), ReadError> {
-    let attribute = CFString::new("AXValue");
-    let mut settable = 0u8;
-    attribute_query();
-    status(unsafe {
-        AXUIElementIsAttributeSettable(element.0, attribute.as_concrete_TypeRef(), &mut settable)
-    })?;
-    if settable == 0 {
-        Err(ReadError::Unsupported)
-    } else {
-        Ok(())
+    for name in ["AXValue", "AXSelectedText"] {
+        let attribute = CFString::new(name);
+        let mut settable = 0u8;
+        attribute_query();
+        match status(unsafe {
+            AXUIElementIsAttributeSettable(
+                element.0,
+                attribute.as_concrete_TypeRef(),
+                &mut settable,
+            )
+        }) {
+            Ok(()) if settable != 0 => return Ok(()),
+            Ok(()) | Err(ReadError::NoValue | ReadError::Native(-25205)) => {}
+            Err(error) => return Err(error),
+        }
     }
+    Err(ReadError::Unsupported)
 }
 
 /// Chromium's actual web nodes return a nil subrole for ordinary editors and
@@ -1247,7 +1348,32 @@ fn check_editable(element: &Element) -> Result<(), ReadError> {
 /// and a self-identifying editable ancestor before interpreting nil as absent.
 /// No accessibility flags, focus, selection or clipboard are changed here.
 fn uses_chromium_web_contract(bundle_id: Option<&str>, electron_framework: bool) -> bool {
-    electron_framework || matches!(bundle_id, Some("com.google.Chrome" | "com.openai.codex"))
+    if electron_framework {
+        return true;
+    }
+    let Some(id) = bundle_id else {
+        return false;
+    };
+    matches!(
+        id,
+        "com.google.Chrome"
+            | "com.google.Chrome.beta"
+            | "com.google.Chrome.dev"
+            | "com.google.Chrome.canary"
+            | "org.chromium.Chromium"
+            | "com.microsoft.edgemac"
+            | "com.microsoft.edgemac.Beta"
+            | "com.microsoft.edgemac.Dev"
+            | "com.microsoft.edgemac.Canary"
+            | "company.thebrowser.Browser"
+            | "company.thebrowser.dia"
+            | "com.brave.Browser"
+            | "com.brave.Browser.beta"
+            | "com.brave.Browser.nightly"
+            | "com.vivaldi.Vivaldi"
+            | "com.operasoftware.Opera"
+            | "com.openai.codex"
+    )
 }
 
 fn webkit_text_contract(marker_is_valid: bool, parameters: &[String]) -> bool {
@@ -1331,10 +1457,53 @@ fn has_electron_framework(app: &objc2_app_kit::NSRunningApplication) -> bool {
     app.bundleURL()
         .and_then(|url| url.path())
         .is_some_and(|path| {
-            std::path::Path::new(&path.to_string())
-                .join("Contents/Frameworks/Electron Framework.framework")
-                .is_dir()
+            let frameworks = std::path::Path::new(&path.to_string()).join("Contents/Frameworks");
+            [
+                "Electron Framework.framework",
+                "Chromium Embedded Framework.framework",
+                "Chromium Framework.framework",
+                "QtWebEngineCore.framework",
+                "nwjs Framework.framework",
+            ]
+            .iter()
+            .any(|name| frameworks.join(name).is_dir())
         })
+}
+
+/// A native NSAccessibilityElement text control without a subrole returns
+/// AX_NO_VALUE for AXSubrole, whereas an uninitialized Chromium focus proxy in
+/// an unknown Chromium container either supports ChromeAXNodeId / AXDOMClassList
+/// or lacks a live native character count + selection range contract.
+fn verified_native_text_control(element: &Element) -> Result<bool, ReadError> {
+    for web_attr in ["ChromeAXNodeId", "AXDOMClassList"] {
+        match attribute(element, web_attr) {
+            Err(ReadError::Native(-25205)) => {}
+            Ok(_) | Err(ReadError::NoValue | ReadError::Unsupported) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    let count_value = match attribute(element, "AXNumberOfCharacters") {
+        Ok(value) => value,
+        Err(ReadError::NoValue | ReadError::Native(-25205) | ReadError::Unsupported) => {
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    if unsafe { CFGetTypeID(count_value.as_CFTypeRef()) } != CFNumber::type_id() {
+        return Ok(false);
+    }
+    let Some(count) =
+        (unsafe { CFNumber::wrap_under_get_rule(count_value.as_CFTypeRef() as CFNumberRef) })
+            .to_i64()
+            .filter(|count| *count >= 0 && *count <= isize::MAX as i64)
+    else {
+        return Ok(false);
+    };
+    match read_selected_range(element, count as usize) {
+        Ok(_) => Ok(true),
+        Err(ReadError::NoValue | ReadError::Native(-25205) | ReadError::Unsupported) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 fn verified_chromium_web_node(element: &Element) -> Result<bool, ReadError> {
@@ -1401,8 +1570,20 @@ mod tests {
 
     #[test]
     fn chromium_contract_requires_a_known_browser_or_an_installed_electron_framework() {
-        assert!(uses_chromium_web_contract(Some("com.google.Chrome"), false));
-        assert!(uses_chromium_web_contract(Some("com.openai.codex"), false));
+        for browser in [
+            "com.google.Chrome",
+            "com.google.Chrome.canary",
+            "org.chromium.Chromium",
+            "com.microsoft.edgemac",
+            "company.thebrowser.Browser",
+            "company.thebrowser.dia",
+            "com.brave.Browser",
+            "com.vivaldi.Vivaldi",
+            "com.operasoftware.Opera",
+            "com.openai.codex",
+        ] {
+            assert!(uses_chromium_web_contract(Some(browser), false));
+        }
         for id in [
             None,
             Some("com.openai.chat"),

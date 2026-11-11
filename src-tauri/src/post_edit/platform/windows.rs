@@ -7,8 +7,10 @@ use windows::Win32::System::Variant::{VariantClear, VT_BOOL, VT_UNKNOWN};
 use windows::Win32::UI::Accessibility::{
     CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement,
     IUIAutomationTextEditPattern, IUIAutomationTextPattern, IUIAutomationTextRange,
-    TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start, TextUnit_Character,
-    UIA_EditControlTypeId, UIA_IsReadOnlyAttributeId, UIA_TextEditPatternId, UIA_TextPatternId,
+    IUIAutomationValuePattern, TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start,
+    TextUnit_Character, UIA_ComboBoxControlTypeId, UIA_DocumentControlTypeId,
+    UIA_EditControlTypeId, UIA_IsReadOnlyAttributeId, UIA_TextControlTypeId, UIA_TextEditPatternId,
+    UIA_TextPatternId, UIA_ValuePatternId,
 };
 
 use super::{OwnedSnapshot, ReadError};
@@ -69,17 +71,25 @@ impl NativeReader {
             .automation
             .as_ref()
             .map_err(|e| ReadError::Native(*e))?;
-        let element = unsafe { automation.GetFocusedElement() }.map_err(native)?;
-        if unsafe { element.CurrentProcessId() }.map_err(native)? as u32 != expected_pid {
+        let raw = unsafe { automation.GetFocusedElement() }.map_err(native)?;
+        if unsafe { raw.CurrentProcessId() }.map_err(native)? as u32 != expected_pid {
             return Err(ReadError::TargetChanged);
         }
-        check_control(&element)?;
+        let element = resolve_editable_focus(automation, raw, expected_pid)?;
+        check_control(automation, &element)?;
         if composition_state(&element) == super::CompositionState::Active {
             return Err(ReadError::CompositionActive);
         }
-        let (window, clipped_edges) = local_window(&element, lookbehind)?;
-        self.clipped_edges = clipped_edges;
-        self.window = Some(window);
+        if unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
+            .is_ok()
+        {
+            let (window, clipped_edges) = local_window(&element, lookbehind)?;
+            self.clipped_edges = clipped_edges;
+            self.window = Some(window);
+        } else {
+            self.clipped_edges = (false, false);
+            self.window = None;
+        }
         self.target = Some((generation, super::target_token(), element));
         self.read(generation)
     }
@@ -103,13 +113,20 @@ impl NativeReader {
             return Err(ReadError::TargetChanged);
         }
         same_focus(automation, element)?;
-        check_control(element)?;
+        check_control(automation, element)?;
         if composition_state(element) == super::CompositionState::Active {
             return Err(ReadError::CompositionActive);
         }
-        let (window, clipped_edges) = local_window(element, lookbehind)?;
-        self.window = Some(window);
-        self.clipped_edges = clipped_edges;
+        if unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
+            .is_ok()
+        {
+            let (window, clipped_edges) = local_window(element, lookbehind)?;
+            self.window = Some(window);
+            self.clipped_edges = clipped_edges;
+        } else {
+            self.window = None;
+            self.clipped_edges = (false, false);
+        }
         self.guards = EdgeGuards::default();
         self.read(generation)
     }
@@ -125,10 +142,38 @@ impl NativeReader {
             return Err(ReadError::StaleGeneration);
         }
         same_focus(automation, element)?;
-        check_control(element)?;
+        check_control(automation, element)?;
         let composition_before = composition_state(element);
         if composition_before == super::CompositionState::Active {
             return Err(ReadError::CompositionActive);
+        }
+        if self.window.is_none() {
+            let text = read_value_pattern(element)?;
+            same_focus(automation, element)?;
+            check_control(automation, element)?;
+            let composition_after = composition_state(element);
+            if composition_after == super::CompositionState::Active {
+                return Err(ReadError::CompositionActive);
+            }
+            let selection_utf16 = if text.is_empty() {
+                0..0
+            } else {
+                usize::MAX..0
+            };
+            return Ok(OwnedSnapshot {
+                target: *token,
+                process_id: unsafe { element.CurrentProcessId() }.map_err(native)? as u32,
+                text,
+                selection_utf16,
+                read_at: Instant::now(),
+                event_driven: false,
+                composition: if composition_before == composition_after {
+                    composition_before
+                } else {
+                    super::CompositionState::Unknown
+                },
+                reset_detection: false,
+            });
         }
         let pattern =
             unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
@@ -240,7 +285,7 @@ impl NativeReader {
         self.guards
             .check(&text, self.clipped_edges.0, self.clipped_edges.1)?;
         same_focus(automation, element)?;
-        check_control(element)?;
+        check_control(automation, element)?;
         let composition_after = composition_state(element);
         if composition_after == super::CompositionState::Active {
             return Err(ReadError::CompositionActive);
@@ -434,7 +479,18 @@ fn native(error: windows::core::Error) -> ReadError {
 
 fn same_focus(automation: &IUIAutomation, element: &IUIAutomationElement) -> Result<(), ReadError> {
     let focused = unsafe { automation.GetFocusedElement() }.map_err(native)?;
-    if !unsafe { automation.CompareElements(element, &focused) }
+    if unsafe { automation.CompareElements(element, &focused) }
+        .map_err(native)?
+        .as_bool()
+    {
+        return Ok(());
+    }
+    let expected_pid = unsafe { element.CurrentProcessId() }.map_err(native)? as u32;
+    if unsafe { focused.CurrentProcessId() }.map_err(native)? as u32 != expected_pid {
+        return Err(ReadError::TargetChanged);
+    }
+    let resolved = resolve_editable_focus(automation, focused, expected_pid)?;
+    if !unsafe { automation.CompareElements(element, &resolved) }
         .map_err(native)?
         .as_bool()
     {
@@ -443,7 +499,7 @@ fn same_focus(automation: &IUIAutomation, element: &IUIAutomationElement) -> Res
     Ok(())
 }
 
-fn check_control(element: &IUIAutomationElement) -> Result<(), ReadError> {
+fn check_not_password(element: &IUIAutomationElement) -> Result<(), ReadError> {
     // Any failure to establish the password property denies access to text.
     if unsafe { element.CurrentIsPassword() }
         .map_err(|_| ReadError::SecurityUnknown)?
@@ -451,7 +507,118 @@ fn check_control(element: &IUIAutomationElement) -> Result<(), ReadError> {
     {
         return Err(ReadError::SecureInput);
     }
-    if unsafe { element.CurrentControlType() }.map_err(native)? != UIA_EditControlTypeId {
+    Ok(())
+}
+
+fn resolve_editable_focus(
+    automation: &IUIAutomation,
+    element: IUIAutomationElement,
+    expected_pid: u32,
+) -> Result<IUIAutomationElement, ReadError> {
+    check_not_password(&element)?;
+    if check_control(automation, &element).is_ok() {
+        return Ok(element);
+    }
+    // Only climb from inline text leaves inside rich editors, never from
+    // buttons, links, list items, or arbitrary page controls.
+    if unsafe { element.CurrentControlType() }.map_err(native)? != UIA_TextControlTypeId {
+        return Ok(element);
+    }
+    let walker = unsafe { automation.ControlViewWalker() }.map_err(native)?;
+    let mut current = element.clone();
+    for _ in 0..4 {
+        let Ok(parent) = (unsafe { walker.GetParentElement(&current) }) else {
+            break;
+        };
+        if unsafe { parent.CurrentProcessId() }.map_err(native)? as u32 != expected_pid {
+            break;
+        }
+        check_not_password(&parent)?;
+        if check_control(automation, &parent).is_ok() {
+            return Ok(parent);
+        }
+        current = parent;
+    }
+    Ok(element)
+}
+
+fn value_pattern_writable(element: &IUIAutomationElement) -> Result<Option<bool>, ReadError> {
+    let Ok(pattern) =
+        (unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) })
+    else {
+        return Ok(None);
+    };
+    let read_only = unsafe { pattern.CurrentIsReadOnly() }
+        .map_err(native)?
+        .as_bool();
+    Ok(Some(!read_only))
+}
+
+fn read_value_pattern(element: &IUIAutomationElement) -> Result<String, ReadError> {
+    let pattern =
+        unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
+            .map_err(|_| ReadError::Unsupported)?;
+    if unsafe { pattern.CurrentIsReadOnly() }
+        .map_err(native)?
+        .as_bool()
+    {
+        return Err(ReadError::Unsupported);
+    }
+    let value = unsafe { pattern.CurrentValue() }
+        .map_err(native)?
+        .to_string();
+    bounded_text(value)
+}
+
+fn check_editable(
+    automation: &IUIAutomation,
+    element: &IUIAutomationElement,
+    control_type: windows::Win32::UI::Accessibility::UIA_CONTROLTYPE_ID,
+) -> Result<(), ReadError> {
+    let value_writable = value_pattern_writable(element)?;
+    if value_writable == Some(false) {
+        return Err(ReadError::Unsupported);
+    }
+    let text_read_only = match unsafe {
+        element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+    } {
+        Ok(pattern) => {
+            let document = unsafe { pattern.DocumentRange() }.map_err(native)?;
+            Some(read_only_attribute(automation, &document)?)
+        }
+        Err(_) => None,
+    };
+    if text_read_only == Some(ReadOnly::Yes) {
+        return Err(ReadError::Unsupported);
+    }
+    match control_type {
+        // Non-text dropdowns (<select> / CBS_DROPDOWNLIST) only expose
+        // ValuePattern; require TextPattern on ComboBox controls.
+        UIA_ComboBoxControlTypeId if text_read_only.is_none() => Err(ReadError::Unsupported),
+        // Whole-page web Document roots expose TextPattern + IsKeyboardFocusable;
+        // require positive evidence of editability for Document controls.
+        UIA_DocumentControlTypeId
+            if text_read_only != Some(ReadOnly::No) && value_writable != Some(true) =>
+        {
+            Err(ReadError::Unsupported)
+        }
+        _ if text_read_only.is_none() && value_writable != Some(true) => {
+            Err(ReadError::Unsupported)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn check_control(
+    automation: &IUIAutomation,
+    element: &IUIAutomationElement,
+) -> Result<(), ReadError> {
+    check_not_password(element)?;
+    let control_type = unsafe { element.CurrentControlType() }.map_err(native)?;
+    if !matches!(
+        control_type,
+        UIA_EditControlTypeId | UIA_DocumentControlTypeId | UIA_ComboBoxControlTypeId
+    ) {
         return Err(ReadError::Unsupported);
     }
     if !unsafe { element.CurrentIsKeyboardFocusable() }
@@ -460,7 +627,7 @@ fn check_control(element: &IUIAutomationElement) -> Result<(), ReadError> {
     {
         return Err(ReadError::Unsupported);
     }
-    Ok(())
+    check_editable(automation, element, control_type)
 }
 
 fn bounded_text(text: String) -> Result<String, ReadError> {

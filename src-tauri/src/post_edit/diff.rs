@@ -34,18 +34,27 @@ pub enum TrackingError {
 
 /// A chosen minimum edit script alone cannot identify a range: deleting either
 /// X in AXX gives AX. Check both boundaries against *all* optimal alignments.
+/// Boundary transitions are anchored on the outer neighbors (`range.start - 1
+/// -> range.start` and `range.end -> range.end + 1`) so that length-changing
+/// edits at the boundary do not fail solely due to equivalent `Sub+Ins` vs
+/// `Ins+Sub` orderings; pure insertions at `range.start` or `range.end` are
+/// included in the returned range and must be validated by the caller (`RangeTracker::slice`)
+/// against `changes`.
 /// A distance-d diagonal band keeps ordinary small edits linear in field size.
 pub fn track_changes(
     before: &str,
     after: &str,
     range: Range<usize>,
 ) -> Result<(Vec<Change>, Range<usize>), TrackingError> {
+    let a: Vec<_> = before.graphemes(true).collect();
+    if range.is_empty() || range.end > a.len() {
+        return Err(TrackingError::Ambiguous);
+    }
     let (edits, changes) = compute(before, after).map_err(|_| TrackingError::BudgetExceeded)?;
     let d = edits.insertions + edits.deletions + edits.substitutions;
     if d == 0 {
         return Ok((changes, range));
     }
-    let a: Vec<_> = before.graphemes(true).collect();
     let b: Vec<_> = after.graphemes(true).collect();
     let width = 2 * d + 1;
     let cells = (a.len() + 1)
@@ -72,19 +81,14 @@ pub fn track_changes(
             costs[index(i, j).unwrap()] = cost.min(infinity);
         }
     }
-    let mut mapped = [None, None];
+    let mut mapped = [
+        (range.start == 0).then_some(0),
+        (range.end == a.len()).then_some(b.len()),
+    ];
     let mut visited = vec![false; cells];
     let mut pending = vec![(a.len(), b.len())];
     visited[index(a.len(), b.len()).unwrap()] = true;
     while let Some((i, j)) = pending.pop() {
-        for (boundary, original) in [range.start, range.end].into_iter().enumerate() {
-            if i == original {
-                if mapped[boundary].is_some_and(|previous| previous != j) {
-                    return Err(TrackingError::Ambiguous);
-                }
-                mapped[boundary] = Some(j);
-            }
-        }
         let current = costs[index(i, j).unwrap()];
         for (next_i, next_j, cost) in [
             (
@@ -99,17 +103,37 @@ pub fn track_changes(
             (i.checked_sub(1), Some(j), 1),
             (Some(i), j.checked_sub(1), 1),
         ] {
-            if let (Some(i), Some(j)) = (next_i, next_j) {
-                if let Some(idx) = index(i, j) {
-                    if !visited[idx] && costs[idx] + cost == current {
-                        visited[idx] = true;
-                        pending.push((i, j));
+            if let (Some(prev_i), Some(prev_j)) = (next_i, next_j) {
+                if let Some(idx) = index(prev_i, prev_j) {
+                    if costs[idx] + cost == current {
+                        if i == range.start && prev_i + 1 == range.start {
+                            if mapped[0].is_some_and(|previous| previous != j) {
+                                return Err(TrackingError::Ambiguous);
+                            }
+                            mapped[0] = Some(j);
+                        }
+                        if prev_i == range.end && i == range.end + 1 {
+                            if mapped[1].is_some_and(|previous| previous != prev_j) {
+                                return Err(TrackingError::Ambiguous);
+                            }
+                            mapped[1] = Some(prev_j);
+                        }
+                        if !visited[idx] {
+                            visited[idx] = true;
+                            pending.push((prev_i, prev_j));
+                        }
                     }
                 }
             }
         }
     }
-    Ok((changes, mapped[0].unwrap()..mapped[1].unwrap()))
+    let (Some(start), Some(end)) = (mapped[0], mapped[1]) else {
+        return Err(TrackingError::Ambiguous);
+    };
+    if start > end {
+        return Err(TrackingError::Ambiguous);
+    }
+    Ok((changes, start..end))
 }
 
 pub fn changes(before: &str, after: &str) -> Result<Vec<Change>, DiffError> {
@@ -250,6 +274,8 @@ mod tests {
         let after = before.replace("返力", "反力");
         let (_, range) = track_changes(&before, &after, 4000..4004).unwrap();
         assert_eq!(range, 4000..4004);
+        let (_, grown) = track_changes("前支座返力后", "前混凝土反力后", 1..5).unwrap();
+        assert_eq!(grown, 1..6);
     }
 
     #[test]

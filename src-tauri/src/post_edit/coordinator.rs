@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 const READ_TIMEOUT: Duration = Duration::from_millis(300);
+const DEBOUNCE_FOR: Duration = Duration::from_millis(150);
 pub fn known_remote_target(
     app: &crate::foreground_app::ForegroundAppInfo,
     clipboard_bridge: bool,
@@ -117,7 +118,13 @@ impl Coordinator {
     fn invalidate(&self, reason: EndReason) {
         let mut active = self.active.lock().unwrap();
         if let Some((_, stop)) = active.take() {
-            *stop.lock().unwrap() = Some(reason);
+            let mut slot = stop.lock().unwrap();
+            // If the previous dictation is already finishing for NextRecording,
+            // cancelling the newly started recording must not discard the
+            // previous dictation's confirmed edits.
+            if !(reason == EndReason::SessionCancelled && *slot == Some(EndReason::NextRecording)) {
+                *slot = Some(reason);
+            }
         }
         self.worker.invalidate();
     }
@@ -504,7 +511,7 @@ fn observe(
     let mut deadlines = vec![
         baseline.at + schedule[0],
         baseline.at + schedule[1],
-        end.checked_sub(Duration::from_millis(800) + READ_TIMEOUT)
+        end.checked_sub(super::observation::STABLE_FOR + READ_TIMEOUT)
             .unwrap_or(baseline.at),
         end,
     ];
@@ -515,6 +522,9 @@ fn observe(
     let mut poll_due = last_read + poll_interval(Duration::ZERO);
     let mut dirty_due: Option<Instant> = None;
     let mut settle_due: Option<Instant> = None;
+    let mut settling_next_recording = false;
+    let mut retried_next_recording_no_value = false;
+    let mut awaiting_next_recording_retry = false;
     loop {
         let stop_reason = *stop.lock().unwrap();
         if !current(worker, generation, attempt) {
@@ -540,7 +550,11 @@ fn observe(
             .min(poll_due)
             .min(dirty_due.unwrap_or(end))
             .min(settle_due.unwrap_or(end));
-        if stop_reason.is_none() && now < deadline {
+        if (stop_reason.is_none()
+            || (stop_reason == Some(EndReason::NextRecording)
+                && (settling_next_recording || awaiting_next_recording_retry)))
+            && now < deadline
+        {
             let events = clock.wait(
                 &worker.events,
                 generation,
@@ -548,7 +562,7 @@ fn observe(
             );
             if events & TEXT_CHANGED != 0 {
                 observation.text_changed();
-                dirty_due.get_or_insert(clock.now().max(last_read + Duration::from_millis(350)));
+                dirty_due.get_or_insert(clock.now().max(last_read + DEBOUNCE_FOR));
             }
             if events & DESTROYED != 0 {
                 let mut done = Completion::cached(observation, generation, EndReason::FocusLeft);
@@ -558,11 +572,12 @@ fn observe(
             if events & FOCUS_CHANGED != 0 {
                 // A leaf focus change can stay inside the same editor. The
                 // native reader verifies normalized focus before reading text.
-                dirty_due.get_or_insert(clock.now().max(last_read + Duration::from_millis(350)));
+                dirty_due.get_or_insert(clock.now().max(last_read + DEBOUNCE_FOR));
             }
             continue;
         }
-        if baseline.native_reads >= 90 {
+        awaiting_next_recording_retry = false;
+        if baseline.native_reads >= super::observation::MAX_READS {
             return Completion::cached(observation, generation, EndReason::BudgetExceeded);
         }
         baseline.native_reads += 1;
@@ -593,7 +608,12 @@ fn observe(
                 | ReadError::NoValue),
             ) => {
                 observation.unresolved_input();
-                if stop_reason.is_some() || clock.now() >= end {
+                let can_retry_next_recording = stop_reason == Some(EndReason::NextRecording)
+                    && error == ReadError::NoValue
+                    && !retried_next_recording_no_value
+                    && !settling_next_recording
+                    && clock.now() + DEBOUNCE_FOR < end;
+                if (stop_reason.is_some() && !can_retry_next_recording) || clock.now() >= end {
                     let mut done = Completion::cached(
                         observation,
                         generation,
@@ -611,7 +631,11 @@ fn observe(
                     };
                     return done;
                 }
-                dirty_due = Some(clock.now() + Duration::from_millis(350));
+                if can_retry_next_recording {
+                    retried_next_recording_no_value = true;
+                    awaiting_next_recording_retry = true;
+                }
+                dirty_due = Some(clock.now() + DEBOUNCE_FOR);
                 poll_due =
                     clock.now() + poll_interval(clock.now().saturating_duration_since(baseline.at));
                 settle_due = None;
@@ -639,8 +663,16 @@ fn observe(
         last_read = snapshot.read_at;
         poll_due = clock.now().max(last_read)
             + poll_interval(last_read.saturating_duration_since(baseline.at));
-        let terminal = stop_reason.is_some() || last_read >= end || clock.now() >= end;
         let sample = observation.sample_read(generation, &snapshot);
+        let can_settle_next_recording = stop_reason == Some(EndReason::NextRecording)
+            && !settling_next_recording
+            && sample.is_ok()
+            && !observation.is_stable()
+            && last_read < end
+            && clock.now() < end;
+        let terminal = (stop_reason.is_some() && !can_settle_next_recording)
+            || last_read >= end
+            || clock.now() >= end;
         if let Err(error) = sample {
             let (reason, retry) = match error {
                 SampleError::CompositionActive => (Reason::CompositionActive, true),
@@ -659,7 +691,7 @@ fn observe(
                 _ => (Reason::Interrupted, false),
             };
             if retry && !terminal {
-                dirty_due = Some(clock.now().max(last_read) + Duration::from_millis(350));
+                dirty_due = Some(clock.now().max(last_read) + DEBOUNCE_FOR);
                 settle_due = None;
                 while checkpoint + 1 < deadlines.len() && deadlines[checkpoint] <= last_read {
                     checkpoint += 1;
@@ -689,6 +721,9 @@ fn observe(
                 generation,
             };
         }
+        if can_settle_next_recording {
+            settling_next_recording = true;
+        }
         let result = observation.progress(EndReason::Timeout);
         diagnostics::publish(attempt, Status::Observing, Reason::None, None, result.edits);
         diagnostics::context(
@@ -702,7 +737,7 @@ fn observe(
         settle_due = (!observation.is_stable()).then(|| {
             observation
                 .stable_at()
-                .max(last_read + Duration::from_millis(350))
+                .max(last_read + DEBOUNCE_FOR)
                 .min(end)
         });
         while checkpoint + 1 < deadlines.len() && deadlines[checkpoint] <= last_read {
@@ -997,6 +1032,8 @@ mod tests {
         WindowChanged,
         Cancel,
         Reinject,
+        NextRecording(&'static str),
+        NextRecordingNoValue,
     }
     struct ScriptedReader {
         clock: VirtualClock,
@@ -1028,7 +1065,9 @@ mod tests {
                 .or(self.last)
                 .expect("initial field state");
             self.last = Some(match step {
-                Step::TextThenNotify(text) | Step::TextThenFocus(text) => Step::Text(text),
+                Step::TextThenNotify(text)
+                | Step::TextThenFocus(text)
+                | Step::NextRecording(text) => Step::Text(text),
                 other => other,
             });
             match step {
@@ -1064,6 +1103,14 @@ mod tests {
                     *self.stop.lock().unwrap() = Some(EndReason::NextInjection);
                     ATTEMPT.fetch_add(1, Ordering::SeqCst);
                     Ok(snapshot("来自新听写的内容", self.clock.now()))
+                }
+                Step::NextRecording(text) => {
+                    *self.stop.lock().unwrap() = Some(EndReason::NextRecording);
+                    Ok(snapshot(text, self.clock.now()))
+                }
+                Step::NextRecordingNoValue => {
+                    *self.stop.lock().unwrap() = Some(EndReason::NextRecording);
+                    Err(ReadError::NoValue)
                 }
             }
         }
@@ -1571,6 +1618,38 @@ mod tests {
         assert_eq!(record.edited_text, "支座反力");
         assert_eq!(record.end_reason, "next_injection");
         assert!(record.stable && !record.complete);
+        diagnostics::set_enabled(false);
+    }
+
+    #[test]
+    fn next_recording_settles_final_edit_instead_of_keeping_intermediate_edit() {
+        let _guard = diagnostics::TEST_LOCK.lock().unwrap();
+        diagnostics::set_enabled(true);
+        for steps in [
+            vec![
+                Step::Text("支座返力"),
+                Step::NextRecording("支座反力"),
+                Step::Text("支座反力"),
+            ],
+            vec![
+                Step::Text("支座返力"),
+                Step::NextRecordingNoValue,
+                Step::Text("支座反力"),
+                Step::Text("支座反力"),
+            ],
+        ] {
+            let record = scripted_run(steps)
+                .expect("next_recording settle read should confirm the final edit");
+            assert_eq!(record.edited_text, "支座反力");
+            assert_eq!(record.end_reason, "next_recording");
+            assert!(record.stable && record.complete);
+            assert!(!record.has_newer_unconfirmed_input);
+        }
+        let c = coordinator().unwrap();
+        let stop = Arc::new(Mutex::new(Some(EndReason::NextRecording)));
+        *c.active.lock().unwrap() = Some((0, Arc::clone(&stop)));
+        c.invalidate(EndReason::SessionCancelled);
+        assert_eq!(*stop.lock().unwrap(), Some(EndReason::NextRecording));
         diagnostics::set_enabled(false);
     }
 

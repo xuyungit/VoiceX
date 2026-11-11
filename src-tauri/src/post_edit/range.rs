@@ -3,6 +3,7 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 const MAX_UTF16_UNITS: usize = 16_384;
+const MAX_START_BOUNDARY_GROWTH: isize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RangeError {
@@ -159,8 +160,10 @@ impl RangeTracker {
 
     /// Project the original injection range onto the current field. A sampled
     /// backspace must not shrink the coordinate frame used for the next sample.
-    /// Net boundary growth remains unknown: correction and continuation cannot
-    /// be distinguished from text alone.
+    /// At `range.start`, non-punctuation word replacements may grow by up to
+    /// `MAX_START_BOUNDARY_GROWTH` graphemes; at `range.end`, net length growth
+    /// is only accepted when it consists purely of trailing punctuation, so
+    /// sentence continuation after editing the tail remains rejected.
     pub fn slice<'a>(&self, snapshot: &'a Snapshot<'_>) -> Result<&'a str, RangeError> {
         if snapshot.target != self.target {
             return Err(RangeError::TargetChanged);
@@ -179,32 +182,100 @@ impl RangeTracker {
                     diff::TrackingError::BudgetExceeded => RangeError::BudgetExceeded,
                 },
             )?;
-        for change in changes {
-            let old = &change.before;
-            let delta = change.after.len() as isize - old.len() as isize;
-            if old.is_empty() && (old.start == self.range.start || old.start == self.range.end) {
-                return Err(RangeError::Ambiguous);
-            }
-            if old.end <= self.range.start || old.start >= self.range.end {
-                // Outside the injection; it does not contribute to its edits.
-            } else if old.start >= self.range.start && old.end <= self.range.end {
-                if delta > 0 && (old.start == self.range.start || old.end == self.range.end) {
-                    return Err(RangeError::Ambiguous);
-                }
-            } else {
-                return Err(RangeError::Ambiguous);
-            }
-        }
+        let ref_offsets: Vec<_> = self
+            .reference
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain(std::iter::once(self.reference.len()))
+            .collect();
         let offsets: Vec<_> = snapshot
             .text
             .grapheme_indices(true)
             .map(|(i, _)| i)
             .chain(std::iter::once(snapshot.text.len()))
             .collect();
+        for change in changes {
+            let old = &change.before;
+            let delta = change.after.len() as isize - old.len() as isize;
+            if old.is_empty() && (old.start == self.range.start || old.start == self.range.end) {
+                let inserted =
+                    &snapshot.text[offsets[change.after.start]..offsets[change.after.end]];
+                if !(old.start == self.range.end && is_trailing_punctuation(inserted)) {
+                    return Err(RangeError::Ambiguous);
+                }
+            } else if old.end <= self.range.start || old.start >= self.range.end {
+                // Outside the injection; it does not contribute to its edits.
+            } else if old.start >= self.range.start && old.end <= self.range.end {
+                if delta > 0 {
+                    let old_text = &self.reference[ref_offsets[old.start]..ref_offsets[old.end]];
+                    let new_text =
+                        &snapshot.text[offsets[change.after.start]..offsets[change.after.end]];
+                    if old.end == self.range.end {
+                        if !allows_end_boundary_growth(old_text, old.len(), new_text) {
+                            return Err(RangeError::Ambiguous);
+                        }
+                    } else if old.start == self.range.start
+                        && (delta > MAX_START_BOUNDARY_GROWTH
+                            || old_text
+                                .chars()
+                                .all(|c| is_blank(c) || is_trailing_punctuation_char(c))
+                            || new_text
+                                .chars()
+                                .all(|c| is_blank(c) || is_trailing_punctuation_char(c)))
+                    {
+                        return Err(RangeError::Ambiguous);
+                    }
+                }
+            } else {
+                return Err(RangeError::Ambiguous);
+            }
+        }
         let (start, end) = (mapped.start, mapped.end);
         let slice = &snapshot.text[offsets[start]..offsets[end]];
         Ok(slice)
     }
+}
+
+fn is_trailing_punctuation_char(c: char) -> bool {
+    matches!(
+        c,
+        '.' | ','
+            | '!'
+            | '?'
+            | ';'
+            | ':'
+            | '。'
+            | '，'
+            | '！'
+            | '？'
+            | '；'
+            | '：'
+            | '、'
+            | '…'
+            | '”'
+            | '’'
+            | '"'
+            | '\''
+            | ')'
+            | '）'
+            | '】'
+            | ']'
+            | '》'
+            | '~'
+            | '～'
+    )
+}
+
+fn is_trailing_punctuation(text: &str) -> bool {
+    !text.is_empty() && text.chars().all(is_trailing_punctuation_char)
+}
+
+fn allows_end_boundary_growth(old_text: &str, old_graphemes: usize, new_text: &str) -> bool {
+    if is_trailing_punctuation(old_text) {
+        return is_trailing_punctuation(new_text);
+    }
+    let trimmed = new_text.trim_end_matches(is_trailing_punctuation_char);
+    trimmed.len() < new_text.len() && trimmed.graphemes(true).count() <= old_graphemes
 }
 
 /// Whitespace, or a zero-width character editors keep as a caret anchor in an
@@ -363,6 +434,50 @@ mod tests {
         assert_eq!(tracker.slice(&snap("支座反力", 4..4)), Ok("支座反力"));
         assert_eq!(
             tracker.slice(&snap("支座反力，继续写", 8..8)),
+            Err(RangeError::Ambiguous)
+        );
+    }
+
+    #[test]
+    fn allows_boundary_word_growth_and_trailing_punctuation_without_accepting_continuation() {
+        let tracker = RangeTracker::from_before_after(
+            &snap("前后", 1..1),
+            &snap("前支座返力后", 5..5),
+            "支座返力",
+        )
+        .unwrap();
+        assert_eq!(
+            tracker.slice(&snap("前混凝土反力后", 6..6)),
+            Ok("混凝土反力")
+        );
+        assert_eq!(
+            tracker.slice(&snap("前支座反弹力后", 6..6)),
+            Ok("支座反弹力")
+        );
+        assert_eq!(
+            tracker.slice(&snap("前支座反力。后", 6..6)),
+            Ok("支座反力。")
+        );
+        assert_eq!(
+            tracker.slice(&snap("前支座反力继续写后", 8..8)),
+            Err(RangeError::Ambiguous)
+        );
+        let tail_edit =
+            RangeTracker::from_before_after(&snap("", 0..0), &snap("支座返利", 4..4), "支座返利")
+                .unwrap();
+        assert_eq!(
+            tail_edit.slice(&snap("支座反力。", 5..5)),
+            Ok("支座反力。")
+        );
+        assert_eq!(
+            tail_edit.slice(&snap("支座反力继续写", 7..7)),
+            Err(RangeError::Ambiguous)
+        );
+        let punctuated =
+            RangeTracker::from_before_after(&snap("", 0..0), &snap("今天开会。", 5..5), "今天开会。")
+                .unwrap();
+        assert_eq!(
+            punctuated.slice(&snap("今天开会，我们讨论", 9..9)),
             Err(RangeError::Ambiguous)
         );
     }
