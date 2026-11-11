@@ -178,9 +178,23 @@
     },
     {
       "provider": "elevenlabs",
+      "id": "scribe_v3_live",
+      "modes": [
+        "realtime"
+      ]
+    },
+    {
+      "provider": "elevenlabs",
       "id": "scribe_v2_realtime",
       "modes": [
         "realtime"
+      ]
+    },
+    {
+      "provider": "elevenlabs",
+      "id": "scribe_v3",
+      "modes": [
+        "batch"
       ]
     },
     {

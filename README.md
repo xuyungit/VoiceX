@@ -222,13 +222,14 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --tr
 | StepAudio（阶跃星辰） | 录完识别 | 默认 `stepaudio-3-asr-max`；单次录音最长 30 分钟 |
 | 小米 MiMo | 录完识别 | `mimo-v2.5-asr` |
 | OpenAI | 云端实时 / 录完识别 | `gpt-live-transcribe` / `gpt-transcribe`；词典作为关键词传入；支持多语种 |
-| ElevenLabs | 云端实时 / 录完识别 | `scribe_v2_realtime` / `scribe_v2`；可在录音结束后整段精修；词典只在录完识别时传入，实时阶段不使用 |
+| ElevenLabs | 云端实时 / 录完识别 | 可选 `scribe_v3_live` / `scribe_v3`，默认仍为 `scribe_v2_realtime` / `scribe_v2`；可在录音结束后整段精修；词典只在录完识别时传入，实时阶段不使用 |
 | [Coli](https://www.npmjs.com/package/@marswave/coli) | 本地离线 | 基于 SenseVoice / Whisper，需单独安装 |
 | Qwen3-ASR（本地） | 本地离线 | 阿里开源模型，完全离线；见下文 |
 
 目前推荐豆包、通义千问、ElevenLabs、Soniox 和 Coli，但体验因人而异，发音习惯、用词和使用领域都会影响效果。
 
 - 云端引擎需要到对应平台申请 API Key。实时识别会使用系统代理设置。
+- ElevenLabs [Scribe v3 / v3 Live](https://elevenlabs.io/blog/scribe-v3) 已加入模型选项，沿用现有识别流程。新模型尚未完成 VoiceX 实机验证；切换默认值前需验证实时出字、停止录音后的尾句收齐及录后精修效果，因此本次保留 v2 默认值和已有模型选择。
 - 服务商下线的模型会从预设中移除：已保存的配置会自动迁移到同一服务商的对应模型；无法安全迁移的会保留并在设置页提示手动选择。
 - Coli 可在 ASR 设置中指定 SenseVoice 模型目录或 ONNX 文件的绝对路径，旁边需有配套的 `tokens.txt`；留空仍使用 coli 默认模型。自定义模型和指定语言需要 coli **0.0.20 或更新版本**，适用于实时识别、Batch 和 SenseVoice 录后精修，不影响 Whisper。`2025-09-09` 版侧重粤语且不支持标点，需自行下载后指定路径。
 

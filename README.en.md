@@ -222,13 +222,14 @@ Choose an engine and model and adjust its parameters on the **ASR** page; each p
 | StepAudio (StepFun) | After recording | Default `stepaudio-3-asr-max`; recordings up to 30 minutes |
 | Xiaomi MiMo | After recording | `mimo-v2.5-asr` |
 | OpenAI | Cloud realtime / after recording | `gpt-live-transcribe` / `gpt-transcribe`; the dictionary is sent as keywords; multiple languages |
-| ElevenLabs | Cloud realtime / after recording | `scribe_v2_realtime` / `scribe_v2`; optional full-recording refinement after realtime; the dictionary is sent only after recording, not during realtime |
+| ElevenLabs | Cloud realtime / after recording | Optional `scribe_v3_live` / `scribe_v3`; defaults remain `scribe_v2_realtime` / `scribe_v2`; optional full-recording refinement after realtime; the dictionary is sent only after recording, not during realtime |
 | [Coli](https://www.npmjs.com/package/@marswave/coli) | Local, offline | SenseVoice / Whisper based; installed separately |
 | Qwen3-ASR (Local) | Local, offline | Alibaba's open-weight model, fully offline; see below |
 
 Doubao, Qwen, ElevenLabs, Soniox, and Coli are currently recommended, but results vary from person to person: pronunciation, wording, and domain vocabulary all play a part.
 
 - Cloud engines need an API key from their provider. Realtime recognition follows your system proxy settings.
+- ElevenLabs [Scribe v3 / v3 Live](https://elevenlabs.io/blog/scribe-v3) are available as model options using the existing recognition flow. VoiceX has not yet verified these models in the app. Live text, final words after stopping, and post-recording refinement need validation before changing the defaults, so this update preserves the v2 defaults and saved model selections.
 - Models a provider retires are removed from the presets. Saved settings move to the provider's corresponding model automatically; those that cannot be moved safely are kept and flagged on the settings page so you can choose another.
 - Coli accepts an absolute SenseVoice model directory or ONNX file path in ASR settings, with its matching `tokens.txt` alongside the model. Leave it empty to keep coli's default. Custom models and language selection require coli **0.0.20 or later** and apply to realtime, Batch, and SenseVoice final refinement; Whisper is unaffected. Download custom models yourself. The `2025-09-09` model focuses on Cantonese and does not support punctuation.
 
