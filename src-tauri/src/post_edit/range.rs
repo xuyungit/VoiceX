@@ -167,8 +167,9 @@ impl RangeTracker {
         }
         check_size(snapshot.text)?;
         // Rich-text and web inputs report an emptied field as a line break
-        // (e.g. "\n" after a chat app sends and clears its composer).
-        if snapshot.text.trim().is_empty() {
+        // (e.g. "\n" after a chat app sends and clears its composer), or as
+        // a zero-width caret anchor.
+        if snapshot.text.chars().all(is_blank) {
             return Err(RangeError::FieldCleared);
         }
         let (changes, mapped) =
@@ -206,6 +207,17 @@ impl RangeTracker {
     }
 }
 
+/// Whitespace, or a zero-width character editors keep as a caret anchor in an
+/// empty paragraph (Slate renders U+FEFF; others use U+200B). Neither is
+/// content a user typed or dictated.
+pub fn is_blank(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}'
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,7 +240,7 @@ mod tests {
             tracker.slice(&snap("前返利续写后", 5..5)),
             Err(RangeError::Ambiguous)
         );
-        for cleared in ["", "\n", " \n"] {
+        for cleared in ["", "\n", " \n", "\u{FEFF}", "\u{FEFF}\n", "\u{200B}"] {
             assert_eq!(
                 tracker.slice(&snap(cleared, 0..0)),
                 Err(RangeError::FieldCleared)

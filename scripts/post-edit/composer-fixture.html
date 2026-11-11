@@ -30,10 +30,17 @@ function edit(text) {
   caret(true);
 }
 function submit() {
-  editor.innerHTML = scenario === 'pseudo'
-    ? `<p data-placeholder="${hint}"><br></p>`
-    : `<p><span contenteditable="false">${hint}</span><br></p>`;
-  caret(false);
+  if (scenario === 'slate') {
+    // Slate's empty editor: a zero-width U+FEFF anchor, caret after it.
+    editor.innerHTML = `<p><span data-slate-zero-width="n">\uFEFF<br></span><span contenteditable="false">${hint}</span></p>`;
+    editor.focus();
+    getSelection().collapse(editor.querySelector('[data-slate-zero-width]').firstChild, 1);
+  } else {
+    editor.innerHTML = scenario === 'pseudo'
+      ? `<p data-placeholder="${hint}"><br></p>`
+      : `<p><span contenteditable="false">${hint}</span><br></p>`;
+    caret(false);
+  }
   // A new draft in the same element must not enter the old observation.
   setTimeout(() => edit('下一条输入'), 2000);
 }
@@ -53,7 +60,7 @@ editor.addEventListener('input', () => {
     else if (scenario === 'shift-enter') editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true }));
     else edit(corrected);
   }, 1300);
-  if (scenario === 'enter' || scenario === 'button' || scenario === 'pseudo') {
+  if (['enter', 'button', 'pseudo', 'slate'].includes(scenario)) {
     setTimeout(() => {
       if (scenario === 'button') document.getElementById('send').click();
       else editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));

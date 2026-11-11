@@ -69,14 +69,15 @@ pub struct OwnedSnapshot {
     pub reset_detection: bool,
 }
 
-/// Empty composers leave the caret before their non-editable hints. A caret
-/// after an atomic mention, or a text selection, is not a reset signal.
+/// Empty composers leave the caret before their non-editable hints, possibly
+/// after a zero-width anchor. A caret after an atomic mention, or a text
+/// selection, is not a reset signal.
 pub(super) fn empty_caret_prefix(text: &str, selection: &Range<usize>) -> bool {
     selection.start == selection.end
         && selection.start
             <= text
                 .chars()
-                .take_while(|c| c.is_whitespace())
+                .take_while(|&c| super::range::is_blank(c))
                 .map(char::len_utf16)
                 .sum::<usize>()
 }
@@ -453,6 +454,9 @@ mod tests {
         assert!(!empty_caret_prefix("提示", &(0..2)));
         assert!(!empty_caret_prefix("提示", &(2..2)));
         assert!(!empty_caret_prefix(" \n提示", &(3..3)));
+        // Slate keeps U+FEFF before the hint and places the caret after it.
+        assert!(empty_caret_prefix("\u{FEFF}\n今天帮你做些什么？", &(1..1)));
+        assert!(!empty_caret_prefix("\u{FEFF}\n今天帮你做些什么？", &(3..3)));
     }
 
     struct BlockingReader {

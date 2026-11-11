@@ -504,6 +504,22 @@ fn live_appkit_marked_text() {
     assert_eq!(committed.text, "支座反力计算");
 }
 
+/// Read-only check against a real app: focus its empty composer (showing the
+/// hint) before the read. Nothing is typed or clicked.
+#[test]
+#[ignore = "reads the focused composer of VOICEX_POST_EDIT_FIXTURE_PID; requires Accessibility"]
+fn live_empty_composer_is_a_reset() {
+    let pid: u32 = std::env::var("VOICEX_POST_EDIT_FIXTURE_PID")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let probe = ObserverWorker::start().unwrap();
+    match probe.capture(0, pid, Duration::from_secs(3)) {
+        Err(ReadError::FieldCleared) => {}
+        other => panic!("an empty composer must read as a reset: {other:?}"),
+    }
+}
+
 #[test]
 #[ignore = "isolated foreground Chromium composer; requires Accessibility"]
 fn live_chromium_composer() {
@@ -584,7 +600,7 @@ fn live_chromium_composer() {
     });
     assert_eq!(record.original_text, original);
     match scenario.as_str() {
-        "enter" | "button" | "pseudo" => {
+        "enter" | "button" | "pseudo" | "slate" => {
             assert_eq!(
                 record.edited_text,
                 "有些 release 版本和 Debug 版本，好像差异很大的。"

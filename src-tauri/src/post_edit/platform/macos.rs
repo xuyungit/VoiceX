@@ -542,11 +542,17 @@ fn non_editable_text_only(root: &Element) -> Result<bool, ReadError> {
                     &mut settable,
                 )
             })?;
-            if settable != 0 {
-                return Ok(false);
+            if settable == 0 {
+                saw_text = true;
+                continue;
             }
-            saw_text = true;
-            continue;
+            // Editable text counts unless it is only a zero-width caret
+            // anchor, which Slate keeps before the hint of an empty editor.
+            match string_attribute(&node, "AXValue") {
+                Ok(value) if value.chars().all(super::super::range::is_blank) => continue,
+                Ok(_) | Err(ReadError::NoValue | ReadError::Native(-25205)) => return Ok(false),
+                Err(error) => return Err(error),
+            }
         }
         if node.0 != root.0 && matches!(role.as_str(), "AXTextField" | "AXTextArea" | "AXWebArea") {
             return Ok(false);

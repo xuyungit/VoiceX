@@ -253,14 +253,14 @@ impl NativeReader {
             && read_only_attribute(automation, window)? != ReadOnly::Unsupported;
         if reset_detection
             && super::empty_caret_prefix(&text, &selection_utf16)
-            && !text.trim().is_empty()
+            && !text.chars().all(super::super::range::is_blank)
         {
             // A mixed/unsupported attribute does not establish a reset. Require
             // a caret before an explicitly read-only text range, not after an
             // atomic mention or alongside ordinary editable text.
             // Exclude generated surrounding line breaks, whose editability can
             // differ from the hint. Search only the bounded, whole-field window.
-            let needle = BSTR::from(text.trim());
+            let needle = BSTR::from(text.trim_matches(super::super::range::is_blank));
             let mut raw = std::ptr::null_mut();
             // S_OK + null means that a concurrent edit removed the text. The
             // generated wrapper cannot represent that successful no-match.
