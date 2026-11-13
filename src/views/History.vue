@@ -284,6 +284,17 @@ function openDetails(record: HistoryRecord) {
   detailVisible.value = true
 }
 
+// A click anywhere on the row opens its details, except on the row's own
+// controls, while it is being edited, or when the click ended a text selection.
+function onRowClick(event: MouseEvent, record: HistoryRecord) {
+  if (editingId.value === record.id) return
+  const target = event.target as Element | null
+  if (target?.closest('button, a, input, textarea, select, [role="button"], [role="menuitem"]')) return
+  const selection = window.getSelection()
+  if (selection && !selection.isCollapsed && (event.currentTarget as Node).contains(selection.anchorNode)) return
+  openDetails(record)
+}
+
 /// A translate-and-read session: the text is the translation, the original
 /// is the selection it came from, and there is no recording behind it.
 function isTranslateRead(record: HistoryRecord): boolean {
@@ -594,6 +605,10 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
             v-for="record in group.records"
             :key="record.id"
             class="list-row"
+            :class="{ editing: editingId === record.id }"
+            tabindex="0"
+            @click="event => onRowClick(event, record)"
+            @keydown.enter.self="openDetails(record)"
           >
             <div class="row-header">
               <div class="row-meta">
@@ -970,6 +985,16 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
   gap: 4px;
   padding: 10px 10px 12px;
   border-radius: var(--radius-md);
+  cursor: pointer;
+  outline: none;
+}
+
+.list-row.editing {
+  cursor: auto;
+}
+
+.list-row:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--color-accent);
 }
 
 .list-row + .list-row::before {
