@@ -562,7 +562,6 @@ onMounted(async () => {
           </div>
 
           <div v-if="activityGrid" class="activity-footer">
-            <div v-if="undatedActivityNote">{{ undatedActivityNote }}</div>
             <div class="month-track">
               <span
                 v-for="m in activityGrid.monthLabels"
@@ -573,14 +572,17 @@ onMounted(async () => {
                 {{ m.label }}
               </span>
             </div>
-            <div v-if="activityMode === 'daily'" class="activity-legend">
-              <span>{{ t('overview.legendLess') }}</span>
-              <span class="legend-dot level-0" />
-              <span class="legend-dot level-1" />
-              <span class="legend-dot level-2" />
-              <span class="legend-dot level-3" />
-              <span class="legend-dot level-4" />
-              <span>{{ t('overview.legendMore') }}</span>
+            <div v-if="undatedActivityNote || activityMode === 'daily'" class="activity-meta-row">
+              <span v-if="undatedActivityNote" class="activity-undated-note">{{ undatedActivityNote }}</span>
+              <div v-if="activityMode === 'daily'" class="activity-legend">
+                <span>{{ t('overview.legendLess') }}</span>
+                <span class="legend-dot level-0" />
+                <span class="legend-dot level-1" />
+                <span class="legend-dot level-2" />
+                <span class="legend-dot level-3" />
+                <span class="legend-dot level-4" />
+                <span>{{ t('overview.legendMore') }}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -1017,10 +1019,22 @@ onMounted(async () => {
   font-size: 11px;
 }
 
+.activity-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.activity-undated-note {
+  color: var(--color-text-tertiary);
+}
+
 .activity-legend {
   display: inline-flex;
   align-items: center;
-  align-self: flex-end;
+  margin-left: auto;
   gap: 3px;
   font-size: 11px;
 }

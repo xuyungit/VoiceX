@@ -911,6 +911,73 @@ pub fn get_usage_stats() -> Result<UsageStats, StorageError> {
     })
 }
 
+fn seed_device_usage_stats_if_missing_conn(
+    conn: &Connection,
+    device_id: &str,
+    exclude_record_id: Option<&str>,
+) -> Result<Option<UsageStats>, StorageError> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM device_usage_stats WHERE device_id = ?1 LIMIT 1",
+            params![device_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    if exists.is_some() {
+        return Ok(None);
+    }
+
+    let stats = conn
+        .query_row(
+            "SELECT
+                COALESCE(SUM(duration_ms), 0),
+                COALESCE(SUM(LENGTH(text)), 0),
+                COALESCE(SUM(llm_invoked), 0),
+                COUNT(*)
+             FROM history_record
+             WHERE error_code = ?2
+               AND mode != ?3
+               AND (?4 IS NULL OR id != ?4)
+               AND (source_device_id = ?1 OR source_device_id IS NULL OR source_device_id = '')",
+            params![
+                device_id,
+                HISTORY_ERROR_NONE,
+                HISTORY_MODE_TRANSLATE_READ,
+                exclude_record_id
+            ],
+            |row| {
+                Ok(UsageStats {
+                    total_duration_ms: row.get(0)?,
+                    total_characters: row.get(1)?,
+                    llm_correction_count: row.get(2)?,
+                    total_recording_count: row.get(3)?,
+                    // No history rows describe reading, so a device row
+                    // built this way starts its reading counters at zero.
+                    tts: TtsCounters::default(),
+                })
+            },
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+    conn.execute(
+        "INSERT INTO device_usage_stats
+         (device_id, total_duration_ms, total_characters, llm_correction_count, total_recording_count, last_updated)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            device_id,
+            stats.total_duration_ms.max(0),
+            stats.total_characters.max(0),
+            stats.llm_correction_count.max(0),
+            stats.total_recording_count.max(0),
+            Utc::now().to_rfc3339()
+        ],
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+    Ok(Some(stats))
+}
+
 /// Get usage stats for the current device based on local history records.
 pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError> {
     let trimmed = device_id.trim();
@@ -924,71 +991,40 @@ pub fn get_local_usage_stats(device_id: &str) -> Result<UsageStats, StorageError
         });
     }
 
-    with_db(|conn| {
-        let existing = conn
-            .query_row(
-                "SELECT total_duration_ms, total_characters, llm_correction_count, total_recording_count,
-                        tts_read_count, tts_translate_count, tts_characters, tts_duration_ms, tts_llm_count
-                 FROM device_usage_stats WHERE device_id = ?1",
-                params![trimmed],
-                |row| {
-                    Ok(UsageStats {
-                        total_duration_ms: row.get(0)?,
-                        total_characters: row.get(1)?,
-                        llm_correction_count: row.get(2)?,
-                        total_recording_count: row.get(3)?,
-                        tts: TtsCounters::from_row(row, 4)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    with_db(|conn| get_local_usage_stats_conn(conn, trimmed))
+}
 
-        if let Some(stats) = existing {
-            return Ok(stats);
-        }
-
-        let stats = conn
-            .query_row(
-                "SELECT
-                    COALESCE(SUM(duration_ms), 0),
-                    COALESCE(SUM(LENGTH(text)), 0),
-                    COALESCE(SUM(llm_invoked), 0),
-                    COUNT(*)
-                 FROM history_record
-                 WHERE source_device_id = ?1 OR source_device_id IS NULL OR source_device_id = ''",
-                params![trimmed],
-                |row| {
-                    Ok(UsageStats {
-                        total_duration_ms: row.get(0)?,
-                        total_characters: row.get(1)?,
-                        llm_correction_count: row.get(2)?,
-                        total_recording_count: row.get(3)?,
-                        // No history rows describe reading, so a device row
-                        // built this way starts its reading counters at zero.
-                        tts: TtsCounters::default(),
-                    })
-                },
-            )
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-
-        conn.execute(
-            "INSERT INTO device_usage_stats
-             (device_id, total_duration_ms, total_characters, llm_correction_count, total_recording_count, last_updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                trimmed,
-                stats.total_duration_ms.max(0),
-                stats.total_characters.max(0),
-                stats.llm_correction_count.max(0),
-                stats.total_recording_count.max(0),
-                Utc::now().to_rfc3339()
-            ],
+fn get_local_usage_stats_conn(conn: &Connection, device_id: &str) -> Result<UsageStats, StorageError> {
+    let existing = conn
+        .query_row(
+            "SELECT total_duration_ms, total_characters, llm_correction_count, total_recording_count,
+                    tts_read_count, tts_translate_count, tts_characters, tts_duration_ms, tts_llm_count
+             FROM device_usage_stats WHERE device_id = ?1",
+            params![device_id],
+            |row| {
+                Ok(UsageStats {
+                    total_duration_ms: row.get(0)?,
+                    total_characters: row.get(1)?,
+                    llm_correction_count: row.get(2)?,
+                    total_recording_count: row.get(3)?,
+                    tts: TtsCounters::from_row(row, 4)?,
+                })
+            },
         )
+        .optional()
         .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
-        Ok(stats)
-    })
+    if let Some(stats) = existing {
+        return Ok(stats);
+    }
+
+    Ok(seed_device_usage_stats_if_missing_conn(conn, device_id, None)?.unwrap_or(UsageStats {
+        total_duration_ms: 0,
+        total_characters: 0,
+        llm_correction_count: 0,
+        total_recording_count: 0,
+        tts: TtsCounters::default(),
+    }))
 }
 
 pub fn set_usage_stats(stats: &UsageStats) -> Result<(), StorageError> {
@@ -1150,27 +1186,27 @@ pub fn increment_usage_stats(
 fn increment_device_usage_stats_conn(
     conn: &Connection,
     device_id: &str,
+    exclude_record_id: Option<&str>,
     duration_ms: i64,
     characters: i64,
     llm_invoked: bool,
 ) -> Result<(), StorageError> {
+    seed_device_usage_stats_if_missing_conn(conn, device_id, exclude_record_id)?;
     let dur = duration_ms.max(0);
     let chars = characters.max(0);
     let llm = if llm_invoked { 1 } else { 0 };
     let now = Utc::now().to_rfc3339();
 
     conn.execute(
-            "INSERT INTO device_usage_stats
-             (device_id, total_duration_ms, total_characters, llm_correction_count, total_recording_count, last_updated)
-             VALUES (?1, ?2, ?3, ?4, 1, ?5)
-             ON CONFLICT(device_id) DO UPDATE SET
-                 total_duration_ms = total_duration_ms + excluded.total_duration_ms,
-                 total_characters = total_characters + excluded.total_characters,
-                 llm_correction_count = llm_correction_count + excluded.llm_correction_count,
-                 total_recording_count = total_recording_count + 1,
-                 last_updated = excluded.last_updated",
-            params![device_id, dur, chars, llm, now],
-        )
+        "UPDATE device_usage_stats
+         SET total_duration_ms = total_duration_ms + ?1,
+             total_characters = total_characters + ?2,
+             llm_correction_count = llm_correction_count + ?3,
+             total_recording_count = total_recording_count + 1,
+             last_updated = ?4
+         WHERE device_id = ?5",
+        params![dur, chars, llm, now, device_id],
+    )
     .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
     Ok(())
 }
@@ -1599,6 +1635,7 @@ fn increment_local_usage_stats_for_record_conn(
     increment_device_usage_stats_conn(
         conn,
         device_id,
+        Some(&record.id),
         record.duration_ms,
         chars,
         record.llm_invoked,
@@ -3246,5 +3283,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remote_count, 0);
+    }
+
+    #[test]
+    fn device_stats_seed_excludes_reads_and_failures_and_preserves_prior_history_on_new_write() {
+        let conn = daily_stats_conn();
+        conn.execute_batch(
+            "INSERT INTO history_record (id, timestamp, text, duration_ms, llm_invoked, mode, error_code, source_device_id) VALUES
+             ('old-ok', '2026-11-15T10:00:00Z', 'abc', 1000, 1, 'assistant_raw', 0, 'device-a'),
+             ('old-read', '2026-11-15T10:05:00Z', 'ignored read', 0, 1, 'translate_read', 0, 'device-a'),
+             ('old-fail', '2026-11-15T10:10:00Z', 'ignored fail', 500, 0, 'assistant_raw', 1, 'device-a'),
+             ('old-remote', '2026-11-15T10:15:00Z', 'ignored remote', 700, 1, 'assistant_raw', 0, 'device-b');",
+        )
+        .unwrap();
+
+        let mut new_rec = recording("new-ok"); // text="hello" (5 chars), duration_ms=1200, llm_invoked=true
+        new_rec.source_device_id = Some("device-a".into());
+        assert!(insert_history_record_with_stats_conn(&conn, &new_rec, true, true).unwrap());
+
+        let totals: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT total_recording_count, total_characters, total_duration_ms, llm_correction_count
+                 FROM device_usage_stats WHERE device_id = 'device-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        // old-ok (1, 3, 1000, 1) + new-ok (1, 5, 1200, 1) = (2, 8, 2200, 2)
+        assert_eq!(totals, (2, 8, 2200, 2));
     }
 }
