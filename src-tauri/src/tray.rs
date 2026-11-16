@@ -15,6 +15,7 @@
 use std::sync::Mutex;
 
 use tauri::menu::{MenuBuilder, MenuItem};
+use tauri::tray::{MouseButton, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, Wry};
 
 use crate::commands::settings::AppSettings;
@@ -248,6 +249,29 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
     }
 }
 
+/// Runs on the main thread, from the tray icon's event handler.
+///
+/// On Windows, left-clicking does not open the menu (configured in
+/// `apply_windows_tray_icon`), so left double-click opens and focuses the
+/// main window instead.
+pub fn handle_tray_icon_event(app: &AppHandle, event: TrayIconEvent) {
+    if should_open_main_window(&event, cfg!(target_os = "windows")) {
+        show_main_window(app);
+    }
+}
+
+fn should_open_main_window(event: &TrayIconEvent, is_windows: bool) -> bool {
+    is_windows
+        && matches!(
+            event,
+            TrayIconEvent::DoubleClick {
+                id,
+                button: MouseButton::Left,
+                ..
+            } if id.as_ref() == TRAY_ID
+        )
+}
+
 /// Recovers a dictation whose paste did not arrive without opening History.
 fn copy_last_dictation() {
     let text = crate::storage::get_or_create_device_id()
@@ -280,6 +304,7 @@ pub(crate) fn show_main_window(app: &AppHandle) {
         return;
     };
     let _ = main.show();
+    let _ = main.unminimize();
     let _ = main.set_focus();
 
     // Under Accessory policy the app has no Dock presence,
@@ -336,5 +361,52 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), ids.len());
+    }
+
+    fn sample_rect() -> tauri::Rect {
+        tauri::Rect {
+            position: tauri::Position::Physical(tauri::PhysicalPosition::new(0, 0)),
+            size: tauri::Size::Physical(tauri::PhysicalSize::new(16, 16)),
+        }
+    }
+
+    #[test]
+    fn windows_left_double_click_on_main_tray_opens_main_window() {
+        let event = TrayIconEvent::DoubleClick {
+            id: tauri::tray::TrayIconId::new(TRAY_ID),
+            position: tauri::PhysicalPosition::new(8.0, 8.0),
+            rect: sample_rect(),
+            button: MouseButton::Left,
+        };
+        assert!(should_open_main_window(&event, true));
+        assert!(!should_open_main_window(&event, false));
+    }
+
+    #[test]
+    fn right_double_click_other_tray_or_single_click_does_not_open_main_window() {
+        let right_double_click = TrayIconEvent::DoubleClick {
+            id: tauri::tray::TrayIconId::new(TRAY_ID),
+            position: tauri::PhysicalPosition::new(8.0, 8.0),
+            rect: sample_rect(),
+            button: MouseButton::Right,
+        };
+        assert!(!should_open_main_window(&right_double_click, true));
+
+        let other_tray_double_click = TrayIconEvent::DoubleClick {
+            id: tauri::tray::TrayIconId::new("other"),
+            position: tauri::PhysicalPosition::new(8.0, 8.0),
+            rect: sample_rect(),
+            button: MouseButton::Left,
+        };
+        assert!(!should_open_main_window(&other_tray_double_click, true));
+
+        let left_single_click = TrayIconEvent::Click {
+            id: tauri::tray::TrayIconId::new(TRAY_ID),
+            position: tauri::PhysicalPosition::new(8.0, 8.0),
+            rect: sample_rect(),
+            button: MouseButton::Left,
+            button_state: tauri::tray::MouseButtonState::Up,
+        };
+        assert!(!should_open_main_window(&left_single_click, true));
     }
 }

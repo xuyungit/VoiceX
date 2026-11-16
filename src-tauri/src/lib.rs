@@ -66,6 +66,12 @@ fn apply_windows_tray_icon(app: &tauri::App) {
         return;
     };
 
+    // Windows opens the tray menu on right click so left double-click can
+    // reach the handler instead of being swallowed by TrackPopupMenu.
+    if let Err(err) = tray.set_show_menu_on_left_click(false) {
+        log::warn!("Failed to disable Windows tray menu on left click: {}", err);
+    }
+
     let tray_icon =
         match tauri::image::Image::from_bytes(include_bytes!("../icons/trayWindows.png")) {
             Ok(icon) => icon,
@@ -251,23 +257,7 @@ pub fn run() {
         .device_event_filter(tauri::DeviceEventFilter::Always)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(main) = app.get_webview_window("main") {
-                let _ = main.show();
-                let _ = main.unminimize();
-                let _ = main.set_focus();
-
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = main.run_on_main_thread(|| {
-                        use objc2::MainThreadMarker;
-                        use objc2_app_kit::NSApplication;
-                        // Safe: run_on_main_thread guarantees we are on the main thread.
-                        let mtm = unsafe { MainThreadMarker::new_unchecked() };
-                        let ns_app = NSApplication::sharedApplication(mtm);
-                        ns_app.activate();
-                    });
-                }
-            }
+            tray::show_main_window(app);
         }))
         .manage(audio::AudioService::default())
         .manage(AsrDebugService::default())
@@ -298,6 +288,7 @@ pub fn run() {
             }
         })
         .on_menu_event(|app, event| tray::handle_menu_event(app, event.id().as_ref()))
+        .on_tray_icon_event(tray::handle_tray_icon_event)
         .setup(|app| {
             #[cfg(target_os = "macos")]
             if let Err(err) = enforce_macos_release_install_path() {
