@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.19.1] - 2026-11-16
+
+### Added
+
+- **Activity & app usage overview** — Overview adds an **Activity & Apps** tab with a 52-week dictation activity grid (daily, weekly, or cumulative, by characters or count) and target-app usage breakdown (today, this week, this month, or all time; sorted by count, characters, or duration), plus top apps this week on the Core tab. Dictations record their foreground target app, and History can filter by target app.
+- **DeepSeek ASR and TTS** — batch speech recognition (automatic language detection, up to 120 seconds and 8 MiB, no hotwords) and streaming speech synthesis with preset voices, sharing the DeepSeek LLM API key. Speech rate is not adjustable, and `voicex-tts` MP3 export is not yet supported. API calls have been tested; in-app validation remains pending.
+- **Custom SenseVoice models for Coli** — specify an absolute SenseVoice model directory or ONNX file path (with its matching `tokens.txt`) in Coli ASR settings for realtime, batch, and SenseVoice post-recording refinement (`coli` 0.0.20 or later).
+- **ElevenLabs Scribe v3 model options** — select `scribe_v3_live` or `scribe_v3` in ElevenLabs ASR settings; `scribe_v2_realtime` and `scribe_v2` remain the defaults while in-app validation of v3 is pending.
+
+### Changed
+
+- **Tray menu and Windows tray** — reading items use parallel labels (**Read Aloud** / **Read Translation**), give way to a single **Stop Reading** item while reading is active, and include keyboard shortcuts (Command keys on macOS, access keys on Windows). Double-clicking the tray icon on Windows opens the main window.
+- **History row interaction** — click a history row (or press Enter when focused) to open its details, while ignoring clicks on row controls, during inline editing, or after selecting text.
+
+### Fixed
+
+- **Usage and activity accounting** — persist local history, device totals, and daily app usage in a single transaction; scope backfills and device-stats seeding to local history; keep undated legacy usage out of dated cumulative activity and display the excluded amount; ignore stale app-statistics responses and align weekly share denominators and month labels.
+- **Post-edit observation** — end observation when a chat composer resets in verified Chromium editors on macOS (including Slate zero-width caret anchors) and supported Windows controls, while keeping the wholesale-rewrite guard where resets cannot be distinguished from hints; continue observing across transient `NoValue` reads during editor re-renders; improve final-edit capture stability and control coverage across Chromium, CEF, QtWebEngine, and NW.js apps.
+- **In-app updates** — refresh stale update offers before downloading when a newer release is available, install already-verified cached packages offline, avoid re-checking on every visit to About, and clean up leftover Windows updater folders in `%TEMP%` on later launches.
+
 ## [0.19.0] - 2026-11-09
 
 ### Added

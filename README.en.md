@@ -292,15 +292,15 @@ Optionally have an LLM correct or translate the recognized text. Choose a provid
   </picture>
 </p>
 
-- Browse every dictation by date: replay audio, copy, view details, and compare the original recognition with the LLM-corrected text.
-- Search all history stored on this device, including source text, output, and your edits. Space-separated keywords must all match; English matching is case-insensitive. Filter by dictation, translated dictation, translate-and-read, or failed recognition. Matches are highlighted and the usual record actions remain available.
+- Browse every dictation by date: click a row to view details, replay audio, copy, and compare the original recognition with the LLM-corrected text.
+- Search all history stored on this device, including source text, output, and your edits. Space-separated keywords must all match; English matching is case-insensitive. Filter by dictation, translated dictation, translate-and-read, failed recognition, or target app. Matches are highlighted and the usual record actions remain available.
 - Edit the final text directly; edited entries are marked "Edited" and copying uses your edit. Edits stay on this device.
 - Turn on **Track edits after dictation** under Input to briefly watch for your follow-up edits in supported apps and compare both versions under **History → Edits** (off by default).
 - Translate an entry into English and copy the translation.
 - Re-transcribe any recording with another engine to compare results, or type the result into the current app again.
 - Recordings whose recognition failed are kept so you can retry later instead of dictating again.
 - Keep text and audio for 7 / 30 / 180 / 365 days or forever.
-- Overview totals dictation and reading: volume, time, speed, and AI calls, for your account and for this device.
+- Overview totals dictation and reading (volume, time, speed, and AI calls for your account and for this device), and charts 52-week dictation activity alongside usage by target app.
 
 ## Cross-device sync
 
