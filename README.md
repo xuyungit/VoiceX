@@ -309,7 +309,6 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --tr
 ## 已知限制
 
 - macOS 安装包仅支持 Apple Silicon，且未经 Apple 公证。
-- 以下 Windows 功能尚未在真机上完整验证：录音时静音、托盘朗读、字幕鼠标穿透、记录输入后的修改。
 - 本地 Qwen3-ASR 暂不支持 Windows。
 
 ## 从源码构建

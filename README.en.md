@@ -309,7 +309,6 @@ If you dictate on several computers, a lightweight self-hosted sync server (`syn
 ## Known limitations
 
 - The macOS build is Apple Silicon only and not notarized by Apple.
-- These Windows features have not been fully tested on a real machine: mute while recording, tray reading, caption click-through, and tracking edits after dictation.
 - Local Qwen3-ASR is not available on Windows.
 
 ## Building from source
