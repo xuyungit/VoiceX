@@ -133,13 +133,14 @@ const ttsProviderType = computed({
 const isVolcengine = computed(() => settingsStore.settings.ttsProviderType === 'volcengine')
 const isAliyun = computed(() => settingsStore.settings.ttsProviderType === 'aliyun')
 const isMimo = computed(() => settingsStore.settings.ttsProviderType === 'mimo')
+const isDeepSeek = computed(() => settingsStore.settings.ttsProviderType === 'deepseek')
 const isAzure = computed(() => settingsStore.settings.ttsProviderType === 'azure')
 const isEdge = computed(() => settingsStore.settings.ttsProviderType === 'edge')
 // Everything that distinguishes "speaks over the network" from "speaks through
 // macOS" — voice list availability, supported controls, whether the
 // controls work off macOS at all.
 const isCloud = computed(
-  () => isVolcengine.value || isAliyun.value || isMimo.value || isAzure.value || isEdge.value
+  () => isVolcengine.value || isAliyun.value || isMimo.value || isDeepSeek.value || isAzure.value || isEdge.value
 )
 // Empty id is the `say` path (Siri / Spoken Content). Compact AVSpeech voices
 // are everything else in the picker; pitch and volume only exist there.
@@ -158,7 +159,7 @@ const isSystemDefaultVoice = computed(
 //     voices take all three.
 const engineControls = computed(() => {
   if (isEdge.value) return { rate: true, pitch: true, volume: true }
-  if (isMimo.value) return { rate: false, pitch: false, volume: true }
+  if (isMimo.value || isDeepSeek.value) return { rate: false, pitch: false, volume: true }
   if (isCloud.value) return { rate: true, pitch: false, volume: true }
   const compact = !isSystemDefaultVoice.value
   return { rate: true, pitch: compact, volume: compact }
@@ -237,6 +238,7 @@ const ttsVoiceId = computed({
     if (isVolcengine.value) return settingsStore.settings.volcTtsSpeaker
     if (isAliyun.value) return settingsStore.settings[aliyunVoiceKey.value]
     if (isMimo.value) return settingsStore.settings.mimoTtsVoice
+    if (isDeepSeek.value) return settingsStore.settings.deepseekTtsVoice
     if (isAzure.value) return settingsStore.settings.azureTtsVoice
     if (isEdge.value) return settingsStore.settings.edgeTtsVoice
     return settingsStore.settings.systemTtsVoiceId
@@ -245,6 +247,7 @@ const ttsVoiceId = computed({
     if (isVolcengine.value) settingsStore.updateSetting('volcTtsSpeaker', value)
     else if (isAliyun.value) settingsStore.updateSetting(aliyunVoiceKey.value, value)
     else if (isMimo.value) settingsStore.updateSetting('mimoTtsVoice', value)
+    else if (isDeepSeek.value) settingsStore.updateSetting('deepseekTtsVoice', value)
     else if (isAzure.value) settingsStore.updateSetting('azureTtsVoice', value)
     else if (isEdge.value) settingsStore.updateSetting('edgeTtsVoice', value)
     else settingsStore.updateSetting('systemTtsVoiceId', value)
@@ -264,6 +267,11 @@ const volcTtsResourceId = computed({
 const aliyunTtsApiKey = computed({
   get: () => settingsStore.settings.aliyunTtsApiKey,
   set: (value: string) => settingsStore.updateSetting('aliyunTtsApiKey', value)
+})
+
+const deepseekApiKey = computed({
+  get: () => settingsStore.settings.llmDeepseekApiKey,
+  set: (value: string) => settingsStore.updateSetting('llmDeepseekApiKey', value)
 })
 
 const mimoTtsApiKey = computed({
@@ -331,7 +339,9 @@ const volumePercent = computed({
       ? settingsStore.settings.volcTtsVolume
       : isAliyun.value
         ? settingsStore.settings.aliyunTtsVolume
-        : isMimo.value
+        : isDeepSeek.value
+          ? settingsStore.settings.deepseekTtsVolume
+          : isMimo.value
           ? settingsStore.settings.mimoTtsVolume
           : isAzure.value
             ? settingsStore.settings.azureTtsVolume
@@ -345,6 +355,7 @@ const volumePercent = computed({
     if (isVolcengine.value) settingsStore.updateSetting('volcTtsVolume', stored)
     else if (isAliyun.value) settingsStore.updateSetting('aliyunTtsVolume', stored)
     else if (isMimo.value) settingsStore.updateSetting('mimoTtsVolume', stored)
+    else if (isDeepSeek.value) settingsStore.updateSetting('deepseekTtsVolume', stored)
     else if (isAzure.value) settingsStore.updateSetting('azureTtsVolume', stored)
     else if (isEdge.value) settingsStore.updateSetting('edgeTtsVolume', stored)
     else settingsStore.updateSetting('systemTtsVolume', stored)
@@ -923,6 +934,12 @@ onBeforeUnmount(() => {
         </SettingRow>
       </template>
 
+      <template v-if="isDeepSeek">
+        <SettingRow :label="t('reading.deepseekApiKey')" :help="t('reading.deepseekApiKeyNote')">
+          <NInput v-model:value="deepseekApiKey" type="password" show-password-on="click" size="small" placeholder="sk-..." />
+        </SettingRow>
+      </template>
+
       <template v-if="isMimo">
         <SettingRow :label="t('reading.mimoApiKey')" :help="t('reading.mimoApiKeyNote')">
           <NInput
@@ -1003,7 +1020,7 @@ onBeforeUnmount(() => {
             :aria-label="t('reading.voiceLabel')"
             :loading="voicesLoading"
             :disabled="!systemVoiceSupported && !isCloud"
-            :tag="isCloud && !isEdge"
+            :tag="isCloud && !isEdge && !isDeepSeek"
             filterable
             size="small"
           />
@@ -1167,7 +1184,7 @@ onBeforeUnmount(() => {
           :placeholder="t('reading.voiceSearchPlaceholder')"
           :aria-label="t('reading.translateVoice')"
           :disabled="!systemVoiceSupported && !isCloud"
-          :tag="isCloud && !isEdge"
+          :tag="isCloud && !isEdge && !isDeepSeek"
           filterable
           size="small"
         />

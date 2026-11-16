@@ -16,6 +16,7 @@ pub mod clipboard_text;
 pub mod cloud_playback;
 pub mod controller;
 pub mod decode;
+pub mod deepseek;
 pub mod edge;
 mod resample;
 pub mod llm_stage;

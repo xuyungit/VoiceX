@@ -368,7 +368,7 @@ fn classify_message(
         return (AsrFailureKind::EmptyResult, false, None);
     }
 
-    if contains_any(
+    if (lower.contains("audio duration") && lower.contains("exceeds")) || contains_any(
         lower,
         &[
             "payload too large",
@@ -1062,6 +1062,21 @@ mod tests {
         assert_eq!(err.code, 55000031);
         assert_eq!(err.message, String::from_utf8_lossy(message));
     }
+    #[test]
+    fn deepseek_audio_limits_are_actionable() {
+        for message in [
+            "DeepSeek audio exceeds maximum 8 MiB",
+            "DeepSeek HTTP 400: audio duration 121000 ms exceeds 120 s",
+        ] {
+            let failure = super::AsrFailure::from_raw_reason(
+                super::AsrProviderType::DeepSeek,
+                super::AsrPhase::Finalizing,
+                message,
+            );
+            assert_eq!(failure.kind, super::AsrFailureKind::AudioLimitExceeded);
+        }
+    }
+
     #[test]
     fn proxy_authentication_errors_do_not_blame_the_provider_api_key() {
         let failure = super::AsrFailure::from_error(

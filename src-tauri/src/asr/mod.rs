@@ -7,6 +7,7 @@
 pub mod audio_utils;
 mod client;
 pub mod cohere_client;
+pub mod deepseek_client;
 pub mod coli_client;
 mod config;
 pub mod models;
@@ -33,6 +34,7 @@ pub mod volc_auth;
 
 pub use client::AsrClient;
 pub use cohere_client::CohereTranscriptionClient;
+pub use deepseek_client::DeepSeekTranscriptionClient;
 pub use coli_client::{
     is_ffmpeg_available, probe_coli_status, resolve_coli_command, ColiAsrClient, ColiAsrStatus,
     ColiRefinementMode,

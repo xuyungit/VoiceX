@@ -248,6 +248,8 @@ struct OggOpusSink {
     first_packet_logged: bool,
     start_instant: Instant,
     packet_count: u64,
+    // Keep the last encoded packet until stop so it can carry the EOS flag.
+    pending_packet: Option<(Vec<u8>, u64, PacketWriteEndInfo)>,
 }
 
 struct WavSink {
@@ -376,6 +378,7 @@ impl OggOpusSink {
             first_packet_logged: false,
             start_instant: Instant::now(),
             packet_count: 0,
+            pending_packet: None,
         })
     }
 
@@ -417,11 +420,14 @@ impl OggOpusSink {
             PacketWriteEndInfo::NormalPacket
         };
 
-        self.writer
-            .write_packet(output, self.stream_serial, end_info, next_granule)
-            .map_err(|e| {
-                AudioCaptureError::StartFailed(format!("Failed to write Opus packet: {}", e))
-            })?;
+        if let Some((packet, granule, ending)) = self.pending_packet.take() {
+            self.writer
+                .write_packet(packet, self.stream_serial, ending, granule)
+                .map_err(|e| {
+                    AudioCaptureError::StartFailed(format!("Failed to write Opus packet: {}", e))
+                })?;
+        }
+        self.pending_packet = Some((output, next_granule, end_info));
 
         if !self.first_packet_logged {
             self.first_packet_logged = true;
@@ -441,12 +447,15 @@ impl OggOpusSink {
             self.pcm_buffer.clear();
         }
 
+        let (last_packet, granule, _) = self.pending_packet.take().ok_or_else(|| {
+            AudioCaptureError::StopFailed("No audio samples captured".to_string())
+        })?;
         self.writer
             .write_packet(
-                Vec::new(),
+                last_packet,
                 self.stream_serial,
                 PacketWriteEndInfo::EndStream,
-                self.granule_pos,
+                granule,
             )
             .map_err(|e| {
                 AudioCaptureError::StopFailed(format!("Failed to finalize opus stream: {}", e))
@@ -1282,4 +1291,44 @@ pub enum AudioCaptureError {
 
     #[error("Failed to stop capture: {0}")]
     StopFailed(String),
+}
+
+#[cfg(test)]
+mod opus_finalization_tests {
+    use super::*;
+    use ogg::reading::PacketReader;
+
+    #[tokio::test]
+    #[ignore = "requires a DeepSeek API key and network"]
+    async fn live_deepseek_accepts_new_recording() {
+        let key = std::env::var("DEEPSEEK_API_KEY").unwrap();
+        let dir = std::env::temp_dir().join(format!("voicex-ogg-live-{}", uuid::Uuid::new_v4()));
+        let mut sink = OggOpusSink::create(&dir, 16_000).unwrap();
+        sink.write(&vec![0; 16_000 * 2]).unwrap();
+        let (path, _) = sink.finish().unwrap();
+        let result = crate::asr::DeepSeekTranscriptionClient::new(key).transcribe_file(&path).await;
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(result.is_ok(), "DeepSeek rejected VoiceX recording: {:?}", result.err());
+    }
+
+    #[test]
+    fn recording_ends_on_the_last_audio_packet() {
+        // Exercise a partial frame and page boundaries, including an exact
+        // twenty-packet page where EOS used to occupy its own page.
+        for samples in [1, 320, 320 * 19, 320 * 20, 320 * 21 + 17] {
+            let dir = std::env::temp_dir().join(format!("voicex-ogg-test-{}", uuid::Uuid::new_v4()));
+            let mut sink = OggOpusSink::create(&dir, 16_000).unwrap();
+            sink.write(&vec![0; samples * 2]).unwrap();
+            let (path, _) = sink.finish().unwrap();
+            let mut reader = PacketReader::new(File::open(&path).unwrap());
+            let mut packets = Vec::new();
+            while let Some(packet) = reader.read_packet().unwrap() { packets.push(packet); }
+            assert_eq!(packets.len(), 2 + samples.div_ceil(320));
+            assert!(packets.last().unwrap().last_in_stream());
+            assert!(packets.iter().all(|packet| !packet.data.is_empty()));
+            let decoded = crate::asr::ogg_decoder::decode_ogg_opus_to_pcm16k(&path).unwrap();
+            assert!(!decoded.is_empty());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
 }

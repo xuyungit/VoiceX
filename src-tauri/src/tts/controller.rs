@@ -19,6 +19,7 @@ use super::clipboard_text;
 use super::edge::EdgeBackend;
 use super::llm_stage::{self, LlmStageError};
 use super::mimo::{MimoBackend, MimoConfig};
+use super::deepseek::DeepSeekBackend;
 use super::volcengine::{self, VolcengineBackend, VolcengineConfig};
 use super::{
     log_event, SessionSlot, SpeechProgress, StopReason, TtsBackend, TtsError, TtsRequest,
@@ -102,6 +103,7 @@ fn lingers_after_read(captions: bool, shown: Option<&SpeechProgress>) -> bool {
 pub const PROVIDER_VOLCENGINE: &str = "volcengine";
 pub const PROVIDER_ALIYUN: &str = "aliyun";
 pub const PROVIDER_MIMO: &str = "mimo";
+pub const PROVIDER_DEEPSEEK: &str = "deepseek";
 pub const PROVIDER_AZURE: &str = "azure";
 pub const PROVIDER_EDGE: &str = "edge";
 
@@ -205,7 +207,7 @@ struct StagedText {
 fn is_cloud_provider(provider: &str) -> bool {
     matches!(
         provider,
-        PROVIDER_VOLCENGINE | PROVIDER_ALIYUN | PROVIDER_MIMO | PROVIDER_AZURE | PROVIDER_EDGE
+        PROVIDER_VOLCENGINE | PROVIDER_ALIYUN | PROVIDER_MIMO | PROVIDER_DEEPSEEK | PROVIDER_AZURE | PROVIDER_EDGE
     )
 }
 
@@ -223,6 +225,7 @@ struct ControllerInner {
     volcengine: Mutex<Option<Arc<VolcengineBackend>>>,
     aliyun: Mutex<Option<Arc<AliyunBackend>>>,
     mimo: Mutex<Option<Arc<MimoBackend>>>,
+    deepseek: Mutex<Option<Arc<DeepSeekBackend>>>,
     azure: Mutex<Option<Arc<AzureBackend>>>,
     edge: Mutex<Option<Arc<EdgeBackend>>>,
     /// Whichever backend owns the current session. `stop` has to reach that
@@ -305,6 +308,9 @@ impl TtsController {
                 api_key: String::new(),
                 instruction: String::new(),
             })));
+        }
+        if let Ok(mut slot) = self.inner.deepseek.lock() {
+            *slot = Some(Arc::new(DeepSeekBackend::new()));
         }
         if let Ok(mut slot) = self.inner.edge.lock() {
             *slot = Some(Arc::new(EdgeBackend::new()));
@@ -584,6 +590,14 @@ impl TtsController {
                     return Some(cloud as Arc<dyn TtsBackend>);
                 }
                 log_event("backend_fallback", &[("provider", provider.to_string())]);
+            }
+            PROVIDER_DEEPSEEK => {
+                let cloud = self.inner.deepseek.lock().ok().and_then(|slot| slot.clone());
+                if let (Some(cloud), Some(settings)) = (cloud, settings) {
+                    cloud.apply_key(&settings.llm_deepseek_api_key);
+                    return Some(cloud as Arc<dyn TtsBackend>);
+                }
+                return None;
             }
             PROVIDER_MIMO => {
                 let cloud = self.inner.mimo.lock().ok().and_then(|slot| slot.clone());
@@ -1335,6 +1349,7 @@ pub fn provider_voice_slot(settings: &mut AppSettings) -> &mut String {
             }
         }
         PROVIDER_MIMO => &mut settings.mimo_tts_voice,
+        PROVIDER_DEEPSEEK => &mut settings.deepseek_tts_voice,
         PROVIDER_AZURE => &mut settings.azure_tts_voice,
         PROVIDER_EDGE => &mut settings.edge_tts_voice,
         _ => &mut settings.system_tts_voice_id,
@@ -1508,6 +1523,9 @@ pub fn voice_request(settings: &AppSettings, text: String) -> TtsRequest {
         // MiMo has no speed parameter at all — the only delivery control is the
         // instruction text, which travels in the backend's config. Volume is
         // local playback gain, so that one is real.
+        PROVIDER_DEEPSEEK => (
+            settings.deepseek_tts_voice.clone(), None, Some(settings.deepseek_tts_volume), None,
+        ),
         PROVIDER_MIMO => (
             settings.mimo_tts_voice.clone(),
             None,

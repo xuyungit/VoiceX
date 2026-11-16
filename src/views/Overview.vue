@@ -42,6 +42,7 @@ const ASR_DISPLAY_NAMES: Record<string, string> = {
   soniox: 'Soniox',
   stepaudio: 'StepAudio',
   mimo: 'MiMo',
+  deepseek: 'DeepSeek',
   coli: 'coli (local)'
 }
 

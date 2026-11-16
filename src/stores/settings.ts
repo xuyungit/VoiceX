@@ -35,7 +35,7 @@ export interface AppSettings {
     hotkeyDefaultsVersion: number
 
     // ASR
-    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'mimo' | 'coli' | 'qwen-local'
+    asrProviderType: 'volcengine' | 'google' | 'funasr' | 'qwen' | 'gemini' | 'cohere' | 'openai' | 'elevenlabs' | 'soniox' | 'stepaudio' | 'mimo' | 'deepseek' | 'coli' | 'qwen-local'
     asrAppKey: string
     asrAccessKey: string
     asrResourceId: string
@@ -246,6 +246,10 @@ export interface AppSettings {
     aliyunTtsInstruction: string
     aliyunTtsRate: number
     aliyunTtsVolume: number
+
+    // TTS Provider: DeepSeek
+    deepseekTtsVoice: string
+    deepseekTtsVolume: number
 
     // TTS Provider: Xiaomi MiMo
     mimoTtsApiKey: string
@@ -527,6 +531,8 @@ const defaultSettings: AppSettings = {
     aliyunTtsRate: 0.5,
     aliyunTtsVolume: 1,
 
+    deepseekTtsVoice: 'stella',
+    deepseekTtsVolume: 1,
     mimoTtsApiKey: '',
     mimoTtsVoice: 'mimo_default',
     mimoTtsInstruction: '',

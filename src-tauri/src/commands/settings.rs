@@ -301,6 +301,10 @@ pub struct AppSettings {
     pub aliyun_tts_rate: f32,
     pub aliyun_tts_volume: f32,
 
+    // TTS Provider: DeepSeek (shares its API key with the LLM and ASR)
+    pub deepseek_tts_voice: String,
+    pub deepseek_tts_volume: f32,
+
     // TTS Provider: Xiaomi MiMo
     /// A MiMo platform key, the same kind the MiMo ASR provider takes. Stored
     /// separately for the same reason as the Alibaba pair above.
@@ -631,6 +635,8 @@ impl Default for AppSettings {
             aliyun_tts_instruction: crate::tts::aliyun::DEFAULT_INSTRUCTION.to_string(),
             aliyun_tts_rate: 0.5,
             aliyun_tts_volume: 1.0,
+            deepseek_tts_voice: "stella".to_string(),
+            deepseek_tts_volume: 1.0,
             mimo_tts_api_key: String::new(),
             mimo_tts_voice: crate::tts::mimo::default_voice().to_string(),
             mimo_tts_instruction: String::new(),
@@ -700,6 +706,7 @@ fn probe_provider_name(provider: &crate::asr::AsrProviderType) -> &'static str {
         crate::asr::AsrProviderType::Soniox => "Soniox Real-Time STT",
         crate::asr::AsrProviderType::StepAudio => provider.display_name(),
         crate::asr::AsrProviderType::Mimo => "Xiaomi MiMo ASR",
+        crate::asr::AsrProviderType::DeepSeek => "DeepSeek ASR",
         crate::asr::AsrProviderType::Coli => "Local Offline ASR (coli)",
         crate::asr::AsrProviderType::QwenLocal => "Local Offline ASR (Qwen3-ASR)",
     }

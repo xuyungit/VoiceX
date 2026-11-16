@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::asr::funasr_client::qwen_uses_inference_protocol;
 use crate::asr::{
     AsrClient, AsrConfig, AsrEvent, AsrProviderType, CohereTranscriptionClient, ColiAsrClient,
-    ColiRefinementMode, ElevenLabsRealtimeClient, ElevenLabsRecognitionMode,
+    ColiRefinementMode, DeepSeekTranscriptionClient, ElevenLabsRealtimeClient, ElevenLabsRecognitionMode,
     ElevenLabsTranscriptionClient, FunAsrRealtimeClient, GeminiLiveClient,
     GeminiTranscriptionClient, GoogleSttClient, MimoTranscriptionClient, OpenAIRealtimeClient,
     OpenAITranscriptionClient, QwenLocalAsrClient, QwenRealtimeClient, QwenRecognitionMode,
@@ -52,6 +52,14 @@ pub async fn transcribe_audio_path_detailed(
         AsrProviderType::ElevenLabs => run_elevenlabs_asr(path, config).await,
         AsrProviderType::StepAudio => run_stepaudio_asr(path, config).await,
         AsrProviderType::Mimo => run_mimo_asr(path, config).await,
+        AsrProviderType::DeepSeek => {
+            let client = DeepSeekTranscriptionClient::new(config.deepseek_api_key.clone());
+            let text = tokio::select! {
+                result = client.transcribe_file(path) => result.map_err(|e| format!("DeepSeek ASR 失败: {e}"))?,
+                _ = cancel.cancelled() => return Err("转录已取消".into()),
+            };
+            Ok(AsrTranscriptionOutcome { text, model_name: Some("DeepSeek ASR".to_string()) })
+        },
         AsrProviderType::Google => run_google_asr(path, config, cancel).await,
         _ => run_streaming_asr(path, config, cancel).await,
     }
@@ -553,6 +561,7 @@ async fn run_streaming_asr(
         AsrProviderType::Mimo => {
             unreachable!("MiMo should use file-based transcription")
         }
+        AsrProviderType::DeepSeek => unreachable!("DeepSeek should use file-based transcription"),
         AsrProviderType::QwenLocal => {
             unreachable!("Qwen local ASR should use file-based transcription")
         }

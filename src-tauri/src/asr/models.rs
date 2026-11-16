@@ -224,6 +224,7 @@ impl AsrConfig {
             Cohere => validate_model_details("cohere", &self.cohere_model, "batch"),
             StepAudio => validate_model_details("stepaudio", &self.stepaudio_model, "batch"),
             Mimo => validate_model_details("mimo", &self.mimo_model, "batch"),
+            DeepSeek => Ok(()),
             ElevenLabs => {
                 if !self.is_batch() {
                     validate_model_details(

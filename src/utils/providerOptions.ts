@@ -38,6 +38,7 @@ const ASR_PROVIDER_LABEL_KEYS: Array<{
   { key: 'asr.providerSoniox', value: 'soniox' },
   { key: 'asr.providerStepAudio', value: 'stepaudio' },
   { key: 'asr.providerMimo', value: 'mimo' },
+  { key: 'asr.providerDeepSeek', value: 'deepseek' },
   { key: 'asr.providerQwenLocal', value: 'qwen-local' }
 ]
 
@@ -220,6 +221,7 @@ export function resolveQwenRecordingHardLimitMinutes(
 export function resolveAsrRecordingHardLimitMinutes(
   settings: Pick<AppSettings, 'asrProviderType' | 'qwenAsrRecognitionMode' | 'qwenAsrPostRecordingRefine'>
 ): number | null {
+  if (settings.asrProviderType === 'deepseek') return 2
   if (settings.asrProviderType === 'stepaudio') {
     return STEPAUDIO_RECORDING_LIMIT_MINUTES
   }

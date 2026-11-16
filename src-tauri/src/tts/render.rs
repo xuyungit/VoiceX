@@ -20,7 +20,7 @@ use super::aliyun::{self, AliyunConfig};
 use super::azure::{self, AzureConfig};
 use super::controller::{
     provider_voice_slot, voice_request, PROVIDER_ALIYUN, PROVIDER_AZURE, PROVIDER_EDGE,
-    PROVIDER_MIMO, PROVIDER_VOLCENGINE,
+    PROVIDER_MIMO, PROVIDER_VOLCENGINE, PROVIDER_DEEPSEEK,
 };
 use super::edge;
 use super::llm_stage::{
@@ -175,6 +175,7 @@ pub fn resolve_tts_provider(
         return match provider.as_str() {
             PROVIDER_EDGE | PROVIDER_VOLCENGINE | PROVIDER_ALIYUN | PROVIDER_MIMO
             | PROVIDER_AZURE => Ok(provider),
+            PROVIDER_DEEPSEEK => Err("DeepSeek TTS does not yet support MP3 export; select another provider with --tts".to_string()),
             "system" => Err(
                 "the 'system' voice speaks directly through the OS and cannot export MP3; \
                  choose one of: edge, volcengine, aliyun, mimo, azure"
@@ -191,6 +192,7 @@ pub fn resolve_tts_provider(
         PROVIDER_EDGE | PROVIDER_VOLCENGINE | PROVIDER_ALIYUN | PROVIDER_MIMO | PROVIDER_AZURE => {
             Ok(configured.to_string())
         }
+        PROVIDER_DEEPSEEK => Err("DeepSeek TTS does not yet support MP3 export; select another provider with --tts".to_string()),
         _ => Ok(PROVIDER_EDGE.to_string()),
     }
 }
@@ -800,6 +802,15 @@ mod tests {
         assert_eq!(resolve_tts_provider(&settings, None).unwrap(), "edge");
         assert!(resolve_tts_provider(&settings, Some("system")).is_err());
         assert!(resolve_tts_provider(&settings, Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn deepseek_mp3_export_reports_unsupported_instead_of_using_edge() {
+        let mut settings = AppSettings::default();
+        settings.tts_provider_type = "deepseek".into();
+        assert!(resolve_tts_provider(&settings, None).is_err());
+        assert!(resolve_tts_provider(&settings, Some("deepseek")).is_err());
+        assert_eq!(resolve_tts_provider(&settings, Some("edge")).unwrap(), "edge");
     }
 
     #[test]

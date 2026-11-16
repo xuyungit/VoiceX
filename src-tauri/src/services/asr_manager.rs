@@ -402,6 +402,10 @@ impl AsrManager {
                 log::warn!("StepAudio ASR is batch-only and should not enter streaming mode");
                 Ok(())
             }
+            AsrProviderType::DeepSeek => {
+                log::warn!("DeepSeek ASR is batch-only and should not enter streaming mode");
+                Ok(())
+            }
             AsrProviderType::Mimo => {
                 log::warn!("MiMo ASR is batch-only and should not enter streaming mode");
                 Ok(())

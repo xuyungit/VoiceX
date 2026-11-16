@@ -4,6 +4,7 @@ export const TTS_PROVIDERS = [
   { value: 'volcengine', labelKey: 'reading.providerVolcengine' },
   { value: 'aliyun', labelKey: 'reading.providerAliyun' },
   { value: 'mimo', labelKey: 'reading.providerMimo' },
+  { value: 'deepseek', labelKey: 'reading.providerDeepSeek' },
   { value: 'azure', labelKey: 'reading.providerAzure' },
   { value: 'edge', labelKey: 'reading.providerEdge' }
 ] as const

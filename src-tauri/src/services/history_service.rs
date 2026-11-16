@@ -432,6 +432,7 @@ impl HistoryService {
                 Self::format_provider_model("StepAudio", &config.stepaudio_model)
             }
             AsrProviderType::Mimo => Self::format_provider_model("MiMo", &config.mimo_model),
+            AsrProviderType::DeepSeek => Some("DeepSeek ASR".to_string()),
             AsrProviderType::QwenLocal => {
                 Self::format_provider_model("Local / Qwen3-ASR", &config.qwen_local_model)
             }

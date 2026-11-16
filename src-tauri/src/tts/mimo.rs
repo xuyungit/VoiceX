@@ -485,7 +485,7 @@ impl PcmConverter {
 /// always [`STREAM_RATE`] raw PCM, and the gap is closed by resampling. No
 /// decoder sits in this path — raw PCM has nothing to decode, which is the
 /// point (see the module docs).
-fn run_playback(
+pub(crate) fn run_playback(
     pieces: Receiver<PieceStream>,
     device_rate: u32,
     gain: f32,
@@ -499,6 +499,9 @@ fn run_playback(
     let playback = match Playback::open(device_rate, gain, 0) {
         Ok(playback) => playback,
         Err(err) => {
+            if let Ok(mut slot) = network_error.lock() {
+                *slot = Some(err.to_string());
+            }
             if token.finish() {
                 log_event(
                     "speak_err",

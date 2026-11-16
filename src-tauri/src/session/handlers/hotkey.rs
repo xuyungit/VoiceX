@@ -77,7 +77,7 @@ impl SessionController {
             // Default HUD to hands-free icon immediately; will switch to push-to-talk if hold threshold is reached.
             state.recording_style = Some(RecordingStyle::HandsFree);
             self.start_audio_capture();
-            self.start_recording_timeout(self.effective_max_recording_minutes(state));
+            self.start_recording_timeout(self.effective_max_recording_minutes(state), state);
             if let Some(hud) = self.hud_service() {
                 hud.reset_display();
             } else {

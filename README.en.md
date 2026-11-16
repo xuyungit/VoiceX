@@ -162,9 +162,11 @@ Translate-and-read has its own target language, LLM, and voice options, plus swi
 
 - **System voice** (macOS only): offline with no setup; by default the voice from System Settings → Accessibility → Spoken Content.
 - **Microsoft Edge online speech**: no account or key; the default on Windows.
-- **Volcengine Doubao Seed-TTS 2.0**, **Alibaba Cloud Model Studio** (Qwen-Audio, Qwen3-TTS dialect voices, CosyVoice), **Xiaomi MiMo**, **Microsoft Azure Speech**.
+- **Volcengine Doubao Seed-TTS 2.0**, **Alibaba Cloud Model Studio** (Qwen-Audio, Qwen3-TTS dialect voices, CosyVoice), **Xiaomi MiMo**, **DeepSeek**, **Microsoft Azure Speech**.
 
-Cloud engines stream, so speech starts about half a second after the hotkey, and long selections are synthesized sentence by sentence. Voice, rate, and volume are saved per engine and can be previewed; some Alibaba Cloud models also accept a one-line description of the speaking style.
+Cloud engines stream audio; startup time varies by provider and network, and long selections are synthesized in pieces. Voice and supported controls are saved per engine and can be previewed; some Alibaba Cloud models also accept a one-line description of the speaking style.
+
+DeepSeek ASR and TTS share the DeepSeek LLM API key; speech rate is not adjustable. API calls have been tested; in-app validation remains pending.
 
 **Windows:** there is no system voice, so Edge online speech is the default. Apps running as administrator cannot be read unless VoiceX also runs as administrator.
 
@@ -190,7 +192,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --tt
 cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --translate --to en --save-text notes.en.txt -o notes.en.mp3
 ```
 
-The output defaults to the input filename plus `.mp3` (such as `notes.md.mp3`); see `--help` for all options. If the desktop app uses the system voice, export uses Edge instead. The target file is replaced only after synthesis succeeds, so a failed export keeps any existing file.
+The output defaults to the input filename plus `.mp3` (such as `notes.md.mp3`); see `--help` for all options. If the desktop app uses the system voice, export uses Edge instead. DeepSeek does not yet support MP3 export; select another engine with `--tts`. The target file is replaced only after synthesis succeeds, so a failed export keeps any existing file.
 
 ### Where the text goes
 
@@ -221,6 +223,7 @@ Choose an engine and model and adjust its parameters on the **ASR** page; each p
 | Soniox | Cloud realtime | Default `stt-rt-v6`; hot words and language hints |
 | StepAudio (StepFun) | After recording | Default `stepaudio-3-asr-max`; recordings up to 30 minutes |
 | Xiaomi MiMo | After recording | `mimo-v2.5-asr` |
+| DeepSeek | After recording | Automatic language detection; up to 120 seconds and 8 MiB; no hotwords |
 | OpenAI | Cloud realtime / after recording | `gpt-live-transcribe` / `gpt-transcribe`; the dictionary is sent as keywords; multiple languages |
 | ElevenLabs | Cloud realtime / after recording | Optional `scribe_v3_live` / `scribe_v3`; defaults remain `scribe_v2_realtime` / `scribe_v2`; optional full-recording refinement after realtime; the dictionary is sent only after recording, not during realtime |
 | [Coli](https://www.npmjs.com/package/@marswave/coli) | Local, offline | SenseVoice / Whisper based; installed separately |
@@ -270,7 +273,7 @@ Optionally have an LLM correct or translate the recognized text. Choose a provid
 
 ## Dictionary and replacement rules
 
-- **Dictionary** — one word per line. Speech recognition passes it to an engine as hints only when **Use hotwords / dictionary for this provider** is on for that engine on the ASR page. The switch is saved per engine and is on by default, except for Google Gemini, where it starts off because the model can echo the word list during silence. Cohere, Xiaomi MiMo, and Coli do not take a dictionary. LLM correction uses the dictionary regardless of this switch.
+- **Dictionary** — one word per line. Speech recognition passes it to an engine as hints only when **Use hotwords / dictionary for this provider** is on for that engine on the ASR page. The switch is saved per engine and is on by default, except for Google Gemini, where it starts off because the model can echo the word list during silence. Cohere, Xiaomi MiMo, DeepSeek, and Coli do not take a dictionary. LLM correction uses the dictionary regardless of this switch.
 - **Replacement rules** — exact, contains, or regex rules applied to the text before it is typed; exact matches ignore trailing punctuation.
 - **Short-sentence punctuation** — trailing punctuation is removed from short sentences, with an adjustable length threshold.
 

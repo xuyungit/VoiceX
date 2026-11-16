@@ -322,7 +322,7 @@ impl SessionController {
         self.cancel_recording_timeout();
 
         if should_restart_timeout {
-            self.start_recording_timeout(self.effective_max_recording_minutes(state));
+            self.start_recording_timeout(self.effective_max_recording_minutes(state), state);
         }
 
         if let Some(manager) = self.audio_manager() {
@@ -809,12 +809,19 @@ impl SessionController {
         }
     }
 
-    fn start_recording_timeout(&self, minutes: u32) {
+    fn start_recording_timeout(&self, minutes: u32, state: &AppState) {
         self.cancel_recording_timeout();
         self.cancel_asr_final_timeout();
 
         let controller = self.clone();
-        let total_secs = (minutes as u64) * 60;
+        let mut total_secs = (minutes as u64) * 60;
+        // Stop slightly before DeepSeek's 120-second hard limit to allow the
+        // capture thread to finish. Settings updates must not restart that
+        // provider's clock from zero while recording is already underway.
+        if minutes == 2 && crate::storage::get_settings().ok().is_some_and(|s| s.asr_provider_type == "deepseek") {
+            let elapsed = state.session_start.map(|start| start.elapsed().as_secs()).unwrap_or(0);
+            total_secs = 118_u64.saturating_sub(elapsed).max(1);
+        }
 
         if total_secs == 0 {
             log::debug!("Recording timeout disabled (minutes=0)");

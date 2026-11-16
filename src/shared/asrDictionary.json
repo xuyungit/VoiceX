@@ -10,6 +10,7 @@
   "stepaudio": { "defaultEnabled": true, "channel": "native" },
   "qwen-local": { "defaultEnabled": true, "channel": "prompt" },
   "cohere": { "defaultEnabled": false, "channel": "unsupported" },
+  "deepseek": { "defaultEnabled": false, "channel": "unsupported" },
   "mimo": { "defaultEnabled": false, "channel": "unsupported" },
   "coli": { "defaultEnabled": false, "channel": "unsupported" }
 }

@@ -50,6 +50,7 @@ pub enum AsrProviderType {
     Soniox,
     StepAudio,
     Mimo,
+    DeepSeek,
     Coli,
     QwenLocal,
 }
@@ -75,6 +76,7 @@ impl AsrProviderType {
             Self::Soniox => "Soniox",
             Self::StepAudio => "StepAudio",
             Self::Mimo => "MiMo",
+            Self::DeepSeek => "DeepSeek",
             Self::Coli => "coli",
             Self::QwenLocal => "Qwen3-ASR (local)",
         }
@@ -263,6 +265,8 @@ pub struct AsrConfig {
     pub stepaudio_base_url: String,
     pub stepaudio_language: String,
 
+    pub deepseek_api_key: String,
+
     // Xiaomi MiMo ASR settings
     pub mimo_api_key: String,
     pub mimo_model: String,
@@ -373,6 +377,7 @@ impl Default for AsrConfig {
             stepaudio_model: crate::asr::models::default_model("stepaudio"),
             stepaudio_base_url: "https://api.stepfun.com/v1".to_string(),
             stepaudio_language: "auto".to_string(),
+            deepseek_api_key: String::new(),
             mimo_api_key: String::new(),
             mimo_model: crate::asr::models::default_model("mimo"),
             mimo_base_url: "https://api.xiaomimimo.com/v1".to_string(),
@@ -423,6 +428,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             "soniox" => AsrProviderType::Soniox,
             "stepaudio" => AsrProviderType::StepAudio,
             "mimo" => AsrProviderType::Mimo,
+            "deepseek" => AsrProviderType::DeepSeek,
             "coli" => AsrProviderType::Coli,
             "qwen-local" => AsrProviderType::QwenLocal,
             _ => AsrProviderType::Volcengine,
@@ -502,6 +508,7 @@ impl From<&crate::commands::settings::AppSettings> for AsrConfig {
             stepaudio_model: settings.stepaudio_model.clone(),
             stepaudio_base_url: settings.stepaudio_base_url.clone(),
             stepaudio_language: settings.stepaudio_language.clone(),
+            deepseek_api_key: settings.llm_deepseek_api_key.clone(),
             mimo_api_key: settings.mimo_api_key.clone(),
             mimo_model: settings.mimo_model.clone(),
             mimo_base_url: settings.mimo_base_url.clone(),
@@ -642,6 +649,12 @@ impl AsrConfig {
                 supports_batch: true,
                 supports_post_recording_batch_refine: false,
             },
+            AsrProviderType::DeepSeek => AsrProviderCapabilities {
+                supports_realtime: false,
+                supports_realtime_with_final_pass: false,
+                supports_batch: true,
+                supports_post_recording_batch_refine: false,
+            },
             AsrProviderType::Mimo => AsrProviderCapabilities {
                 supports_realtime: false,
                 supports_realtime_with_final_pass: false,
@@ -717,6 +730,7 @@ impl AsrConfig {
             AsrProviderType::Soniox => AsrPipelineMode::Realtime,
             AsrProviderType::StepAudio => AsrPipelineMode::Batch,
             AsrProviderType::Mimo => AsrPipelineMode::Batch,
+            AsrProviderType::DeepSeek => AsrPipelineMode::Batch,
             AsrProviderType::QwenLocal => AsrPipelineMode::Batch,
             AsrProviderType::Coli if !self.coli_realtime => AsrPipelineMode::Batch,
             AsrProviderType::Coli
@@ -733,6 +747,7 @@ impl AsrConfig {
             (AsrProviderType::Qwen, AsrPipelineMode::Batch)
             | (AsrProviderType::Qwen, AsrPipelineMode::RealtimeWithFinalPass) => Some(5),
             (AsrProviderType::StepAudio, AsrPipelineMode::Batch) => Some(30),
+            (AsrProviderType::DeepSeek, AsrPipelineMode::Batch) => Some(2),
             (AsrProviderType::GeminiLive, _) => {
                 super::models::max_recording_minutes("gemini-live", &self.gemini_live_model)
             }
@@ -917,6 +932,7 @@ impl AsrConfig {
                 require("stepaudio_model", "识别模型", &self.stepaudio_model);
                 require("stepaudio_base_url", "服务地址", &self.stepaudio_base_url);
             }
+            DeepSeek => require("deepseek_api_key", "API Key", &self.deepseek_api_key),
             Mimo => {
                 require("mimo_api_key", "API Key", &self.mimo_api_key);
                 require("mimo_model", "识别模型", &self.mimo_model);
@@ -1071,6 +1087,20 @@ mod tests {
         assert!(config.capabilities().supports_batch);
         assert!(!config.capabilities().supports_realtime);
         assert_eq!(config.max_recording_minutes_limit(), Some(30));
+    }
+
+    #[test]
+    fn deepseek_is_batch_only_uses_shared_key_and_caps_recording() {
+        let mut settings = crate::commands::settings::AppSettings::default();
+        settings.asr_provider_type = "deepseek".into();
+        settings.llm_deepseek_api_key = "test-key".into();
+        let config = super::AsrConfig::from(&settings);
+        assert_eq!(config.provider_type, super::AsrProviderType::DeepSeek);
+        assert_eq!(config.deepseek_api_key, "test-key");
+        assert!(config.is_valid() && config.is_batch());
+        assert!(!config.capabilities().supports_realtime);
+        assert_eq!(config.max_recording_minutes_limit(), Some(2));
+        assert!(config.hotwords.is_empty());
     }
 
     #[test]
