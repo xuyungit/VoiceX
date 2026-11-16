@@ -84,6 +84,7 @@ const enUS = {
     modeDaily: 'Daily',
     modeWeekly: 'Weekly',
     modeCumulative: 'Cumulative',
+    undatedActivity: 'An additional {value} has no recorded date and is excluded from this chart.',
     legendLess: 'Less',
     legendMore: 'More',
     tooltipDay: '{date} · {chars} chars · {count} uses',

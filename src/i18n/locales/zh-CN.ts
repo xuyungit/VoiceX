@@ -84,6 +84,7 @@ const zhCN = {
     modeDaily: '每天',
     modeWeekly: '每周',
     modeCumulative: '累计总量',
+    undatedActivity: '另有 {value} 日期未知，未计入图表',
     legendLess: '少',
     legendMore: '多',
     tooltipDay: '{date} · {chars} 字 · {count} 次',

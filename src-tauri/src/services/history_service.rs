@@ -43,7 +43,6 @@ pub struct HistoryService;
 
 struct PersistBehavior {
     update_stats: bool,
-    update_device_stats: bool,
     enqueue_sync: bool,
     text_retention_days: u32,
     audio_retention_days: u32,
@@ -261,35 +260,20 @@ impl HistoryService {
             let _work = work;
             let mut record = record;
             if record.source_device_id.is_none() {
-                if let Ok(device_id) = storage::get_or_create_device_id() {
-                    record.source_device_id = Some(device_id);
-                }
+                record.source_device_id = Some(storage::get_or_create_device_id().map_err(|err| {
+                    log::warn!("Failed to resolve history device ID: {}", err);
+                    err.to_string()
+                })?);
             }
 
-            let persisted = storage::insert_history_record_with_stats(&record, behavior.update_stats)
-                .map_err(|err| {
-                    log::warn!("Failed to persist history: {}", err);
-                    err.to_string()
-                })?;
+            let persisted =
+                storage::insert_local_history_record_with_stats(&record, behavior.update_stats)
+                    .map_err(|err| {
+                        log::warn!("Failed to persist history: {}", err);
+                        err.to_string()
+                    })?;
             if !persisted {
                 return Ok(false);
-            }
-
-            if behavior.update_device_stats {
-                if let Some(device_id) = record.source_device_id.as_ref() {
-                    let chars = record.text.chars().count() as i64;
-                    if let Err(err) = storage::increment_device_usage_stats(
-                        device_id,
-                        record.duration_ms,
-                        chars,
-                        record.llm_invoked,
-                    ) {
-                        log::warn!("Failed to update device usage stats: {}", err);
-                    }
-                    if let Err(err) = storage::increment_daily_usage_stats_for_record(&record) {
-                        log::warn!("Failed to update daily app usage stats: {}", err);
-                    }
-                }
             }
 
             if behavior.enqueue_sync {
@@ -318,7 +302,6 @@ impl HistoryService {
 
         PersistBehavior {
             update_stats: !sync_ready,
-            update_device_stats: true,
             enqueue_sync: sync_ready,
             text_retention_days: if settings.sync_enabled {
                 0
@@ -350,7 +333,6 @@ impl HistoryService {
     fn translate_read_behavior(settings: &AppSettings) -> PersistBehavior {
         PersistBehavior {
             update_stats: false,
-            update_device_stats: false,
             enqueue_sync: false,
             ..Self::completed_behavior(settings)
         }
@@ -359,7 +341,6 @@ impl HistoryService {
     fn local_failure_behavior(settings: &AppSettings) -> PersistBehavior {
         PersistBehavior {
             update_stats: false,
-            update_device_stats: false,
             enqueue_sync: false,
             text_retention_days: settings.text_retention_days,
             audio_retention_days: settings.audio_retention_days,
@@ -598,10 +579,9 @@ mod tests {
         let translate = HistoryService::behavior_for_mode(HISTORY_MODE_TRANSLATE_READ, &settings);
         let dictation = HistoryService::behavior_for_mode("assistant_corrected", &settings);
 
-        assert!(dictation.enqueue_sync && dictation.update_device_stats);
+        assert!(dictation.enqueue_sync);
         assert!(!translate.enqueue_sync);
         assert!(!translate.update_stats);
-        assert!(!translate.update_device_stats);
         // Same retention as the dictation path, so a translation persist never
         // prunes synced rows that dictation would keep.
         assert_eq!(translate.text_retention_days, dictation.text_retention_days);
@@ -617,10 +597,8 @@ mod tests {
         let translate = HistoryService::behavior_for_mode(HISTORY_MODE_TRANSLATE_READ, &settings);
         let dictation = HistoryService::behavior_for_mode("assistant_raw", &settings);
 
-        assert!(dictation.update_stats && dictation.update_device_stats && !dictation.enqueue_sync);
-        assert!(
-            !translate.update_stats && !translate.update_device_stats && !translate.enqueue_sync
-        );
+        assert!(dictation.update_stats && !dictation.enqueue_sync);
+        assert!(!translate.update_stats && !translate.enqueue_sync);
     }
 
     #[test]

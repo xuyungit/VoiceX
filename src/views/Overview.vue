@@ -205,7 +205,7 @@ function localWithoutSharedUnit(local: string, total: string) {
 
 const weeklyTopWithShare = computed(() => {
   const items = historyStore.weeklyTopApps
-  const total = items.reduce((sum, item) => sum + item.usageCount, 0)
+  const total = historyStore.weeklyTotalCount
   return items.slice(0, 3).map(item => ({
     ...item,
     sharePct: total > 0 ? Math.round((item.usageCount / total) * 100) : 0,
@@ -216,6 +216,17 @@ const activityGrid = computed(() => {
   const data = historyStore.dailyActivity
   if (!data) return null
   return buildActivityGrid(data, activityMetric.value, activityMode.value, locale.value)
+})
+
+const undatedActivityNote = computed(() => {
+  const data = historyStore.dailyActivity
+  if (!data) return ''
+  const count = activityMetric.value === 'chars' ? data.undatedCharacters : data.undatedCount
+  if (count <= 0) return ''
+  const value = activityMetric.value === 'chars'
+    ? t('overview.charsUnit', { count: formatCharacters(count) })
+    : t('overview.countUnit', { count: formatCount(count) })
+  return t('overview.undatedActivity', { value })
 })
 
 function formatShortDate(isoDate: string): string {
@@ -329,6 +340,29 @@ function appBarWidthPct(item: AppUsageStat): number {
   return Math.max(4, Math.round((metricValue(item, appSortBy.value) / max) * 100))
 }
 
+function primaryAppMetric(item: AppUsageStat): string {
+  if (appSortBy.value === 'chars') {
+    return t('overview.charsUnit', { count: formatCharacters(item.totalCharacters) })
+  }
+  if (appSortBy.value === 'duration') {
+    return formatCompactAppDuration(item.totalDurationMs)
+  }
+  return t('overview.countUnit', { count: formatCount(item.usageCount) })
+}
+
+function secondaryAppMetric(item: AppUsageStat): string {
+  const avg = t('overview.avgCharsPerUse', {
+    count: formatCount(Math.round(item.totalCharacters / Math.max(1, item.usageCount))),
+  })
+  if (appSortBy.value === 'chars') {
+    return `${t('overview.countUnit', { count: formatCount(item.usageCount) })} · ${formatCompactAppDuration(item.totalDurationMs)} · ${avg}`
+  }
+  if (appSortBy.value === 'duration') {
+    return `${t('overview.countUnit', { count: formatCount(item.usageCount) })} · ${t('overview.charsUnit', { count: formatCharacters(item.totalCharacters) })} · ${avg}`
+  }
+  return `${t('overview.charsUnit', { count: formatCharacters(item.totalCharacters) })} · ${formatCompactAppDuration(item.totalDurationMs)} · ${avg}`
+}
+
 function appInitials(name: string): string {
   const trimmed = name.trim()
   return trimmed ? trimmed.slice(0, 2).toUpperCase() : '?'
@@ -343,11 +377,14 @@ function selectRange(range: AppUsageRange) {
 }
 
 async function refreshInsights() {
-  await Promise.all([
-    historyStore.loadWeeklyTopApps(),
+  const tasks: Array<Promise<unknown>> = [
     historyStore.loadAppStats(historyStore.appUsageRange),
     historyStore.loadDailyActivity(),
-  ])
+  ]
+  if (historyStore.appUsageRange !== 'week') {
+    tasks.push(historyStore.loadWeeklyTopApps())
+  }
+  await Promise.all(tasks)
 }
 
 watch(
@@ -525,6 +562,7 @@ onMounted(async () => {
           </div>
 
           <div v-if="activityGrid" class="activity-footer">
+            <div v-if="undatedActivityNote">{{ undatedActivityNote }}</div>
             <div class="month-track">
               <span
                 v-for="m in activityGrid.monthLabels"
@@ -623,13 +661,11 @@ onMounted(async () => {
                 </div>
                 <div class="app-metrics">
                   <div class="app-metric-primary">
-                    {{ t('overview.countUnit', { count: formatCount(item.usageCount) }) }}
+                    {{ primaryAppMetric(item) }}
                     <span class="app-share">({{ appSharePct(item) }}%)</span>
                   </div>
                   <div class="app-metric-secondary">
-                    {{ t('overview.charsUnit', { count: formatCharacters(item.totalCharacters) }) }}
-                    · {{ formatCompactAppDuration(item.totalDurationMs) }}
-                    · {{ t('overview.avgCharsPerUse', { count: formatCount(Math.round(item.totalCharacters / Math.max(1, item.usageCount))) }) }}
+                    {{ secondaryAppMetric(item) }}
                   </div>
                 </div>
               </div>
@@ -961,9 +997,8 @@ onMounted(async () => {
 
 .activity-footer {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  gap: 6px;
   font-size: var(--font-xs);
   color: var(--color-text-tertiary);
 }
@@ -972,11 +1007,12 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: repeat(52, minmax(0, 1fr));
   gap: 3px;
-  flex: 1;
+  width: 100%;
   min-width: 0;
 }
 
 .month-label {
+  grid-row: 1;
   white-space: nowrap;
   font-size: 11px;
 }
@@ -984,8 +1020,8 @@ onMounted(async () => {
 .activity-legend {
   display: inline-flex;
   align-items: center;
+  align-self: flex-end;
   gap: 3px;
-  flex-shrink: 0;
   font-size: 11px;
 }
 

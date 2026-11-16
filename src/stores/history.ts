@@ -54,6 +54,9 @@ export interface DailyActivityResponse {
     priorCount: number
     priorCharacters: number
     priorDurationMs: number
+    undatedCount: number
+    undatedCharacters: number
+    undatedDurationMs: number
     days: DailyActivityPoint[]
 }
 
@@ -111,8 +114,12 @@ export const useHistoryStore = defineStore('history', () => {
     const appUsageRange = ref<AppUsageRange>('week')
     const appStats = ref<AppUsageStat[]>([])
     const weeklyTopApps = ref<AppUsageStat[]>([])
+    const weeklyTotalCount = ref(0)
     const allAppsForFilter = ref<AppUsageStat[]>([])
     const dailyActivity = ref<DailyActivityResponse | null>(null)
+    let appStatsGeneration = 0
+    // The app list and teaser can request weekly data independently.
+    let weeklyStatsGeneration = 0
     const pageSize = 20
     let refreshQueued = false
     let searchGeneration = 0
@@ -193,13 +200,22 @@ export const useHistoryStore = defineStore('history', () => {
         statsRevision.value++
     }
 
+    function applyWeeklySnapshot(result: AppUsageStat[]) {
+        weeklyTopApps.value = result.slice(0, 3)
+        weeklyTotalCount.value = result.reduce((sum, item) => sum + item.usageCount, 0)
+    }
+
     async function loadAppStats(range: AppUsageRange = appUsageRange.value) {
         appUsageRange.value = range
+        const generation = ++appStatsGeneration
+        const weeklyGeneration = range === 'week' ? ++weeklyStatsGeneration : null
         try {
             const result = await invoke<AppUsageStat[]>('get_app_usage_stats', { range })
-            appStats.value = result
-            if (range === 'week') {
-                weeklyTopApps.value = result.slice(0, 3)
+            if (generation === appStatsGeneration) {
+                appStats.value = result
+            }
+            if (weeklyGeneration === weeklyStatsGeneration) {
+                applyWeeklySnapshot(result)
             }
         } catch (error) {
             console.error('Failed to load app usage stats:', error)
@@ -207,9 +223,12 @@ export const useHistoryStore = defineStore('history', () => {
     }
 
     async function loadWeeklyTopApps() {
+        const generation = ++weeklyStatsGeneration
         try {
             const result = await invoke<AppUsageStat[]>('get_app_usage_stats', { range: 'week' })
-            weeklyTopApps.value = result.slice(0, 3)
+            if (generation === weeklyStatsGeneration) {
+                applyWeeklySnapshot(result)
+            }
         } catch (error) {
             console.error('Failed to load weekly top apps:', error)
         }
@@ -401,6 +420,7 @@ export const useHistoryStore = defineStore('history', () => {
         appUsageRange,
         appStats,
         weeklyTopApps,
+        weeklyTotalCount,
         allAppsForFilter,
         dailyActivity,
         setSearch,

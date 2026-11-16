@@ -135,9 +135,13 @@ export function buildActivityGrid(
     const weekStart = addDays(start, w * 7)
     const colMonth = weekStart.getMonth()
     if (colMonth !== lastMonth) {
-      // Avoid crowding the very first label if month switches immediately at col 1.
+      const label = monthFormatter.format(weekStart)
       if (monthLabels.length === 0 || w - monthLabels[monthLabels.length - 1].colIndex >= 2) {
-        monthLabels.push({ colIndex: w, label: monthFormatter.format(weekStart) })
+        monthLabels.push({ colIndex: w, label })
+      } else if (monthLabels.length === 1 && monthLabels[0].colIndex === 0) {
+        // Column 0 was a single trailing week of the previous month; replace it
+        // so the full month starting at column 1 is not dropped.
+        monthLabels[0] = { colIndex: w, label }
       }
       lastMonth = colMonth
     }

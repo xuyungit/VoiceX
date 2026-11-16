@@ -722,13 +722,22 @@ pub fn insert_history_record_with_stats(
     record: &HistoryRecord,
     update_stats: bool,
 ) -> Result<bool, StorageError> {
-    with_db(|conn| insert_history_record_with_stats_conn(conn, record, update_stats))
+    with_db(|conn| insert_history_record_with_stats_conn(conn, record, update_stats, false))
+}
+
+/// Commit a local history record, device totals and daily app usage together.
+pub fn insert_local_history_record_with_stats(
+    record: &HistoryRecord,
+    update_stats: bool,
+) -> Result<bool, StorageError> {
+    with_db(|conn| insert_history_record_with_stats_conn(conn, record, update_stats, true))
 }
 
 fn insert_history_record_with_stats_conn(
     conn: &Connection,
     record: &HistoryRecord,
     update_stats: bool,
+    update_local_stats: bool,
 ) -> Result<bool, StorageError> {
     let tx = conn
         .unchecked_transaction()
@@ -769,6 +778,9 @@ fn insert_history_record_with_stats_conn(
                 record.text.chars().count() as i64,
                 record.llm_invoked,
             )?;
+        }
+        if update_local_stats {
+            increment_local_usage_stats_for_record_conn(&tx, record)?;
         }
     }
     tx.commit()
@@ -1135,24 +1147,19 @@ pub fn increment_usage_stats(
     with_db(|conn| increment_usage_stats_conn(conn, duration_ms, characters, llm_invoked))
 }
 
-/// Increment per-device usage stats.
-pub fn increment_device_usage_stats(
+fn increment_device_usage_stats_conn(
+    conn: &Connection,
     device_id: &str,
     duration_ms: i64,
     characters: i64,
     llm_invoked: bool,
 ) -> Result<(), StorageError> {
-    let trimmed = device_id.trim();
-    if trimmed.is_empty() {
-        return Ok(());
-    }
     let dur = duration_ms.max(0);
     let chars = characters.max(0);
     let llm = if llm_invoked { 1 } else { 0 };
     let now = Utc::now().to_rfc3339();
 
-    with_db(|conn| {
-        conn.execute(
+    conn.execute(
             "INSERT INTO device_usage_stats
              (device_id, total_duration_ms, total_characters, llm_correction_count, total_recording_count, last_updated)
              VALUES (?1, ?2, ?3, ?4, 1, ?5)
@@ -1162,11 +1169,10 @@ pub fn increment_device_usage_stats(
                  llm_correction_count = llm_correction_count + excluded.llm_correction_count,
                  total_recording_count = total_recording_count + 1,
                  last_updated = excluded.last_updated",
-            params![trimmed, dur, chars, llm, now],
+            params![device_id, dur, chars, llm, now],
         )
-        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        Ok(())
-    })
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    Ok(())
 }
 
 /// Overwrite the account-wide reading counters with the server's totals.
@@ -1347,6 +1353,10 @@ pub struct DailyActivityResponse {
     pub prior_count: i64,
     pub prior_characters: i64,
     pub prior_duration_ms: i64,
+    /// Lifetime usage absent from dated rows; never assign it to a chart date.
+    pub undated_count: i64,
+    pub undated_characters: i64,
+    pub undated_duration_ms: i64,
     pub days: Vec<DailyActivityPoint>,
 }
 
@@ -1456,15 +1466,16 @@ fn migrate_daily_usage_stats(conn: &Connection) -> Result<(), StorageError> {
     {
         let mut stmt = tx
             .prepare(
-                "SELECT timestamp, text, duration_ms, llm_invoked, source_device_id,
+                "SELECT timestamp, text, duration_ms, llm_invoked,
                         target_app_platform, target_app_key, target_app_name
                  FROM history_record
-                 WHERE error_code = ?1 AND mode != ?2",
+                 WHERE error_code = ?1 AND mode != ?2
+                   AND (source_device_id = ?3 OR source_device_id IS NULL OR source_device_id = '')",
             )
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         let rows = stmt
             .query_map(
-                params![HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ],
+                params![HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ, local_device_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -1474,7 +1485,6 @@ fn migrate_daily_usage_stats(conn: &Connection) -> Result<(), StorageError> {
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, Option<String>>(5)?,
                         row.get::<_, Option<String>>(6)?,
-                        row.get::<_, Option<String>>(7)?,
                     ))
                 },
             )
@@ -1486,7 +1496,6 @@ fn migrate_daily_usage_stats(conn: &Connection) -> Result<(), StorageError> {
                 text,
                 duration_ms,
                 llm_invoked,
-                source_device_id,
                 target_platform,
                 target_key,
                 target_name,
@@ -1495,11 +1504,6 @@ fn migrate_daily_usage_stats(conn: &Connection) -> Result<(), StorageError> {
             let Some(local_date) = local_date_from_rfc3339(&timestamp) else {
                 continue;
             };
-            let device_id = source_device_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&local_device_id);
             let app_key = target_key
                 .as_deref()
                 .map(str::trim)
@@ -1522,7 +1526,7 @@ fn migrate_daily_usage_stats(conn: &Connection) -> Result<(), StorageError> {
 
             upsert_daily_usage_stats_conn(
                 &tx,
-                device_id,
+                &local_device_id,
                 &local_date,
                 FEATURE_KIND_DICTATION,
                 platform,
@@ -1547,21 +1551,24 @@ fn migrate_daily_usage_stats(conn: &Connection) -> Result<(), StorageError> {
         .map_err(|e| StorageError::QueryFailed(e.to_string()))
 }
 
-/// Record one completed local dictation into `daily_usage_stats`.
-pub fn increment_daily_usage_stats_for_record(record: &HistoryRecord) -> Result<(), StorageError> {
+fn increment_local_usage_stats_for_record_conn(
+    conn: &Connection,
+    record: &HistoryRecord,
+) -> Result<(), StorageError> {
     if record.error_code != HISTORY_ERROR_NONE || record.mode == HISTORY_MODE_TRANSLATE_READ {
         return Ok(());
     }
-    let Some(device_id) = record
+    let device_id = record
         .source_device_id
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    else {
-        return Ok(());
-    };
-    let local_date = local_date_from_rfc3339(&record.timestamp)
-        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+        .ok_or_else(|| {
+            StorageError::QueryFailed("Local history is missing its device ID".into())
+        })?;
+    let local_date = local_date_from_rfc3339(&record.timestamp).ok_or_else(|| {
+        StorageError::QueryFailed("Local history has an invalid timestamp".into())
+    })?;
     let app_key = record
         .target_app_key
         .as_deref()
@@ -1589,22 +1596,27 @@ pub fn increment_daily_usage_stats_for_record(record: &HistoryRecord) -> Result<
     };
     let chars = record.text.chars().count() as i64;
 
-    with_db(|conn| {
-        upsert_daily_usage_stats_conn(
-            conn,
-            device_id,
-            &local_date,
-            FEATURE_KIND_DICTATION,
-            platform,
-            app_key,
-            app_name,
-            1,
-            chars,
-            record.duration_ms,
-            i64::from(record.llm_invoked),
-            &record.timestamp,
-        )
-    })
+    increment_device_usage_stats_conn(
+        conn,
+        device_id,
+        record.duration_ms,
+        chars,
+        record.llm_invoked,
+    )?;
+    upsert_daily_usage_stats_conn(
+        conn,
+        device_id,
+        &local_date,
+        FEATURE_KIND_DICTATION,
+        platform,
+        app_key,
+        app_name,
+        1,
+        chars,
+        record.duration_ms,
+        i64::from(record.llm_invoked),
+        &record.timestamp,
+    )
 }
 
 fn range_start_date(range: AppUsageRange, today: NaiveDate) -> Option<String> {
@@ -1738,6 +1750,9 @@ pub fn get_daily_activity(device_id: &str) -> Result<DailyActivityResponse, Stor
             prior_count: 0,
             prior_characters: 0,
             prior_duration_ms: 0,
+            undated_count: 0,
+            undated_characters: 0,
+            undated_duration_ms: 0,
             days: Vec::new(),
         });
     }
@@ -1754,7 +1769,7 @@ fn get_daily_activity_in(
     let start_str = start_date.format("%Y-%m-%d").to_string();
     let end_str = today.format("%Y-%m-%d").to_string();
 
-    let (prior_count, prior_characters, prior_duration_ms) = conn
+    let (prior_count, prior_characters, prior_duration_ms): (i64, i64, i64) = conn
         .query_row(
             "SELECT COALESCE(SUM(usage_count), 0),
                     COALESCE(SUM(total_characters), 0),
@@ -1802,12 +1817,46 @@ fn get_daily_activity_in(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
+    let window_count: i64 = days.iter().map(|d| d.usage_count).sum();
+    let window_characters: i64 = days.iter().map(|d| d.total_characters).sum();
+    let window_duration_ms: i64 = days.iter().map(|d| d.total_duration_ms).sum();
+
+    // Retention may have removed history from inside or outside this window
+    // before backfill. Keep that undated remainder out of the dated baseline.
+    let device_totals: Option<(i64, i64, i64)> = conn
+        .query_row(
+            "SELECT COALESCE(total_recording_count, 0),
+                    COALESCE(total_characters, 0),
+                    COALESCE(total_duration_ms, 0)
+             FROM device_usage_stats
+             WHERE device_id = ?1
+             LIMIT 1",
+            params![device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+    let (undated_count, undated_characters, undated_duration_ms) =
+        if let Some((dev_count, dev_chars, dev_duration_ms)) = device_totals {
+            (
+                (dev_count - prior_count - window_count).max(0),
+                (dev_chars - prior_characters - window_characters).max(0),
+                (dev_duration_ms - prior_duration_ms - window_duration_ms).max(0),
+            )
+        } else {
+            (0, 0, 0)
+        };
+
     Ok(DailyActivityResponse {
         start_date: start_str,
         end_date: end_str,
         prior_count,
         prior_characters,
         prior_duration_ms,
+        undated_count,
+        undated_characters,
+        undated_duration_ms,
         days,
     })
 }
@@ -2404,6 +2453,35 @@ mod tests {
             search_history_in(&conn, 1, 0, "反力", HistoryRecordType::All, None).unwrap()[0].id,
             "a"
         );
+        // Target app filter narrows both search pages and counts (case-insensitively).
+        conn.execute(
+            "UPDATE history_record SET target_app_platform = 'macos', target_app_key = 'com.todesktop.cursor', target_app_name = 'Cursor' WHERE id IN ('a', 'c')",
+            [],
+        )
+        .unwrap();
+        let app_ids = search_history_in(
+            &conn,
+            20,
+            0,
+            "",
+            HistoryRecordType::All,
+            Some(" COM.TODESKTOP.CURSOR "),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect::<Vec<_>>();
+        assert_eq!(app_ids, ["c", "a"]);
+        assert_eq!(
+            count_history_in(
+                &conn,
+                "",
+                HistoryRecordType::All,
+                Some(" COM.TODESKTOP.CURSOR ")
+            )
+            .unwrap(),
+            2
+        );
     }
 
     fn recording_conn() -> Connection {
@@ -2509,9 +2587,9 @@ mod tests {
         let conn = recording_conn();
         let record = recording("synced");
         // A server snapshot already covers this row: no aggregate delta is needed.
-        assert!(insert_history_record_with_stats_conn(&conn, &record, false).unwrap());
+        assert!(insert_history_record_with_stats_conn(&conn, &record, false, false).unwrap());
         assert_eq!(recording_totals(&conn), (1, 0, 0, 0));
-        assert!(!insert_history_record_with_stats_conn(&conn, &record, false).unwrap());
+        assert!(!insert_history_record_with_stats_conn(&conn, &record, false, false).unwrap());
         assert_eq!(recording_totals(&conn).0, 1);
 
         // A live event beyond usage_seq updates aggregates but must not count twice.
@@ -2519,7 +2597,7 @@ mod tests {
         assert_eq!(recording_totals(&conn), (1, 1200, 5, 1));
         conn.execute("DELETE FROM history_record WHERE id = 'synced'", [])
             .unwrap();
-        assert!(insert_history_record_with_stats_conn(&conn, &record, false).unwrap());
+        assert!(insert_history_record_with_stats_conn(&conn, &record, false, false).unwrap());
         migrate_recording_counts(&conn).unwrap();
         assert_eq!(recording_totals(&conn), (1, 1200, 5, 1));
     }
@@ -2527,14 +2605,14 @@ mod tests {
     #[test]
     fn recording_count_includes_local_dictation_and_excludes_reading_and_failures() {
         let conn = recording_conn();
-        assert!(insert_history_record_with_stats_conn(&conn, &recording("local"), true).unwrap());
+        assert!(insert_history_record_with_stats_conn(&conn, &recording("local"), true, false).unwrap());
         assert_eq!(recording_totals(&conn), (1, 1200, 5, 1));
         let mut reading = recording("reading");
         reading.mode = HISTORY_MODE_TRANSLATE_READ.into();
-        insert_history_record_with_stats_conn(&conn, &reading, false).unwrap();
+        insert_history_record_with_stats_conn(&conn, &reading, false, false).unwrap();
         let mut failure = recording("failure");
         failure.error_code = crate::services::history_service::HISTORY_ERROR_ASR_FAILED;
-        insert_history_record_with_stats_conn(&conn, &failure, false).unwrap();
+        insert_history_record_with_stats_conn(&conn, &failure, false, false).unwrap();
         migrate_recording_counts(&conn).unwrap();
         assert_eq!(recording_totals(&conn), (1, 1200, 5, 1));
     }
@@ -2548,14 +2626,14 @@ mod tests {
         )
         .unwrap();
         let record = recording("retry");
-        assert!(insert_history_record_with_stats_conn(&conn, &record, true).is_err());
+        assert!(insert_history_record_with_stats_conn(&conn, &record, true, false).is_err());
         let history_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM history_record", [], |r| r.get(0))
             .unwrap();
         assert_eq!(history_count, 0);
         assert_eq!(recording_totals(&conn), (0, 0, 0, 0));
         conn.execute_batch("DROP TRIGGER reject_count;").unwrap();
-        assert!(insert_history_record_with_stats_conn(&conn, &record, true).unwrap());
+        assert!(insert_history_record_with_stats_conn(&conn, &record, true, false).unwrap());
         assert_eq!(recording_totals(&conn), (1, 1200, 5, 1));
     }
 
@@ -2777,7 +2855,11 @@ mod tests {
     fn daily_stats_conn() -> Connection {
         let conn = recording_conn();
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS user_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            "ALTER TABLE device_usage_stats ADD COLUMN total_duration_ms INTEGER DEFAULT 0;
+             ALTER TABLE device_usage_stats ADD COLUMN total_characters INTEGER DEFAULT 0;
+             ALTER TABLE device_usage_stats ADD COLUMN llm_correction_count INTEGER DEFAULT 0;
+             ALTER TABLE device_usage_stats ADD COLUMN last_updated TEXT;
+             CREATE TABLE IF NOT EXISTS user_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS daily_usage_stats (
                  device_id TEXT NOT NULL,
                  local_date TEXT NOT NULL,
@@ -2795,6 +2877,104 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn local_stats_failure_rolls_back_history_and_all_counters_and_allows_retry() {
+        for table in ["device_usage_stats", "daily_usage_stats"] {
+            for update_account in [false, true] {
+                let conn = daily_stats_conn();
+                // The one-time backfill has already run, as it would at startup.
+                migrate_daily_usage_stats(&conn).unwrap();
+                conn.execute_batch(&format!(
+                    "CREATE TRIGGER reject_stats BEFORE INSERT ON {table}
+                     BEGIN SELECT RAISE(ABORT, 'test stats failure'); END;"
+                ))
+                .unwrap();
+                let mut record = recording("retry-local");
+                record.target_app_platform = Some("macos".into());
+                record.target_app_key = Some("test.app".into());
+                record.target_app_name = Some("Test".into());
+                let persist =
+                    || insert_history_record_with_stats_conn(&conn, &record, update_account, true);
+                assert!(persist().is_err());
+                let row_counts: (i64, i64, i64, i64) = conn
+                    .query_row(
+                        "SELECT (SELECT COUNT(*) FROM history_record),
+                            (SELECT COUNT(*) FROM counted_recordings),
+                            (SELECT COUNT(*) FROM device_usage_stats),
+                            (SELECT COUNT(*) FROM daily_usage_stats)",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .unwrap();
+                assert_eq!(row_counts, (0, 0, 0, 0));
+                assert_eq!(recording_totals(&conn), (0, 0, 0, 0));
+
+                conn.execute_batch("DROP TRIGGER reject_stats;").unwrap();
+                assert!(persist().unwrap());
+                assert!(!persist().unwrap());
+                migrate_daily_usage_stats(&conn).unwrap();
+                let today = Local::now().date_naive();
+                let apps =
+                    get_app_usage_stats_in(&conn, "device-a", AppUsageRange::All, today).unwrap();
+                assert_eq!(apps.len(), 1);
+                assert_eq!(
+                    (
+                        apps[0].usage_count,
+                        apps[0].total_characters,
+                        apps[0].total_duration_ms,
+                        apps[0].llm_count
+                    ),
+                    (1, 5, 1200, 1)
+                );
+                let device_totals: (i64, i64, i64, i64) = conn.query_row(
+                    "SELECT total_recording_count, total_characters, total_duration_ms, llm_correction_count
+                     FROM device_usage_stats WHERE device_id = 'device-a'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                ).unwrap();
+                assert_eq!(device_totals, (1, 5, 1200, 1));
+                assert_eq!(
+                    recording_totals(&conn),
+                    if update_account {
+                        (1, 1200, 5, 1)
+                    } else {
+                        (1, 0, 0, 0)
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn local_stats_exclude_reads_failures_and_synced_history() {
+        let conn = daily_stats_conn();
+        let record = recording("local");
+        insert_history_record_with_stats_conn(&conn, &record, true, true).unwrap();
+        let mut reading = recording("reading");
+        reading.mode = HISTORY_MODE_TRANSLATE_READ.into();
+        insert_history_record_with_stats_conn(&conn, &reading, false, true).unwrap();
+        let mut failed = recording("failed");
+        failed.error_code = crate::services::history_service::HISTORY_ERROR_ASR_FAILED;
+        insert_history_record_with_stats_conn(&conn, &failed, false, true).unwrap();
+        let mut synced = recording("synced");
+        synced.source_device_id = Some("other-device".into());
+        insert_history_record_with_stats_conn(&conn, &synced, false, false).unwrap();
+
+        let activity = get_daily_activity_in(&conn, "device-a", Local::now().date_naive()).unwrap();
+        assert_eq!(activity.days.len(), 1);
+        assert_eq!(activity.days[0].usage_count, 1);
+        assert_eq!(activity.days[0].total_characters, 5);
+        assert_eq!(activity.undated_count, 0);
+        let device_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM device_usage_stats", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(device_rows, 1);
+        let remote = get_daily_activity_in(&conn, "other-device", Local::now().date_naive()).unwrap();
+        assert!(remote.days.is_empty());
     }
 
     #[test]
@@ -2960,6 +3140,77 @@ mod tests {
         assert_eq!(activity.days[0].local_date, "2026-11-18");
         assert_eq!(activity.days[0].usage_count, 3);
         assert_eq!(activity.days[0].total_characters, 300);
+        assert_eq!(activity.undated_count, 0);
+
+        // When retention pruned older history rows before backfill, `device_usage_stats`
+        // preserves the true lifetime total (e.g. 50 uses / 5000 chars vs 3 uses / 300 chars in window).
+        conn.execute(
+            "INSERT INTO device_usage_stats (device_id, total_recording_count, total_characters, total_duration_ms)
+             VALUES ('dev-1', 50, 5000, 120000)",
+            [],
+        )
+        .unwrap();
+        let reconciled = get_daily_activity_in(&conn, "dev-1", today).unwrap();
+        assert_eq!(reconciled.prior_count, 10);
+        assert_eq!(reconciled.prior_characters, 1000);
+        assert_eq!(reconciled.prior_duration_ms, 40000);
+        assert_eq!(reconciled.undated_count, 37);
+        assert_eq!(reconciled.undated_characters, 3700);
+        assert_eq!(reconciled.undated_duration_ms, 70000);
+    }
+
+    #[test]
+    fn daily_activity_does_not_backdate_retention_gaps() {
+        let conn = daily_stats_conn();
+        conn.execute_batch(
+            "INSERT INTO device_usage_stats (device_id, total_recording_count, total_characters, total_duration_ms)
+             VALUES ('dev-local', 100, 10000, 100000);"
+        ).unwrap();
+        upsert_daily_usage_stats_conn(
+            &conn,
+            "dev-local",
+            "2026-11-16",
+            FEATURE_KIND_DICTATION,
+            "",
+            UNTRACKED_APP_KEY,
+            "",
+            10,
+            1000,
+            10000,
+            0,
+            "2026-11-16T00:00:00Z",
+        )
+        .unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
+        let activity = get_daily_activity_in(&conn, "dev-local", today).unwrap();
+        assert_eq!(
+            (
+                activity.prior_count,
+                activity.prior_characters,
+                activity.prior_duration_ms
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (
+                activity.undated_count,
+                activity.undated_characters,
+                activity.undated_duration_ms
+            ),
+            (90, 9000, 90000)
+        );
+
+        conn.execute("UPDATE device_usage_stats SET total_recording_count = 0, total_characters = 0, total_duration_ms = 0", []).unwrap();
+        let activity = get_daily_activity_in(&conn, "dev-local", today).unwrap();
+        assert_eq!(
+            (
+                activity.undated_count,
+                activity.undated_characters,
+                activity.undated_duration_ms
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(activity.days[0].total_characters, 1000);
     }
 
     #[test]
@@ -2969,6 +3220,8 @@ mod tests {
             "INSERT INTO user_config (key, value) VALUES ('sync_device_id', 'dev-local');
              INSERT INTO history_record (id, timestamp, text, duration_ms, llm_invoked, mode, error_code, source_device_id) VALUES
              ('ok1', '2026-11-15T10:00:00Z', 'hello', 1000, 1, 'assistant_raw', 0, 'dev-local'),
+             ('ok_legacy', '2026-11-15T10:02:00Z', 'legacy', 800, 0, 'assistant_raw', 0, NULL),
+             ('remote1', '2026-11-15T10:03:00Z', 'remote', 900, 1, 'assistant_raw', 0, 'dev-other'),
              ('read1', '2026-11-15T10:05:00Z', 'skip read', 0, 1, 'translate_read', 0, 'dev-local'),
              ('fail1', '2026-11-15T10:10:00Z', '', 500, 0, 'assistant_raw', 1, 'dev-local');",
         )
@@ -2984,6 +3237,14 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
+        let remote_count: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(usage_count), 0) FROM daily_usage_stats WHERE device_id = 'dev-other'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remote_count, 0);
     }
 }

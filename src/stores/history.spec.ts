@@ -1,5 +1,5 @@
 import { createPinia, disposePinia } from 'pinia'
-import { finalText, useHistoryStore, type HistoryRecord } from './history'
+import { finalText, useHistoryStore, type AppUsageStat, type HistoryRecord } from './history'
 
 function check(condition: boolean, message: string) {
   if (!condition) throw new Error(message)
@@ -8,6 +8,62 @@ function check(condition: boolean, message: string) {
 // Let the registration and result IPC promises settle without resolving any
 // deliberately held page/count request.
 const flushIpc = () => new Promise<void>(resolve => setTimeout(resolve, 0))
+
+export async function checkAppStatsRequests() {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const pinia = createPinia()
+  const requests: { resolve: (rows: AppUsageStat[]) => void }[] = []
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    __TAURI_INTERNALS__: { invoke(command: string) {
+      check(command === 'get_app_usage_stats', 'Only app stats should be requested')
+      return new Promise<AppUsageStat[]>(resolve => requests.push({ resolve }))
+    } }
+  } })
+  const snapshot = (count: number): AppUsageStat[] => [{
+    platform: 'macos', appKey: 'test.app', appName: 'Test', usageCount: count,
+    totalCharacters: count * 10, totalDurationMs: count * 1000, llmCount: 0,
+    lastUsedAt: '2026-11-16T00:00:00Z',
+  }]
+  try {
+    const store = useHistoryStore(pinia)
+    const week = store.loadAppStats('week')
+    const today = store.loadAppStats('today')
+    requests[1].resolve(snapshot(2))
+    await today
+    requests[0].resolve(snapshot(10))
+    await week
+    check(store.appUsageRange === 'today' && store.appStats[0].usageCount === 2, 'An old range response must not replace the selected range')
+
+    const oldToday = store.loadAppStats('today')
+    const newToday = store.loadAppStats('today')
+    requests[3].resolve(snapshot(3))
+    await newToday
+    requests[2].resolve(snapshot(2))
+    await oldToday
+    check(store.appStats[0].usageCount === 3, 'An old refresh of the same range must also be discarded')
+
+    const oldTop = store.loadWeeklyTopApps()
+    const currentWeek = store.loadAppStats('week')
+    const apps = [10, 6, 3, 1].map((count, i) => ({ ...snapshot(count)[0], appKey: `app-${i}` }))
+    requests[5].resolve(apps)
+    await currentWeek
+    requests[4].resolve(snapshot(5))
+    await oldTop
+    check(store.weeklyTopApps.length === 3 && store.weeklyTotalCount === 20, 'An old teaser response must not replace the current weekly snapshot or its full denominator')
+
+    const oldWeek = store.loadAppStats('week')
+    const newTop = store.loadWeeklyTopApps()
+    requests[7].resolve(snapshot(30))
+    await newTop
+    requests[6].resolve(snapshot(20))
+    await oldWeek
+    check(store.weeklyTotalCount === 30, 'An old app list response must not overwrite a newer weekly teaser snapshot')
+  } finally {
+    disposePinia(pinia)
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else Reflect.deleteProperty(globalThis, 'window')
+  }
+}
 
 export async function checkHistoryDeferredCounts() {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
@@ -185,7 +241,7 @@ export async function checkHistorySearchRequests() {
   const pinia = createPinia()
   let searchId = 0
   const reads: {
-    args: { query: string; recordType: string; limit: number; offset: number }
+    args: { query: string; recordType: string; targetAppKey?: string; limit: number; offset: number }
     resolve: (rows: HistoryRecord[]) => void
     reject: (error: Error) => void
   }[] = []
@@ -203,18 +259,29 @@ export async function checkHistorySearchRequests() {
     const store = useHistoryStore(pinia)
     const old = store.loadHistory(true)
     await flushIpc()
-    const current = store.setSearch('  反力\t标定  ', 'dictation')
+    const current = store.setSearch('  反力\t标定  ', 'dictation', ' com.todesktop.cursor ')
     await flushIpc()
-    check(reads[1].args.query === '反力 标定' && reads[1].args.recordType === 'dictation', 'Send normalized query and type to the backend')
+    check(
+      reads[1].args.query === '反力 标定' &&
+      reads[1].args.recordType === 'dictation' &&
+      reads[1].args.targetAppKey === 'com.todesktop.cursor',
+      'Send normalized query, type, and targetAppKey to the backend',
+    )
     reads[0].resolve([record(99)])
     await old
     check(store.isLoading && store.records.length === 0, 'An old response must not replace results or clear the current loading state')
     reads[1].resolve(Array.from({ length: 20 }, (_, i) => record(i)))
     await current
     const more = store.loadHistory()
-    check(reads[2].args.offset === 20 && reads[2].args.query === '反力 标定', 'Pagination must retain search conditions')
-    const changed = store.setSearch('', 'failed')
+    check(
+      reads[2].args.offset === 20 &&
+      reads[2].args.query === '反力 标定' &&
+      reads[2].args.targetAppKey === 'com.todesktop.cursor',
+      'Pagination must retain search conditions including targetAppKey',
+    )
+    const changed = store.setSearch('', 'failed', null)
     await flushIpc()
+    check(reads[3].args.targetAppKey === undefined, 'Clearing targetAppKey omits it from backend request')
     reads[3].resolve([record(42)])
     await changed
     reads[2].reject(new Error('Stale page failure'))
