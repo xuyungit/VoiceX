@@ -29,6 +29,7 @@ const editingId = ref<string | null>(null)
 const savingEdit = ref(false)
 const searchInput = ref(historyStore.searchQuery)
 const searchType = ref<HistoryRecordType>(historyStore.recordType)
+const searchAppKey = ref<string>(historyStore.targetAppKey ?? '')
 const searchPending = ref(false)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 const filterOptions = computed(() => [
@@ -38,19 +39,26 @@ const filterOptions = computed(() => [
   { label: t('history.translateRead'), value: 'translate_read' },
   { label: t('history.filterFailed'), value: 'failed' },
 ])
+const appFilterOptions = computed(() => [
+  { label: t('history.filterAllApps'), value: '' },
+  ...historyStore.allAppsForFilter.map(app => ({
+    label: app.appName,
+    value: app.appKey,
+  })),
+])
 const searchBusy = computed(() => searchPending.value || historyStore.isLoading)
-const hasSearchConditions = computed(() => Boolean(searchInput.value.trim()) || searchType.value !== 'all')
+const hasSearchConditions = computed(() => Boolean(searchInput.value.trim()) || searchType.value !== 'all' || Boolean(searchAppKey.value))
 
 function applySearch() {
   clearTimeout(searchTimer)
   searchPending.value = false
   editingId.value = null
-  void historyStore.setSearch(searchInput.value, searchType.value)
+  void historyStore.setSearch(searchInput.value, searchType.value, searchAppKey.value || null)
 }
 
-watch([searchInput, searchType], ([query, type], [, previousType]) => {
+watch([searchInput, searchType, searchAppKey], ([query, type, appKey], [, previousType, previousAppKey]) => {
   clearTimeout(searchTimer)
-  if (!query.trim() || type !== previousType) {
+  if (!query.trim() || type !== previousType || appKey !== previousAppKey) {
     applySearch()
   } else {
     searchPending.value = true
@@ -61,6 +69,7 @@ watch([searchInput, searchType], ([query, type], [, previousType]) => {
 function clearSearch() {
   searchInput.value = ''
   searchType.value = 'all'
+  searchAppKey.value = ''
 }
 
 function onSearchEnter(event: KeyboardEvent) {
@@ -175,8 +184,13 @@ onMounted(async () => {
   // Settings are loaded once by App.vue; reloading here re-applied the global hotkey on every visit.
   await Promise.all([
     historyStore.loadHistory(true),
+    historyStore.loadAllAppsForFilter(),
     postEditStore.load()
   ])
+})
+
+watch(() => historyStore.statsRevision, () => {
+  void historyStore.loadAllAppsForFilter()
 })
 
 onMounted(() => window.addEventListener('keydown', onFindShortcut))
@@ -583,6 +597,13 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
         </template>
       </NInput>
       <NSelect v-model:value="searchType" :options="filterOptions" class="history-filter" :aria-label="t('history.filterLabel')" />
+      <NSelect
+        v-if="historyStore.allAppsForFilter.length > 0"
+        v-model:value="searchAppKey"
+        :options="appFilterOptions"
+        class="history-app-filter"
+        :aria-label="t('history.filterAppLabel')"
+      />
     </div>
 
     <div v-if="searchBusy && historyStore.records.length === 0" class="loading-container" :aria-label="t('history.searching')" aria-busy="true">
@@ -614,6 +635,12 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
               <div class="row-meta">
                 <span class="row-time">{{ formatTime(record.timestamp) }}</span>
                 <span class="device-meta">{{ formatDevice(record) }}</span>
+                <span
+                  v-if="record.targetAppName"
+                  class="tag row-tag target-app-tag"
+                >
+                  → {{ record.targetAppName }}
+                </span>
                 <span
                   v-if="modeBadge(record)"
                   class="tag mode-tag row-tag"
@@ -767,6 +794,12 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
               </svg>
               <span class="detail-text">{{ formatDevice(detailRecord) }}</span>
             </span>
+            <span v-if="detailRecord.targetAppName" class="detail-item" :title="`${t('history.targetAppLabel')}: ${detailRecord.targetAppName}`">
+              <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14" aria-hidden="true">
+                <path d="M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm0 4v10h14V8H5z" />
+              </svg>
+              <span class="detail-text">{{ detailRecord.targetAppName }}</span>
+            </span>
             <span class="detail-item" :title="modeLabel(detailRecord)">
               <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14" aria-hidden="true">
                 <path d="M12 3 1 9l11 6 9-4.91V17h2V9L12 3zm0 9.82L5.04 9 12 5.18 18.96 9 12 12.82zM5 13.18l7 3.82 7-3.82V17l-7 4-7-4v-3.82z" />
@@ -883,6 +916,8 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 .history-search { flex: 1; min-width: 0; }
 .history-search :deep(.n-input__prefix) { color: var(--color-text-tertiary); margin-right: 8px; }
 .history-filter { width: 176px; flex-shrink: 0; }
+.history-app-filter { width: 150px; flex-shrink: 0; }
+.target-app-tag { color: var(--color-text-primary); }
 /* The count sits inside the box, like a find bar; it dims while a search runs. */
 .search-status {
   font-size: var(--font-sm);

@@ -114,6 +114,7 @@ impl Fixture {
                         process_id: self.child.id(),
                         remote_bridge: false,
                         app_name: Some("Fixture".into()),
+                        target_app: None,
                     }),
                 )
             },
@@ -632,6 +633,7 @@ fn live_chromium_composer() {
                     process_id: pid,
                     remote_bridge: false,
                     app_name: Some("Composer fixture".into()),
+                    target_app: None,
                 }),
             )
         },
@@ -825,6 +827,7 @@ fn live_macos_editors() {
                     process_id: pid,
                     remote_bridge: false,
                     app_name: Some(bundle.clone()),
+                    target_app: None,
                 }),
             };
             // This validates reader/range/storage with a synthetic identity;
@@ -888,6 +891,7 @@ fn live_macos_dispatch_samples() {
                             process_id: f.child.id(),
                             remote_bridge: false,
                             app_name: Some("Fixture".into()),
+                            target_app: None,
                         }),
                     )
                 },

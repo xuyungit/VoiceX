@@ -1,9 +1,10 @@
 //! Database operations
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -17,6 +18,9 @@ use uuid::Uuid;
 static DB: std::sync::OnceLock<Mutex<Connection>> = std::sync::OnceLock::new();
 const RECENT_TARGET_APPS_KEY: &str = "recent_target_apps";
 const MAX_RECENT_TARGET_APPS: usize = 5;
+const DAILY_USAGE_BACKFILL_KEY: &str = "daily_usage_backfilled_v1";
+pub const FEATURE_KIND_DICTATION: &str = "dictation";
+pub const UNTRACKED_APP_KEY: &str = "__untracked__";
 
 /// Initialize the database
 pub fn init_database(path: &Path) -> Result<(), StorageError> {
@@ -143,6 +147,9 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     ensure_column(&conn, "history_record", "edited_text", "TEXT")?;
     ensure_column(&conn, "history_record", "edit_source", "TEXT")?;
     ensure_column(&conn, "history_record", "edited_at", "TEXT")?;
+    ensure_column(&conn, "history_record", "target_app_platform", "TEXT")?;
+    ensure_column(&conn, "history_record", "target_app_key", "TEXT")?;
+    ensure_column(&conn, "history_record", "target_app_name", "TEXT")?;
     ensure_column(&conn, "sync_state", "current_server_id", "TEXT")?;
     ensure_column(&conn, "sync_state", "current_account_id", "TEXT")?;
     ensure_column(&conn, "sync_server_state", "usage_seq", "INTEGER DEFAULT 0")?;
@@ -151,11 +158,28 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     // History pages and retention cleanup all order or filter by timestamp;
     // without this every page is a full scan plus a sort.
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS history_record_time ON history_record(timestamp DESC);",
+        "CREATE INDEX IF NOT EXISTS history_record_time ON history_record(timestamp DESC);
+         CREATE TABLE IF NOT EXISTS daily_usage_stats (
+             device_id TEXT NOT NULL,
+             local_date TEXT NOT NULL,
+             feature_kind TEXT NOT NULL,
+             platform TEXT NOT NULL,
+             app_key TEXT NOT NULL,
+             app_name TEXT NOT NULL,
+             usage_count INTEGER NOT NULL DEFAULT 0,
+             total_characters INTEGER NOT NULL DEFAULT 0,
+             total_duration_ms INTEGER NOT NULL DEFAULT 0,
+             llm_count INTEGER NOT NULL DEFAULT 0,
+             last_used_at TEXT NOT NULL,
+             PRIMARY KEY (device_id, local_date, feature_kind, platform, app_key)
+         );
+         CREATE INDEX IF NOT EXISTS daily_usage_stats_date_idx
+             ON daily_usage_stats(device_id, feature_kind, local_date);",
     )
     .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
     migrate_recording_counts(&conn)?;
+    migrate_daily_usage_stats(&conn)?;
 
     // Upgrade the persisted settings blob in place (e.g. legacy single custom
     // LLM endpoint -> named endpoints array). Best-effort: never block startup.
@@ -372,7 +396,16 @@ pub struct HistoryRecord {
     /// output VoiceX produced. Local only: never part of the sync payload.
     #[serde(default)]
     pub edited_text: Option<String>,
+    /// Target application that received the injected text. Local only.
+    #[serde(default)]
+    pub target_app_platform: Option<String>,
+    #[serde(default)]
+    pub target_app_key: Option<String>,
+    #[serde(default)]
+    pub target_app_name: Option<String>,
 }
+
+const HISTORY_RECORD_SELECT_COLUMNS: &str = "h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text, h.target_app_platform, h.target_app_key, h.target_app_name";
 
 fn map_history_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> {
     Ok(HistoryRecord {
@@ -393,6 +426,9 @@ fn map_history_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRe
         asr_model_name: row.get(14)?,
         llm_model_name: row.get(15)?,
         edited_text: row.get(16)?,
+        target_app_platform: row.get(17)?,
+        target_app_key: row.get(18)?,
+        target_app_name: row.get(19)?,
     })
 }
 
@@ -477,7 +513,7 @@ pub fn search_history(
     query: &str,
     record_type: HistoryRecordType,
 ) -> Result<Vec<HistoryRecord>, StorageError> {
-    with_db(|conn| search_history_in(conn, limit, offset, query, record_type))
+    with_db(|conn| search_history_in(conn, limit, offset, query, record_type, None))
 }
 
 /// The `WHERE` clause shared by a search's pages and its count, with the
@@ -485,6 +521,7 @@ pub fn search_history(
 fn history_filter(
     query: &str,
     record_type: HistoryRecordType,
+    target_app_key: Option<&str>,
     first_param: usize,
 ) -> (String, Vec<rusqlite::types::Value>) {
     let mut values: Vec<rusqlite::types::Value> = Vec::new();
@@ -510,6 +547,10 @@ fn history_filter(
         }
         HistoryRecordType::Failed => format!("h.error_code != {HISTORY_ERROR_NONE}"),
     };
+    if let Some(app_key) = target_app_key.map(str::trim).filter(|s| !s.is_empty()) {
+        let p = bind(app_key.to_ascii_lowercase().into());
+        sql.push_str(&format!(" AND h.target_app_key = {p}"));
+    }
     // Spaces mean AND across keywords; a keyword may occur in any text version.
     // LIKE folds ASCII case, preserves Chinese substrings, and treats user input literally.
     for word in query.split_whitespace() {
@@ -531,11 +572,12 @@ pub(super) fn search_history_in(
     offset: u32,
     query: &str,
     record_type: HistoryRecordType,
+    target_app_key: Option<&str>,
 ) -> Result<Vec<HistoryRecord>, StorageError> {
-    let (filter, filter_values) = history_filter(query, record_type, 3);
+    let (filter, filter_values) = history_filter(query, record_type, target_app_key, 3);
     // The ID makes pagination deterministic even for equal timestamps.
     let sql = format!(
-        "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text
+        "SELECT {HISTORY_RECORD_SELECT_COLUMNS}
          FROM history_record h
          LEFT JOIN device_registry d ON d.device_id = h.source_device_id
          WHERE {filter}
@@ -557,8 +599,9 @@ pub(super) fn count_history_in(
     conn: &Connection,
     query: &str,
     record_type: HistoryRecordType,
+    target_app_key: Option<&str>,
 ) -> Result<u32, StorageError> {
-    let (filter, values) = history_filter(query, record_type, 1);
+    let (filter, values) = history_filter(query, record_type, target_app_key, 1);
     conn.query_row(
         &format!("SELECT COUNT(*) FROM history_record h WHERE {filter}"),
         rusqlite::params_from_iter(values),
@@ -582,14 +625,17 @@ pub fn get_history_since(
         return get_history(limit, offset);
     }
     with_db(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text
+        let sql = format!(
+            "SELECT {HISTORY_RECORD_SELECT_COLUMNS}
              FROM history_record h
              LEFT JOIN device_registry d ON d.device_id = h.source_device_id
              WHERE h.timestamp > ?3
              ORDER BY h.timestamp DESC
              LIMIT ?1 OFFSET ?2"
-        ).map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
         let records = stmt
             .query_map(params![limit, offset, trimmed], map_history_record_row)
@@ -624,15 +670,16 @@ pub fn get_history_for_device_since(
     }
     with_db(|conn| {
         let records = if let Some(value) = since_value.as_deref() {
+            let sql = format!(
+                "SELECT {HISTORY_RECORD_SELECT_COLUMNS}
+                 FROM history_record h
+                 LEFT JOIN device_registry d ON d.device_id = h.source_device_id
+                 WHERE h.timestamp > ?3 AND (h.source_device_id = ?4 OR h.source_device_id IS NULL OR h.source_device_id = '')
+                 ORDER BY h.timestamp DESC
+                 LIMIT ?1 OFFSET ?2"
+            );
             let mut stmt = conn
-                .prepare(
-                    "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text
-                     FROM history_record h
-                     LEFT JOIN device_registry d ON d.device_id = h.source_device_id
-                     WHERE h.timestamp > ?3 AND (h.source_device_id = ?4 OR h.source_device_id IS NULL OR h.source_device_id = '')
-                     ORDER BY h.timestamp DESC
-                     LIMIT ?1 OFFSET ?2",
-                )
+                .prepare(&sql)
                 .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
             let rows = stmt
                 .query_map(
@@ -643,15 +690,16 @@ pub fn get_history_for_device_since(
             let records: Vec<HistoryRecord> = rows.filter_map(|r| r.ok()).collect();
             records
         } else {
+            let sql = format!(
+                "SELECT {HISTORY_RECORD_SELECT_COLUMNS}
+                 FROM history_record h
+                 LEFT JOIN device_registry d ON d.device_id = h.source_device_id
+                 WHERE (h.source_device_id = ?3 OR h.source_device_id IS NULL OR h.source_device_id = '')
+                 ORDER BY h.timestamp DESC
+                 LIMIT ?1 OFFSET ?2"
+            );
             let mut stmt = conn
-                .prepare(
-                    "SELECT h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text
-                     FROM history_record h
-                     LEFT JOIN device_registry d ON d.device_id = h.source_device_id
-                     WHERE (h.source_device_id = ?3 OR h.source_device_id IS NULL OR h.source_device_id = '')
-                     ORDER BY h.timestamp DESC
-                     LIMIT ?1 OFFSET ?2",
-                )
+                .prepare(&sql)
                 .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
             let rows = stmt
                 .query_map(params![limit, offset, device_id], map_history_record_row)
@@ -687,8 +735,8 @@ fn insert_history_record_with_stats_conn(
         .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
     let inserted = tx.execute(
             "INSERT OR IGNORE INTO history_record (
-                id, timestamp, text, original_text, ai_correction_applied, llm_invoked, mode, duration_ms, audio_path, is_final, error_code, error_message, source_device_id, asr_model_name, llm_model_name
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                id, timestamp, text, original_text, ai_correction_applied, llm_invoked, mode, duration_ms, audio_path, is_final, error_code, error_message, source_device_id, asr_model_name, llm_model_name, target_app_platform, target_app_key, target_app_name
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 record.id,
                 record.timestamp,
@@ -705,6 +753,9 @@ fn insert_history_record_with_stats_conn(
                 record.source_device_id,
                 record.asr_model_name,
                 record.llm_model_name,
+                record.target_app_platform,
+                record.target_app_key,
+                record.target_app_name,
             ],
         )
         .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
@@ -1255,6 +1306,512 @@ pub fn get_device_tts_stats(device_id: &str) -> Result<TtsCounters, StorageError
     })
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppUsageRange {
+    Today,
+    Week,
+    Month,
+    #[default]
+    All,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUsageStat {
+    pub platform: String,
+    pub app_key: String,
+    pub app_name: String,
+    pub usage_count: i64,
+    pub total_characters: i64,
+    pub total_duration_ms: i64,
+    pub llm_count: i64,
+    pub last_used_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyActivityPoint {
+    pub local_date: String,
+    pub usage_count: i64,
+    pub total_characters: i64,
+    pub total_duration_ms: i64,
+    pub llm_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DailyActivityResponse {
+    pub start_date: String,
+    pub end_date: String,
+    pub prior_count: i64,
+    pub prior_characters: i64,
+    pub prior_duration_ms: i64,
+    pub days: Vec<DailyActivityPoint>,
+}
+
+fn local_date_from_rfc3339(timestamp: &str) -> Option<String> {
+    DateTime::parse_from_rfc3339(timestamp.trim())
+        .ok()
+        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
+}
+
+fn get_or_create_device_id_conn(conn: &Connection) -> Result<String, StorageError> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT value FROM user_config WHERE key = 'sync_device_id' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    if let Some(value) = existing.filter(|v| !v.trim().is_empty()) {
+        return Ok(value);
+    }
+    let new_id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO user_config (key, value) VALUES ('sync_device_id', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![new_id],
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    Ok(new_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsert_daily_usage_stats_conn(
+    conn: &Connection,
+    device_id: &str,
+    local_date: &str,
+    feature_kind: &str,
+    platform: &str,
+    app_key: &str,
+    app_name: &str,
+    usage_count: i64,
+    characters: i64,
+    duration_ms: i64,
+    llm_count: i64,
+    last_used_at: &str,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO daily_usage_stats (
+             device_id, local_date, feature_kind, platform, app_key, app_name,
+             usage_count, total_characters, total_duration_ms, llm_count, last_used_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(device_id, local_date, feature_kind, platform, app_key) DO UPDATE SET
+             app_name = CASE
+                 WHEN excluded.app_name != '' AND excluded.last_used_at >= daily_usage_stats.last_used_at
+                     THEN excluded.app_name
+                 WHEN daily_usage_stats.app_name = '' AND excluded.app_name != ''
+                     THEN excluded.app_name
+                 ELSE daily_usage_stats.app_name
+             END,
+             usage_count = daily_usage_stats.usage_count + excluded.usage_count,
+             total_characters = daily_usage_stats.total_characters + excluded.total_characters,
+             total_duration_ms = daily_usage_stats.total_duration_ms + excluded.total_duration_ms,
+             llm_count = daily_usage_stats.llm_count + excluded.llm_count,
+             last_used_at = CASE
+                 WHEN excluded.last_used_at > daily_usage_stats.last_used_at
+                     THEN excluded.last_used_at
+                 ELSE daily_usage_stats.last_used_at
+             END",
+        params![
+            device_id,
+            local_date,
+            feature_kind,
+            platform,
+            app_key,
+            app_name,
+            usage_count.max(0),
+            characters.max(0),
+            duration_ms.max(0),
+            llm_count.max(0),
+            last_used_at,
+        ],
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    Ok(())
+}
+
+/// One-time backfill of `daily_usage_stats` from surviving local history rows so
+/// daily activity charts reflect past usage immediately. Runs once per database.
+fn migrate_daily_usage_stats(conn: &Connection) -> Result<(), StorageError> {
+    let done: Option<String> = conn
+        .query_row(
+            "SELECT value FROM user_config WHERE key = ?1 LIMIT 1",
+            params![DAILY_USAGE_BACKFILL_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    if done.as_deref() == Some("1") {
+        return Ok(());
+    }
+
+    let local_device_id = get_or_create_device_id_conn(conn)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+    {
+        let mut stmt = tx
+            .prepare(
+                "SELECT timestamp, text, duration_ms, llm_invoked, source_device_id,
+                        target_app_platform, target_app_key, target_app_name
+                 FROM history_record
+                 WHERE error_code = ?1 AND mode != ?2",
+            )
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let rows = stmt
+            .query_map(
+                params![HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i32>(3)? != 0,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                    ))
+                },
+            )
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+        for row in rows {
+            let (
+                timestamp,
+                text,
+                duration_ms,
+                llm_invoked,
+                source_device_id,
+                target_platform,
+                target_key,
+                target_name,
+            ) = row.map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+            let Some(local_date) = local_date_from_rfc3339(&timestamp) else {
+                continue;
+            };
+            let device_id = source_device_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&local_device_id);
+            let app_key = target_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(UNTRACKED_APP_KEY);
+            let platform = if app_key == UNTRACKED_APP_KEY {
+                ""
+            } else {
+                target_platform.as_deref().map(str::trim).unwrap_or("")
+            };
+            let app_name = if app_key == UNTRACKED_APP_KEY {
+                ""
+            } else {
+                target_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(app_key)
+            };
+
+            upsert_daily_usage_stats_conn(
+                &tx,
+                device_id,
+                &local_date,
+                FEATURE_KIND_DICTATION,
+                platform,
+                app_key,
+                app_name,
+                1,
+                text.chars().count() as i64,
+                duration_ms,
+                i64::from(llm_invoked),
+                &timestamp,
+            )?;
+        }
+    }
+
+    tx.execute(
+        "INSERT INTO user_config (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![DAILY_USAGE_BACKFILL_KEY],
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    tx.commit()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))
+}
+
+/// Record one completed local dictation into `daily_usage_stats`.
+pub fn increment_daily_usage_stats_for_record(record: &HistoryRecord) -> Result<(), StorageError> {
+    if record.error_code != HISTORY_ERROR_NONE || record.mode == HISTORY_MODE_TRANSLATE_READ {
+        return Ok(());
+    }
+    let Some(device_id) = record
+        .source_device_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(());
+    };
+    let local_date = local_date_from_rfc3339(&record.timestamp)
+        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+    let app_key = record
+        .target_app_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(UNTRACKED_APP_KEY);
+    let platform = if app_key == UNTRACKED_APP_KEY {
+        ""
+    } else {
+        record
+            .target_app_platform
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+    };
+    let app_name = if app_key == UNTRACKED_APP_KEY {
+        ""
+    } else {
+        record
+            .target_app_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(app_key)
+    };
+    let chars = record.text.chars().count() as i64;
+
+    with_db(|conn| {
+        upsert_daily_usage_stats_conn(
+            conn,
+            device_id,
+            &local_date,
+            FEATURE_KIND_DICTATION,
+            platform,
+            app_key,
+            app_name,
+            1,
+            chars,
+            record.duration_ms,
+            i64::from(record.llm_invoked),
+            &record.timestamp,
+        )
+    })
+}
+
+fn range_start_date(range: AppUsageRange, today: NaiveDate) -> Option<String> {
+    let date = match range {
+        AppUsageRange::Today => today,
+        AppUsageRange::Week => {
+            today - Duration::days(i64::from(today.weekday().num_days_from_monday()))
+        }
+        AppUsageRange::Month => NaiveDate::from_ymd_opt(today.year(), today.month(), 1)?,
+        AppUsageRange::All => return None,
+    };
+    Some(date.format("%Y-%m-%d").to_string())
+}
+
+pub fn get_app_usage_stats(
+    device_id: &str,
+    range: AppUsageRange,
+) -> Result<Vec<AppUsageStat>, StorageError> {
+    let trimmed = device_id.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let today = Local::now().date_naive();
+    with_db(|conn| get_app_usage_stats_in(conn, trimmed, range, today))
+}
+
+fn get_app_usage_stats_in(
+    conn: &Connection,
+    device_id: &str,
+    range: AppUsageRange,
+    today: NaiveDate,
+) -> Result<Vec<AppUsageStat>, StorageError> {
+    let since_date = range_start_date(range, today);
+    let mut stmt = if since_date.is_some() {
+        conn.prepare(
+            "SELECT platform, app_key, app_name, usage_count, total_characters,
+                    total_duration_ms, llm_count, last_used_at
+             FROM daily_usage_stats
+             WHERE device_id = ?1
+               AND feature_kind = ?2
+               AND app_key != ?3
+               AND local_date >= ?4",
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?
+    } else {
+        conn.prepare(
+            "SELECT platform, app_key, app_name, usage_count, total_characters,
+                    total_duration_ms, llm_count, last_used_at
+             FROM daily_usage_stats
+             WHERE device_id = ?1
+               AND feature_kind = ?2
+               AND app_key != ?3",
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?
+    };
+
+    let map_row = |row: &rusqlite::Row<'_>| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?,
+            row.get::<_, String>(7)?,
+        ))
+    };
+
+    let rows = if let Some(ref since) = since_date {
+        stmt.query_map(
+            params![device_id, FEATURE_KIND_DICTATION, UNTRACKED_APP_KEY, since],
+            map_row,
+        )
+    } else {
+        stmt.query_map(
+            params![device_id, FEATURE_KIND_DICTATION, UNTRACKED_APP_KEY],
+            map_row,
+        )
+    }
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+    let mut grouped: HashMap<(String, String), AppUsageStat> = HashMap::new();
+    for row in rows {
+        let (platform, app_key, app_name, count, chars, duration_ms, llm_count, last_used_at) =
+            row.map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let entry = grouped
+            .entry((platform.clone(), app_key.clone()))
+            .or_insert_with(|| AppUsageStat {
+                platform,
+                app_key,
+                app_name: app_name.clone(),
+                usage_count: 0,
+                total_characters: 0,
+                total_duration_ms: 0,
+                llm_count: 0,
+                last_used_at: last_used_at.clone(),
+            });
+        entry.usage_count += count;
+        entry.total_characters += chars;
+        entry.total_duration_ms += duration_ms;
+        entry.llm_count += llm_count;
+        if last_used_at >= entry.last_used_at {
+            entry.last_used_at = last_used_at;
+            if !app_name.is_empty() {
+                entry.app_name = app_name;
+            }
+        }
+    }
+
+    let mut items: Vec<AppUsageStat> = grouped.into_values().collect();
+    items.sort_by(|a, b| {
+        b.usage_count
+            .cmp(&a.usage_count)
+            .then_with(|| b.total_characters.cmp(&a.total_characters))
+            .then_with(|| a.app_name.cmp(&b.app_name))
+    });
+    Ok(items)
+}
+
+pub fn get_daily_activity(device_id: &str) -> Result<DailyActivityResponse, StorageError> {
+    let trimmed = device_id.trim();
+    let today = Local::now().date_naive();
+    if trimmed.is_empty() {
+        let end_week_monday =
+            today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
+        let start_date = end_week_monday - Duration::weeks(51);
+        return Ok(DailyActivityResponse {
+            start_date: start_date.format("%Y-%m-%d").to_string(),
+            end_date: today.format("%Y-%m-%d").to_string(),
+            prior_count: 0,
+            prior_characters: 0,
+            prior_duration_ms: 0,
+            days: Vec::new(),
+        });
+    }
+    with_db(|conn| get_daily_activity_in(conn, trimmed, today))
+}
+
+fn get_daily_activity_in(
+    conn: &Connection,
+    device_id: &str,
+    today: NaiveDate,
+) -> Result<DailyActivityResponse, StorageError> {
+    let end_week_monday = today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    let start_date = end_week_monday - Duration::weeks(51);
+    let start_str = start_date.format("%Y-%m-%d").to_string();
+    let end_str = today.format("%Y-%m-%d").to_string();
+
+    let (prior_count, prior_characters, prior_duration_ms) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(usage_count), 0),
+                    COALESCE(SUM(total_characters), 0),
+                    COALESCE(SUM(total_duration_ms), 0)
+             FROM daily_usage_stats
+             WHERE device_id = ?1 AND feature_kind = ?2 AND local_date < ?3",
+            params![device_id, FEATURE_KIND_DICTATION, start_str],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT local_date,
+                    SUM(usage_count),
+                    SUM(total_characters),
+                    SUM(total_duration_ms),
+                    SUM(llm_count)
+             FROM daily_usage_stats
+             WHERE device_id = ?1
+               AND feature_kind = ?2
+               AND local_date >= ?3
+               AND local_date <= ?4
+             GROUP BY local_date
+             ORDER BY local_date ASC",
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+    let rows = stmt
+        .query_map(
+            params![device_id, FEATURE_KIND_DICTATION, start_str, end_str],
+            |row| {
+                Ok(DailyActivityPoint {
+                    local_date: row.get(0)?,
+                    usage_count: row.get(1)?,
+                    total_characters: row.get(2)?,
+                    total_duration_ms: row.get(3)?,
+                    llm_count: row.get(4)?,
+                })
+            },
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+    let days = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+    Ok(DailyActivityResponse {
+        start_date: start_str,
+        end_date: end_str,
+        prior_count,
+        prior_characters,
+        prior_duration_ms,
+        days,
+    })
+}
+
 /// Get settings
 pub fn get_settings() -> Result<AppSettings, StorageError> {
     with_db(read_settings_from_connection)
@@ -1769,7 +2326,7 @@ mod tests {
     }
 
     fn search_ids(conn: &Connection, query: &str, kind: HistoryRecordType) -> Vec<String> {
-        search_history_in(conn, 20, 0, query, kind)
+        search_history_in(conn, 20, 0, query, kind, None)
             .unwrap()
             .into_iter()
             .map(|r| r.id)
@@ -1808,7 +2365,7 @@ mod tests {
             ("50%", HistoryRecordType::All),
         ] {
             assert_eq!(
-                count_history_in(&conn, query, kind).unwrap() as usize,
+                count_history_in(&conn, query, kind, None).unwrap() as usize,
                 search_ids(&conn, query, kind).len(),
                 "query={query:?}"
             );
@@ -1837,14 +2394,14 @@ mod tests {
         assert_eq!(search_ids(&conn, "", HistoryRecordType::Failed), ["f"]);
         let ids = (0..3)
             .flat_map(|page| {
-                search_history_in(&conn, 2, page * 2, "", HistoryRecordType::All).unwrap()
+                search_history_in(&conn, 2, page * 2, "", HistoryRecordType::All, None).unwrap()
             })
             .map(|record| record.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, ["f", "e", "d", "c", "b", "a"]);
         // A keyword on the oldest row is found without first fetching the preceding pages.
         assert_eq!(
-            search_history_in(&conn, 1, 0, "反力", HistoryRecordType::All).unwrap()[0].id,
+            search_history_in(&conn, 1, 0, "反力", HistoryRecordType::All, None).unwrap()[0].id,
             "a"
         );
     }
@@ -1858,7 +2415,8 @@ mod tests {
                  llm_invoked INTEGER DEFAULT 0, mode TEXT DEFAULT 'assistant_raw',
                  duration_ms INTEGER DEFAULT 0, audio_path TEXT, is_final INTEGER DEFAULT 1,
                  error_code INTEGER DEFAULT 0, error_message TEXT, source_device_id TEXT,
-                 asr_model_name TEXT, llm_model_name TEXT
+                 asr_model_name TEXT, llm_model_name TEXT,
+                 target_app_platform TEXT, target_app_key TEXT, target_app_name TEXT
              );
              CREATE TABLE usage_stats (
                  id INTEGER PRIMARY KEY, total_recording_count INTEGER DEFAULT 0,
@@ -1894,6 +2452,9 @@ mod tests {
             asr_model_name: None,
             llm_model_name: None,
             edited_text: None,
+            target_app_platform: None,
+            target_app_key: None,
+            target_app_name: None,
         }
     }
 
@@ -2211,5 +2772,218 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM user_config", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    fn daily_stats_conn() -> Connection {
+        let conn = recording_conn();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS user_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS daily_usage_stats (
+                 device_id TEXT NOT NULL,
+                 local_date TEXT NOT NULL,
+                 feature_kind TEXT NOT NULL,
+                 platform TEXT NOT NULL,
+                 app_key TEXT NOT NULL,
+                 app_name TEXT NOT NULL,
+                 usage_count INTEGER NOT NULL DEFAULT 0,
+                 total_characters INTEGER NOT NULL DEFAULT 0,
+                 total_duration_ms INTEGER NOT NULL DEFAULT 0,
+                 llm_count INTEGER NOT NULL DEFAULT 0,
+                 last_used_at TEXT NOT NULL,
+                 PRIMARY KEY (device_id, local_date, feature_kind, platform, app_key)
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn daily_app_stats_aggregate_across_ranges_and_exclude_untracked() {
+        let conn = daily_stats_conn();
+        let today = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap(); // Wednesday
+
+        // Today (2026-11-18)
+        upsert_daily_usage_stats_conn(
+            &conn,
+            "dev-1",
+            "2026-11-18",
+            FEATURE_KIND_DICTATION,
+            "macos",
+            "com.todesktop.cursor",
+            "Cursor",
+            3,
+            300,
+            15000,
+            2,
+            "2026-11-18T10:00:00Z",
+        )
+        .unwrap();
+        // Earlier this week (Monday 2026-11-16)
+        upsert_daily_usage_stats_conn(
+            &conn,
+            "dev-1",
+            "2026-11-16",
+            FEATURE_KIND_DICTATION,
+            "macos",
+            "com.tencent.xinWeChat",
+            "微信",
+            4,
+            200,
+            10000,
+            4,
+            "2026-11-16T08:00:00Z",
+        )
+        .unwrap();
+        // Earlier this month (2026-11-02)
+        upsert_daily_usage_stats_conn(
+            &conn,
+            "dev-1",
+            "2026-11-02",
+            FEATURE_KIND_DICTATION,
+            "macos",
+            "com.todesktop.cursor",
+            "Cursor App",
+            2,
+            100,
+            5000,
+            1,
+            "2026-11-02T08:00:00Z",
+        )
+        .unwrap();
+        // Last month (2026-10-15) + untracked + another device
+        upsert_daily_usage_stats_conn(
+            &conn,
+            "dev-1",
+            "2026-10-15",
+            FEATURE_KIND_DICTATION,
+            "",
+            UNTRACKED_APP_KEY,
+            "",
+            5,
+            500,
+            20000,
+            3,
+            "2026-10-15T08:00:00Z",
+        )
+        .unwrap();
+        upsert_daily_usage_stats_conn(
+            &conn,
+            "dev-2",
+            "2026-11-18",
+            FEATURE_KIND_DICTATION,
+            "windows",
+            "code.exe",
+            "Code",
+            99,
+            9999,
+            99999,
+            99,
+            "2026-11-18T10:00:00Z",
+        )
+        .unwrap();
+
+        let today_stats = get_app_usage_stats_in(&conn, "dev-1", AppUsageRange::Today, today).unwrap();
+        assert_eq!(today_stats.len(), 1);
+        assert_eq!(today_stats[0].app_key, "com.todesktop.cursor");
+        assert_eq!(today_stats[0].usage_count, 3);
+
+        let week_stats = get_app_usage_stats_in(&conn, "dev-1", AppUsageRange::Week, today).unwrap();
+        assert_eq!(week_stats.len(), 2);
+        assert_eq!(week_stats[0].app_key, "com.tencent.xinWeChat");
+        assert_eq!(week_stats[1].app_key, "com.todesktop.cursor");
+
+        let all_stats = get_app_usage_stats_in(&conn, "dev-1", AppUsageRange::All, today).unwrap();
+        assert_eq!(all_stats.len(), 2);
+        assert_eq!(all_stats[0].app_key, "com.todesktop.cursor");
+        assert_eq!(all_stats[0].usage_count, 5);
+        assert_eq!(all_stats[0].total_characters, 400);
+        // Latest timestamped display name wins.
+        assert_eq!(all_stats[0].app_name, "Cursor");
+    }
+
+    #[test]
+    fn daily_activity_includes_untracked_and_prior_baseline() {
+        let conn = daily_stats_conn();
+        let today = NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+
+        upsert_daily_usage_stats_conn(
+            &conn,
+            "dev-1",
+            "2024-01-10",
+            FEATURE_KIND_DICTATION,
+            "",
+            UNTRACKED_APP_KEY,
+            "",
+            10,
+            1000,
+            40000,
+            8,
+            "2024-01-10T10:00:00Z",
+        )
+        .unwrap();
+        upsert_daily_usage_stats_conn(
+            &conn,
+            "dev-1",
+            "2026-11-18",
+            FEATURE_KIND_DICTATION,
+            "macos",
+            "com.tencent.xinWeChat",
+            "微信",
+            2,
+            250,
+            9000,
+            2,
+            "2026-11-18T10:00:00Z",
+        )
+        .unwrap();
+        upsert_daily_usage_stats_conn(
+            &conn,
+            "dev-1",
+            "2026-11-18",
+            FEATURE_KIND_DICTATION,
+            "",
+            UNTRACKED_APP_KEY,
+            "",
+            1,
+            50,
+            1000,
+            0,
+            "2026-11-18T11:00:00Z",
+        )
+        .unwrap();
+
+        let activity = get_daily_activity_in(&conn, "dev-1", today).unwrap();
+        assert_eq!(activity.end_date, "2026-11-18");
+        assert_eq!(activity.prior_count, 10);
+        assert_eq!(activity.prior_characters, 1000);
+        assert_eq!(activity.days.len(), 1);
+        assert_eq!(activity.days[0].local_date, "2026-11-18");
+        assert_eq!(activity.days[0].usage_count, 3);
+        assert_eq!(activity.days[0].total_characters, 300);
+    }
+
+    #[test]
+    fn migrate_daily_usage_stats_backfills_once_and_skips_failures_and_reads() {
+        let conn = daily_stats_conn();
+        conn.execute_batch(
+            "INSERT INTO user_config (key, value) VALUES ('sync_device_id', 'dev-local');
+             INSERT INTO history_record (id, timestamp, text, duration_ms, llm_invoked, mode, error_code, source_device_id) VALUES
+             ('ok1', '2026-11-15T10:00:00Z', 'hello', 1000, 1, 'assistant_raw', 0, 'dev-local'),
+             ('read1', '2026-11-15T10:05:00Z', 'skip read', 0, 1, 'translate_read', 0, 'dev-local'),
+             ('fail1', '2026-11-15T10:10:00Z', '', 500, 0, 'assistant_raw', 1, 'dev-local');",
+        )
+        .unwrap();
+
+        migrate_daily_usage_stats(&conn).unwrap();
+        migrate_daily_usage_stats(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(usage_count), 0) FROM daily_usage_stats WHERE device_id = 'dev-local'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

@@ -20,7 +20,9 @@ try {
   checkHistorySearchPreview()
   const { checkHistoryPlayback } = await server.ssrLoadModule('/src/utils/historyPlayback.spec.ts')
   await checkHistoryPlayback()
-  console.log('History lifecycle, search races, pagination, match preview, and playback checks passed.')
+  const { checkActivityGrid } = await server.ssrLoadModule('/src/utils/activityGrid.spec.ts')
+  checkActivityGrid()
+  console.log('History lifecycle, search races, pagination, match preview, playback, and activity grid checks passed.')
 } finally {
   await server.close()
 }

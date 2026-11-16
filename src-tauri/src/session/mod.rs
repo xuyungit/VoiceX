@@ -589,6 +589,7 @@ impl SessionController {
                 injection_version,
                 intent,
                 outcome,
+                target_app,
             } => self.handle_inject_done_state(
                 state,
                 text,
@@ -601,6 +602,7 @@ impl SessionController {
                 injection_version,
                 intent,
                 outcome,
+                target_app,
             ),
         }
     }
@@ -1666,6 +1668,7 @@ mod tests {
             // others end the session at once.
             let expected = if error.is_some() {
                 HotkeySessionState::Finalizing
+                    target_app: None,
             } else {
                 HotkeySessionState::Idle
             };

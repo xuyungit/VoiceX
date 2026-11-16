@@ -402,6 +402,8 @@ pub fn run() {
             commands::history::delete_history_record,
             commands::history::get_usage_stats,
             commands::history::get_local_usage_stats,
+            commands::history::get_app_usage_stats,
+            commands::history::get_daily_activity,
             commands::history::load_history_audio,
             commands::history::count_history,
             commands::sync::get_sync_state,

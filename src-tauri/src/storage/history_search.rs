@@ -107,20 +107,26 @@ pub async fn page(
     offset: u32,
     query: String,
     kind: HistoryRecordType,
+    target_app_key: Option<String>,
 ) -> Result<Vec<HistoryRecord>, String> {
     let readers = readers()?;
     readers
         .read(readers.pages.clone(), id, move |conn| {
-            search_history_in(conn, limit, offset, &query, kind)
+            search_history_in(conn, limit, offset, &query, kind, target_app_key.as_deref())
         })
         .await
 }
 
-pub async fn count(id: u64, query: String, kind: HistoryRecordType) -> Result<u32, String> {
+pub async fn count(
+    id: u64,
+    query: String,
+    kind: HistoryRecordType,
+    target_app_key: Option<String>,
+) -> Result<u32, String> {
     let readers = readers()?;
     readers
         .read(readers.counts.clone(), id, move |conn| {
-            count_history_in(conn, &query, kind)
+            count_history_in(conn, &query, kind, target_app_key.as_deref())
         })
         .await
 }

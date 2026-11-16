@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
 export type HistoryRecordType = 'all' | 'dictation' | 'translation' | 'translate_read' | 'failed'
+export type AppUsageRange = 'today' | 'week' | 'month' | 'all'
 
 export interface HistoryRecord {
     id: string
@@ -23,6 +24,37 @@ export interface HistoryRecord {
     llmModelName: string | null
     /** The user's final version when it differs from `text` (VoiceX output). */
     editedText: string | null
+    targetAppPlatform: string | null
+    targetAppKey: string | null
+    targetAppName: string | null
+}
+
+export interface AppUsageStat {
+    platform: string
+    appKey: string
+    appName: string
+    usageCount: number
+    totalCharacters: number
+    totalDurationMs: number
+    llmCount: number
+    lastUsedAt: string
+}
+
+export interface DailyActivityPoint {
+    localDate: string
+    usageCount: number
+    totalCharacters: number
+    totalDurationMs: number
+    llmCount: number
+}
+
+export interface DailyActivityResponse {
+    startDate: string
+    endDate: string
+    priorCount: number
+    priorCharacters: number
+    priorDurationMs: number
+    days: DailyActivityPoint[]
 }
 
 /** The text a dictation ended up as: the user's edit, else VoiceX's output. */
@@ -73,7 +105,14 @@ export const useHistoryStore = defineStore('history', () => {
     const hasMore = ref(true)
     const searchQuery = ref('')
     const recordType = ref<HistoryRecordType>('all')
-    const hasFilters = computed(() => Boolean(searchQuery.value) || recordType.value !== 'all')
+    const targetAppKey = ref<string | null>(null)
+    const hasFilters = computed(() => Boolean(searchQuery.value) || recordType.value !== 'all' || Boolean(targetAppKey.value))
+    const statsRevision = ref(0)
+    const appUsageRange = ref<AppUsageRange>('week')
+    const appStats = ref<AppUsageStat[]>([])
+    const weeklyTopApps = ref<AppUsageStat[]>([])
+    const allAppsForFilter = ref<AppUsageStat[]>([])
+    const dailyActivity = ref<DailyActivityResponse | null>(null)
     const pageSize = 20
     let refreshQueued = false
     let searchGeneration = 0
@@ -150,6 +189,46 @@ export const useHistoryStore = defineStore('history', () => {
         } catch (error) {
             console.error('Failed to load local stats:', error)
         }
+
+        statsRevision.value++
+    }
+
+    async function loadAppStats(range: AppUsageRange = appUsageRange.value) {
+        appUsageRange.value = range
+        try {
+            const result = await invoke<AppUsageStat[]>('get_app_usage_stats', { range })
+            appStats.value = result
+            if (range === 'week') {
+                weeklyTopApps.value = result.slice(0, 3)
+            }
+        } catch (error) {
+            console.error('Failed to load app usage stats:', error)
+        }
+    }
+
+    async function loadWeeklyTopApps() {
+        try {
+            const result = await invoke<AppUsageStat[]>('get_app_usage_stats', { range: 'week' })
+            weeklyTopApps.value = result.slice(0, 3)
+        } catch (error) {
+            console.error('Failed to load weekly top apps:', error)
+        }
+    }
+
+    async function loadAllAppsForFilter() {
+        try {
+            allAppsForFilter.value = await invoke<AppUsageStat[]>('get_app_usage_stats', { range: 'all' })
+        } catch (error) {
+            console.error('Failed to load app filter options:', error)
+        }
+    }
+
+    async function loadDailyActivity() {
+        try {
+            dailyActivity.value = await invoke<DailyActivityResponse>('get_daily_activity')
+        } catch (error) {
+            console.error('Failed to load daily activity:', error)
+        }
     }
 
     async function loadHistory(reset = false) {
@@ -178,7 +257,19 @@ export const useHistoryStore = defineStore('history', () => {
                 backendSearchId = id
             }
             const searchId = backendSearchId
-            const filters = { searchId, query: searchQuery.value, recordType: recordType.value }
+            const filters: {
+                searchId: number
+                query: string
+                recordType: HistoryRecordType
+                targetAppKey?: string
+            } = {
+                searchId,
+                query: searchQuery.value,
+                recordType: recordType.value
+            }
+            if (targetAppKey.value) {
+                filters.targetAppKey = targetAppKey.value
+            }
             const result = await invoke<HistoryRecord[]>('get_history', { limit, offset, ...filters })
             if (generation !== searchGeneration) return
 
@@ -247,14 +338,16 @@ export const useHistoryStore = defineStore('history', () => {
         }
     }
 
-    async function setSearch(query: string, type: HistoryRecordType) {
+    async function setSearch(query: string, type: HistoryRecordType, appKey: string | null = targetAppKey.value) {
         const normalized = query.trim().split(/\s+/u).filter(Boolean).join(' ')
-        if (normalized === searchQuery.value && type === recordType.value) return
+        const normalizedApp = appKey && appKey.trim() ? appKey.trim() : null
+        if (normalized === searchQuery.value && type === recordType.value && normalizedApp === targetAppKey.value) return
         // A slow previous query must not overwrite new results, errors or loading state.
         searchGeneration++
         refreshQueued = false
         searchQuery.value = normalized
         recordType.value = type
+        targetAppKey.value = normalizedApp
         pinned.clear()
         loadError.value = null
         isLoading.value = false
@@ -300,14 +393,25 @@ export const useHistoryStore = defineStore('history', () => {
         hasMore,
         searchQuery,
         recordType,
+        targetAppKey,
         hasFilters,
         searching,
         total,
+        statsRevision,
+        appUsageRange,
+        appStats,
+        weeklyTopApps,
+        allAppsForFilter,
+        dailyActivity,
         setSearch,
         recordsByDate,
         formattedStats,
         formattedLocalStats,
         loadStats,
+        loadAppStats,
+        loadWeeklyTopApps,
+        loadAllAppsForFilter,
+        loadDailyActivity,
         loadHistory,
         deleteRecord,
         setFinalText,

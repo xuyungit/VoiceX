@@ -626,6 +626,7 @@ mod tests {
                             process_id: pid,
                             remote_bridge: false,
                             app_name: Some("Fixture".into()),
+                            target_app: None,
                         }),
                     )
                 },

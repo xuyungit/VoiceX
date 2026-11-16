@@ -2,7 +2,9 @@
 
 use crate::services::history_service::HISTORY_MODE_TRANSLATE_READ;
 use crate::services::sync_service::SyncService;
-use crate::storage::{HistoryRecord, HistoryRecordType, UsageStats};
+use crate::storage::{
+    AppUsageRange, AppUsageStat, DailyActivityResponse, HistoryRecord, HistoryRecordType, UsageStats,
+};
 use tauri::State;
 
 /// Allocate a search generation and cancel older reads without touching the writer.
@@ -23,10 +25,15 @@ pub async fn get_history(
     offset: u32,
     query: Option<String>,
     record_type: Option<HistoryRecordType>,
+    target_app_key: Option<String>,
 ) -> Result<Vec<HistoryRecord>, String> {
     let query = query.unwrap_or_default();
     let record_type = record_type.unwrap_or_default();
-    let searching = !query.trim().is_empty() || !matches!(record_type, HistoryRecordType::All);
+    let searching = !query.trim().is_empty()
+        || !matches!(record_type, HistoryRecordType::All)
+        || target_app_key
+            .as_deref()
+            .is_some_and(|key| !key.trim().is_empty());
     if offset == 0 && !searching {
         tauri::async_runtime::spawn_blocking(|| {
             let settings = crate::storage::get_settings().map_err(|e| e.to_string())?;
@@ -47,7 +54,7 @@ pub async fn get_history(
         .map_err(|e| e.to_string())??;
     }
 
-    crate::storage::history_search::page(search_id, limit, offset, query, record_type).await
+    crate::storage::history_search::page(search_id, limit, offset, query, record_type, target_app_key).await
 }
 
 /// How many records a search matches in all; History pages load 20 at a time.
@@ -56,11 +63,13 @@ pub async fn count_history(
     search_id: u64,
     query: Option<String>,
     record_type: Option<HistoryRecordType>,
+    target_app_key: Option<String>,
 ) -> Result<u32, String> {
     crate::storage::history_search::count(
         search_id,
         query.unwrap_or_default(),
         record_type.unwrap_or_default(),
+        target_app_key,
     )
     .await
 }
@@ -98,6 +107,29 @@ pub async fn get_local_usage_stats() -> Result<UsageStats, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let device_id = crate::storage::get_or_create_device_id().map_err(|e| e.to_string())?;
         crate::storage::get_local_usage_stats(&device_id).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Get per-app dictation usage statistics for the current device.
+#[tauri::command]
+pub async fn get_app_usage_stats(range: Option<AppUsageRange>) -> Result<Vec<AppUsageStat>, String> {
+    let range = range.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        let device_id = crate::storage::get_or_create_device_id().map_err(|e| e.to_string())?;
+        crate::storage::get_app_usage_stats(&device_id, range).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Get daily dictation activity for the 52-week dot grid on the current device.
+#[tauri::command]
+pub async fn get_daily_activity() -> Result<DailyActivityResponse, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let device_id = crate::storage::get_or_create_device_id().map_err(|e| e.to_string())?;
+        crate::storage::get_daily_activity(&device_id).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

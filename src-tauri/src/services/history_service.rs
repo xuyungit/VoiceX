@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::asr::{AsrConfig, AsrPipelineMode, AsrProviderType, ColiRefinementMode};
 use crate::commands::settings::AppSettings;
+use crate::foreground_app::TargetAppIdentity;
 use crate::services::sync_service::SyncService;
 use crate::state::{ProcessingIntent, RecordingStyle};
 use crate::storage;
@@ -82,7 +83,7 @@ impl HistoryService {
         if let Err(err) = self.persist_with_id(
             Uuid::new_v4(), final_text, original_text, ai_correction_applied,
             llm_invoked, mode, duration_ms, audio_path, asr_model_name,
-            llm_model_name, app_handle,
+            llm_model_name, None, app_handle,
         ) {
             log::error!("History not persisted: {err}");
         }
@@ -100,6 +101,7 @@ impl HistoryService {
         audio_path: Option<String>,
         asr_model_name: Option<String>,
         llm_model_name: Option<String>,
+        target_app: Option<TargetAppIdentity>,
         app_handle: Option<AppHandle>,
     ) -> Result<tauri::async_runtime::JoinHandle<Result<bool, String>>, String> {
         let settings = match storage::get_settings() {
@@ -110,6 +112,7 @@ impl HistoryService {
             }
         };
 
+        let target_app = target_app.filter(|app| !app.is_self);
         let record = HistoryRecord {
             id: record_id.to_string(),
             timestamp: Utc::now().to_rfc3339(),
@@ -128,6 +131,9 @@ impl HistoryService {
             asr_model_name,
             llm_model_name,
             edited_text: None,
+            target_app_platform: target_app.as_ref().map(|app| app.platform.clone()),
+            target_app_key: target_app.as_ref().map(|app| app.app_key.clone()),
+            target_app_name: target_app.map(|app| app.app_name),
         };
 
         let behavior = Self::behavior_for_mode(&record.mode, &settings);
@@ -177,6 +183,9 @@ impl HistoryService {
             asr_model_name,
             llm_model_name: None,
             edited_text: None,
+            target_app_platform: None,
+            target_app_key: None,
+            target_app_name: None,
         };
 
         if let Err(err) = self.persist_record(record, Self::local_failure_behavior(&settings), app_handle)
@@ -276,6 +285,9 @@ impl HistoryService {
                         record.llm_invoked,
                     ) {
                         log::warn!("Failed to update device usage stats: {}", err);
+                    }
+                    if let Err(err) = storage::increment_daily_usage_stats_for_record(&record) {
+                        log::warn!("Failed to update daily app usage stats: {}", err);
                     }
                 }
             }

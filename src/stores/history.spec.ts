@@ -86,7 +86,8 @@ const record = (index: number): HistoryRecord => ({
   originalText: null, editedText: null, aiCorrectionApplied: false, llmInvoked: false,
   mode: 'assistant_raw', durationMs: 1000, audioPath: null, isFinal: true,
   errorCode: 0, errorMessage: null, sourceDeviceId: null, sourceDeviceName: null,
-  asrModelName: null, llmModelName: null
+  asrModelName: null, llmModelName: null,
+  targetAppPlatform: null, targetAppKey: null, targetAppName: null
 })
 
 export async function checkHistoryLifecycle() {

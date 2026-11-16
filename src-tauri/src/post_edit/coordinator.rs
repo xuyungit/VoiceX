@@ -1141,6 +1141,7 @@ mod tests {
                 process_id: 1,
                 remote_bridge: false,
                 app_name: Some("Fixture".into()),
+                target_app: None,
             }),
         }
     }
@@ -1723,6 +1724,7 @@ mod tests {
             process_id: 1,
             remote_bridge: false,
             app_name: Some("Fixture".into()),
+            target_app: None,
         };
         let receipt = InjectionReceipt {
             session_id: uuid::Uuid::new_v4(),
@@ -1819,6 +1821,7 @@ mod tests {
                     process_id: 1,
                     remote_bridge: false,
                     app_name: Some("Fixture".into()),
+                    target_app: None,
                 }),
             },
             "synthetic".into(),

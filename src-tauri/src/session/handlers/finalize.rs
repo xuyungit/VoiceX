@@ -19,6 +19,7 @@ impl SessionController {
         injection_version: u64,
         intent: ProcessingIntent,
         outcome: InjectionOutcome,
+        target_app: Option<crate::foreground_app::TargetAppIdentity>,
     ) {
         // If a newer final arrived while this injection was running, redo injection with the latest text.
         if state.final_version > injection_version {
@@ -35,6 +36,12 @@ impl SessionController {
         state.final_injected = true;
         state.final_typed = outcome == InjectionOutcome::Dispatched;
         state.injection_in_progress = false;
+
+        let effective_target_app = if outcome == InjectionOutcome::Dispatched {
+            target_app.filter(|app| !app.is_self)
+        } else {
+            None
+        };
 
         let resolved_mode = crate::services::history_service::HistoryService::resolve_mode(
             intent,
@@ -57,6 +64,7 @@ impl SessionController {
                 llm_invoked,
                 state.session_llm_model_name.clone(),
             ),
+            effective_target_app,
             self.app_handle(),
         );
 

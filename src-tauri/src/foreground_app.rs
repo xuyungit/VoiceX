@@ -47,6 +47,15 @@ pub struct RecentTargetApp {
     pub last_seen_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetAppIdentity {
+    pub platform: String,
+    pub app_key: String,
+    pub app_name: String,
+    pub is_self: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AppMatchCandidate {
     platform: String,
@@ -127,7 +136,62 @@ fn all_match_candidates(info: &ForegroundAppInfo) -> Vec<AppMatchCandidate> {
     candidates
 }
 
+fn clean_app_display_name(platform: &str, raw: &str) -> String {
+    let trimmed = raw.trim();
+    if platform == "windows"
+        && trimmed.len() > 4
+        && trimmed
+            .get(trimmed.len() - 4..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".exe"))
+    {
+        return trimmed[..trimmed.len() - 4].to_string();
+    }
+    trimmed.to_string()
+}
+
 impl ForegroundAppInfo {
+    pub fn to_target_app_identity(&self) -> Option<TargetAppIdentity> {
+        let platform = normalize_platform(&self.platform);
+        let non_empty = |value: Option<&str>| -> Option<String> {
+            value
+                .map(normalize_match_value)
+                .filter(|item| !item.is_empty())
+        };
+
+        // macOS bundles carry stable reverse-DNS bundle IDs; on Windows prefer
+        // process_name so versioned install paths (e.g. Squirrel/Electron) fold
+        // into one app entry.
+        let app_key = if platform == "macos" {
+            non_empty(self.bundle_id.as_deref())
+                .or_else(|| non_empty(self.process_name.as_deref()))
+                .or_else(|| non_empty(self.executable_path.as_deref()))
+        } else {
+            non_empty(self.process_name.as_deref())
+                .or_else(|| non_empty(self.executable_path.as_deref()))
+                .or_else(|| non_empty(self.bundle_id.as_deref()))
+        }?;
+
+        let raw_name = self
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                self.process_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+            })
+            .unwrap_or(&app_key);
+
+        Some(TargetAppIdentity {
+            app_name: clean_app_display_name(&platform, raw_name),
+            platform,
+            app_key,
+            is_self: self.is_self,
+        })
+    }
+
     pub fn to_recent_target_app(&self) -> Option<RecentTargetApp> {
         let candidate = all_match_candidates(self).into_iter().next()?;
         let app_name = self
@@ -560,5 +624,29 @@ mod tests {
             serialized.get("skipClipboardRestore").and_then(|v| v.as_bool()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn target_app_identity_normalizes_macos_and_windows_apps() {
+        let mac = sample_macos_app().to_target_app_identity().unwrap();
+        assert_eq!(mac.platform, "macos");
+        assert_eq!(mac.app_key, "com.microsoft.rdc.macos");
+        assert_eq!(mac.app_name, "Windows App");
+        assert!(!mac.is_self);
+
+        let win = ForegroundAppInfo {
+            platform: "Windows".to_string(),
+            display_name: Some("Code.exe".to_string()),
+            process_name: Some("Code.exe".to_string()),
+            bundle_id: None,
+            executable_path: Some("C:\\Users\\demo\\AppData\\Local\\Programs\\Code.exe".to_string()),
+            process_id: 100,
+            is_self: false,
+        }
+        .to_target_app_identity()
+        .unwrap();
+        assert_eq!(win.platform, "windows");
+        assert_eq!(win.app_key, "code.exe");
+        assert_eq!(win.app_name, "Code");
     }
 }

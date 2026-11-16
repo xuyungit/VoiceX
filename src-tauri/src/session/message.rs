@@ -137,5 +137,6 @@ pub enum SessionMessage {
         injection_version: u64,
         intent: ProcessingIntent,
         outcome: InjectionOutcome,
+        target_app: Option<crate::foreground_app::TargetAppIdentity>,
     },
 }

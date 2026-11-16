@@ -19,6 +19,7 @@ pub struct ResolvedApp {
     pub process_id: u32,
     pub app_name: Option<String>,
     pub remote_bridge: bool,
+    pub target_app: Option<crate::foreground_app::TargetAppIdentity>,
 }
 
 #[derive(Debug, Clone, Copy)]
