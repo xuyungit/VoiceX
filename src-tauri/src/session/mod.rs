@@ -1668,6 +1668,7 @@ mod tests {
                     injection_version,
                     intent: crate::state::ProcessingIntent::Assistant,
                     outcome: InjectionOutcome::from(&dispatch),
+                    target_app: None,
                 },
             );
             assert_eq!(state.terminal_error_message.as_deref(), error, "{dispatch:?}");
@@ -1675,7 +1676,6 @@ mod tests {
             // others end the session at once.
             let expected = if error.is_some() {
                 HotkeySessionState::Finalizing
-                    target_app: None,
             } else {
                 HotkeySessionState::Idle
             };
