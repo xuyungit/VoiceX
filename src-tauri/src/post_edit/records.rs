@@ -117,8 +117,17 @@ pub struct FinalText {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ListedRecord {
+    #[serde(flatten)]
+    pub record: Record,
+    pub target_app_platform: Option<String>,
+    pub target_app_key: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecordPage {
-    pub records: Vec<Record>,
+    pub records: Vec<ListedRecord>,
     pub save_error: Option<String>,
 }
 
@@ -474,32 +483,37 @@ pub fn save(ticket: CaptureTicket, record: &Record) -> Result<(), StorageError> 
 pub fn list(limit: u32, offset: u32) -> Result<RecordPage, StorageError> {
     let records = storage::with_db(|conn| {
         cleanup(conn)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT p.payload, h.text, h.edited_text FROM post_edit_record p
-                 JOIN history_record h ON h.id = p.source_id
-                 WHERE h.edited_text IS NOT NULL
-                 ORDER BY p.timestamp DESC, p.id DESC LIMIT ?1 OFFSET ?2",
-            )
-            .map_err(sql)?;
-        let rows = stmt
-            .query_map(params![limit.clamp(1, 100), offset], |r| {
-                Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?))
-            })
-            .map_err(sql)?;
-        rows.map(|row| {
-            let (payload, original, edited) = row.map_err(sql)?;
-            let mut record: Record = serde_json::from_str(&payload).map_err(json)?;
-            record.original_text = original;
-            record.edited_text = edited;
-            Ok(record)
-        })
-        .collect()
+        list_in(conn, limit, offset)
     })?;
     Ok(RecordPage {
         records,
         save_error: SAVE_ERROR.lock().unwrap().clone(),
     })
+}
+
+fn list_in(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<ListedRecord>, StorageError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.payload, h.text, h.edited_text, h.target_app_platform, h.target_app_key
+             FROM post_edit_record p
+             JOIN history_record h ON h.id = p.source_id
+             WHERE h.edited_text IS NOT NULL
+             ORDER BY p.timestamp DESC, p.id DESC LIMIT ?1 OFFSET ?2",
+        )
+        .map_err(sql)?;
+    let rows = stmt
+        .query_map(params![limit.clamp(1, 100), offset], |r| {
+            Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .map_err(sql)?;
+    rows.map(|row| {
+        let (payload, original, edited, target_app_platform, target_app_key) = row.map_err(sql)?;
+        let mut record: Record = serde_json::from_str(&payload).map_err(json)?;
+        record.original_text = original;
+        record.edited_text = edited;
+        Ok(ListedRecord { record, target_app_platform, target_app_key })
+    })
+    .collect()
 }
 
 fn delete(conn: &Connection, kind: &str, id: &str) -> Result<(), StorageError> {
@@ -635,7 +649,8 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE history_record (
                 id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, text TEXT NOT NULL, mode TEXT NOT NULL,
-                edited_text TEXT, edit_source TEXT, edited_at TEXT
+                edited_text TEXT, edit_source TEXT, edited_at TEXT,
+                target_app_platform TEXT, target_app_key TEXT
              );",
         )
         .unwrap();
@@ -710,6 +725,28 @@ mod tests {
         let listed = entry(&conn, "source").unwrap();
         assert_eq!((listed.original_text.as_str(), listed.edited_text.as_str()), ("返利", "反力"));
         assert!(!listed.complete);
+    }
+
+    #[test]
+    fn listed_edits_include_the_dictations_app_identity_without_changing_the_payload() {
+        let conn = db();
+        let mut record = record();
+        record.app_name = Some("Code.exe".into());
+        assert!(insert(&conn, &record).unwrap());
+        let legacy = list_in(&conn, 10, 0).unwrap();
+        assert!(legacy[0].target_app_platform.is_none());
+        assert!(legacy[0].target_app_key.is_none());
+        conn.execute(
+            "UPDATE history_record SET target_app_platform = 'windows', target_app_key = 'code.exe'
+             WHERE id = 'source'", [],
+        ).unwrap();
+        let records = list_in(&conn, 10, 0).unwrap();
+        let json = serde_json::to_value(&records[0]).unwrap();
+        assert_eq!(json["appName"], "Code.exe");
+        assert_eq!(json["targetAppPlatform"], "windows");
+        assert_eq!(json["targetAppKey"], "code.exe");
+        let payload: String = conn.query_row("SELECT payload FROM post_edit_record", [], |row| row.get(0)).unwrap();
+        assert!(!payload.contains("targetAppKey"));
     }
 
     #[test]

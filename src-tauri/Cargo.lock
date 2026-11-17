@@ -6479,6 +6479,7 @@ dependencies = [
  "objc2-avf-audio",
  "objc2-foundation",
  "ogg",
+ "png 0.17.16",
  "prost",
  "prost-types",
  "protoc-bin-vendored",

@@ -14,6 +14,7 @@ import PostEditHistory from '../components/PostEditHistory.vue'
 import InlineTextEditor from '../components/InlineTextEditor.vue'
 import LoadMoreSentinel from '../components/LoadMoreSentinel.vue'
 import HistorySearchText from '../components/HistorySearchText.vue'
+import AppIcon from '../components/AppIcon.vue'
 import { hiddenSearchMatches } from '../utils/historySearch'
 import { useHistoryPlayback } from '../utils/historyPlayback'
 
@@ -40,12 +41,28 @@ const filterOptions = computed(() => [
   { label: t('history.filterFailed'), value: 'failed' },
 ])
 const appFilterOptions = computed(() => [
-  { label: t('history.filterAllApps'), value: '' },
+  { label: t('history.filterAllApps'), value: '', platform: null as string | null },
   ...historyStore.allAppsForFilter.map(app => ({
     label: app.appName,
     value: app.appKey,
+    platform: app.platform,
   })),
 ])
+
+function renderAppFilterLabel(option: { label?: string; value?: string | number; platform?: string | null }) {
+  const label = String(option.label ?? '')
+  const val = String(option.value ?? '')
+  if (!val) return label
+  return h('span', { class: 'app-filter-option' }, [
+    h(AppIcon, {
+      platform: option.platform ?? null,
+      appKey: val,
+      appName: label,
+      size: 'xs',
+    }),
+    h('span', { class: 'app-filter-option-text' }, label),
+  ])
+}
 const searchBusy = computed(() => searchPending.value || historyStore.isLoading)
 const hasSearchConditions = computed(() => Boolean(searchInput.value.trim()) || searchType.value !== 'all' || Boolean(searchAppKey.value))
 
@@ -601,6 +618,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
         v-if="historyStore.allAppsForFilter.length > 0"
         v-model:value="searchAppKey"
         :options="appFilterOptions"
+        :render-label="renderAppFilterLabel"
         class="history-app-filter"
         :aria-label="t('history.filterAppLabel')"
       />
@@ -639,7 +657,13 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                   v-if="record.targetAppName"
                   class="tag row-tag target-app-tag"
                 >
-                  → {{ record.targetAppName }}
+                  <AppIcon
+                    :platform="record.targetAppPlatform"
+                    :app-key="record.targetAppKey"
+                    :app-name="record.targetAppName"
+                    size="xs"
+                  />
+                  <span>{{ record.targetAppName }}</span>
                 </span>
                 <span
                   v-if="modeBadge(record)"
@@ -795,9 +819,13 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
               <span class="detail-text">{{ formatDevice(detailRecord) }}</span>
             </span>
             <span v-if="detailRecord.targetAppName" class="detail-item" :title="`${t('history.targetAppLabel')}: ${detailRecord.targetAppName}`">
-              <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14" aria-hidden="true">
-                <path d="M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm0 4v10h14V8H5z" />
-              </svg>
+              <AppIcon
+                :platform="detailRecord.targetAppPlatform"
+                :app-key="detailRecord.targetAppKey"
+                :app-name="detailRecord.targetAppName"
+                size="xs"
+                fallback="window-svg"
+              />
               <span class="detail-text">{{ detailRecord.targetAppName }}</span>
             </span>
             <span class="detail-item" :title="modeLabel(detailRecord)">
@@ -1084,6 +1112,25 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
 .row-tag {
   flex-shrink: 0;
+}
+
+.target-app-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+:deep(.app-filter-option) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+:deep(.app-filter-option-text) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .list-text {

@@ -13,6 +13,8 @@ import SettingsSection from '../components/settings/SettingsSection.vue'
 import SettingRow from '../components/settings/SettingRow.vue'
 import HelpTip from '../components/settings/HelpTip.vue'
 import HotkeyField from '../components/settings/HotkeyField.vue'
+import AppIcon from '../components/AppIcon.vue'
+import { useAppIconStore } from '../stores/appIcons'
 import {
   exceedsRecordingHardLimit,
   resolveAsrRecordingHardLimitMinutes
@@ -42,6 +44,7 @@ interface InjectionAppRow extends RecentTargetApp {
 
 const settingsStore = useSettingsStore()
 const postEditStore = usePostEditStore()
+const appIconStore = useAppIconStore()
 const { t } = useI18n()
 const recentTargetApps = ref<RecentTargetApp[]>([])
 const postEditTest = ref<PostEditTestSnapshot | null>(null)
@@ -536,11 +539,6 @@ function getAppUsageLabel(app: InjectionAppRow) {
   })
 }
 
-function getAppBadgeLabel(appName: string) {
-  const trimmed = appName.trim()
-  return (trimmed[0] ?? '?').toUpperCase()
-}
-
 onMounted(async () => {
   void postEditStore.load()
   if (showPostEditDiagnostics) {
@@ -559,6 +557,7 @@ onMounted(async () => {
   await refreshOutputMuteStatus()
   if (inputSettingsDisposed) return
   const unlistenRecent = await listen('input:recent-target-apps-updated', () => {
+    appIconStore.invalidateMissing()
     void loadRecentTargetApps()
   })
   if (inputSettingsDisposed) { unlistenRecent(); return }
@@ -756,7 +755,15 @@ onBeforeUnmount(() => {
             <div class="override-group-title">{{ group.title }}</div>
             <ul class="override-list">
               <li v-for="app in group.rows" :key="app.key" class="override-item">
-                <div class="override-badge">{{ getAppBadgeLabel(app.appName) }}</div>
+                <AppIcon
+                  class="override-badge"
+                  :platform="app.platform"
+                  :app-key="app.bundleId ?? app.processName ?? app.matchValue"
+                  :bundle-id="app.bundleId"
+                  :executable-path="app.executablePath"
+                  :app-name="app.appName"
+                  size="md"
+                />
                 <div class="override-copy">
                   <div class="override-name">{{ app.appName }}</div>
                   <div class="override-meta">
@@ -854,17 +861,6 @@ onBeforeUnmount(() => {
 .override-badge {
   align-self: flex-start;
   margin-top: 2px;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: var(--radius-md);
-  background: var(--color-accent-light);
-  color: var(--color-accent);
-  font-size: var(--font-sm);
-  font-weight: 600;
 }
 
 .override-copy {

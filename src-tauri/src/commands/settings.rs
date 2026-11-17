@@ -1341,6 +1341,15 @@ pub fn get_recent_target_apps() -> Result<Vec<RecentTargetApp>, String> {
 }
 
 #[tauri::command]
+pub async fn get_app_icons(
+    requests: Vec<crate::app_icons::AppIconLookupRequest>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    tokio::task::spawn_blocking(move || crate::app_icons::resolve_app_icons(&requests))
+        .await
+        .map_err(|e| format!("Failed to resolve app icons: {e}"))?
+}
+
+#[tauri::command]
 pub fn get_resolved_ui_locale(preferred: Option<String>) -> Result<String, String> {
     let requested_language = if let Some(preferred) = preferred {
         preferred

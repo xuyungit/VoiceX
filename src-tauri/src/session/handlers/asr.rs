@@ -525,7 +525,10 @@ impl SessionController {
                             // Resolve only after queuing and modifier waits: the
                             // user may choose a different app during either wait.
                             let target_app = match target_controller.capture_foreground_app() {
-                                Ok(app) => Some(app),
+                                Ok(app) => {
+                                    crate::app_icons::record_foreground_app_async(&app);
+                                    Some(app)
+                                }
                                 Err(err) => {
                                     log::warn!(
                                         "Cannot resolve per-app injection settings; using the configured global mode: {}",

@@ -10,6 +10,7 @@ import { condense, diffText, type TextDiff } from '../utils/textDiff'
 import CorrectionDiff from './CorrectionDiff.vue'
 import InlineTextEditor from './InlineTextEditor.vue'
 import LoadMoreSentinel from './LoadMoreSentinel.vue'
+import AppIcon from './AppIcon.vue'
 
 const historyStore = useHistoryStore()
 const { t, locale } = useI18n()
@@ -178,7 +179,15 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
         <header class="record-meta">
           <div class="meta-main">
             <time :datetime="record.timestamp">{{ time(record.timestamp) }}</time>
-            <span v-if="record.appName" class="app-name">{{ record.appName }}</span>
+            <span v-if="record.appName" class="app-name">
+              <AppIcon
+                :app-name="record.appName"
+                :platform="record.targetAppPlatform"
+                :app-key="record.targetAppKey"
+                size="xs"
+              />
+              <span class="app-name-text">{{ record.appName }}</span>
+            </span>
           </div>
           <div v-if="editingId !== record.id" class="record-actions">
             <NButton text size="tiny" @click="editingId = record.id">{{ t('postEdit.edit') }}</NButton>
@@ -245,7 +254,8 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
 .record-meta { justify-content: space-between; min-height: 24px; margin-bottom: 10px; }
 .meta-main { min-width: 0; }
 .record-meta time { font-size: var(--font-sm); font-variant-numeric: tabular-nums; font-weight: 600; }
-.app-name { color: var(--color-text-tertiary); font-size: var(--font-xs); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-name { display: inline-flex; align-items: center; gap: 5px; color: var(--color-text-tertiary); font-size: var(--font-xs); max-width: 260px; overflow: hidden; }
+.app-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .record-actions { display: inline-flex; align-items: center; gap: 14px; flex-shrink: 0; }
 .more-button { width: 24px; padding: 0; color: var(--color-text-secondary); }
 .edit-preview { margin-top: 10px; padding: 10px 12px; border-radius: 6px; background: var(--color-bg-secondary); }

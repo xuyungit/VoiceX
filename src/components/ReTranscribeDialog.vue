@@ -7,6 +7,7 @@ import { useSettingsStore } from '../stores/settings'
 import type { HistoryRecord } from '../stores/history'
 import { buildAsrProviderOptions } from '../utils/providerOptions'
 import { buildLlmProviderOptions, providerSelectionKey } from '../utils/llmOptions'
+import AppIcon from './AppIcon.vue'
 
 const props = defineProps<{
   show: boolean
@@ -42,6 +43,8 @@ const result = ref<{
   asrModelName: string
   llmModelName: string | null
   targetAppName?: string | null
+  targetAppPlatform?: string | null
+  targetAppKey?: string | null
   injectionMode?: string | null
 } | null>(null)
 
@@ -112,6 +115,8 @@ async function startReplayInject() {
       asrModelName: string
       llmModelName: string | null
       targetAppName: string | null
+      targetAppPlatform: string | null
+      targetAppKey: string | null
       injectionMode: string
     }>('replay_history_injection', {
       request: {
@@ -302,7 +307,15 @@ function close() {
             <div class="result-title">
               {{ t('history.finalText') }}
               <span v-if="result.targetAppName || result.injectionMode" class="result-model">
-                <template v-if="result.targetAppName">{{ result.targetAppName }}</template>
+                <template v-if="result.targetAppName">
+                  <AppIcon
+                    :app-name="result.targetAppName"
+                    :platform="result.targetAppPlatform"
+                    :app-key="result.targetAppKey"
+                    size="xs"
+                  />
+                  <span>{{ result.targetAppName }}</span>
+                </template>
                 <template v-if="result.targetAppName && result.injectionMode"> · </template>
                 <template v-if="result.injectionMode">{{ result.injectionMode }}</template>
               </span>
@@ -396,6 +409,9 @@ function close() {
 }
 
 .result-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-weight: 400;
   font-size: var(--font-xs);
   color: var(--color-text-tertiary);

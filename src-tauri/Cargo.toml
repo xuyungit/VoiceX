@@ -90,6 +90,7 @@ tokio-stream = "0.1"
 # JWT signing for Google Service Account auth
 ring = "0.17"
 base64 = "0.22"
+png = "0.17"
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
@@ -138,8 +139,15 @@ objc2-app-kit = { version = "0.3", features = [
     # (NSEvent::mouseLocation + NSScreen::screens)
     "NSEvent",
     "NSScreen",
+    # App icon extraction and 64x64 PNG rendering
+    "NSWorkspace",
+    "NSImage",
+    "NSImageRep",
+    "NSBitmapImageRep",
+    "NSGraphics",
+    "NSGraphicsContext",
 ] }
-objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSData", "NSProcessInfo"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSData", "NSDictionary", "NSProcessInfo"] }
 # macOS system voice (AVSpeechSynthesizer). Default features pull in the whole
 # AVFAudio surface; we only need the speech synthesis headers.
 objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "AVSpeechSynthesis"] }
@@ -173,6 +181,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security",
     # Microphone privacy switches (capability consent store).
     "Win32_System_Registry",
+    # App icon extraction via Shell / GDI without system error dialogs.
+    "Win32_UI_Shell",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
 ] }
 # Selected-text reading through UI Automation. COM interfaces are only in the
 # `windows` crate, not `windows-sys`; this is the version Tauri's WebView2

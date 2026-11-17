@@ -38,6 +38,7 @@ impl SessionController {
                         app_info.is_self
                     );
                     if !app_info.is_self {
+                        crate::app_icons::record_foreground_app_async(&app_info);
                         if let Some(recent_app) = app_info.to_recent_target_app() {
                             if let Err(err) =
                                 crate::storage::remember_recent_target_app(&recent_app)

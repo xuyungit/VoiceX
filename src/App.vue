@@ -14,6 +14,7 @@ import { useHistoryStore } from './stores/history'
 import { useSyncStore, type SyncStateResponse } from './stores/sync'
 import { usePermissionsStore } from './stores/permissions'
 import { useUpdatesStore } from './stores/updates'
+import { useAppIconStore } from './stores/appIcons'
 
 // Naive UI derives hover/alpha shades from these values, so they must be literal colors
 // (not CSS variables). Keep them in sync with styles/variables.css.
@@ -60,6 +61,7 @@ const settingsStore = useSettingsStore()
 const historyStore = useHistoryStore()
 const syncStore = useSyncStore()
 const permissionsStore = usePermissionsStore()
+const appIconStore = useAppIconStore()
 // Loaded up front so History shows its tab bar on first render when enabled.
 const postEditStore = usePostEditStore()
 let unlistenHistory: (() => void) | null = null
@@ -76,6 +78,7 @@ let historyRefreshQueued = false
 const SYNC_GATED_STATUSES = new Set(['connecting', 'syncing', 'reconnecting'])
 
 async function refreshHistoryNow() {
+  appIconStore.invalidateMissing()
   await Promise.all([
     historyStore.loadHistory(true),
     historyStore.loadStats()

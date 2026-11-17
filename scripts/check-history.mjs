@@ -24,7 +24,9 @@ try {
   await checkHistoryPlayback()
   const { checkActivityGrid } = await server.ssrLoadModule('/src/utils/activityGrid.spec.ts')
   checkActivityGrid()
-  console.log('History lifecycle, search races, pagination, match preview, playback, and activity grid checks passed.')
+  const { checkAppIconStoreBatchingAndCaching } = await server.ssrLoadModule('/src/stores/appIcons.spec.ts')
+  await checkAppIconStoreBatchingAndCaching()
+  console.log('History lifecycle, search races, pagination, match preview, playback, activity grid, and app icon store checks passed.')
 } finally {
   await server.close()
 }

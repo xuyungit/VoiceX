@@ -186,6 +186,7 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     migrate_settings_blob(&conn);
 
     crate::post_edit::records::create_schema(&conn)?;
+    crate::app_icons::create_schema(&conn)?;
     super::history_search::init(path)?;
     let _ = DB.set(Mutex::new(conn));
     log::info!("Database initialized at {:?}", path);

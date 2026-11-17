@@ -39,6 +39,8 @@ export interface PostEditRecord {
   timestamp: string
   lastObservedAt: string
   appName: string | null
+  targetAppPlatform: string | null
+  targetAppKey: string | null
   originalText: string
   editedText: string
   complete: boolean

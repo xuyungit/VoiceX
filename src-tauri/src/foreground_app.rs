@@ -136,7 +136,7 @@ fn all_match_candidates(info: &ForegroundAppInfo) -> Vec<AppMatchCandidate> {
     candidates
 }
 
-fn clean_app_display_name(platform: &str, raw: &str) -> String {
+pub(crate) fn clean_app_display_name(platform: &str, raw: &str) -> String {
     let trimmed = raw.trim();
     if platform == "windows"
         && trimmed.len() > 4

@@ -77,6 +77,8 @@ pub struct ReplayHistoryInjectionResult {
     pub asr_model_name: String,
     pub llm_model_name: Option<String>,
     pub target_app_name: Option<String>,
+    pub target_app_platform: Option<String>,
+    pub target_app_key: Option<String>,
     pub injection_mode: String,
 }
 
@@ -170,6 +172,7 @@ pub async fn replay_history_injection(
         if target_app.is_self {
             return Err("请在开始测试后切回目标应用，再试一次".to_string());
         }
+        crate::app_icons::record_foreground_app_async(&target_app);
 
         let matched_override =
             match_text_injection_override(&target_app, &settings.text_injection_overrides);
@@ -224,6 +227,7 @@ pub async fn replay_history_injection(
         .map_err(|err| format!("注入任务失败: {err}"))?
         .map_err(|err| format!("文本注入失败: {err}"))?;
 
+        let target_identity = target_app.to_target_app_identity();
         Ok(ReplayHistoryInjectionResult {
             asr_text: pipeline.asr_text,
             llm_text: pipeline.llm_text,
@@ -231,6 +235,8 @@ pub async fn replay_history_injection(
             asr_model_name: pipeline.asr_model_name,
             llm_model_name: pipeline.llm_model_name,
             target_app_name: preferred_app_name(&target_app),
+            target_app_platform: target_identity.as_ref().map(|app| app.platform.clone()),
+            target_app_key: target_identity.map(|app| app.app_key),
             injection_mode: injection_mode_label(injection_mode).to_string(),
         })
     })

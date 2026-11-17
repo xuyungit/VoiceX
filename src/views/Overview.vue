@@ -12,6 +12,7 @@ import {
   type ActivityMode,
 } from '../utils/activityGrid'
 import PermissionSetupCard from '../components/PermissionSetupCard.vue'
+import AppIcon from '../components/AppIcon.vue'
 
 type OverviewTab = 'core' | 'insights'
 type AppSortBy = 'count' | 'chars' | 'duration'
@@ -363,11 +364,6 @@ function secondaryAppMetric(item: AppUsageStat): string {
   return `${t('overview.charsUnit', { count: formatCharacters(item.totalCharacters) })} · ${formatCompactAppDuration(item.totalDurationMs)} · ${avg}`
 }
 
-function appInitials(name: string): string {
-  const trimmed = name.trim()
-  return trimmed ? trimmed.slice(0, 2).toUpperCase() : '?'
-}
-
 function showAppSubKey(item: AppUsageStat): boolean {
   return item.appKey.trim().toLowerCase() !== item.appName.trim().toLowerCase()
 }
@@ -480,6 +476,7 @@ onMounted(async () => {
           <span class="teaser-label">{{ t('overview.weeklyTopApps') }}</span>
           <div class="teaser-pills">
             <span v-for="app in weeklyTopWithShare" :key="`${app.platform}:${app.appKey}`" class="teaser-pill">
+              <AppIcon :platform="app.platform" :app-key="app.appKey" :app-name="app.appName" size="xs" />
               <span class="teaser-name">{{ app.appName }}</span>
               <span class="teaser-pct">{{ app.sharePct }}%</span>
             </span>
@@ -631,8 +628,15 @@ onMounted(async () => {
               </div>
               <div class="summary-cell">
                 <div class="summary-label">{{ t('overview.mostUsedApp') }}</div>
-                <div class="summary-value truncate">
-                  {{ periodTotals.topApp?.appName ?? '—' }}
+                <div class="summary-value summary-top-app truncate">
+                  <AppIcon
+                    v-if="periodTotals.topApp"
+                    :platform="periodTotals.topApp.platform"
+                    :app-key="periodTotals.topApp.appKey"
+                    :app-name="periodTotals.topApp.appName"
+                    size="sm"
+                  />
+                  <span class="truncate">{{ periodTotals.topApp?.appName ?? '—' }}</span>
                   <span v-if="periodTotals.topApp" class="summary-sub">{{ periodTotals.topShare }}%</span>
                 </div>
               </div>
@@ -649,7 +653,7 @@ onMounted(async () => {
             <div class="app-list">
               <div v-for="(item, index) in sortedApps" :key="`${item.platform}:${item.appKey}`" class="app-row">
                 <div class="app-main">
-                  <div class="app-avatar">{{ appInitials(item.appName) }}</div>
+                  <AppIcon :platform="item.platform" :app-key="item.appKey" :app-name="item.appName" size="md" />
                   <div class="app-info">
                     <div class="app-title-line">
                       <span class="app-rank">{{ index + 1 }}.</span>
@@ -1079,8 +1083,15 @@ onMounted(async () => {
   color: var(--color-text-primary);
 }
 
+.summary-top-app {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .summary-sub {
-  margin-left: 4px;
+  margin-left: 2px;
+  flex-shrink: 0;
   font-size: var(--font-xs);
   font-weight: 400;
   color: var(--color-text-secondary);
@@ -1110,20 +1121,6 @@ onMounted(async () => {
   gap: 12px;
   flex: 1;
   min-width: 0;
-}
-
-.app-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
-  background: var(--color-accent-light);
-  color: var(--color-accent);
-  font-size: var(--font-xs);
-  font-weight: 700;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
 }
 
 .app-info {
