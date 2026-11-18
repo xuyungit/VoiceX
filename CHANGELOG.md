@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.19.3] - 2026-11-18
+
+### Fixed
+
+- **Windows Remote Desktop dictation** — use a larger microphone buffer in RDP sessions to prevent dropped audio.
+- **Recording playback** — save recordings correctly from microphones using 44.1 kHz and other sample rates that require conversion before Opus encoding.
+- **History** — keep the recording when realtime recognition returns no text, so it can be played back or transcribed again.
+
 ## [0.19.2] - 2026-11-18
 
 ### Added
