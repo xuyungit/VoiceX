@@ -62,7 +62,7 @@ pub fn run_playback_with_rates(
     handle_slot: Arc<Mutex<Option<PlaybackHandle>>>,
     speaking: Arc<AtomicBool>,
 ) {
-    let mut resampler = super::resample::LinearResampler::new(stream_rate, sample_rate);
+    let mut resampler = crate::audio::resample::LinearResampler::new(stream_rate, sample_rate);
     let mut samples_out = Vec::new();
     let playback = match Playback::open(sample_rate, gain, prebuffer) {
         Ok(playback) => playback,

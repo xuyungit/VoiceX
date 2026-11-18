@@ -174,6 +174,43 @@ async fn run_regressions(directory: &Path) {
     assert!(error.contains("解码"), "{error}");
     assert!(!error.contains("Qwen"));
 
+    settings.asr_provider_type = "qwen".into();
+    crate::storage::save_settings(&settings).unwrap();
+    for (index, asr_finishes_first) in [(4, false), (5, true)] {
+        let path = directory.join(format!("realtime_{index}.wav"));
+        write_wav(&path, 1_000);
+        let mut state = AppState::new();
+        state.handle_hotkey_pressed();
+        controller.handle_audio_started_state(
+            &mut state,
+            16_000,
+            1,
+            Some(path.to_string_lossy().into()),
+        );
+        if asr_finishes_first {
+            controller.on_asr_stream_finished_state(&mut state);
+            assert!(state.is_recording && state.terminal_error_message.is_none());
+        }
+        state.transition_to_finalizing();
+        controller.handle_audio_stopped_state(
+            &mut state,
+            Some(path.to_string_lossy().into()),
+            None,
+            Some(1_000),
+        );
+        if !asr_finishes_first {
+            controller.on_asr_stream_finished_state(&mut state);
+        }
+        assert_eq!(state.terminal_error_message.as_deref(), Some("未识别到有效语音。"));
+        let rows = wait_for_history(index).await;
+        assert!(rows.iter().any(|row| {
+            row.error_code == crate::services::history_service::HISTORY_ERROR_ASR_FAILED
+                && row.audio_path.as_deref() == path.to_str()
+        }));
+        controller.on_error_display_done_state(&mut state);
+        assert!(path.exists());
+    }
+
     let logs = std::fs::read_to_string(log_path).unwrap();
     assert!(
         logs.contains(raw_body),

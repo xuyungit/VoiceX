@@ -28,7 +28,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
-use super::{device::AudioInputDeviceManager, AudioChunker};
+use super::{device::AudioInputDeviceManager, resample::LinearResampler, AudioChunker};
 
 const AUDIO_VIZ_BAND_EDGES: [f32; 9] = [
     120.0, 220.0, 400.0, 700.0, 1200.0, 2000.0, 3200.0, 4800.0, 7200.0,
@@ -82,7 +82,6 @@ pub struct AudioRecordingResult {
 struct ActiveCapture {
     shared: Arc<CaptureShared>,
     stream: SendableStream,
-    file_path: Option<PathBuf>,
     sample_rate: u32,
     channels: u16,
 }
@@ -134,13 +133,18 @@ impl CaptureShared {
         }
     }
 
-    fn dispatch(&self, data: &[u8]) {
+    fn dispatch(&self, samples: &[i16]) {
         if !self.running.load(Ordering::SeqCst) {
             return;
         }
 
+        let mut data = Vec::with_capacity(samples.len() * 2);
+        for sample in samples {
+            data.extend_from_slice(&sample.to_le_bytes());
+        }
+
         if let Ok(mut chunker) = self.chunker.lock() {
-            let chunks = chunker.append(data);
+            let chunks = chunker.append(&data);
             drop(chunker);
 
             if let Ok(mut tx_guard) = self.tx.lock() {
@@ -153,20 +157,27 @@ impl CaptureShared {
         }
 
         if let Ok(mut sink_guard) = self.sink.lock() {
-            if let Some(sink) = sink_guard.as_mut() {
-                let _ = sink.write(data);
+            let failed = sink_guard.as_mut().and_then(|sink| {
+                sink.write(samples)
+                    .err()
+                    .map(|error| (sink.path.clone(), error))
+            });
+            if let Some((path, error)) = failed {
+                log::error!("Failed to write recording {}: {}", path.display(), error);
+                drop(sink_guard.take());
+                remove_incomplete_recording(&path);
             }
         }
 
         if let Ok(mut wav_guard) = self.wav_sink.lock() {
             if let Some(wav) = wav_guard.as_mut() {
-                let _ = wav.write(data);
+                let _ = wav.write(&data);
             }
         }
 
         if let Ok(mut refinement_guard) = self.refinement_pcm.lock() {
             if let Some(buffer) = refinement_guard.as_mut() {
-                buffer.extend_from_slice(data);
+                buffer.extend_from_slice(&data);
             }
         }
     }
@@ -240,9 +251,10 @@ struct OggOpusSink {
     path: PathBuf,
     writer: PacketWriter<'static, File>,
     encoder: OpusEncoder,
+    resampler: Option<LinearResampler>,
     pcm_buffer: Vec<i16>,
     frame_samples: usize,
-    input_sample_rate: u32,
+    encoder_sample_rate: u32,
     granule_pos: u64,
     stream_serial: u32,
     first_packet_logged: bool,
@@ -314,9 +326,9 @@ impl OggOpusSink {
             AudioCaptureError::StartFailed(format!("Failed to create recording dir: {}", e))
         })?;
 
-        let filename = format!("recording-{}.opus", Utc::now().format("%Y%m%d-%H%M%S"));
+        let filename = format!("recording-{}.opus", Utc::now().format("%Y%m%d-%H%M%S%.3f"));
         let path = dir.join(filename);
-        let file = File::create(&path)
+        let file = File::create_new(&path)
             .map_err(|e| AudioCaptureError::StartFailed(format!("Failed to create file: {}", e)))?;
 
         let opus_rate = match sample_rate {
@@ -326,14 +338,17 @@ impl OggOpusSink {
             24000 => OpusSampleRate::Hz24000,
             _ => OpusSampleRate::Hz48000,
         };
+        let encoder_sample_rate = opus_rate as u32;
+        let resampler = (sample_rate != encoder_sample_rate)
+            .then(|| LinearResampler::new(sample_rate, encoder_sample_rate));
 
         let encoder =
             OpusEncoder::new(opus_rate, Channels::Mono, Application::Audio).map_err(|e| {
                 AudioCaptureError::StartFailed(format!("Failed to init Opus encoder: {}", e))
             })?;
         let lookahead = encoder.lookahead().unwrap_or(0);
-        let pre_skip =
-            ((lookahead as u64) * 48000 / sample_rate as u64).min(u16::MAX as u64) as u16;
+        let pre_skip = ((lookahead as u64) * 48_000 / u64::from(encoder_sample_rate))
+            .min(u64::from(u16::MAX)) as u16;
 
         let mut writer: PacketWriter<'static, File> = PacketWriter::new(file);
         let stream_serial = rand::thread_rng().next_u32();
@@ -370,9 +385,10 @@ impl OggOpusSink {
             path,
             writer,
             encoder,
+            resampler,
             pcm_buffer: Vec::with_capacity(960),
-            frame_samples: (sample_rate as usize / 50).max(1), // 20ms frames
-            input_sample_rate: sample_rate,
+            frame_samples: encoder_sample_rate as usize / 50, // 20ms frames
+            encoder_sample_rate,
             granule_pos: 0,
             stream_serial,
             first_packet_logged: false,
@@ -382,18 +398,20 @@ impl OggOpusSink {
         })
     }
 
-    fn write(&mut self, data: &[u8]) -> Result<(), AudioCaptureError> {
-        if data.len() % 2 != 0 {
-            return Err(AudioCaptureError::StartFailed(
-                "PCM chunk not aligned to i16".into(),
-            ));
-        }
-
-        for chunk in data.chunks_exact(2) {
+    fn write(&mut self, samples: &[i16]) -> Result<(), AudioCaptureError> {
+        if let Some(resampler) = &mut self.resampler {
+            let input: Vec<_> = samples.iter().copied().map(f32::from).collect();
+            let mut output = Vec::new();
+            resampler.process(&input, &mut output);
             self.pcm_buffer
-                .push(i16::from_le_bytes([chunk[0], chunk[1]]));
+                .extend(output.into_iter().map(|sample| sample.round() as i16));
+        } else {
+            self.pcm_buffer.extend_from_slice(samples);
         }
+        self.encode_buffered_frames()
+    }
 
+    fn encode_buffered_frames(&mut self) -> Result<(), AudioCaptureError> {
         while self.pcm_buffer.len() >= self.frame_samples {
             let frame: Vec<i16> = self.pcm_buffer.drain(..self.frame_samples).collect();
             self.encode_and_write(&frame)?;
@@ -410,8 +428,8 @@ impl OggOpusSink {
             .map_err(|e| AudioCaptureError::StartFailed(format!("Opus encode failed: {}", e)))?;
         output.truncate(len);
 
-        // Opus granule position counts 48k samples; scale from 16k input.
-        let frame_samples_48k = (frame.len() as u64) * 48000 / (self.input_sample_rate as u64);
+        // Ogg Opus granule positions always count 48 kHz samples.
+        let frame_samples_48k = (frame.len() as u64) * 48_000 / u64::from(self.encoder_sample_rate);
         let next_granule = self.granule_pos + frame_samples_48k;
 
         let end_info = if self.packet_count % 20 == 19 {
@@ -440,11 +458,17 @@ impl OggOpusSink {
     }
 
     fn finish(mut self) -> Result<(PathBuf, u64), AudioCaptureError> {
+        if let Some(resampler) = &mut self.resampler {
+            let mut output = Vec::new();
+            resampler.finish(&mut output);
+            self.pcm_buffer
+                .extend(output.into_iter().map(|sample| sample.round() as i16));
+            self.encode_buffered_frames()?;
+        }
         if !self.pcm_buffer.is_empty() {
-            let mut frame = self.pcm_buffer.clone();
+            let mut frame = std::mem::take(&mut self.pcm_buffer);
             frame.resize(self.frame_samples, 0);
             self.encode_and_write(&frame)?;
-            self.pcm_buffer.clear();
         }
 
         let (last_packet, granule, _) = self.pending_packet.take().ok_or_else(|| {
@@ -469,6 +493,16 @@ impl OggOpusSink {
             .len();
 
         Ok((self.path, bytes))
+    }
+}
+
+fn remove_incomplete_recording(path: &Path) {
+    if let Err(error) = std::fs::remove_file(path) {
+        log::warn!(
+            "Failed to remove incomplete recording {}: {}",
+            path.display(),
+            error
+        );
     }
 }
 
@@ -525,6 +559,15 @@ impl AudioCaptureService {
         let device = AudioInputDeviceManager::resolve_device(self.preferred_device_uid.as_deref())?;
         let output_channels = self.config.channels;
         let (config, sample_format) = Self::select_config(&device, output_channels)?;
+        #[cfg(target_os = "windows")]
+        let config = {
+            let session_protocol = windows_session_protocol();
+            log::info!("Windows audio session protocol: {:?}", session_protocol);
+            StreamConfig {
+                buffer_size: windows_input_buffer_size(config.sample_rate.0, session_protocol),
+                ..config
+            }
+        };
         let input_channels = config.channels;
         let device_name = device.name().unwrap_or_else(|_| "Unknown device".into());
 
@@ -582,16 +625,17 @@ impl AudioCaptureService {
         self.active = Some(ActiveCapture {
             shared,
             stream,
-            file_path: file_path.clone(),
             sample_rate: config.sample_rate.0,
             channels: output_channels,
         });
 
-        log::debug!(
-            "Audio capture started at {} Hz ({} ch in -> {} ch out) on device '{}'",
+        log::info!(
+            "Audio input opened ({} Hz, {} ch in -> {} ch out, format={:?}, buffer={:?}, device={:?})",
             config.sample_rate.0,
             input_channels,
             output_channels,
+            sample_format,
+            config.buffer_size,
             device_name
         );
 
@@ -610,10 +654,10 @@ impl AudioCaptureService {
         let ActiveCapture {
             shared,
             stream,
-            file_path,
             sample_rate,
             channels,
         } = active;
+        let elapsed = shared.start_instant.elapsed();
 
         // Pause the stream before dropping to ensure proper device release on macOS
         if let Err(e) = stream.0.pause() {
@@ -630,17 +674,23 @@ impl AudioCaptureService {
         };
 
         let mut bytes_written = 0;
-        let mut path = file_path;
+        let mut path = None;
         let mut refinement_path = None;
 
         if let Some(sink) = sink {
+            let sink_path = sink.path.clone();
             match sink.finish() {
                 Ok((p, bytes)) => {
                     path = Some(p);
                     bytes_written = bytes;
                 }
                 Err(err) => {
-                    log::error!("Failed to finalize audio file: {}", err);
+                    log::error!(
+                        "Failed to finalize audio file {}: {}",
+                        sink_path.display(),
+                        err
+                    );
+                    remove_incomplete_recording(&sink_path);
                 }
             }
         }
@@ -669,10 +719,11 @@ impl AudioCaptureService {
             }
         }
 
-        log::debug!(
-            "Audio capture stopped (duration {} ms, bytes {})",
+        log::info!(
+            "Audio input timing (elapsed {} ms, captured {} ms, frames {})",
+            elapsed.as_millis(),
             duration_ms,
-            bytes_written
+            samples
         );
 
         Ok(AudioRecordingResult {
@@ -1082,12 +1133,7 @@ where
 
     shared.increment_samples(frames);
 
-    let mut bytes = Vec::with_capacity(mono.len() * 2);
-    for sample in mono {
-        bytes.extend_from_slice(&sample.to_le_bytes());
-    }
-
-    shared.dispatch(&bytes);
+    shared.dispatch(&mono);
 }
 
 fn compute_visualization_bands(samples: &[i16], sample_rate: u32, level: f32) -> [f32; 8] {
@@ -1180,6 +1226,57 @@ fn dft_bin(samples: &[f32], bin: usize) -> (f32, f32) {
 impl Default for AudioCaptureService {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_session_protocol() -> Option<u16> {
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTSClientProtocolType, WTSFreeMemory, WTSQuerySessionInformationW, WTS_CURRENT_SERVER_HANDLE,
+        WTS_CURRENT_SESSION,
+    };
+
+    let mut buffer = std::ptr::null_mut();
+    let mut bytes = 0;
+    // WTS owns the returned USHORT buffer until WTSFreeMemory is called.
+    let success = unsafe {
+        WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE,
+            WTS_CURRENT_SESSION,
+            WTSClientProtocolType,
+            &mut buffer,
+            &mut bytes,
+        )
+    };
+    if success == 0 {
+        log::warn!(
+            "Failed to query Windows audio session protocol: {}",
+            std::io::Error::last_os_error()
+        );
+        return None;
+    }
+    if buffer.is_null() || bytes != std::mem::size_of::<u16>() as u32 {
+        if !buffer.is_null() {
+            unsafe { WTSFreeMemory(buffer.cast()) };
+        }
+        log::warn!("Invalid Windows audio session protocol response ({} bytes)", bytes);
+        return None;
+    }
+
+    let protocol = unsafe { buffer.read() };
+    unsafe { WTSFreeMemory(buffer.cast()) };
+    Some(protocol)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_input_buffer_size(sample_rate: u32, session_protocol: Option<u16>) -> cpal::BufferSize {
+    // WTSClientProtocolType returns 2 for RDP. The larger WASAPI buffer
+    // provides capacity for redirected audio arriving in bursts.
+    const RDP_PROTOCOL: u16 = 2;
+    if session_protocol == Some(RDP_PROTOCOL) {
+        cpal::BufferSize::Fixed(sample_rate / 2)
+    } else {
+        cpal::BufferSize::Default
     }
 }
 
@@ -1294,6 +1391,25 @@ pub enum AudioCaptureError {
 }
 
 #[cfg(test)]
+#[test]
+fn only_rdp_uses_the_larger_windows_input_buffer() {
+    assert_eq!(
+        windows_input_buffer_size(44_100, Some(2)),
+        cpal::BufferSize::Fixed(22_050)
+    );
+    assert_eq!(
+        windows_input_buffer_size(48_000, Some(2)),
+        cpal::BufferSize::Fixed(24_000)
+    );
+    for session_protocol in [Some(0), Some(1), None] {
+        assert_eq!(
+            windows_input_buffer_size(44_100, session_protocol),
+            cpal::BufferSize::Default
+        );
+    }
+}
+
+#[cfg(test)]
 mod opus_finalization_tests {
     use super::*;
     use ogg::reading::PacketReader;
@@ -1304,7 +1420,7 @@ mod opus_finalization_tests {
         let key = std::env::var("DEEPSEEK_API_KEY").unwrap();
         let dir = std::env::temp_dir().join(format!("voicex-ogg-live-{}", uuid::Uuid::new_v4()));
         let mut sink = OggOpusSink::create(&dir, 16_000).unwrap();
-        sink.write(&vec![0; 16_000 * 2]).unwrap();
+        sink.write(&vec![0; 16_000]).unwrap();
         let (path, _) = sink.finish().unwrap();
         let result = crate::asr::DeepSeekTranscriptionClient::new(key).transcribe_file(&path).await;
         std::fs::remove_dir_all(dir).unwrap();
@@ -1318,7 +1434,7 @@ mod opus_finalization_tests {
         for samples in [1, 320, 320 * 19, 320 * 20, 320 * 21 + 17] {
             let dir = std::env::temp_dir().join(format!("voicex-ogg-test-{}", uuid::Uuid::new_v4()));
             let mut sink = OggOpusSink::create(&dir, 16_000).unwrap();
-            sink.write(&vec![0; samples * 2]).unwrap();
+            sink.write(&vec![0; samples]).unwrap();
             let (path, _) = sink.finish().unwrap();
             let mut reader = PacketReader::new(File::open(&path).unwrap());
             let mut packets = Vec::new();
@@ -1329,6 +1445,50 @@ mod opus_finalization_tests {
             let decoded = crate::asr::ogg_decoder::decode_ogg_opus_to_pcm16k(&path).unwrap();
             assert!(!decoded.is_empty());
             std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn recording_resamples_unsupported_device_rates_across_callbacks() {
+        for rate in [44_100, 48_000, 96_000] {
+            for sample_count in [1, rate / 50, rate] {
+                let dir =
+                    std::env::temp_dir().join(format!("voicex-ogg-test-{}", uuid::Uuid::new_v4()));
+                let mut sink = OggOpusSink::create(&dir, rate).unwrap();
+                let input: Vec<_> = (0..sample_count)
+                    .map(|index| {
+                        (12_000.0 * (TAU * 440.0 * index as f32 / rate as f32).cos()) as i16
+                    })
+                    .collect();
+                for chunk in input.chunks(127) {
+                    sink.write(chunk).unwrap();
+                }
+
+                let (path, _) = sink.finish().unwrap();
+                let mut reader = PacketReader::new(File::open(&path).unwrap());
+                let head = reader.read_packet().unwrap().unwrap();
+                assert_eq!(&head.data[12..16], &rate.to_le_bytes());
+                assert_eq!(u16::from_le_bytes([head.data[10], head.data[11]]), 312);
+                reader.read_packet().unwrap().unwrap(); // OpusTags
+                let expected_packets = sample_count.div_ceil(rate / 50);
+                let mut packet_count = 0;
+                while let Some(packet) = reader.read_packet().unwrap() {
+                    packet_count += 1;
+                    assert!(!packet.data.is_empty());
+                    assert_eq!(packet.last_in_stream(), packet_count == expected_packets);
+                    if packet.last_in_stream() {
+                        assert_eq!(packet.absgp_page(), u64::from(expected_packets) * 960);
+                    }
+                }
+                assert_eq!(packet_count, expected_packets);
+                drop(reader);
+                let pcm = crate::asr::ogg_decoder::decode_ogg_opus_to_pcm16k(&path).unwrap();
+                assert!(!pcm.is_empty());
+                if sample_count == rate {
+                    assert!(pcm.iter().any(|&byte| byte != 0));
+                }
+                std::fs::remove_dir_all(dir).unwrap();
+            }
         }
     }
 }

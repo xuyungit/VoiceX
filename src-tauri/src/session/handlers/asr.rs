@@ -315,6 +315,15 @@ impl SessionController {
             log::debug!("Inject skip: injection already in progress");
             return;
         }
+        if state.is_recording {
+            log::debug!("Inject skip: recording still running");
+            return;
+        }
+        if state.session_start.is_some() && state.session_audio_path.is_some() {
+            // AudioStopped replaces the provisional path with the save result.
+            log::debug!("Inject defer: waiting for recording to finalize");
+            return;
+        }
         if state.asr_refinement_in_progress {
             log::debug!("Inject skip: ASR refinement still in progress");
             return;
@@ -333,33 +342,10 @@ impl SessionController {
                 }
             }
         }
-        if !state.has_final_result {
-            log::debug!("Inject skip: no final result yet");
-            if state.asr_stream_finished
-                && (state.session_state == HotkeySessionState::Finalizing
-                    || state.session_state == HotkeySessionState::HandsFree)
-            {
-                log::info!("ASR finished with no final result; closing HUD");
-                self.discard_session_audio_file(state, "no_final_result");
-                self.discard_session_refinement_audio_file(state, "no_final_result");
-                self.hide_hud_and_reset_state(state);
-            }
-            return;
-        }
-        if state.is_recording {
-            log::debug!("Inject skip: recording still running");
-            return;
-        }
-        if state.session_final_text.is_empty() {
-            log::debug!("Inject skip: final text empty");
-            if state.asr_stream_finished
-                && (state.session_state == HotkeySessionState::Finalizing
-                    || state.session_state == HotkeySessionState::HandsFree)
-            {
-                log::info!("ASR finished with empty text; closing HUD");
-                self.discard_session_audio_file(state, "empty_final_text");
-                self.discard_session_refinement_audio_file(state, "empty_final_text");
-                self.hide_hud_and_reset_state(state);
+        if !state.has_final_result || state.session_final_text.trim().is_empty() {
+            if state.asr_stream_finished && state.session_state == HotkeySessionState::Finalizing {
+                log::info!("Realtime ASR finished without recognized text");
+                self.fail_asr_with_recording_state(state, "未识别到有效语音。".into());
             }
             return;
         }
@@ -919,14 +905,14 @@ impl SessionController {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Batch ASR skipped, failed to load settings: {}", e);
-                self.fail_batch_asr_state(state, "无法加载设置，请稍后重试。".to_string());
+                self.fail_asr_with_recording_state(state, "无法加载设置，请稍后重试。".to_string());
                 return;
             }
         };
         let mut config = AsrConfig::from(&settings);
         if let Err(failure) = config.validate_for_recognition(crate::asr::AsrPhase::Finalizing) {
             failure.log("Batch ASR configuration validation failed");
-            self.fail_batch_asr_state(state, failure.display_message);
+            self.fail_asr_with_recording_state(state, failure.display_message);
             return;
         }
         state.session_asr_model_name =
@@ -936,7 +922,7 @@ impl SessionController {
             Some(path) => path,
             None => {
                 log::warn!("Batch ASR skipped: no usable audio path available");
-                self.fail_batch_asr_state(state, "录音文件缺失，请重试。".to_string());
+                self.fail_asr_with_recording_state(state, "录音文件缺失，请重试。".to_string());
                 return;
             }
         };
@@ -1005,7 +991,7 @@ impl SessionController {
             let provider = crate::storage::get_settings()
                 .ok()
                 .map(|settings| AsrConfig::from(&settings).provider_type);
-            self.fail_batch_asr_state(
+            self.fail_asr_with_recording_state(
                 state,
                 build_batch_asr_hud_message(provider, "Batch ASR returned empty result"),
             );
@@ -1040,14 +1026,14 @@ impl SessionController {
         let provider = crate::storage::get_settings()
             .ok()
             .map(|settings| AsrConfig::from(&settings).provider_type);
-        self.fail_batch_asr_state(
+        self.fail_asr_with_recording_state(
             state,
             build_batch_asr_hud_message(provider, reason.as_str()),
         );
     }
 
-    fn fail_batch_asr_state(&self, state: &mut AppState, message: String) {
-        if state.session_audio_path.is_some() {
+    fn fail_asr_with_recording_state(&self, state: &mut AppState, message: String) {
+        if let Some(path) = state.session_audio_path.take() {
             let history = crate::services::history_service::HistoryService::new();
             history.persist_failed_asr(
                 crate::services::history_service::HistoryService::resolve_mode(
@@ -1056,17 +1042,12 @@ impl SessionController {
                     false,
                 ),
                 state.session_duration_ms,
-                state
-                    .session_audio_path
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().to_string()),
+                Some(path.to_string_lossy().into()),
                 state.session_asr_model_name.clone(),
                 message.clone(),
                 self.app_handle(),
             );
-            // Hand off the audio file to persisted history so cleanup does not remove it.
-            state.session_audio_path = None;
-            self.discard_session_refinement_audio_file(state, "batch_asr_failed_history_persisted");
+            self.discard_session_refinement_audio_file(state, "asr_failed_history");
         }
 
         state.terminal_error_message = Some(message.clone());

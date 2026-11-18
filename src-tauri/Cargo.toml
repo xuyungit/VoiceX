@@ -170,6 +170,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_Accessibility",
     "Win32_Foundation",
     "Win32_System_Threading",
+    "Win32_System_RemoteDesktop",
     "Win32_Networking_WinHttp",
     # Selected-text reading: clipboard snapshot/restore needs the sequence
     # number and per-format enumeration, neither of which `arboard` exposes.

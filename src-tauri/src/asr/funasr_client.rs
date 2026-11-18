@@ -293,6 +293,7 @@ async fn read_events(
 ) -> Result<(), AsrError> {
     let mut committed_text = String::new();
     let mut pending_partial = String::new();
+    let mut result_events = 0u64;
 
     while let Some(message) = tokio::select! {
         _ = cancel.cancelled() => None,
@@ -318,6 +319,7 @@ async fn read_events(
 
                 match event_name {
                     "result-generated" => {
+                        result_events += 1;
                         if let Some(sentence) = payload
                             .get("payload")
                             .and_then(|v| v.get("output"))
@@ -362,6 +364,11 @@ async fn read_events(
                             pending_partial.clear();
                             on_event(AsrEvent::committed(committed_text.clone()));
                         }
+                        log::info!(
+                            "DashScope inference task finished (result_events={}, text_chars={})",
+                            result_events,
+                            committed_text.chars().count()
+                        );
                         return Ok(());
                     }
                     "task-failed" => {
@@ -418,6 +425,7 @@ async fn write_audio_and_finish(
     ws_write: &mut futures_util::stream::SplitSink<crate::network::WsStream, Message>,
     task_id: &str,
 ) -> Result<(), AsrError> {
+    let mut sent_bytes = 0u64;
     while let Some(chunk) = tokio::select! {
         _ = cancel.cancelled() => None,
         next = audio_rx.recv() => next,
@@ -426,6 +434,7 @@ async fn write_audio_and_finish(
         if pcm.is_empty() {
             continue;
         }
+        let bytes = pcm.len() as u64;
         ws_write
             .send(Message::Binary(pcm.into()))
             .await
@@ -433,6 +442,7 @@ async fn write_audio_and_finish(
                 AsrError::ConnectionFailed(format!("Fun-ASR audio send failed: {}", e))
                     .in_phase(AsrPhase::Streaming)
             })?;
+        sent_bytes += bytes;
     }
 
     if cancel.is_cancelled() {
@@ -456,10 +466,11 @@ async fn write_audio_and_finish(
                 .in_phase(AsrPhase::Finalizing)
         })?;
 
-    log::debug!(
-        "DashScope inference finish-task sent (model={}, stream_rate={})",
+    log::info!(
+        "DashScope inference finish-task sent (model={}, stream_rate={}, sent_audio_ms={})",
         model,
-        stream_rate
+        stream_rate,
+        sent_bytes * 1000 / (2 * u64::from(stream_rate))
     );
     Ok(())
 }

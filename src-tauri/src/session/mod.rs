@@ -1452,22 +1452,21 @@ impl SessionController {
             state.asr_stream_finished
         );
 
-        // If a final already arrived (we treat it as ASR finished), inject immediately.
-        if state.has_final_result && state.asr_stream_finished {
+        // A stream can finish while capture is still running. Handle its
+        // result once the finalized recording is available.
+        if state.asr_stream_finished {
             self.maybe_inject_final_state(state);
             return;
         }
 
         // Wait for ASR stream-finished; schedule a fallback in case the server never closes.
-        if !state.asr_stream_finished {
-            let controller = self.clone();
-            let handle = tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(ASR_FINAL_WAIT_MS)).await;
-                controller.send_message(SessionMessage::AsrFinalTimeout);
-            });
-            if let Ok(mut guard) = self.asr_final_timeout.lock() {
-                *guard = Some(handle);
-            }
+        let controller = self.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(ASR_FINAL_WAIT_MS)).await;
+            controller.send_message(SessionMessage::AsrFinalTimeout);
+        });
+        if let Ok(mut guard) = self.asr_final_timeout.lock() {
+            *guard = Some(handle);
         }
     }
 
@@ -1783,6 +1782,22 @@ mod tests {
             Some("active.wav".into())
         );
         assert_eq!(state.session_duration_ms, Some(1_500));
+    }
+
+    #[test]
+    fn finished_asr_waits_for_the_recording_save_result() {
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        state.session_state = HotkeySessionState::Finalizing;
+        controller.handle_audio_started_state(&mut state, 44_100, 1, Some("active.opus".into()));
+        state.has_final_result = true;
+        state.session_final_text = "Test recording".into();
+        state.asr_stream_finished = true;
+
+        controller.maybe_inject_final_state(&mut state);
+
+        assert!(!state.injection_in_progress);
+        assert!(!state.final_injected);
     }
 
     #[test]

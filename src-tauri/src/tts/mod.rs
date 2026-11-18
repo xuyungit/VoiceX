@@ -18,7 +18,6 @@ pub mod controller;
 pub mod decode;
 pub mod deepseek;
 pub mod edge;
-mod resample;
 pub mod llm_stage;
 #[cfg(target_os = "macos")]
 pub mod mac_say;

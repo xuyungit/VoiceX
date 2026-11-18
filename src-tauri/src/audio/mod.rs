@@ -7,6 +7,7 @@ mod capture;
 mod chunker;
 mod device;
 pub mod output_mute;
+pub(crate) mod resample;
 
 use std::{path::PathBuf, sync::Mutex};
 

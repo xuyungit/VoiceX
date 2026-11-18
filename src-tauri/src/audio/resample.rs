@@ -1,15 +1,11 @@
-/// Linear-interpolation resampler from the provider's fixed 24 kHz to the
-/// device rate. Stateful across chunks — the last sample of one chunk seeds
-/// the interpolation into the next, so chunk boundaries are inaudible.
+/// Streaming linear interpolation with a sample position shared across chunks.
 ///
-/// This interpolator has no anti-alias filter. Callers should prefer device
-/// rates at or above the source rate when negotiating playback.
+/// This interpolator has no anti-alias filter.
 pub(crate) struct LinearResampler {
-    /// Source samples advanced per output sample.
-    step: f64,
-    /// Position of the next output sample, in source samples, relative to the
-    /// start of the current chunk. May be negative fractionally into `prev`.
-    pos: f64,
+    src_rate: i64,
+    dst_rate: i64,
+    /// Position relative to the chunk, in units of 1/dst_rate source samples.
+    pos: i64,
     /// Last sample of the previous chunk, addressed as index -1.
     prev: Option<f32>,
 }
@@ -17,15 +13,16 @@ pub(crate) struct LinearResampler {
 impl LinearResampler {
     pub(crate) fn new(src_rate: u32, dst_rate: u32) -> Self {
         Self {
-            step: f64::from(src_rate) / f64::from(dst_rate),
-            pos: 0.0,
+            src_rate: i64::from(src_rate),
+            dst_rate: i64::from(dst_rate),
+            pos: 0,
             prev: None,
         }
     }
 
     /// Whether `process` would just copy its input through.
     pub(crate) fn is_identity(&self) -> bool {
-        self.step == 1.0
+        self.src_rate == self.dst_rate
     }
 
     pub(crate) fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
@@ -39,10 +36,9 @@ impl LinearResampler {
         }
 
         loop {
-            let index = self.pos.floor();
-            let frac = (self.pos - index) as f32;
-            let index = index as isize;
-            let at = |i: isize| -> Option<f32> {
+            let index = self.pos.div_euclid(self.dst_rate);
+            let frac = self.pos.rem_euclid(self.dst_rate) as f32 / self.dst_rate as f32;
+            let at = |i: i64| -> Option<f32> {
                 if i < 0 {
                     self.prev
                 } else {
@@ -55,10 +51,19 @@ impl LinearResampler {
                 break;
             };
             output.push(a + (b - a) * frac);
-            self.pos += self.step;
+            self.pos += self.src_rate;
         }
 
-        self.pos -= input.len() as f64;
+        self.pos -= input.len() as i64 * self.dst_rate;
         self.prev = input.last().copied();
+    }
+
+    /// Emit the remaining samples by extending the last input sample.
+    pub(crate) fn finish(&mut self, output: &mut Vec<f32>) {
+        output.clear();
+        if let Some(last) = self.prev {
+            self.process(&[last], output);
+            self.prev = None;
+        }
     }
 }

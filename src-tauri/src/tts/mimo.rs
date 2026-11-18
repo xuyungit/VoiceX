@@ -31,11 +31,11 @@ use super::cloud_playback::{self, PieceStream};
 use super::decode::RECV_POLL;
 use super::playback::{negotiate_sample_rate, Playback, PlaybackHandle};
 use super::render::{require_api_key, PieceSink};
-use super::resample::LinearResampler;
 use super::{
     cloud_http_client, log_cloud_retry, log_event, piece_limit_for, split_for_backend, CancelToken,
     CloudStreamError, SpeechProgress, TtsBackend, TtsError, TtsRequest, TtsStatus, TtsVoice,
 };
+use crate::audio::resample::LinearResampler;
 
 const ENDPOINT: &str = "https://api.xiaomimimo.com/v1/chat/completions";
 
