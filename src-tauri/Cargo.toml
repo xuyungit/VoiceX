@@ -184,6 +184,7 @@ windows-sys = { version = "0.59", features = [
     # App icon extraction via Shell / GDI without system error dialogs.
     "Win32_UI_Shell",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_Diagnostics_Debug",
 ] }
 # Selected-text reading through UI Automation. COM interfaces are only in the
@@ -199,6 +200,7 @@ windows = { version = "0.61", features = [
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
+    "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_Devices_FunctionDiscovery",
 ] }

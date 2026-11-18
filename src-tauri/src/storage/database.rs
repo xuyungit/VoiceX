@@ -186,7 +186,6 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     migrate_settings_blob(&conn);
 
     crate::post_edit::records::create_schema(&conn)?;
-    crate::app_icons::create_schema(&conn)?;
     super::history_search::init(path)?;
     let _ = DB.set(Mutex::new(conn));
     log::info!("Database initialized at {:?}", path);
@@ -2334,7 +2333,7 @@ fn set_user_config_value(key: &str, value: &str) -> Result<(), StorageError> {
     })
 }
 
-fn ensure_column(
+pub(crate) fn ensure_column(
     conn: &Connection,
     table: &str,
     column: &str,

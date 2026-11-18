@@ -32,6 +32,7 @@ interface RecentTargetApp {
   displayName: string | null
   processName: string | null
   bundleId: string | null
+  appUserModelId?: string | null
   executablePath: string | null
   lastSeenAt: string | null
 }
@@ -291,8 +292,9 @@ const injectionAppRows = computed<InjectionAppRow[]>(() => {
       matchKind: overrideItem.matchKind,
       matchValue: overrideItem.matchValue,
       displayName: overrideItem.appName,
-      processName: overrideItem.matchKind === 'process_name' ? overrideItem.appName : null,
+      processName: overrideItem.matchKind === 'process_name' ? overrideItem.matchValue : null,
       bundleId: overrideItem.matchKind === 'bundle_id' ? overrideItem.matchValue : null,
+      appUserModelId: overrideItem.matchKind === 'app_user_model_id' ? overrideItem.matchValue : null,
       executablePath:
         overrideItem.matchKind === 'executable_path' ? overrideItem.matchValue : null,
       lastSeenAt: null,
@@ -515,6 +517,9 @@ function updateSkipClipboardRestore(app: InjectionAppRow, checked: boolean) {
 }
 
 function getAppIdentityLabel(app: InjectionAppRow) {
+  if (app.appUserModelId) {
+    return t('input.appUserModelIdValue', { value: app.appUserModelId })
+  }
   if (app.bundleId) {
     return t('input.bundleIdValue', { value: app.bundleId })
   }
@@ -758,7 +763,8 @@ onBeforeUnmount(() => {
                 <AppIcon
                   class="override-badge"
                   :platform="app.platform"
-                  :app-key="app.bundleId ?? app.processName ?? app.matchValue"
+                  :app-key="app.bundleId ?? app.processName"
+                  :app-user-model-id="app.appUserModelId"
                   :bundle-id="app.bundleId"
                   :executable-path="app.executablePath"
                   :app-name="app.appName"

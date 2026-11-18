@@ -334,6 +334,7 @@ const zhCN = {
     skipClipboardRestore: '粘贴后不恢复剪贴板',
     skipClipboardRestoreNote: '适用于远程桌面等剪贴板同步不稳定的场景；开启后剪贴板将保留本次输入的内容，不再恢复粘贴前的内容。',
     bundleIdValue: 'bundle id: {value}',
+    appUserModelIdValue: 'Windows 应用 ID: {value}',
     processNameValue: '进程名: {value}',
     lastCapturedAt: '最近触发于 {time}',
     savedOverride: '已保存的覆盖',

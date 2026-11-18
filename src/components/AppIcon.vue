@@ -9,6 +9,7 @@ const props = withDefaults(
     appKey?: string | null
     bundleId?: string | null
     executablePath?: string | null
+    appUserModelId?: string | null
     size?: 'xs' | 'sm' | 'md'
     fallback?: 'badge' | 'window-svg' | 'none'
   }>(),
@@ -17,6 +18,7 @@ const props = withDefaults(
     appKey: null,
     bundleId: null,
     executablePath: null,
+    appUserModelId: null,
     size: 'md',
     fallback: 'badge',
   },
@@ -29,6 +31,7 @@ const query = computed(() => ({
   appKey: props.appKey,
   bundleId: props.bundleId,
   executablePath: props.executablePath,
+  appUserModelId: props.appUserModelId,
   appName: props.appName,
 }))
 

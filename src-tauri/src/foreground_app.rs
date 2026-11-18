@@ -10,6 +10,7 @@ pub struct ForegroundAppInfo {
     pub display_name: Option<String>,
     pub process_name: Option<String>,
     pub bundle_id: Option<String>,
+    pub app_user_model_id: Option<String>,
     pub executable_path: Option<String>,
     pub process_id: u32,
     pub is_self: bool,
@@ -43,6 +44,8 @@ pub struct RecentTargetApp {
     pub display_name: Option<String>,
     pub process_name: Option<String>,
     pub bundle_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_user_model_id: Option<String>,
     pub executable_path: Option<String>,
     pub last_seen_at: String,
 }
@@ -63,10 +66,10 @@ struct AppMatchCandidate {
     match_value: String,
 }
 
-pub fn detect_foreground_app(app: &AppHandle) -> Result<ForegroundAppInfo, String> {
+pub fn detect_foreground_app(_app: &AppHandle) -> Result<ForegroundAppInfo, String> {
     #[cfg(target_os = "macos")]
     {
-        return macos::detect_foreground_app(app);
+        return macos::detect_foreground_app(_app);
     }
 
     #[cfg(target_os = "windows")]
@@ -76,7 +79,6 @@ pub fn detect_foreground_app(app: &AppHandle) -> Result<ForegroundAppInfo, Strin
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = app;
         Err("Foreground app detection is not supported on this platform".to_string())
     }
 }
@@ -96,9 +98,40 @@ fn normalize_match_value(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
+pub(crate) const APP_USER_MODEL_ID_MATCH: &str = "app_user_model_id";
+pub(crate) const APP_USER_MODEL_ID_KEY_PREFIX: &str = "aumid:";
+
+pub(crate) fn packaged_app_id(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let (family, app_id) = value.split_once('!')?;
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    (value.len() <= 130 && family.contains('_') && valid_part(family) && valid_part(app_id))
+        .then_some(value)
+}
+
+pub(crate) fn packaged_app_key(id: &str) -> String {
+    format!(
+        "{APP_USER_MODEL_ID_KEY_PREFIX}{}",
+        normalize_match_value(id)
+    )
+}
+
 fn all_match_candidates(info: &ForegroundAppInfo) -> Vec<AppMatchCandidate> {
     let mut candidates = Vec::new();
     let platform = normalize_platform(&info.platform);
+
+    if let Some(id) = info.packaged_app_id() {
+        candidates.push(AppMatchCandidate {
+            platform: platform.clone(),
+            match_kind: APP_USER_MODEL_ID_MATCH.to_string(),
+            match_value: normalize_match_value(id),
+        });
+    }
 
     if let Some(bundle_id) = info.bundle_id.as_deref() {
         let normalized = normalize_match_value(bundle_id);
@@ -150,6 +183,13 @@ pub(crate) fn clean_app_display_name(platform: &str, raw: &str) -> String {
 }
 
 impl ForegroundAppInfo {
+    pub(crate) fn packaged_app_id(&self) -> Option<&str> {
+        if !self.platform.trim().eq_ignore_ascii_case("windows") {
+            return None;
+        }
+        self.app_user_model_id.as_deref().and_then(packaged_app_id)
+    }
+
     pub fn to_target_app_identity(&self) -> Option<TargetAppIdentity> {
         let platform = normalize_platform(&self.platform);
         let non_empty = |value: Option<&str>| -> Option<String> {
@@ -158,10 +198,11 @@ impl ForegroundAppInfo {
                 .filter(|item| !item.is_empty())
         };
 
-        // macOS bundles carry stable reverse-DNS bundle IDs; on Windows prefer
-        // process_name so versioned install paths (e.g. Squirrel/Electron) fold
-        // into one app entry.
-        let app_key = if platform == "macos" {
+        // Package app IDs distinguish children of the same Windows host.
+        // Keep the executable name for classic apps across versioned installs.
+        let app_key = if let Some(id) = self.packaged_app_id() {
+            Some(packaged_app_key(id))
+        } else if platform == "macos" {
             non_empty(self.bundle_id.as_deref())
                 .or_else(|| non_empty(self.process_name.as_deref()))
                 .or_else(|| non_empty(self.executable_path.as_deref()))
@@ -208,6 +249,7 @@ impl ForegroundAppInfo {
             display_name: self.display_name.clone(),
             process_name: self.process_name.clone(),
             bundle_id: self.bundle_id.clone(),
+            app_user_model_id: self.app_user_model_id.clone(),
             executable_path: self.executable_path.clone(),
             last_seen_at: chrono::Utc::now().to_rfc3339(),
         })
@@ -219,15 +261,22 @@ pub fn match_text_injection_override<'a>(
     overrides: &'a [TextInjectionAppOverride],
 ) -> Option<&'a TextInjectionAppOverride> {
     let candidates = all_match_candidates(app);
-    overrides.iter().rev().find(|override_item| {
+    let mut legacy_match = None;
+    for override_item in overrides.iter().rev() {
         let override_platform = normalize_platform(&override_item.platform);
         let override_value = normalize_match_value(&override_item.match_value);
-        candidates.iter().any(|candidate| {
+        if candidates.iter().any(|candidate| {
             candidate.platform == override_platform
                 && candidate.match_kind == override_item.match_kind
                 && candidate.match_value == override_value
-        })
-    })
+        }) {
+            if override_item.match_kind == APP_USER_MODEL_ID_MATCH {
+                return Some(override_item);
+            }
+            legacy_match.get_or_insert(override_item);
+        }
+    }
+    legacy_match
 }
 
 #[cfg(target_os = "macos")]
@@ -273,6 +322,7 @@ mod macos {
             display_name,
             process_name,
             bundle_id,
+            app_user_model_id: None,
             executable_path,
             process_id,
             is_self: process_id == std::process::id(),
@@ -327,21 +377,28 @@ mod windows {
     use std::time::{Duration, Instant};
 
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, HWND},
+        Foundation::{
+            CloseHandle, APPMODEL_ERROR_NO_APPLICATION, APPMODEL_ERROR_NO_PACKAGE, BOOL,
+            ERROR_SUCCESS, HANDLE, HWND, LPARAM,
+        },
+        Storage::Packaging::Appx::{
+            GetApplicationUserModelId, APPLICATION_USER_MODEL_ID_MAX_LENGTH,
+        },
         System::Threading::{
             OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
             PROCESS_QUERY_LIMITED_INFORMATION,
         },
         UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK},
         UI::WindowsAndMessaging::{
-            DispatchMessageW, GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetMessageW,
-            GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow,
-            TranslateMessage, EVENT_SYSTEM_FOREGROUND, GUITHREADINFO, MSG, WINEVENT_OUTOFCONTEXT,
+            DispatchMessageW, EnumChildWindows, GetClassNameW, GetForegroundWindow,
+            GetGUIThreadInfo, GetMessageW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+            SetForegroundWindow, TranslateMessage, EVENT_SYSTEM_FOREGROUND, GUITHREADINFO, MSG,
+            WINEVENT_OUTOFCONTEXT,
         },
     };
 
     use crate::foreground_app::{
-        is_tray_host_window_class, process_name_from_path, ForegroundAppInfo,
+        is_tray_host_window_class, packaged_app_id, process_name_from_path, ForegroundAppInfo,
     };
 
     /// The last foreground window the user could have been working in, as an
@@ -460,6 +517,70 @@ mod windows {
             && !info.hwndFocus.is_null()
     }
 
+    unsafe fn process_path(process: HANDLE) -> Option<String> {
+        let mut buffer = vec![0u16; 4096];
+        let mut size = buffer.len() as u32;
+        (QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buffer.as_mut_ptr(), &mut size)
+            != 0)
+            .then(|| String::from_utf16_lossy(&buffer[..size as usize]))
+    }
+
+    unsafe fn process_app_id(process: HANDLE) -> Option<String> {
+        let mut buffer = [0u16; APPLICATION_USER_MODEL_ID_MAX_LENGTH as usize + 1];
+        let mut size = buffer.len() as u32;
+        let status = GetApplicationUserModelId(process, &mut size, buffer.as_mut_ptr()) as u32;
+        if status == ERROR_SUCCESS {
+            let id = String::from_utf16_lossy(&buffer[..size.saturating_sub(1) as usize]);
+            return packaged_app_id(&id).map(str::to_owned);
+        }
+        if status != APPMODEL_ERROR_NO_APPLICATION && status != APPMODEL_ERROR_NO_PACKAGE {
+            log::debug!("Could not query the Windows application ID: {status}");
+        }
+        None
+    }
+
+    #[derive(Default)]
+    struct HostedApp {
+        app_id: Option<String>,
+        process_name: Option<String>,
+    }
+
+    // A legacy UWP window can be framed by ApplicationFrameHost.exe. Its
+    // CoreWindow child belongs to the app process with the package identity.
+    unsafe extern "system" fn find_hosted_app(hwnd: HWND, state: LPARAM) -> BOOL {
+        let mut class = [0u16; 64];
+        let length = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+        if length <= 0
+            || !class[..length as usize]
+                .iter()
+                .copied()
+                .eq("Windows.UI.Core.CoreWindow".encode_utf16())
+        {
+            return 1;
+        }
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return 1;
+        }
+        let app_id = process_app_id(process);
+        let name = app_id
+            .as_ref()
+            .and_then(|_| process_path(process))
+            .as_deref()
+            .and_then(process_name_from_path);
+        CloseHandle(process);
+
+        if app_id.is_some() {
+            let result = &mut *(state as *mut HostedApp);
+            result.app_id = app_id;
+            result.process_name = name;
+            return 0;
+        }
+        1
+    }
+
     pub fn detect_foreground_app() -> Result<ForegroundAppInfo, String> {
         unsafe {
             let hwnd = GetForegroundWindow();
@@ -480,35 +601,51 @@ mod windows {
                 ));
             }
 
-            let mut buffer = vec![0u16; 4096];
-            let mut size = buffer.len() as u32;
-            let path_result = QueryFullProcessImageNameW(
-                process,
-                PROCESS_NAME_WIN32,
-                buffer.as_mut_ptr(),
-                &mut size,
-            );
+            let executable_path = process_path(process);
+            let process_name = executable_path.as_deref().and_then(process_name_from_path);
+            let mut display_name = process_name.clone();
+            let app_user_model_id = if process_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case("ApplicationFrameHost.exe"))
+            {
+                let mut hosted = HostedApp::default();
+                EnumChildWindows(
+                    hwnd,
+                    Some(find_hosted_app),
+                    (&mut hosted as *mut HostedApp) as LPARAM,
+                );
+                if hosted.app_id.is_some() {
+                    display_name = hosted.process_name;
+                }
+                hosted.app_id
+            } else {
+                process_app_id(process)
+            };
+            if let Some(id) = app_user_model_id
+                .as_deref()
+                .filter(|_| display_name.is_none())
+            {
+                display_name = id.split_once('_').map(|(name, _)| name.to_owned());
+            }
 
             let close_result = CloseHandle(process);
             if close_result == 0 {
                 log::warn!("Failed to close foreground process handle (pid={process_id})");
             }
 
-            if path_result == 0 {
+            if executable_path.is_none() && app_user_model_id.is_none() {
                 return Err(format!(
                     "Failed to read the foreground process path (pid={process_id})"
                 ));
             }
 
-            let executable_path = String::from_utf16_lossy(&buffer[..size as usize]);
-            let process_name = process_name_from_path(&executable_path);
-
             Ok(ForegroundAppInfo {
                 platform: "Windows".to_string(),
-                display_name: process_name.clone(),
+                display_name,
                 process_name,
                 bundle_id: None,
-                executable_path: Some(executable_path),
+                app_user_model_id,
+                executable_path,
                 process_id,
                 is_self: process_id == std::process::id(),
             })
@@ -518,7 +655,10 @@ mod windows {
 
 #[cfg(test)]
 mod tests {
-    use super::{match_text_injection_override, ForegroundAppInfo, TextInjectionAppOverride};
+    use super::{
+        match_text_injection_override, ForegroundAppInfo, TextInjectionAppOverride,
+        APP_USER_MODEL_ID_MATCH,
+    };
 
     fn sample_macos_app() -> ForegroundAppInfo {
         ForegroundAppInfo {
@@ -526,6 +666,7 @@ mod tests {
             display_name: Some("Windows App".to_string()),
             process_name: Some("Windows App".to_string()),
             bundle_id: Some("com.microsoft.rdc.macos".to_string()),
+            app_user_model_id: None,
             executable_path: Some(
                 "/Applications/Windows App.app/Contents/MacOS/Windows App".to_string(),
             ),
@@ -621,7 +762,9 @@ mod tests {
         assert!(parsed.skip_clipboard_restore);
         let serialized = serde_json::to_value(&parsed).unwrap();
         assert_eq!(
-            serialized.get("skipClipboardRestore").and_then(|v| v.as_bool()),
+            serialized
+                .get("skipClipboardRestore")
+                .and_then(|v| v.as_bool()),
             Some(true)
         );
     }
@@ -639,7 +782,10 @@ mod tests {
             display_name: Some("Code.exe".to_string()),
             process_name: Some("Code.exe".to_string()),
             bundle_id: None,
-            executable_path: Some("C:\\Users\\demo\\AppData\\Local\\Programs\\Code.exe".to_string()),
+            app_user_model_id: None,
+            executable_path: Some(
+                "C:\\Users\\demo\\AppData\\Local\\Programs\\Code.exe".to_string(),
+            ),
             process_id: 100,
             is_self: false,
         }
@@ -648,5 +794,63 @@ mod tests {
         assert_eq!(win.platform, "windows");
         assert_eq!(win.app_key, "code.exe");
         assert_eq!(win.app_name, "Code");
+    }
+
+    #[test]
+    fn windows_packaged_apps_share_a_host_but_have_independent_rules_and_keys() {
+        let mut hosted = ForegroundAppInfo {
+            platform: "Windows".into(),
+            display_name: Some("Editor.exe".into()),
+            process_name: Some("ApplicationFrameHost.exe".into()),
+            bundle_id: None,
+            app_user_model_id: Some("Vendor.Editor_publisher!App".into()),
+            executable_path: Some(r"C:\Windows\System32\ApplicationFrameHost.exe".into()),
+            process_id: 123,
+            is_self: false,
+        };
+        let editor = hosted.to_target_app_identity().unwrap();
+        let recent = hosted.to_recent_target_app().unwrap();
+        assert_eq!(editor.app_key, "aumid:vendor.editor_publisher!app");
+        assert_eq!(editor.app_name, "Editor");
+        assert_eq!(recent.match_kind, APP_USER_MODEL_ID_MATCH);
+        assert_eq!(
+            recent.app_user_model_id.as_deref(),
+            Some("Vendor.Editor_publisher!App")
+        );
+        let overrides = [
+            TextInjectionAppOverride {
+                platform: "windows".into(),
+                app_name: "Editor".into(),
+                match_kind: APP_USER_MODEL_ID_MATCH.into(),
+                match_value: recent.match_value,
+                mode: "typing".into(),
+                skip_clipboard_restore: false,
+            },
+            TextInjectionAppOverride {
+                platform: "windows".into(),
+                app_name: "Legacy host rule".into(),
+                match_kind: "process_name".into(),
+                match_value: "applicationframehost.exe".into(),
+                mode: "pasteboard".into(),
+                skip_clipboard_restore: false,
+            },
+        ];
+        assert_eq!(
+            match_text_injection_override(&hosted, &overrides)
+                .unwrap()
+                .mode,
+            "typing"
+        );
+        hosted.app_user_model_id = Some("Vendor.Photo_publisher!App".into());
+        assert_ne!(
+            hosted.to_target_app_identity().unwrap().app_key,
+            editor.app_key
+        );
+        assert_eq!(
+            match_text_injection_override(&hosted, &overrides)
+                .unwrap()
+                .mode,
+            "pasteboard"
+        );
     }
 }

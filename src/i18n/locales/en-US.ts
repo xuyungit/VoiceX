@@ -334,6 +334,7 @@ const enUS = {
     skipClipboardRestore: 'Keep pasted text on clipboard',
     skipClipboardRestoreNote: 'For targets with unreliable clipboard sync such as remote desktop; the injected text stays on the clipboard instead of restoring the previous content.',
     bundleIdValue: 'bundle id: {value}',
+    appUserModelIdValue: 'Windows app ID: {value}',
     processNameValue: 'Process: {value}',
     lastCapturedAt: 'Last triggered at {time}',
     savedOverride: 'Saved override',

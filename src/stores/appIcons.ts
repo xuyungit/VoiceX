@@ -7,6 +7,7 @@ export interface AppIconQuery {
   appKey?: string | null
   bundleId?: string | null
   executablePath?: string | null
+  appUserModelId?: string | null
   appName?: string | null
 }
 
@@ -16,6 +17,7 @@ export interface AppIconLookupRequest {
   appKey?: string | null
   bundleId?: string | null
   executablePath?: string | null
+  appUserModelId?: string | null
   appName?: string | null
 }
 
@@ -28,11 +30,12 @@ export function buildAppIconRequestKey(query: AppIconQuery): string {
   const appKey = normalizeToken(query.appKey)
   const bundleId = normalizeToken(query.bundleId)
   const executablePath = normalizeToken(query.executablePath)
+  const appUserModelId = normalizeToken(query.appUserModelId)
   const appName = normalizeToken(query.appName)
 
-  const primary = appKey || bundleId || executablePath || appName
+  const primary = appUserModelId || appKey || bundleId || executablePath || appName
   if (!primary) return ''
-  return `${platform}:${appKey}|${bundleId}|${executablePath}|${ primary === appName ? appName : '' }`
+  return `${platform}:${appKey}|${bundleId}|${executablePath}|${appUserModelId}|${primary === appName ? appName : ''}`
 }
 
 export function getAppFallbackLabel(appName: string, mode: 'initials' | 'single' = 'initials'): string {
@@ -111,6 +114,7 @@ export const useAppIconStore = defineStore('appIcons', () => {
         appKey: query.appKey ?? null,
         bundleId: query.bundleId ?? null,
         executablePath: query.executablePath ?? null,
+        appUserModelId: query.appUserModelId ?? null,
         appName: query.appName ?? null,
       })
       scheduleFlush()

@@ -1113,6 +1113,9 @@ fn normalize_text_injection_override_match_kind(match_kind: &str) -> String {
     match match_kind.trim() {
         "bundle_id" => "bundle_id".to_string(),
         "executable_path" => "executable_path".to_string(),
+        crate::foreground_app::APP_USER_MODEL_ID_MATCH => {
+            crate::foreground_app::APP_USER_MODEL_ID_MATCH.to_string()
+        }
         _ => "process_name".to_string(),
     }
 }

@@ -89,6 +89,18 @@ export async function checkAppIconStoreBatchingAndCaching() {
         buildAppIconRequestKey({ platform: 'macos', appKey: 'com.apple.finder' }),
       'Request key normalization must be case-insensitive',
     )
+
+    const host = { platform: 'Windows', appKey: 'ApplicationFrameHost.exe' }
+    const editorId = 'Vendor.Editor_publisher!App'
+    const photoId = 'Vendor.Photo_publisher!App'
+    store.getIconUrl({ ...host, appUserModelId: editorId })
+    store.getIconUrl({ ...host, appUserModelId: photoId })
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    check(batches[2].length === 2, 'Applications that share a Windows host must request separate icons')
+    check(
+      batches[2][0].appUserModelId === editorId && batches[2][1].appUserModelId === photoId,
+      'App icon lookup must carry the original Windows application identity',
+    )
   } finally {
     disposePinia(pinia)
     if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)

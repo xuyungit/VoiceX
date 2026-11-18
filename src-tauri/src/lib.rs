@@ -102,7 +102,9 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize storage
     storage::init_database(&db_path)?;
-    app_icons::init(&app_data_dir)?;
+    if let Err(err) = app_icons::init(&app_data_dir) {
+        log::warn!("Application icons are unavailable: {err}");
+    }
     post_edit::records::init(app.handle())?;
     audio::output_mute::init(app.handle());
 

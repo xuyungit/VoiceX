@@ -1,6 +1,6 @@
 //! Application icon extraction and local disk cache (`app_data_dir/app_icons/`).
 //!
-//! Icons are extracted as 64×64 PNG files and indexed in SQLite (`app_icon_index`)
+//! Icons are extracted as PNG files and indexed in SQLite (`app_icon_index`)
 //! by `(platform, app_key)`.
 //! - When a foreground app is captured on hotkey press or injection, its metadata
 //!   and icon are recorded asynchronously in the background without delaying
@@ -9,16 +9,16 @@
 //!   views, cached PNGs are served from disk; missing or updated apps (detected
 //!   via path or modification time changes, without background timers) are
 //!   extracted on demand and persisted.
-//! - The disk cache is capped at 10 MiB. Startup and writes evict the least
+//! - The disk cache is capped at 10 MiB. Startup and new writes evict the least
 //!   recently accessed PNGs while retaining app identities and source paths.
 //! - Path guards avoid probing TCC-protected personal folders on macOS
 //!   (`~/Desktop`, `~/Documents`, `~/Downloads`, iCloud Drive, removable volumes)
 //!   or network shares on Windows, preventing OS permission/error popups.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
 use base64::Engine as _;
@@ -27,16 +27,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::foreground_app::ForegroundAppInfo;
+use crate::foreground_app::{
+    packaged_app_id, packaged_app_key, ForegroundAppInfo, TargetAppIdentity,
+    APP_USER_MODEL_ID_KEY_PREFIX, APP_USER_MODEL_ID_MATCH,
+};
 use crate::storage::{self, StorageError};
 
 pub const ICON_PIXEL_SIZE: u32 = 64;
 const ICON_CACHE_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 static ICONS_DIR: OnceLock<PathBuf> = OnceLock::new();
-// Keep extraction, reads and eviction together so cleanup cannot remove a PNG
-// between resolving its path and serving it to the UI.
-static CACHE_IO: Mutex<()> = Mutex::new(());
+// Serialize reads, writes and eviction. Remember which packaged icons have
+// been checked this run, since their Shell resource has no local file stamp.
+static CACHE_IO: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppIconEntry {
@@ -45,6 +48,7 @@ pub struct AppIconEntry {
     pub app_name: String,
     pub bundle_id: Option<String>,
     pub executable_path: Option<String>,
+    pub app_user_model_id: Option<String>,
     pub icon_file: Option<String>,
     pub source_path: Option<String>,
     pub source_mtime_secs: Option<i64>,
@@ -59,11 +63,28 @@ pub struct AppIconLookupRequest {
     pub app_key: Option<String>,
     pub bundle_id: Option<String>,
     pub executable_path: Option<String>,
+    pub app_user_model_id: Option<String>,
     pub app_name: Option<String>,
 }
 
-/// Create the `app_icon_index` table during database initialization.
-pub fn create_schema(conn: &Connection) -> Result<(), StorageError> {
+#[derive(Default)]
+struct SourceHints<'a> {
+    bundle_id: Option<&'a str>,
+    executable_path: Option<&'a str>,
+    app_user_model_id: Option<&'a str>,
+}
+
+impl<'a> From<&'a ForegroundAppInfo> for SourceHints<'a> {
+    fn from(info: &'a ForegroundAppInfo) -> Self {
+        Self {
+            bundle_id: info.bundle_id.as_deref(),
+            executable_path: info.executable_path.as_deref(),
+            app_user_model_id: info.packaged_app_id(),
+        }
+    }
+}
+
+fn create_schema(conn: &Connection) -> Result<(), StorageError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS app_icon_index (
             platform TEXT NOT NULL,
@@ -71,29 +92,27 @@ pub fn create_schema(conn: &Connection) -> Result<(), StorageError> {
             app_name TEXT NOT NULL,
             bundle_id TEXT,
             executable_path TEXT,
+            app_user_model_id TEXT,
             icon_file TEXT,
             source_path TEXT,
             source_mtime_secs INTEGER,
             updated_at TEXT NOT NULL,
             last_accessed_at TEXT NOT NULL DEFAULT '',
+            last_seen_at INTEGER,
             PRIMARY KEY (platform, app_key)
         );
         CREATE INDEX IF NOT EXISTS app_icon_index_name_idx
             ON app_icon_index(app_name COLLATE NOCASE);",
     )
     .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-    let has_access_time = conn
-        .prepare(
-            "SELECT 1 FROM pragma_table_info('app_icon_index') WHERE name = 'last_accessed_at'",
-        )
-        .and_then(|mut stmt| stmt.exists([]))
-        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-    if !has_access_time {
-        conn.execute_batch(
-            "ALTER TABLE app_icon_index ADD COLUMN last_accessed_at TEXT NOT NULL DEFAULT '';",
-        )
-        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-    }
+    storage::ensure_column(
+        conn,
+        "app_icon_index",
+        "last_accessed_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    storage::ensure_column(conn, "app_icon_index", "last_seen_at", "INTEGER")?;
+    storage::ensure_column(conn, "app_icon_index", "app_user_model_id", "TEXT")?;
     conn.execute(
         "UPDATE app_icon_index SET last_accessed_at = updated_at WHERE last_accessed_at = ''",
         [],
@@ -109,17 +128,22 @@ pub fn init(app_data_dir: &Path) -> Result<(), StorageError> {
     std::fs::create_dir_all(&dir).map_err(|e| {
         StorageError::ConnectionFailed(format!("Failed to create app_icons directory: {e}"))
     })?;
+    storage::with_db(create_schema)?;
+    if let Err(err) = seed_known_apps_from_storage() {
+        log::warn!("Failed to seed the application icon index: {err}");
+    }
     let _ = ICONS_DIR.set(dir.clone());
-    seed_known_apps_from_storage();
-    std::thread::spawn(move || {
+    if let Err(err) = std::thread::Builder::new().spawn(move || {
         let result = CACHE_IO
             .lock()
             .map_err(|e| format!("Failed to lock app icon cache: {e}"))
-            .and_then(|_guard| cleanup_icon_cache_in_dir(&dir));
+            .and_then(|_guard| make_room_for_icon(&dir, None, 0));
         if let Err(err) = result {
             log::warn!("Failed to clean app icon cache at startup: {err}");
         }
-    });
+    }) {
+        log::warn!("Failed to schedule application icon cache cleanup: {err}");
+    }
     Ok(())
 }
 
@@ -155,6 +179,26 @@ fn normalize_key(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
+// UI callers can have a persisted executable rule or a stats/history key.
+// Both refer to the same cache entry for a Windows executable.
+fn canonical_app_key(platform: &str, value: &str) -> String {
+    if platform == "windows" {
+        normalize_key(value.rsplit(['\\', '/']).next().unwrap_or_default())
+    } else {
+        normalize_key(value)
+    }
+}
+
+fn app_key_from_executable(platform: &str, path: &str) -> Option<String> {
+    if platform == "windows" {
+        return Some(canonical_app_key(platform, path)).filter(|key| !key.is_empty());
+    }
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(normalize_key)
+}
+
 fn non_empty_trimmed(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -164,10 +208,12 @@ fn non_empty_trimmed(value: Option<&str>) -> Option<String> {
 
 /// Deterministic, filesystem-safe filename for `(platform, app_key)`.
 pub fn icon_filename_for_key(platform: &str, app_key: &str) -> String {
+    let platform = normalize_platform(platform);
+    let app_key = canonical_app_key(&platform, app_key);
     let mut hasher = Sha256::new();
-    hasher.update(normalize_platform(platform).as_bytes());
+    hasher.update(platform.as_bytes());
     hasher.update(b":");
-    hasher.update(normalize_key(app_key).as_bytes());
+    hasher.update(app_key.as_bytes());
     let digest = hasher.finalize();
     format!("{}.png", hex::encode(&digest[..16]))
 }
@@ -175,148 +221,147 @@ pub fn icon_filename_for_key(platform: &str, app_key: &str) -> String {
 /// Seed `app_icon_index` with metadata from `recent_target_apps` and
 /// `text_injection_overrides` so existing known paths are preserved even after
 /// `recent_target_apps` rotates past its 5-entry limit.
-fn seed_known_apps_from_storage() {
-    if let Ok(recent_apps) = storage::get_recent_target_apps() {
+fn seed_known_apps_from_storage() -> Result<(), StorageError> {
+    let recent_apps = storage::get_recent_target_apps()?;
+    let settings = storage::get_settings()?;
+    storage::with_db(|conn| {
         for recent in recent_apps {
+            let seen_at = chrono::DateTime::parse_from_rfc3339(&recent.last_seen_at)
+                .map(|time| time.timestamp_micros())
+                .ok();
             let info = ForegroundAppInfo {
-                platform: recent.platform.clone(),
-                display_name: recent
-                    .display_name
-                    .clone()
-                    .or(Some(recent.app_name.clone())),
-                process_name: recent.process_name.clone(),
-                bundle_id: recent.bundle_id.clone(),
-                executable_path: recent.executable_path.clone(),
+                platform: recent.platform,
+                display_name: recent.display_name.or(Some(recent.app_name)),
+                process_name: recent.process_name,
+                bundle_id: recent.bundle_id,
+                app_user_model_id: recent.app_user_model_id,
+                executable_path: recent.executable_path,
                 process_id: 0,
                 is_self: false,
             };
             if let Some(identity) = info.to_target_app_identity() {
-                let _ = upsert_metadata_only(
-                    &identity.platform,
-                    &identity.app_key,
-                    &identity.app_name,
-                    recent.bundle_id.as_deref(),
-                    recent.executable_path.as_deref(),
-                );
+                remember_app_source(conn, &identity, SourceHints::from(&info), seen_at)?;
             }
         }
-    }
 
-    if let Ok(settings) = storage::get_settings() {
         for item in settings.text_injection_overrides {
             let platform = normalize_platform(&item.platform);
             let bundle_id = (item.match_kind == "bundle_id").then_some(item.match_value.as_str());
             let executable_path =
                 (item.match_kind == "executable_path").then_some(item.match_value.as_str());
-            let app_key = if platform == "macos" {
-                bundle_id
-                    .map(normalize_key)
-                    .unwrap_or_else(|| normalize_key(&item.match_value))
-            } else if item.match_kind == "executable_path" {
-                Path::new(&item.match_value)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(normalize_key)
-                    .unwrap_or_else(|| normalize_key(&item.match_value))
+            let app_user_model_id = (platform == "windows"
+                && item.match_kind == APP_USER_MODEL_ID_MATCH)
+                .then(|| packaged_app_id(&item.match_value))
+                .flatten();
+            let app_key = if let Some(id) = app_user_model_id {
+                packaged_app_key(id)
             } else {
-                normalize_key(&item.match_value)
+                executable_path
+                    .and_then(|path| app_key_from_executable(&platform, path))
+                    .unwrap_or_else(|| canonical_app_key(&platform, &item.match_value))
             };
             if !app_key.is_empty() {
-                let _ = upsert_metadata_only(
-                    &platform,
-                    &app_key,
-                    &item.app_name,
-                    bundle_id,
-                    executable_path,
-                );
+                let identity = TargetAppIdentity {
+                    platform,
+                    app_key,
+                    app_name: item.app_name,
+                    is_self: false,
+                };
+                remember_app_source(
+                    conn,
+                    &identity,
+                    SourceHints {
+                        bundle_id,
+                        executable_path,
+                        app_user_model_id,
+                    },
+                    None,
+                )?;
             }
         }
-    }
-}
-
-fn upsert_metadata_only(
-    platform: &str,
-    app_key: &str,
-    app_name: &str,
-    bundle_id: Option<&str>,
-    executable_path: Option<&str>,
-) -> Result<(), StorageError> {
-    let platform = normalize_platform(platform);
-    let app_key = normalize_key(app_key);
-    if app_key.is_empty() {
-        return Ok(());
-    }
-    let now = Utc::now().to_rfc3339();
-    let clean_name = app_name.trim();
-    let bundle_id = non_empty_trimmed(bundle_id);
-    let executable_path = non_empty_trimmed(executable_path);
-
-    storage::with_db(|conn| {
-        conn.execute(
-            "INSERT INTO app_icon_index (
-                platform, app_key, app_name, bundle_id, executable_path, updated_at, last_accessed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-            ON CONFLICT(platform, app_key) DO UPDATE SET
-                app_name = CASE
-                    WHEN excluded.app_name != '' THEN excluded.app_name
-                    ELSE app_icon_index.app_name
-                END,
-                bundle_id = COALESCE(excluded.bundle_id, app_icon_index.bundle_id),
-                executable_path = COALESCE(excluded.executable_path, app_icon_index.executable_path)",
-            params![platform, app_key, clean_name, bundle_id, executable_path, now],
-        )
-        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         Ok(())
     })
 }
 
+fn remember_app_source(
+    conn: &Connection,
+    identity: &TargetAppIdentity,
+    source: SourceHints<'_>,
+    seen_at: Option<i64>,
+) -> Result<(), StorageError> {
+    let platform = normalize_platform(&identity.platform);
+    let app_key = canonical_app_key(&platform, &identity.app_key);
+    if app_key.is_empty() {
+        return Ok(());
+    }
+    let now = Utc::now().to_rfc3339();
+    let clean_name = identity.app_name.trim();
+    let bundle_id = non_empty_trimmed(source.bundle_id);
+    let executable_path = non_empty_trimmed(source.executable_path);
+
+    // Saved overrides have no observation timestamp. They can seed a missing
+    // entry, but must never replace a path observed on a newer recording.
+    conn.execute(
+        "INSERT INTO app_icon_index (
+            platform, app_key, app_name, bundle_id, executable_path, updated_at, last_accessed_at, last_seen_at,
+            app_user_model_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8)
+        ON CONFLICT(platform, app_key) DO UPDATE SET
+            app_name = COALESCE(NULLIF(excluded.app_name, ''), app_icon_index.app_name),
+            bundle_id = COALESCE(excluded.bundle_id, app_icon_index.bundle_id),
+            executable_path = COALESCE(excluded.executable_path, app_icon_index.executable_path),
+            app_user_model_id = COALESCE(excluded.app_user_model_id, app_icon_index.app_user_model_id),
+            last_seen_at = excluded.last_seen_at
+        WHERE (excluded.last_seen_at IS NOT NULL
+            AND (app_icon_index.last_seen_at IS NULL OR excluded.last_seen_at >= app_icon_index.last_seen_at))
+            OR (excluded.last_seen_at IS NULL AND app_icon_index.last_seen_at IS NULL
+                AND app_icon_index.executable_path IS NULL AND excluded.executable_path IS NOT NULL)",
+        params![platform, app_key, clean_name, bundle_id, executable_path, now, seen_at, source.app_user_model_id],
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    Ok(())
+}
+
 /// Spawn a non-blocking background task to record and cache the icon for `app`.
 pub fn record_foreground_app_async(app: &ForegroundAppInfo) {
-    if app.is_self {
+    if app.is_self || icons_dir().is_none() {
         return;
     }
     let cloned = app.clone();
-    std::thread::spawn(move || {
-        if let Err(err) = record_and_cache_foreground_app(&cloned) {
+    let seen_at = Utc::now().timestamp_micros();
+    if let Err(err) = std::thread::Builder::new().spawn(move || {
+        if let Err(err) = record_and_cache_foreground_app(&cloned, seen_at) {
             log::warn!("Failed to cache foreground app icon: {err}");
         }
-    });
+    }) {
+        log::warn!("Failed to schedule foreground app icon lookup: {err}");
+    }
 }
 
 /// Synchronously record `ForegroundAppInfo` metadata and extract/refresh its
 /// cached PNG if missing or if the application binary/bundle changed on disk.
-pub fn record_and_cache_foreground_app(app: &ForegroundAppInfo) -> Result<Option<PathBuf>, String> {
-    if app.is_self {
-        return Ok(None);
-    }
-    let Some(identity) = app.to_target_app_identity() else {
-        return Ok(None);
+fn record_and_cache_foreground_app(app: &ForegroundAppInfo, seen_at: i64) -> Result<(), String> {
+    let (Some(dir), Some(identity)) = (icons_dir(), app.to_target_app_identity()) else {
+        return Ok(());
     };
-    let _guard = CACHE_IO
+    let mut checked_packages = CACHE_IO
         .lock()
         .map_err(|e| format!("Failed to lock app icon cache: {e}"))?;
 
-    upsert_metadata_only(
-        &identity.platform,
-        &identity.app_key,
-        &identity.app_name,
-        app.bundle_id.as_deref(),
-        app.executable_path.as_deref(),
-    )
+    storage::with_db(|conn| {
+        remember_app_source(conn, &identity, SourceHints::from(app), Some(seen_at))
+    })
     .map_err(|e| e.to_string())?;
 
-    let Some(dir) = icons_dir() else {
-        return Ok(None);
-    };
-
-    ensure_cached_icon_in_dir(
+    ensure_icon_png(
         dir,
+        &mut checked_packages,
         &identity.platform,
         &identity.app_key,
         &identity.app_name,
-        app.bundle_id.as_deref(),
-        app.executable_path.as_deref(),
+        SourceHints::default(),
     )
+    .map(|_| ())
 }
 
 /// Batch-resolve icons for UI components. Returns a map of `request_key -> data:image/png;base64,...`.
@@ -333,7 +378,7 @@ pub fn resolve_app_icons_in_dir(
     dir: &Path,
     requests: &[AppIconLookupRequest],
 ) -> Result<HashMap<String, String>, String> {
-    let _guard = CACHE_IO
+    let mut checked_packages = CACHE_IO
         .lock()
         .map_err(|e| format!("Failed to lock app icon cache: {e}"))?;
     let mut results = HashMap::with_capacity(requests.len());
@@ -342,26 +387,16 @@ pub fn resolve_app_icons_in_dir(
         if req.request_key.trim().is_empty() {
             continue;
         }
-        let png_path = match resolve_single_request_in_dir(dir, req) {
-            Ok(Some(path)) => path,
-            Ok(None) => continue,
-            Err(err) => {
-                log::warn!("Failed to resolve app icon {}: {err}", req.request_key);
-                continue;
-            }
-        };
-        match std::fs::read(&png_path) {
-            Ok(bytes) if !bytes.is_empty() => {
+        match resolve_single_request_in_dir(dir, &mut checked_packages, req) {
+            Ok(Some(bytes)) => {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 results.insert(
                     req.request_key.clone(),
                     format!("data:image/png;base64,{b64}"),
                 );
             }
-            Ok(_) => {}
-            Err(err) => {
-                log::warn!("Failed to read cached app icon {:?}: {}", png_path, err);
-            }
+            Ok(None) => {}
+            Err(err) => log::warn!("Failed to resolve app icon {}: {err}", req.request_key),
         }
     }
 
@@ -370,8 +405,9 @@ pub fn resolve_app_icons_in_dir(
 
 fn resolve_single_request_in_dir(
     dir: &Path,
+    checked_packages: &mut HashSet<String>,
     req: &AppIconLookupRequest,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<Vec<u8>>, String> {
     let platform = req
         .platform
         .as_deref()
@@ -382,21 +418,33 @@ fn resolve_single_request_in_dir(
     let explicit_exe_path = non_empty_trimmed(req.executable_path.as_deref());
     let explicit_app_name = non_empty_trimmed(req.app_name.as_deref()).unwrap_or_default();
 
-    // 1. Determine canonical app_key if possible, or look up existing index entry by name/path.
-    let mut app_key = non_empty_trimmed(req.app_key.as_deref()).map(|k| normalize_key(&k));
-    if app_key.is_none() {
-        if platform == "macos" {
-            app_key = explicit_bundle_id.as_deref().map(normalize_key);
-        }
-        if app_key.is_none() {
-            if let Some(ref exe) = explicit_exe_path {
-                app_key = Path::new(exe)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(normalize_key);
-            }
-        }
-    }
+    let raw_key = non_empty_trimmed(req.app_key.as_deref());
+    let explicit_app_id = if platform == "windows" {
+        req.app_user_model_id
+            .as_deref()
+            .and_then(packaged_app_id)
+            .or_else(|| {
+                raw_key
+                    .as_deref()
+                    .and_then(|key| key.strip_prefix(APP_USER_MODEL_ID_KEY_PREFIX))
+                    .and_then(packaged_app_id)
+            })
+    } else {
+        None
+    };
+    let app_key = explicit_app_id
+        .map(packaged_app_key)
+        .or_else(|| {
+            raw_key
+                .as_deref()
+                .map(|key| canonical_app_key(&platform, key))
+        })
+        .or_else(|| explicit_bundle_id.as_deref().map(normalize_key))
+        .or_else(|| {
+            explicit_exe_path
+                .as_deref()
+                .and_then(|exe| app_key_from_executable(&platform, exe))
+        });
 
     // Legacy records may only have an app name. New history/replay requests
     // supply the stable platform/app_key identity instead.
@@ -406,13 +454,17 @@ fn resolve_single_request_in_dir(
         })
         .map_err(|e| e.to_string())?
         {
-            return ensure_cached_icon_in_dir(
+            return ensure_icon_png(
                 dir,
+                checked_packages,
                 &entry.platform,
                 &entry.app_key,
                 &entry.app_name,
-                entry.bundle_id.as_deref(),
-                entry.executable_path.as_deref(),
+                SourceHints {
+                    bundle_id: entry.bundle_id.as_deref(),
+                    executable_path: entry.executable_path.as_deref(),
+                    app_user_model_id: entry.app_user_model_id.as_deref(),
+                },
             );
         }
     }
@@ -424,33 +476,42 @@ fn resolve_single_request_in_dir(
         return Ok(None);
     }
 
-    ensure_cached_icon_in_dir(
+    ensure_icon_png(
         dir,
+        checked_packages,
         &platform,
         &app_key,
         &explicit_app_name,
-        explicit_bundle_id.as_deref(),
-        explicit_exe_path.as_deref(),
+        SourceHints {
+            bundle_id: explicit_bundle_id.as_deref(),
+            executable_path: explicit_exe_path.as_deref(),
+            app_user_model_id: explicit_app_id,
+        },
     )
 }
 
-fn ensure_cached_icon_in_dir(
+fn ensure_icon_png(
     dir: &Path,
+    checked_packages: &mut HashSet<String>,
     platform: &str,
     app_key: &str,
     app_name: &str,
-    bundle_id_hint: Option<&str>,
-    executable_path_hint: Option<&str>,
-) -> Result<Option<PathBuf>, String> {
+    hints: SourceHints<'_>,
+) -> Result<Option<Vec<u8>>, String> {
     let platform = normalize_platform(platform);
-    let app_key = normalize_key(app_key);
+    let app_key = canonical_app_key(&platform, app_key);
     if app_key.is_empty() {
+        return Ok(None);
+    }
+    if platform == "windows" && app_key == "applicationframehost.exe" {
+        // Old records or an unresolved hosted window have no app identity.
+        // Display the usual placeholder instead of branding them as the host.
         return Ok(None);
     }
 
     let existing = get_entry(&platform, &app_key).map_err(|e| e.to_string())?;
 
-    let merged_bundle_id = non_empty_trimmed(bundle_id_hint)
+    let merged_bundle_id = non_empty_trimmed(hints.bundle_id)
         .or_else(|| existing.as_ref().and_then(|e| e.bundle_id.clone()))
         .or_else(|| {
             // On macOS, daily_usage_stats stores bundle_id directly in app_key.
@@ -461,30 +522,66 @@ fn ensure_cached_icon_in_dir(
             }
         });
 
-    let merged_exe_path = non_empty_trimmed(executable_path_hint)
-        .or_else(|| existing.as_ref().and_then(|e| e.executable_path.clone()));
+    // Caller hints can come from old path-based overrides. Use the observed
+    // path first, and keep a record of the last source that actually worked.
+    let known_exe = existing
+        .as_ref()
+        .and_then(|entry| entry.executable_path.as_deref());
+    let source_exe = existing
+        .as_ref()
+        .and_then(|entry| entry.source_path.as_deref());
+    let hinted_exe = non_empty_trimmed(hints.executable_path);
+    let merged_exe_path = known_exe.or(hinted_exe.as_deref());
 
-    let merged_name = if !app_name.trim().is_empty() {
-        app_name.trim().to_string()
-    } else if let Some(ref e) = existing {
-        e.app_name.clone()
-    } else {
-        app_key.clone()
-    };
+    let merged_name = existing
+        .as_ref()
+        .map(|entry| entry.app_name.as_str())
+        .filter(|name| !name.is_empty())
+        .or_else(|| (!app_name.trim().is_empty()).then(|| app_name.trim()))
+        .unwrap_or(&app_key)
+        .to_owned();
+
+    // Keep the AUMID returned by Windows for Shell lookup. The lowercased
+    // app key groups statistics and locates the cache entry.
+    let packaged_id = (platform == "windows")
+        .then(|| {
+            app_key
+                .strip_prefix(APP_USER_MODEL_ID_KEY_PREFIX)
+                .and_then(packaged_app_id)
+        })
+        .flatten()
+        .map(|id| {
+            existing
+                .as_ref()
+                .and_then(|entry| entry.app_user_model_id.as_deref())
+                .or(hints.app_user_model_id.and_then(packaged_app_id))
+                .unwrap_or(id)
+        });
+    let refresh_packaged = packaged_id.is_some()
+        && platform == current_platform_name()
+        && !checked_packages.contains(&app_key);
 
     // Check if the current platform can inspect the live source path/mtime.
-    let current_source = if platform == current_platform_name() {
+    let current_source = if platform != current_platform_name() || packaged_id.is_some() {
+        None
+    } else if platform == "windows" {
+        [known_exe, source_exe, hinted_exe.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|exe| {
+                resolve_local_source(&platform, &app_key, merged_bundle_id.as_deref(), Some(exe))
+            })
+    } else {
         resolve_local_source(
             &platform,
             &app_key,
             merged_bundle_id.as_deref(),
-            merged_exe_path.as_deref(),
+            merged_exe_path,
         )
-    } else {
-        None
     };
 
     // Determine whether the existing cached PNG on disk is still valid.
+    let mut previous_packaged_png = None;
     if let Some(ref entry) = existing {
         if let Some(ref icon_file) = entry.icon_file {
             let cached_path = dir.join(icon_file);
@@ -497,9 +594,20 @@ fn ensure_cached_icon_in_dir(
                         _ => false,
                     };
                 if !source_changed {
-                    storage::with_db(|conn| touch_cached_icon_in(conn, &platform, &app_key))
-                        .map_err(|e| e.to_string())?;
-                    return Ok(Some(cached_path));
+                    let bytes = std::fs::read(&cached_path).map_err(|e| {
+                        format!("Failed to read cached app icon {cached_path:?}: {e}")
+                    })?;
+                    if !bytes.is_empty() {
+                        if refresh_packaged {
+                            previous_packaged_png = Some(bytes);
+                        } else {
+                            storage::with_db(|conn| {
+                                touch_cached_icon_in(conn, &platform, &app_key)
+                            })
+                            .map_err(|e| e.to_string())?;
+                            return Ok(Some(bytes));
+                        }
+                    }
                 }
             }
         }
@@ -513,12 +621,25 @@ fn ensure_cached_icon_in_dir(
     let extracted = extract_platform_icon_png(
         &app_key,
         merged_bundle_id.as_deref(),
-        merged_exe_path.as_deref(),
+        merged_exe_path,
         current_source.as_ref().map(|(p, _)| p.as_str()),
-    )?;
+        packaged_id,
+    );
 
-    let Some((png_bytes, resolved_source_path)) = extracted else {
-        return Ok(None);
+    let (png_bytes, resolved_source_path) = match (extracted, previous_packaged_png) {
+        (Ok(Some(extracted)), _) => extracted,
+        (result, Some(previous)) => {
+            // The package can be unavailable when opening older history.
+            if let Err(err) = result {
+                log::warn!("Could not refresh packaged app icon for {app_key}: {err}");
+            }
+            storage::with_db(|conn| touch_cached_icon_in(conn, &platform, &app_key))
+                .map_err(|e| e.to_string())?;
+            checked_packages.insert(app_key);
+            return Ok(Some(previous));
+        }
+        (Ok(None), None) => return Ok(None),
+        (Err(err), None) => return Err(err),
     };
 
     let mtime_secs = resolved_source_path
@@ -527,30 +648,40 @@ fn ensure_cached_icon_in_dir(
         .or_else(|| current_source.and_then(|(_, m)| m));
 
     let file_name = icon_filename_for_key(&platform, &app_key);
-    let final_path = dir.join(&file_name);
-    write_png_atomically(dir, &final_path, &png_bytes)?;
-
     let entry = AppIconEntry {
+        app_user_model_id: packaged_id.map(str::to_owned),
         platform,
         app_key,
         app_name: merged_name,
         bundle_id: merged_bundle_id,
-        executable_path: merged_exe_path,
-        icon_file: Some(file_name),
+        executable_path: merged_exe_path.map(str::to_owned),
+        icon_file: Some(file_name.clone()),
         source_path: resolved_source_path,
         source_mtime_secs: mtime_secs,
         updated_at: Utc::now().to_rfc3339(),
     };
-    upsert_entry(&entry).map_err(|e| e.to_string())?;
-    cleanup_icon_cache_in_dir(dir)?;
+    // A disk cache failure must not discard a successfully extracted icon.
+    let result = make_room_for_icon(dir, Some(&file_name), png_bytes.len() as u64)
+        .and_then(|()| write_png_atomically(dir, &dir.join(&file_name), &png_bytes))
+        .and_then(|()| upsert_entry(&entry).map_err(|e| e.to_string()));
+    match result {
+        Ok(()) if entry.app_user_model_id.is_some() => {
+            checked_packages.insert(entry.app_key);
+        }
+        Ok(()) => {}
+        Err(err) => log::warn!("Could not store app icon for {}: {err}", entry.app_key),
+    }
 
-    Ok(Some(final_path))
+    Ok(Some(png_bytes))
 }
 
 fn write_png_atomically(dir: &Path, final_path: &Path, bytes: &[u8]) -> Result<(), String> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| format!("Failed to create app_icons directory: {e}"))?;
-    let mut temp = tempfile::NamedTempFile::new_in(dir)
+    // If a crash interrupts this write, the orphan can be counted and evicted
+    // with the other PNGs on the next run.
+    let mut temp = tempfile::Builder::new()
+        .prefix(".pending-")
+        .suffix(".png")
+        .tempfile_in(dir)
         .map_err(|e| format!("Failed to create temporary icon file: {e}"))?;
     temp.write_all(bytes)
         .map_err(|e| format!("Failed to write temporary icon file: {e}"))?;
@@ -559,13 +690,13 @@ fn write_png_atomically(dir: &Path, final_path: &Path, bytes: &[u8]) -> Result<(
     Ok(())
 }
 
-pub fn get_entry(platform: &str, app_key: &str) -> Result<Option<AppIconEntry>, StorageError> {
+fn get_entry(platform: &str, app_key: &str) -> Result<Option<AppIconEntry>, StorageError> {
     let platform = normalize_platform(platform);
     let app_key = normalize_key(app_key);
     storage::with_db(|conn| {
         conn.query_row(
             "SELECT platform, app_key, app_name, bundle_id, executable_path,
-                    icon_file, source_path, source_mtime_secs, updated_at
+                    icon_file, source_path, source_mtime_secs, updated_at, app_user_model_id
              FROM app_icon_index
              WHERE platform = ?1 AND app_key = ?2
              LIMIT 1",
@@ -596,7 +727,7 @@ fn find_entry_by_name_in(
     let cur_platform = current_platform_name();
     conn.query_row(
         "SELECT platform, app_key, app_name, bundle_id, executable_path,
-                    icon_file, source_path, source_mtime_secs, updated_at
+                    icon_file, source_path, source_mtime_secs, updated_at, app_user_model_id
              FROM app_icon_index
              WHERE (?4 IS NULL OR platform = ?4)
                AND (app_name = ?1 COLLATE NOCASE
@@ -611,23 +742,24 @@ fn find_entry_by_name_in(
     .map_err(|e| StorageError::QueryFailed(e.to_string()))
 }
 
-pub fn upsert_entry(entry: &AppIconEntry) -> Result<(), StorageError> {
+fn upsert_entry(entry: &AppIconEntry) -> Result<(), StorageError> {
     storage::with_db(|conn| {
         conn.execute(
             "INSERT INTO app_icon_index (
                 platform, app_key, app_name, bundle_id, executable_path,
-                icon_file, source_path, source_mtime_secs, updated_at, last_accessed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                icon_file, source_path, source_mtime_secs, updated_at, last_accessed_at, app_user_model_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)
             ON CONFLICT(platform, app_key) DO UPDATE SET
                 app_name = CASE
                     WHEN excluded.app_name != '' THEN excluded.app_name
                     ELSE app_icon_index.app_name
                 END,
-                bundle_id = COALESCE(excluded.bundle_id, app_icon_index.bundle_id),
-                executable_path = COALESCE(excluded.executable_path, app_icon_index.executable_path),
-                icon_file = COALESCE(excluded.icon_file, app_icon_index.icon_file),
-                source_path = COALESCE(excluded.source_path, app_icon_index.source_path),
-                source_mtime_secs = COALESCE(excluded.source_mtime_secs, app_icon_index.source_mtime_secs),
+                bundle_id = COALESCE(app_icon_index.bundle_id, excluded.bundle_id),
+                executable_path = COALESCE(app_icon_index.executable_path, excluded.executable_path),
+                app_user_model_id = COALESCE(app_icon_index.app_user_model_id, excluded.app_user_model_id),
+                icon_file = excluded.icon_file,
+                source_path = excluded.source_path,
+                source_mtime_secs = excluded.source_mtime_secs,
                 updated_at = excluded.updated_at,
                 last_accessed_at = excluded.last_accessed_at",
             params![
@@ -640,6 +772,7 @@ pub fn upsert_entry(entry: &AppIconEntry) -> Result<(), StorageError> {
                 entry.source_path,
                 entry.source_mtime_secs,
                 entry.updated_at,
+                entry.app_user_model_id,
             ],
         )
         .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
@@ -658,6 +791,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppIconEntry> {
         source_path: row.get(6)?,
         source_mtime_secs: row.get(7)?,
         updated_at: row.get(8)?,
+        app_user_model_id: row.get(9)?,
     })
 }
 
@@ -689,12 +823,25 @@ fn cached_icon_accesses(conn: &Connection) -> Result<HashMap<String, String>, St
 
 // Caller holds CACHE_IO. Filesystem work stays outside the database lock so a
 // directory scan or deletion does not hold up recording/history database writes.
-fn cleanup_icon_cache_in_dir(dir: &Path) -> Result<(), String> {
+fn make_room_for_icon(dir: &Path, replacing: Option<&str>, new_bytes: u64) -> Result<(), String> {
+    let budget = ICON_CACHE_MAX_BYTES
+        .checked_sub(new_bytes)
+        .ok_or_else(|| "App icon exceeds the disk cache limit".to_string())?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("Failed to create app_icons directory: {e}"))?;
     let accesses = storage::with_db(cached_icon_accesses).map_err(|e| e.to_string())?;
-    let removed = prune_icon_cache_files(dir, &accesses, ICON_CACHE_MAX_BYTES)?;
+    let (removed, total_bytes) =
+        prune_icon_cache_files(dir, &accesses, budget, replacing, |path| {
+            std::fs::remove_file(path)
+        })?;
     if !removed.is_empty() {
         storage::with_db(|conn| clear_cached_icon_files(conn, &removed))
             .map_err(|e| e.to_string())?;
+    }
+    if total_bytes > budget {
+        return Err(format!(
+            "App icon cache still contains {total_bytes} bytes with a budget of {budget} bytes after cleanup"
+        ));
     }
     Ok(())
 }
@@ -703,7 +850,9 @@ fn prune_icon_cache_files(
     dir: &Path,
     accesses: &HashMap<String, String>,
     max_bytes: u64,
-) -> Result<Vec<String>, String> {
+    replacing: Option<&str>,
+    mut remove_file: impl FnMut(&Path) -> io::Result<()>,
+) -> Result<(Vec<String>, u64), String> {
     let mut files = Vec::new();
     let mut seen = HashSet::new();
     let mut total_bytes = 0u64;
@@ -718,9 +867,14 @@ fn prune_icon_cache_files(
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
+        // The new file replaces this entry atomically. Only its new size
+        // counts against the budget reserved by the caller.
+        seen.insert(name.clone());
+        if replacing == Some(name.as_str()) {
+            continue;
+        }
         let size = entry.metadata().map_err(|e| e.to_string())?.len();
         total_bytes += size;
-        seen.insert(name.clone());
         // Unindexed PNGs left by an interrupted write are evicted first.
         let accessed_at = accesses.get(&name).cloned().unwrap_or_default();
         files.push((accessed_at, name, size));
@@ -737,13 +891,17 @@ fn prune_icon_cache_files(
             if total_bytes <= max_bytes {
                 break;
             }
-            std::fs::remove_file(dir.join(&name))
-                .map_err(|e| format!("Failed to evict app icon {name}: {e}"))?;
+            if let Err(err) = remove_file(&dir.join(&name)) {
+                if err.kind() != io::ErrorKind::NotFound {
+                    log::warn!("Failed to evict app icon {name}: {err}");
+                    continue;
+                }
+            }
             total_bytes -= size;
             removed.push(name);
         }
     }
-    Ok(removed)
+    Ok((removed, total_bytes))
 }
 
 fn clear_cached_icon_files(conn: &Connection, files: &[String]) -> Result<(), StorageError> {
@@ -877,6 +1035,7 @@ fn resolve_local_source(
 
     #[cfg(target_os = "windows")]
     {
+        let _ = (app_key, bundle_id);
         let exe = executable_path?;
         let path = Path::new(exe);
         if !is_safe_probe_path(path) || !path.is_file() {
@@ -898,16 +1057,21 @@ fn extract_platform_icon_png(
     bundle_id: Option<&str>,
     executable_path: Option<&str>,
     resolved_source: Option<&str>,
+    packaged_id: Option<&str>,
 ) -> Result<Option<(Vec<u8>, Option<String>)>, String> {
     #[cfg(target_os = "macos")]
     {
+        let _ = packaged_id;
         return macos::extract_icon_png(app_key, bundle_id, executable_path, resolved_source);
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = (app_key, bundle_id);
-        let Some(exe) = resolved_source.or(executable_path) else {
+        let _ = (app_key, bundle_id, executable_path);
+        if let Some(id) = packaged_id {
+            return windows::extract_packaged_icon_png(id).map(|bytes| Some((bytes, None)));
+        }
+        let Some(exe) = resolved_source else {
             return Ok(None);
         };
         return windows::extract_icon_png(Path::new(exe))
@@ -916,7 +1080,13 @@ fn extract_platform_icon_png(
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = (app_key, bundle_id, executable_path, resolved_source);
+        let _ = (
+            app_key,
+            bundle_id,
+            executable_path,
+            resolved_source,
+            packaged_id,
+        );
         Ok(None)
     }
 }
@@ -1148,6 +1318,16 @@ mod windows {
     use std::path::Path;
     use std::ptr::null_mut;
 
+    use ::windows::{
+        core::{HSTRING, PCWSTR},
+        Win32::{
+            System::Com::{
+                CoInitializeEx, CoTaskMemFree, CoUninitialize, IBindCtx, COINIT_APARTMENTTHREADED,
+                COINIT_DISABLE_OLE1DDE,
+            },
+            UI::Shell::{IShellItem, SHCreateItemFromParsingName, SHGetIDListFromObject},
+        },
+    };
     use windows_sys::Win32::{
         Graphics::Gdi::{
             DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
@@ -1156,13 +1336,34 @@ mod windows {
         System::Diagnostics::Debug::{
             SetThreadErrorMode, SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX, THREAD_ERROR_MODE,
         },
-        UI::Shell::{SHDefExtractIconW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON},
+        UI::Shell::{
+            SHDefExtractIconW, SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_PIDL,
+        },
         UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO},
     };
 
     use super::{
         bgra_to_rgba_with_fallback_mask, encode_rgba_png, is_safe_probe_path, ICON_PIXEL_SIZE,
     };
+
+    struct ShellApartment;
+
+    impl ShellApartment {
+        fn enter() -> Result<Self, String> {
+            // Both callers run on background threads. Keep all Shell objects
+            // within this synchronous call and release them before COM exits.
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }
+                .ok()
+                .map_err(|e| format!("Could not initialize COM for Windows app icons: {e}"))?;
+            Ok(Self)
+        }
+    }
+
+    impl Drop for ShellApartment {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
+    }
 
     struct ThreadErrorModeGuard(THREAD_ERROR_MODE);
 
@@ -1211,18 +1412,11 @@ mod windows {
             );
 
             if hr != 0 || hicon.is_null() {
-                hicon = null_mut();
-                let mut shfi: SHFILEINFOW = zeroed();
-                let res = SHGetFileInfoW(
-                    wide_path.as_ptr(),
-                    0,
-                    &mut shfi,
-                    size_of::<SHFILEINFOW>() as u32,
-                    SHGFI_ICON | SHGFI_LARGEICON,
-                );
-                if res != 0 && !shfi.hIcon.is_null() {
-                    hicon = shfi.hIcon;
+                if !hicon.is_null() {
+                    DestroyIcon(hicon);
                 }
+                let _com = ShellApartment::enter()?;
+                hicon = shell_icon(wide_path.as_ptr(), 0);
             }
 
             if hicon.is_null() {
@@ -1232,6 +1426,43 @@ mod windows {
             let result = hicon_to_png(hicon);
             DestroyIcon(hicon);
             result.map(Some)
+        }
+    }
+
+    pub fn extract_packaged_icon_png(app_user_model_id: &str) -> Result<Vec<u8>, String> {
+        let _com = ShellApartment::enter()?;
+        let shell_path = HSTRING::from(format!("shell:AppsFolder\\{app_user_model_id}"));
+        unsafe {
+            let item: IShellItem =
+                SHCreateItemFromParsingName(PCWSTR(shell_path.as_ptr()), None::<&IBindCtx>)
+                    .map_err(|e| format!("Could not resolve the registered Windows app: {e}"))?;
+            let pidl = SHGetIDListFromObject(&item).map_err(|e| {
+                format!("Could not identify the registered Windows app in Shell: {e}")
+            })?;
+            let hicon = shell_icon(pidl.cast(), SHGFI_PIDL);
+            CoTaskMemFree(Some(pidl.cast()));
+            if hicon.is_null() {
+                return Err("The Windows Shell did not return a packaged app icon".to_string());
+            }
+            let result = hicon_to_png(hicon);
+            DestroyIcon(hicon);
+            result
+        }
+    }
+
+    unsafe fn shell_icon(path_or_pidl: *const u16, flags: u32) -> HICON {
+        let mut info: SHFILEINFOW = zeroed();
+        let success = SHGetFileInfoW(
+            path_or_pidl,
+            0,
+            &mut info,
+            size_of::<SHFILEINFOW>() as u32,
+            flags | SHGFI_ICON | SHGFI_LARGEICON,
+        );
+        if success != 0 {
+            info.hIcon
+        } else {
+            null_mut()
         }
     }
 
@@ -1449,12 +1680,15 @@ mod tests {
             .unwrap()
             .set_len(mib)
             .unwrap();
-        let removed = prune_icon_cache_files(
+        let (removed, total) = prune_icon_cache_files(
             dir.path(),
             &cached_icon_accesses(&conn).unwrap(),
             ICON_CACHE_MAX_BYTES,
+            None,
+            |path| std::fs::remove_file(path),
         )
         .unwrap();
+        assert_eq!(total, 8 * mib);
         clear_cached_icon_files(&conn, &removed).unwrap();
         assert!(removed.contains(&"old.png".to_string()));
         assert!(removed.contains(&"orphan.png".to_string()));
@@ -1481,9 +1715,12 @@ mod tests {
         assert!(prune_icon_cache_files(
             dir.path(),
             &cached_icon_accesses(&conn).unwrap(),
-            ICON_CACHE_MAX_BYTES
+            ICON_CACHE_MAX_BYTES,
+            None,
+            |path| std::fs::remove_file(path)
         )
         .unwrap()
+        .0
         .is_empty());
     }
 
@@ -1502,11 +1739,103 @@ mod tests {
             .unwrap()
             .set_len(ICON_CACHE_MAX_BYTES)
             .unwrap();
-        assert!(
-            prune_icon_cache_files(dir.path(), &HashMap::new(), ICON_CACHE_MAX_BYTES)
-                .unwrap()
-                .is_empty()
+        assert!(prune_icon_cache_files(
+            dir.path(),
+            &HashMap::new(),
+            ICON_CACHE_MAX_BYTES,
+            None,
+            |path| std::fs::remove_file(path)
+        )
+        .unwrap()
+        .0
+        .is_empty());
+    }
+
+    #[test]
+    fn startup_seed_preserves_the_newest_observed_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        let app = TargetAppIdentity {
+            platform: "windows".into(),
+            app_key: "code.exe".into(),
+            app_name: "Code".into(),
+            is_self: false,
+        };
+        let old = r"C:\Apps\Code\app-1.0\Code.exe";
+        let new = r"C:\Apps\Code\app-2.0\Code.exe";
+        // The index may already contain a stale override from an older build.
+        for (path, seen) in [(old, None), (new, Some(20)), (old, Some(10)), (old, None)] {
+            remember_app_source(
+                &conn,
+                &app,
+                SourceHints {
+                    executable_path: Some(path),
+                    ..Default::default()
+                },
+                seen,
+            )
+            .unwrap();
+        }
+        let entry = find_entry_by_name_in(&conn, "Code.exe", Some("windows"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.executable_path.as_deref(), Some(new));
+        assert_eq!(
+            icon_filename_for_key("Windows", old),
+            icon_filename_for_key("windows", "code.exe")
         );
+        assert_eq!(
+            app_key_from_executable("windows", new).as_deref(),
+            Some("code.exe")
+        );
+    }
+
+    #[test]
+    fn cache_budget_skips_a_locked_file_and_reserves_the_replacement_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let mib = 1024 * 1024;
+        let mut accesses = HashMap::new();
+        for (name, size, seen) in [
+            ("locked.png", 4 * mib, "1"),
+            ("old.png", 4 * mib, "2"),
+            ("replace.png", 2 * mib, "3"),
+        ] {
+            accesses.insert(name.to_owned(), seen.to_owned());
+            std::fs::File::create(dir.path().join(name))
+                .unwrap()
+                .set_len(size)
+                .unwrap();
+        }
+        // A 3 MiB replacement must fit alongside the 4 MiB locked file.
+        let (removed, remaining) = prune_icon_cache_files(
+            dir.path(),
+            &accesses,
+            ICON_CACHE_MAX_BYTES - 3 * mib,
+            Some("replace.png"),
+            |path| {
+                if path.ends_with("locked.png") {
+                    Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                } else {
+                    std::fs::remove_file(path)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(removed, ["old.png"]);
+        assert_eq!(remaining + 3 * mib, 7 * mib);
+        assert!(dir.path().join("replace.png").exists());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires Windows with a registered packaged app (VOICEX_TEST_AUMID)"]
+    fn extracts_a_registered_windows_app_icon() {
+        let app_id = std::env::var("VOICEX_TEST_AUMID").expect("a registered packaged app AUMID");
+        let bytes = windows::extract_packaged_icon_png(&app_id).expect("registered app icon");
+        let reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        assert!(reader.info().width > 0 && reader.info().height > 0);
     }
 
     #[test]
