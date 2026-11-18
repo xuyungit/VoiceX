@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.19.2] - 2026-11-18
+
+### Added
+
+- **Target app icons** — show the app's system icon in Overview, per-app input settings, and History where it can be retrieved. Windows uses executable icons for desktop apps and the registered application ID for MSIX and UWP apps. Packaged apps that share a host can have separate statistics and input rules.
+
+### Fixed
+
+- **Icon lookup and caching** — app lists share cache keys, and saved input rules no longer overwrite newer observed install paths. The local icon cache automatically prunes to 10 MiB. A cache failure leaves recording and hotkeys available, and a file that cannot be removed no longer stops the rest of the cleanup.
+
 ## [0.19.1] - 2026-11-16
 
 ### Added
