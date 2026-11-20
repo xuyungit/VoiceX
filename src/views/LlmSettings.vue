@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { NInput, NAutoComplete, NSwitch, NButton, NSelect, NTabs, NTabPane, NTooltip, useDialog } from 'naive-ui'
+import { NInput, NSwitch, NButton, NSelect, NTabs, NTabPane, NTooltip, useDialog } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import type { ResolvedLocale } from '../i18n'
 import { useSettingsStore, type AppSettings, type CustomLlmEndpoint } from '../stores/settings'
@@ -9,6 +9,7 @@ import { getDefaultPrompt } from '../utils/llmPrompts'
 import {
   buildLlmApiModeOptions,
   buildLlmProviderOptions,
+  isOfficialOpenAiBaseUrl,
   providerSelectionKey,
   ADD_CUSTOM_ENDPOINT_VALUE,
   CUSTOM_ENDPOINT_PREFIX,
@@ -125,9 +126,17 @@ const llmOpenaiApiKey = computed({
   set: (v: string) => settingsStore.updateSetting('llmOpenaiApiKey', v)
 })
 const llmOpenaiModel = computed({
-  get: () => settingsStore.settings.llmOpenaiModel,
-  set: (v: string) => settingsStore.updateSetting('llmOpenaiModel', v)
+  get: () => settingsStore.settings.llmOpenaiModel || null,
+  set: (v: string | null) => settingsStore.updateSetting('llmOpenaiModel', v?.trim() ?? '')
 })
+const llmOpenaiServiceTier = computed({
+  get: () => settingsStore.settings.llmOpenaiServiceTier,
+  set: (v: AppSettings['llmOpenaiServiceTier']) => settingsStore.updateSetting('llmOpenaiServiceTier', v)
+})
+const openaiServiceTierOptions = computed(() => [
+  { label: t('llm.openaiServiceTierStandard'), value: 'default' },
+  { label: t('llm.openaiServiceTierFast'), value: 'fast' }
+])
 const llmOpenaiReasoningEffort = computed({
   get: () => settingsStore.settings.llmOpenaiReasoningEffort ?? '',
   set: (v: string) => settingsStore.updateSetting('llmOpenaiReasoningEffort', v || null)
@@ -336,17 +345,16 @@ const activePromptTab = ref<'assistant' | 'translation'>('assistant')
 const llmProbeLoading = ref(false)
 const llmProbeResult = ref<LlmProviderProbeResult | null>(null)
 const llmProbeError = ref('')
-const openaiModels = ref<string[]>([])
+const isOfficialOpenai = computed(() => isOfficialOpenAiBaseUrl(llmOpenaiBaseUrl.value))
+const canLoadOpenaiModels = computed(() => Boolean(llmOpenaiBaseUrl.value.trim() && llmOpenaiApiKey.value.trim()))
+const openaiModels = ref<string[] | null>(null)
+const openaiModelOptions = computed(() => (openaiModels.value ?? []).map(value => ({ value, label: value })))
 const openaiModelsLoading = ref(false)
 const openaiModelsError = ref('')
 let openaiModelsRequest = 0
-watch([llmOpenaiBaseUrl, llmOpenaiApiKey], () => {
-  openaiModelsRequest++
-  openaiModels.value = []
-  openaiModelsError.value = ''
-  openaiModelsLoading.value = false
-})
+
 async function loadOpenaiModels() {
+  if (!canLoadOpenaiModels.value || openaiModelsLoading.value) return
   const request = ++openaiModelsRequest
   openaiModelsLoading.value = true
   openaiModelsError.value = ''
@@ -361,6 +369,33 @@ async function loadOpenaiModels() {
     if (request === openaiModelsRequest) openaiModelsLoading.value = false
   }
 }
+
+watch(
+  [llmOpenaiBaseUrl, llmOpenaiApiKey, isOpenai, () => settingsStore.isLoading],
+  ([baseUrl, apiKey, selected, settingsLoading], [previousUrl, previousKey, wasSelected, wasLoading], onCleanup) => {
+    const credentialsChanged = baseUrl !== previousUrl || apiKey !== previousKey
+    if (credentialsChanged) {
+      openaiModelsRequest++
+      openaiModels.value = null
+      openaiModelsError.value = ''
+      openaiModelsLoading.value = false
+    }
+    if (settingsLoading || !selected || !isOfficialOpenai.value || !canLoadOpenaiModels.value) return
+
+    const prefetch = () => {
+      if (openaiModels.value === null && !openaiModelsError.value) void loadOpenaiModels()
+    }
+    // Load saved credentials immediately. Give edits time to settle before
+    // asking OpenAI to list models for the new credentials.
+    if (credentialsChanged && wasSelected && !wasLoading) {
+      const timer = window.setTimeout(prefetch, 500)
+      onCleanup(() => window.clearTimeout(timer))
+    } else {
+      prefetch()
+    }
+  },
+  { immediate: true }
+)
 
 // The reasoning fields the selected provider will be sent, resolved by the
 // backend from the page's current values, saved or not.
@@ -577,14 +612,33 @@ const probeDiff = computed(() => {
             placeholder="sk-..."
           />
         </SettingRow>
-        <SettingRow :label="t('llm.modelName')" :help="t('llm.openaiModelsNote')">
+        <SettingRow :label="t('llm.modelName')" :help="t(isOfficialOpenai ? 'llm.openaiModelsNote' : 'llm.openaiGatewayModelsNote')">
           <template #status>
             <div v-if="openaiModelsError">{{ openaiModelsError }}</div>
           </template>
           <div class="control-group">
-            <NAutoComplete v-model:value="llmOpenaiModel" :options="openaiModels.map(value => ({ value, label: value }))" />
-            <NButton size="small" :loading="openaiModelsLoading" @click="loadOpenaiModels">{{ t('llm.openaiModelsFetch') }}</NButton>
+            <NSelect
+              v-model:value="llmOpenaiModel"
+              :options="openaiModelOptions"
+              :loading="openaiModelsLoading"
+              :placeholder="t('llm.openaiModelPlaceholder')"
+              filterable
+              tag
+            >
+              <template v-if="openaiModelsLoading && openaiModels === null" #empty>
+                {{ t('llm.openaiModelsLoading') }}
+              </template>
+            </NSelect>
+            <NButton
+              size="small"
+              :disabled="!canLoadOpenaiModels"
+              :loading="openaiModelsLoading"
+              @click="loadOpenaiModels"
+            >{{ t('llm.openaiModelsFetch') }}</NButton>
           </div>
+        </SettingRow>
+        <SettingRow v-if="isOfficialOpenai" :label="t('llm.openaiServiceTier')" :help="t('llm.openaiServiceTierHelp')">
+          <NSelect v-model:value="llmOpenaiServiceTier" :options="openaiServiceTierOptions" />
         </SettingRow>
         <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortOptionalSub')">
           <template #status>

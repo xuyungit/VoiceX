@@ -204,10 +204,16 @@ fn enable_thinking_false() -> LowestKnob {
 
 /// OpenAI's floor moved with the model line: the o-series stops at `low`,
 /// gpt-5 at `minimal`, and most gpt-5.1 and later models take `none`.
-/// GPT-6 Astra and GPT-6.1 Sol require at least `low`.
+/// GPT-6 Astra, GPT-6.1 Sol and GPT-6.2 Astra/Sol require at least `low`.
 fn openai_knob(model: &str) -> Option<LowestKnob> {
-    if model == "gpt-6-astra" || model.starts_with("gpt-6-astra-")
-        || model == "gpt-6.1-sol" || model.starts_with("gpt-6.1-sol-")
+    if ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.2-astra", "gpt-6.2-sol"]
+        .into_iter()
+        .any(|alias| {
+            model == alias
+                || model
+                    .strip_prefix(alias)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
+        })
     {
         return Some(LowestKnob::Effort("low"));
     }
@@ -418,6 +424,7 @@ mod tests {
             model_name: "m".to_string(),
             api_mode: LLMApiMode::ChatCompletions,
             reasoning,
+            openai_service_tier: None,
             extra_body: None,
         }
     }

@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::time::timeout;
 
 use crate::foreground_app::{RecentTargetApp, TextInjectionAppOverride};
-use crate::llm::{LLMClient, PromptBuildOptions};
+use crate::llm::{is_official_openai_base_url, LLMClient, OpenAiServiceTier, PromptBuildOptions};
 use crate::services::llm_service::LLM_PROVIDER_FOLLOW;
 use crate::tts::llm_stage;
 use crate::services::{
@@ -160,6 +160,7 @@ pub struct AppSettings {
     pub llm_openai_base_url: String,
     pub llm_openai_api_key: String,
     pub llm_openai_model: String,
+    pub llm_openai_service_tier: OpenAiServiceTier,
     /// Reasoning for the OpenAI provider; `None`/blank asks for the lowest the
     /// model accepts, which is no field at all for one that does not reason.
     #[serde(default)]
@@ -552,9 +553,10 @@ impl Default for AppSettings {
             llm_volcengine_model: crate::llm::default_volcengine_model().to_string(),
             llm_volcengine_reasoning_effort: None,
 
-            llm_openai_base_url: "https://api.openai.com/v1".to_string(),
+            llm_openai_base_url: crate::llm::default_openai_base_url().to_string(),
             llm_openai_api_key: String::new(),
             llm_openai_model: crate::llm::default_openai_model().to_string(),
+            llm_openai_service_tier: OpenAiServiceTier::default(),
             llm_openai_reasoning_effort: None,
 
             llm_qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
@@ -899,7 +901,7 @@ pub fn migrate_openai_default_model(value: &mut serde_json::Value) -> bool {
     match object.get("llmOpenaiBaseUrl") {
         None => {} // Missing fields use AppSettings' official endpoint default.
         Some(serde_json::Value::String(url))
-            if url.trim_end_matches('/') == "https://api.openai.com/v1" => {}
+            if url.trim_end_matches('/') == crate::llm::default_openai_base_url() => {}
         _ => return false,
     }
     let replacement = object
@@ -1455,27 +1457,58 @@ pub fn save_settings(
     Ok(())
 }
 
-/// List IDs visible to the configured account. The Models API does not report
-/// which endpoint each ID supports, so callers must not present this as a list
-/// of verified chat models.
+/// The Models API lists IDs without endpoint capability metadata. Prefer
+/// stable aliases for general-purpose text models as picker suggestions.
+fn is_openai_text_model_alias(id: &str) -> bool {
+    static TEXT_ALIAS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(concat!(
+            r"^gpt-[56](?:\.[0-9]+)?(?:-(?:astra|sol|terra|luna|mini|nano))?$",
+            r"|^gpt-(?:4o(?:-mini)?|4\.1(?:-(?:mini|nano))?)$",
+            r"|^o(?:3(?:-mini)?|4-mini)$"
+        ))
+        .expect("OpenAI model alias pattern must be valid")
+    });
+    TEXT_ALIAS.is_match(id)
+}
+
 #[tauri::command]
 pub async fn list_openai_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
     let endpoint = format!("{}/models", base_url.trim().trim_end_matches('/'));
     let response = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .build().map_err(|e| e.to_string())?
-        .get(endpoint).bearer_auth(api_key.trim()).send().await
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(endpoint)
+        .bearer_auth(api_key.trim())
+        .send()
+        .await
         .map_err(|e| e.to_string())?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("OpenAI models HTTP {}", status.as_u16()));
     }
-    #[derive(serde::Deserialize)]
-    struct ModelList { data: Vec<ModelId> }
-    #[derive(serde::Deserialize)]
-    struct ModelId { id: String }
+    #[derive(Deserialize)]
+    struct ModelList {
+        data: Vec<Model>,
+    }
+    #[derive(Deserialize)]
+    struct Model {
+        id: String,
+        shutdown_date: Option<chrono::NaiveDate>,
+    }
     let result: ModelList = response.json().await.map_err(|e| e.to_string())?;
-    let mut ids: Vec<String> = result.data.into_iter().map(|model| model.id).collect();
+    let official = is_official_openai_base_url(&base_url);
+    let today = chrono::Utc::now().date_naive();
+    let mut ids: Vec<String> = result
+        .data
+        .into_iter()
+        .filter(|model| {
+            !official
+                || (is_openai_text_model_alias(&model.id)
+                    && model.shutdown_date.is_none_or(|date| today < date))
+        })
+        .map(|model| model.id)
+        .collect();
     ids.sort_unstable();
     ids.dedup();
     Ok(ids)
@@ -1570,7 +1603,7 @@ pub async fn clear_soniox_debug_overrides(
 mod tests {
     use super::{
         active_custom_endpoint, apply_llm_provider_selection, default_tts_provider_type,
-        migrate_hotkey_digit_key_codes, migrate_llm_custom_endpoints,
+        is_openai_text_model_alias, migrate_hotkey_digit_key_codes, migrate_llm_custom_endpoints,
         migrate_text_injection_override_restore_flag, migrate_volcengine_minimal_effort,
         normalize_qwen_settings, normalize_text_injection_overrides, preview_llm_reasoning,
         rewrite_unavailable_system_provider, AppSettings,
@@ -1596,6 +1629,26 @@ mod tests {
         let request = crate::llm::create_provider(&config.provider_type)
             .build_chat_request(Vec::new(), &config);
         assert_eq!(request["reasoning_effort"], "none");
+        assert_eq!(request["service_tier"], "default");
+    }
+
+    #[test]
+    fn openai_model_picker_suggests_stable_text_aliases() {
+        for id in ["gpt-6.1-terra", "gpt-6-luna", "gpt-5.4-mini", "gpt-4o", "o4-mini"] {
+            assert!(is_openai_text_model_alias(id), "{id}");
+        }
+        for id in [
+            "gpt-6.1-terra-2026-10-01",
+            "gpt-5.5-pro",
+            "gpt-5.3-codex",
+            "gpt-4o-mini-transcribe",
+            "gpt-realtime-2",
+            "gpt-image-2",
+            "text-embedding-3-small",
+            "ft:gpt-4o-mini:team",
+        ] {
+            assert!(!is_openai_text_model_alias(id), "{id}");
+        }
     }
 
     #[test]

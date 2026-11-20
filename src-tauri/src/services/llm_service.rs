@@ -66,17 +66,19 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             reasoning: ReasoningChoice::from_setting(
                 settings.llm_volcengine_reasoning_effort.as_deref(),
             ),
+            openai_service_tier: None,
             extra_body: None,
         },
         LLMProviderType::Openai => LLMConfig {
             provider_type: LLMProviderType::Openai,
-            base_url: settings.llm_openai_base_url.clone(),
+            base_url: settings.llm_openai_base_url.trim().to_string(),
             api_key: settings.llm_openai_api_key.clone(),
             model_name: settings.llm_openai_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
             reasoning: ReasoningChoice::from_setting(
                 settings.llm_openai_reasoning_effort.as_deref(),
             ),
+            openai_service_tier: Some(settings.llm_openai_service_tier),
             extra_body: None,
         },
         LLMProviderType::Qwen => LLMConfig {
@@ -86,6 +88,7 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             model_name: settings.llm_qwen_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
             reasoning: ReasoningChoice::Lowest,
+            openai_service_tier: None,
             extra_body: None,
         },
         LLMProviderType::Deepseek => LLMConfig {
@@ -95,6 +98,7 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             model_name: settings.llm_deepseek_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
             reasoning: ReasoningChoice::Lowest,
+            openai_service_tier: None,
             extra_body: None,
         },
         LLMProviderType::Gemini => LLMConfig {
@@ -104,6 +108,7 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             model_name: settings.llm_gemini_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
             reasoning: ReasoningChoice::Lowest,
+            openai_service_tier: None,
             extra_body: None,
         },
         LLMProviderType::Anthropic => LLMConfig {
@@ -113,6 +118,7 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
             model_name: settings.llm_anthropic_model.clone(),
             api_mode: LLMApiMode::ChatCompletions,
             reasoning: ReasoningChoice::Lowest,
+            openai_service_tier: None,
             extra_body: None,
         },
         LLMProviderType::Custom => {
@@ -128,6 +134,7 @@ pub fn build_llm_config_from_settings(settings: &AppSettings) -> LLMConfig {
                 reasoning: ReasoningChoice::from_setting(
                     endpoint.map(|e| e.reasoning_effort.as_str()),
                 ),
+                openai_service_tier: None,
                 extra_body: endpoint.and_then(|e| non_empty(Some(&e.extra_body))),
             }
         }

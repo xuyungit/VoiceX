@@ -1,6 +1,6 @@
 //! LLM Provider trait and implementations
 
-use super::config::{LLMConfig, LLMProviderType};
+use super::config::{is_official_openai_base_url, LLMConfig, LLMProviderType};
 use super::reasoning;
 use serde::Serialize;
 use serde_json::Value;
@@ -98,6 +98,12 @@ impl LLMProvider for OpenAIProvider {
             "messages": messages
         });
         insert_reasoning_fields(&mut req, config);
+        if let Some(tier) = config
+            .openai_service_tier
+            .filter(|_| is_official_openai_base_url(&config.base_url))
+        {
+            req["service_tier"] = serde_json::json!(tier);
+        }
         req
     }
 
@@ -298,6 +304,7 @@ mod tests {
             model_name: "m".to_string(),
             api_mode: LLMApiMode::ChatCompletions,
             reasoning,
+            openai_service_tier: None,
             extra_body: None,
         }
     }
@@ -311,6 +318,24 @@ mod tests {
             role: "user".to_string(),
             content: "hi".to_string(),
         }]
+    }
+
+    #[test]
+    fn openai_service_tier_only_reaches_official_chat_requests() {
+        use crate::commands::settings::AppSettings;
+        use crate::services::llm_service::build_llm_config_for_key;
+
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"llmOpenaiServiceTier":"fast"}"#).unwrap();
+        let mut config = build_llm_config_for_key(&settings, "openai");
+        for url in ["https://api.openai.com/v1", "https://eu.api.openai.com/v1/"] {
+            config.base_url = url.into();
+            let request = OpenAIProvider.build_chat_request(user_message(), &config);
+            assert_eq!(request["service_tier"], "fast");
+        }
+        config.base_url = "https://api.openai.com.example/v1".into();
+        let request = OpenAIProvider.build_chat_request(user_message(), &config);
+        assert!(request.get("service_tier").is_none());
     }
 
     #[test]
@@ -427,7 +452,13 @@ mod tests {
         assert!(lowest.get("max_completion_tokens").is_none());
         assert_eq!(lowest["reasoning_effort"], "none");
 
-        for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-sol-2026-10-01"] {
+        for model in [
+            "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6.1-sol-2026-10-01",
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
+        ] {
             config.model_name = model.to_string();
             let request = OpenAIProvider.build_chat_request(user_message(), &config);
             assert_eq!(request["reasoning_effort"], "low", "{model}");

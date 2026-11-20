@@ -1,6 +1,19 @@
 {
   "volcengineDefaultModel": "doubao-seed-2-0-mini-260428",
   "volcengineRetiredDefaultModel": "doubao-seed-2-0-mini-260215",
+  "openaiBaseUrl": "https://api.openai.com/v1",
+  "openaiRegionalBaseUrls": [
+    "https://us.api.openai.com/v1",
+    "https://eu.api.openai.com/v1",
+    "https://au.api.openai.com/v1",
+    "https://ca.api.openai.com/v1",
+    "https://jp.api.openai.com/v1",
+    "https://in.api.openai.com/v1",
+    "https://sg.api.openai.com/v1",
+    "https://kr.api.openai.com/v1",
+    "https://gb.api.openai.com/v1",
+    "https://ae.api.openai.com/v1"
+  ],
   "openaiDefaultModel": "gpt-6-luna",
   "deepseekBaseUrl": "https://api.deepseek.com",
   "deepseekDefaultModel": "deepseek-flash",

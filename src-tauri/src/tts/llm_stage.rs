@@ -474,6 +474,7 @@ mod tests {
             model_name: "test".to_string(),
             api_mode: LLMApiMode::ChatCompletions,
             reasoning: ReasoningChoice::default(),
+            openai_service_tier: None,
             extra_body: None,
         }
     }

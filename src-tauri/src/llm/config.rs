@@ -9,6 +9,8 @@ use std::sync::OnceLock;
 struct ModelDefaults {
     volcengine_default_model: String,
     volcengine_retired_default_model: String,
+    openai_base_url: String,
+    openai_regional_base_urls: Vec<String>,
     openai_default_model: String,
     deepseek_base_url: String,
     deepseek_default_model: String,
@@ -34,6 +36,19 @@ pub fn replacement_for_retired_volcengine_default(model: &str) -> Option<&'stati
 
 pub fn default_openai_model() -> &'static str {
     &model_defaults().openai_default_model
+}
+
+pub fn default_openai_base_url() -> &'static str {
+    &model_defaults().openai_base_url
+}
+
+pub fn is_official_openai_base_url(base_url: &str) -> bool {
+    let base_url = base_url.trim().trim_end_matches('/');
+    base_url == default_openai_base_url()
+        || model_defaults()
+            .openai_regional_base_urls
+            .iter()
+            .any(|url| url == base_url)
 }
 
 pub fn default_deepseek_base_url() -> &'static str {
@@ -110,6 +125,14 @@ impl LLMApiMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiServiceTier {
+    #[default]
+    Default,
+    Fast,
+}
+
 /// LLM service configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LLMConfig {
@@ -121,6 +144,8 @@ pub struct LLMConfig {
     /// How much the model may think. The default asks for the lowest this
     /// endpoint accepts, which `reasoning::plan` spells per vendor.
     pub reasoning: ReasoningChoice,
+    /// Service tier for the official OpenAI API.
+    pub openai_service_tier: Option<OpenAiServiceTier>,
     /// Extra JSON object merged into every request body, the way llm-bench's
     /// `[provider.extra]` works. This is how endpoint-specific thinking knobs
     /// reach the wire (`enable_thinking: false` on DashScope,
@@ -138,6 +163,7 @@ impl Default for LLMConfig {
             model_name: default_volcengine_model().to_string(),
             api_mode: LLMApiMode::default(),
             reasoning: ReasoningChoice::default(),
+            openai_service_tier: None,
             extra_body: None,
         }
     }

@@ -10,7 +10,7 @@ import type { UiLanguage } from '../i18n'
 import type { UiTheme } from '../theme'
 import { getDefaultPrompt } from '../utils/llmPrompts'
 import { isMacOS } from '../utils/platform'
-import type { LlmApiModeValue, LlmProviderValue } from '../utils/llmOptions'
+import type { LlmApiModeValue, LlmProviderValue, OpenAiServiceTier } from '../utils/llmOptions'
 
 export interface CustomLlmEndpoint {
     id: string
@@ -153,6 +153,7 @@ export interface AppSettings {
     llmOpenaiBaseUrl: string
     llmOpenaiApiKey: string
     llmOpenaiModel: string
+    llmOpenaiServiceTier: OpenAiServiceTier
     llmOpenaiReasoningEffort: string | null
 
     // LLM Provider: Qwen (DashScope)
@@ -457,9 +458,10 @@ const defaultSettings: AppSettings = {
     llmVolcengineModel: llmModels.volcengineDefaultModel,
     llmVolcengineReasoningEffort: null,
 
-    llmOpenaiBaseUrl: 'https://api.openai.com/v1',
+    llmOpenaiBaseUrl: llmModels.openaiBaseUrl,
     llmOpenaiApiKey: '',
     llmOpenaiModel: llmModels.openaiDefaultModel,
+    llmOpenaiServiceTier: 'default',
     llmOpenaiReasoningEffort: null,
 
     llmQwenBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',

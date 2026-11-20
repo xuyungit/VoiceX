@@ -1,4 +1,5 @@
 import type { CustomLlmEndpoint } from '../stores/settings'
+import llmModels from '../shared/llmModels.json'
 
 type ProviderOption<T extends string> = {
   label: string
@@ -22,6 +23,13 @@ export type LlmProviderValue = typeof LLM_PROVIDER_VALUES[number]
 
 export const LLM_API_MODE_VALUES = ['chat_completions', 'responses'] as const
 export type LlmApiModeValue = typeof LLM_API_MODE_VALUES[number]
+
+export type OpenAiServiceTier = 'default' | 'fast'
+
+export function isOfficialOpenAiBaseUrl(baseUrl: string): boolean {
+  const url = baseUrl.trim().replace(/\/+$/, '')
+  return url === llmModels.openaiBaseUrl || llmModels.openaiRegionalBaseUrls.includes(url)
+}
 
 // Dropdown value prefix for a specific named custom endpoint, e.g. `custom:<id>`.
 export const CUSTOM_ENDPOINT_PREFIX = 'custom:'
