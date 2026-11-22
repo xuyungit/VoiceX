@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.19.4] - 2026-11-22
+
+### Added
+
+- **LLM model pickers, caching, and OpenAI service tier** — load OpenAI, Gemini, and custom-endpoint model lists with a 24-hour local cache and 1-hour failure cooldown (with manual refresh); choose Standard or Fast service tier for OpenAI; choose per-model reasoning effort for Gemini and inspect sent reasoning parameters plus token and throughput metrics in the connection test; add Gemini native API mode for custom endpoints.
+- **Recording ready cue** — show the HUD immediately on hotkey press while opening the microphone asynchronously, and play a soft cue when the microphone is ready (enabled by default; mutes output after the cue when **Mute while recording** is on).
+- **Remove extra blank lines** — add an option in **Text rules** to remove blank lines from dictation output while keeping regular paragraph and list line breaks.
+
+### Changed
+
+- **ElevenLabs ASR defaults** — default new and empty configurations to `scribe_v3_live` (realtime) and `scribe_v3` (batch), while keeping `scribe_v2_realtime` and `scribe_v2` selectable.
+- **Audio, storage, and paste latency** — offload audio capture processing off the real-time audio callback thread, cache settings and precompiled replacement rules in storage, move recent-app writes off the hotkey path, and shorten the clipboard pre-paste delay for local apps.
+
+### Fixed
+
+- **Session isolation & HUD** — isolate asynchronous microphone startup and readiness state per recording session; restore the LLM-correcting shimmer and smooth sweep cadence in the HUD.
+- **Input settings** — hide offline audio devices from the mute-restore warning.
+
 ## [0.19.3] - 2026-11-18
 
 ### Fixed

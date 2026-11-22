@@ -262,11 +262,11 @@ Optionally have an LLM correct or translate the recognized text. Choose a provid
 | DeepSeek | `deepseek-flash` |
 | Google Gemini | `gemini-3.5-flash-lite` |
 | Anthropic (Claude, or any compatible endpoint) | `claude-haiku-5-5` |
-| Custom | Any OpenAI-compatible endpoint |
+| Custom | Any OpenAI- or Gemini-compatible endpoint |
 
 - **Correction** — fixes recognition errors using your dictionary, with customizable prompts (`{{DICTIONARY}}` inserts the word list).
 - **Translation** — double-tap the hotkey to translate the result to English.
-- **Connection test** — sends one real correction request with the current provider and model so you can check speed and quality.
+- **Connection test** — sends one real correction request with the current provider and model so you can check speed, reasoning parameters, and quality.
 - **Recent input context** — optionally passes your last five inputs as reference, preferring edited versions.
 - **Lowest reasoning by default** — short corrections gain nothing from "thinking", so it is turned down to save time; the settings page shows exactly what is sent. A reply cut off at the output limit is reported as an error instead of being used.
 
@@ -274,7 +274,7 @@ Optionally have an LLM correct or translate the recognized text. Choose a provid
 
 - **Dictionary** — one word per line. Speech recognition passes it to an engine as hints only when **Use hotwords / dictionary for this provider** is on for that engine on the ASR page. The switch is saved per engine and is on by default, except for Google Gemini, where it starts off because the model can echo the word list during silence. Cohere, Xiaomi MiMo, DeepSeek, and Coli do not take a dictionary. LLM correction uses the dictionary regardless of this switch.
 - **Replacement rules** — exact, contains, or regex rules applied to the text before it is typed; exact matches ignore trailing punctuation.
-- **Short-sentence punctuation** — trailing punctuation is removed from short sentences, with an adjustable length threshold.
+- **Text formatting** — trailing punctuation is removed from short sentences with an adjustable length threshold, with an option to remove extra blank lines.
 
 ## Text input
 
