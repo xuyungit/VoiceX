@@ -14,7 +14,7 @@ function collectSpecs(dir) {
   })
 }
 
-const args = process.argv.slice(2)
+const args = process.argv.slice(2).filter(arg => arg !== '--')
 const requested = args.filter(arg => arg !== '--skip-i18n')
 const allSpecs = collectSpecs('src').sort()
 for (const file of requested) {

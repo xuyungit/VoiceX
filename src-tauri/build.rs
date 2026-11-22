@@ -15,8 +15,29 @@ fn configure_protoc() {
     env::set_var("PROTOC", protoc_path);
 }
 
+fn run_tauri_build() {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os == "windows" && target_env == "msvc" {
+        // `tauri_build`'s default winres manifest only attaches to `[[bin]]` targets,
+        // leaving `cargo test --lib` without Common Controls v6 (`TaskDialogIndirect`
+        // fails at startup with 0xc0000139). Let the MSVC linker embed it for all
+        // linked targets (bins and test harnesses) instead of duplicating the resource.
+        let attrs = tauri_build::Attributes::new().windows_attributes(
+            tauri_build::WindowsAttributes::new_without_app_manifest(),
+        );
+        tauri_build::try_build(attrs).expect("Failed to run tauri-build");
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!(
+            "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+        );
+    } else {
+        tauri_build::build();
+    }
+}
+
 fn main() {
-    tauri_build::build();
+    run_tauri_build();
 
     configure_protoc();
 

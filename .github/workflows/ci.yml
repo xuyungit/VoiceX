@@ -38,7 +38,7 @@ jobs:
         run: pnpm build
 
       - name: Run frontend test suite
-        run: pnpm test --skip-i18n
+        run: pnpm test:unit
 
   rust:
     name: Rust checks & tests (${{ matrix.os }})
