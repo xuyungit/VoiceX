@@ -172,8 +172,11 @@ const outputMuteHint = computed(() => {
   if (outputMuteQueryError.value) return t('input.muteWhileRecordingError', { message: outputMuteQueryError.value })
   if (!status) return null
   if (status.recoveryError) return t('input.muteRecoveryError', { message: status.recoveryError })
-  if (status.pendingRestores.length) {
-    const devices = status.pendingRestores.map(d => d.error ? `${d.device}: ${d.error}` : d.device).join('; ')
+  // Offline devices are silently restored by the backend when they reconnect;
+  // only warn in settings when a currently connected device is still waiting.
+  const activePendingRestores = status.pendingRestores.filter(d => !d.disconnected)
+  if (activePendingRestores.length) {
+    const devices = activePendingRestores.map(d => d.error ? `${d.device}: ${d.error}` : d.device).join('; ')
     return t('input.muteRestorePending', { devices })
   }
   if (!muteOutputWhileRecording.value && !status.recording) return null
