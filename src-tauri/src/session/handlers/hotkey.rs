@@ -27,7 +27,7 @@ impl SessionController {
         if start_recording {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             crate::post_edit::coordinator::next_recording();
-            match self.capture_foreground_app() {
+            let recent_app = match self.capture_foreground_app() {
                 Ok(app_info) => {
                     log::info!(
                         "Hotkey target app captured: display_name={:?}, process_name={:?}, bundle_id={:?}, pid={}, is_self={}",
@@ -37,38 +37,21 @@ impl SessionController {
                         app_info.process_id,
                         app_info.is_self
                     );
-                    if !app_info.is_self {
+                    let recent_app = if !app_info.is_self {
                         crate::app_icons::record_foreground_app_async(&app_info);
-                        if let Some(recent_app) = app_info.to_recent_target_app() {
-                            if let Err(err) =
-                                crate::storage::remember_recent_target_app(&recent_app)
-                            {
-                                log::warn!("Failed to remember target app: {}", err);
-                            } else if let Some(app_handle) = self.app_handle() {
-                                if let Err(err) = app_handle.emit(
-                                    "input:recent-target-apps-updated",
-                                    serde_json::json!({
-                                        "appName": recent_app.app_name,
-                                        "platform": recent_app.platform,
-                                        "matchKind": recent_app.match_kind,
-                                        "matchValue": recent_app.match_value,
-                                    }),
-                                ) {
-                                    log::warn!(
-                                        "Failed to emit recent target apps update event: {}",
-                                        err
-                                    );
-                                }
-                            }
-                        }
-                    }
+                        app_info.to_recent_target_app()
+                    } else {
+                        None
+                    };
                     state.session_target_app = Some(app_info);
+                    recent_app
                 }
                 Err(err) => {
                     log::warn!("Failed to capture hotkey target app: {}", err);
                     state.session_target_app = None;
+                    None
                 }
-            }
+            };
 
             let (asr_model_name, llm_model_name) =
                 crate::services::history_service::HistoryService::capture_model_snapshot();
@@ -93,6 +76,27 @@ impl SessionController {
 
             self.start_audio_capture(state);
             self.start_recording_timeout(self.effective_max_recording_minutes(state), state);
+
+            if let Some(recent_app) = recent_app {
+                let app_handle = self.app_handle();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Err(err) = crate::storage::remember_recent_target_app(&recent_app) {
+                        log::warn!("Failed to remember target app: {}", err);
+                    } else if let Some(app_handle) = app_handle {
+                        if let Err(err) = app_handle.emit(
+                            "input:recent-target-apps-updated",
+                            serde_json::json!({
+                                "appName": recent_app.app_name,
+                                "platform": recent_app.platform,
+                                "matchKind": recent_app.match_kind,
+                                "matchValue": recent_app.match_value,
+                            }),
+                        ) {
+                            log::warn!("Failed to emit recent target apps update event: {}", err);
+                        }
+                    }
+                });
+            }
         }
 
         if let Some(threshold) = start_hold_timer {

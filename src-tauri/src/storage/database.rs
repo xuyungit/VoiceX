@@ -4,6 +4,7 @@ use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -2044,7 +2045,11 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), StorageError> {
 }
 
 pub fn get_recent_target_apps() -> Result<Vec<RecentTargetApp>, StorageError> {
-    let Some(json) = get_user_config_value(RECENT_TARGET_APPS_KEY)? else {
+    with_db(get_recent_target_apps_in)
+}
+
+fn get_recent_target_apps_in(conn: &Connection) -> Result<Vec<RecentTargetApp>, StorageError> {
+    let Some(json) = get_user_config_value_in(conn, RECENT_TARGET_APPS_KEY)? else {
         return Ok(Vec::new());
     };
 
@@ -2061,18 +2066,36 @@ pub fn get_recent_target_apps() -> Result<Vec<RecentTargetApp>, StorageError> {
 }
 
 pub fn remember_recent_target_app(app: &RecentTargetApp) -> Result<(), StorageError> {
-    let mut apps = get_recent_target_apps()?;
-    apps.retain(|existing| {
-        !(existing.platform.eq_ignore_ascii_case(&app.platform)
+    with_db(|conn| remember_recent_target_app_in(conn, app))
+}
+
+fn remember_recent_target_app_in(
+    conn: &Connection,
+    app: &RecentTargetApp,
+) -> Result<(), StorageError> {
+    let mut apps = get_recent_target_apps_in(conn)?;
+    let same_app = |existing: &RecentTargetApp| {
+        existing.platform.eq_ignore_ascii_case(&app.platform)
             && existing.match_kind == app.match_kind
-            && existing.match_value == app.match_value)
-    });
+            && existing.match_value == app.match_value
+    };
+    let seen_at = |entry: &RecentTargetApp| DateTime::parse_from_rfc3339(&entry.last_seen_at).ok();
+    let captured_at = seen_at(app);
+    // Blocking workers may finish in a different order from the hotkey presses.
+    if apps
+        .iter()
+        .any(|existing| same_app(existing) && seen_at(existing) > captured_at)
+    {
+        return Ok(());
+    }
+    apps.retain(|existing| !same_app(existing));
     apps.insert(0, app.clone());
+    apps.sort_by_cached_key(|entry| Reverse(seen_at(entry)));
     apps.truncate(MAX_RECENT_TARGET_APPS);
 
     let payload = serde_json::to_string(&apps)
         .map_err(|err| StorageError::SerializeFailed(err.to_string()))?;
-    set_user_config_value(RECENT_TARGET_APPS_KEY, &payload)
+    set_user_config_value_in(conn, RECENT_TARGET_APPS_KEY, &payload)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2384,27 +2407,31 @@ pub fn save_llm_model_cache(json: &str) -> Result<(), StorageError> {
 }
 
 fn get_user_config_value(key: &str) -> Result<Option<String>, StorageError> {
-    with_db(|conn| {
-        conn.query_row(
-            "SELECT value FROM user_config WHERE key = ?1 LIMIT 1",
-            params![key],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| StorageError::QueryFailed(e.to_string()))
-    })
+    with_db(|conn| get_user_config_value_in(conn, key))
+}
+
+fn get_user_config_value_in(conn: &Connection, key: &str) -> Result<Option<String>, StorageError> {
+    conn.query_row(
+        "SELECT value FROM user_config WHERE key = ?1 LIMIT 1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))
 }
 
 fn set_user_config_value(key: &str, value: &str) -> Result<(), StorageError> {
-    with_db(|conn| {
-        conn.execute(
-            "INSERT INTO user_config (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![key, value],
-        )
-        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        Ok(())
-    })
+    with_db(|conn| set_user_config_value_in(conn, key, value))
+}
+
+fn set_user_config_value_in(conn: &Connection, key: &str, value: &str) -> Result<(), StorageError> {
+    conn.execute(
+        "INSERT INTO user_config (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    Ok(())
 }
 
 pub(crate) fn ensure_column(
@@ -2756,6 +2783,30 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn recent_target_apps_use_capture_order_when_writes_arrive_out_of_order() {
+        let conn = setup_conn();
+        let app = |id: &str, name: &str, captured_at: &str| RecentTargetApp {
+            platform: "macos".into(),
+            app_name: name.into(),
+            match_kind: "bundle_id".into(),
+            match_value: id.into(),
+            display_name: None,
+            process_name: None,
+            bundle_id: Some(id.into()),
+            app_user_model_id: None,
+            executable_path: None,
+            last_seen_at: captured_at.into(),
+        };
+        let latest = app("com.example.a", "Current name", "2026-11-22T10:00:03+00:00");
+        let other = app("com.example.b", "Other app", "2026-11-22T10:00:02+00:00");
+        let stale = app("com.example.a", "Old name", "2026-11-22T10:00:01+00:00");
+        for entry in [&latest, &other, &stale] {
+            remember_recent_target_app_in(&conn, entry).unwrap();
+        }
+        assert_eq!(get_recent_target_apps_in(&conn).unwrap(), [latest, other]);
     }
 
     fn read_settings_blob(conn: &Connection) -> serde_json::Value {
