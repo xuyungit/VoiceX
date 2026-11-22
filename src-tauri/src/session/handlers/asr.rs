@@ -537,6 +537,18 @@ impl SessionController {
                             let skip_clipboard_restore = matched_override
                                 .map(|item| item.skip_clipboard_restore)
                                 .unwrap_or(false);
+                            // Keep the longer bridge wait for known remote-desktop clients,
+                            // explicit bridge overrides, or when the destination could not be
+                            // identified at all.
+                            let clipboard_bridge = target_app
+                                .as_ref()
+                                .map(|app| {
+                                    crate::foreground_app::is_clipboard_bridge_target(
+                                        app,
+                                        skip_clipboard_restore,
+                                    )
+                                })
+                                .unwrap_or(true);
                             // Remote clipboard bridges still need their
                             // activation round-trip before the paste shortcut.
                             let focus_roundtrip_pid = target_app
@@ -544,24 +556,20 @@ impl SessionController {
                                 .filter(|app| skip_clipboard_restore && !app.is_self)
                                 .map(|app| app.process_id);
                             log::info!(
-                                "Injection destination: app={:?}, pid={:?}, mode={:?}, override_match={:?}",
+                                "Injection destination: app={:?}, pid={:?}, mode={:?}, override_match={:?}, clipboard_bridge={}",
                                 target_app.as_ref().and_then(|app| app
                                     .display_name
                                     .as_deref()
                                     .or(app.process_name.as_deref())),
                                 target_app.as_ref().map(|app| app.process_id),
                                 mode,
-                                matched_override.map(|item| item.app_name.as_str())
+                                matched_override.map(|item| item.app_name.as_str()),
+                                clipboard_bridge
                             );
                             let resolved = target_app.as_ref().map(|app| crate::injector::ResolvedApp {
                                 process_id: app.process_id,
                                 app_name: app.display_name.clone().or_else(|| app.process_name.clone()),
-                                remote_bridge: {
-                                    #[cfg(any(target_os = "macos", target_os = "windows"))]
-                                    { crate::post_edit::coordinator::known_remote_target(app, skip_clipboard_restore) }
-                                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                                    { skip_clipboard_restore }
-                                },
+                                remote_bridge: clipboard_bridge,
                                 target_app: app.to_target_app_identity(),
                             });
                             #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -580,6 +588,7 @@ impl SessionController {
                                 }
                             }
                             (crate::injector::TextInjector::with_mode(mode, skip_clipboard_restore)
+                                .with_clipboard_bridge(clipboard_bridge)
                                 .with_focus_roundtrip_target(focus_roundtrip_pid), resolved)
                         },
                     );

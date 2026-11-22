@@ -10,8 +10,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::asr::{transcribe_audio_path, transcribe_audio_path_detailed, AsrConfig};
 use crate::commands::settings::AppSettings;
-use crate::foreground_app::{detect_foreground_app, match_text_injection_override};
-use crate::injector::{inject_serialized_with_guard, InjectionGuard, TextInjectionMode};
+use crate::foreground_app::{
+    detect_foreground_app, is_clipboard_bridge_target, match_text_injection_override,
+};
+use crate::injector::{
+    inject_serialized_with_resolver, InjectionGuard, TextInjectionMode, TextInjector,
+};
 use crate::llm::{correction_timeout_for_text, LLMClient, PromptBuildOptions};
 use crate::services::{
     history_service::HistoryService, llm_service::build_llm_config_from_settings,
@@ -186,6 +190,8 @@ pub async fn replay_history_injection(
         let skip_clipboard_restore_for_override = matched_override
             .map(|override_item| override_item.skip_clipboard_restore)
             .unwrap_or(false);
+        let clipboard_bridge =
+            is_clipboard_bridge_target(&target_app, skip_clipboard_restore_for_override);
         // Clipboard-bridge targets additionally need the focus round-trip:
         // their Mac-side client only announces the clipboard when it becomes
         // active again, so we bounce activation through VoiceX before pasting
@@ -197,13 +203,14 @@ pub async fn replay_history_injection(
         };
 
         log::info!(
-            "Replay injection target captured: display_name={:?}, process_name={:?}, bundle_id={:?}, pid={}, mode={:?}, override_match={:?}",
+            "Replay injection target captured: display_name={:?}, process_name={:?}, bundle_id={:?}, pid={}, mode={:?}, override_match={:?}, clipboard_bridge={}",
             target_app.display_name,
             target_app.process_name,
             target_app.bundle_id,
             target_app.process_id,
             injection_mode,
-            matched_override.map(|override_item| override_item.app_name.clone())
+            matched_override.map(|override_item| override_item.app_name.clone()),
+            clipboard_bridge
         );
         log::info!(
             "Replay injecting final text (len={}, intent={:?})",
@@ -215,13 +222,11 @@ pub async fn replay_history_injection(
         let injection_cancel = cancel.clone();
         let guard = InjectionGuard::new(move || injection_cancel.is_cancelled());
         tauri::async_runtime::spawn_blocking(move || {
-            inject_serialized_with_guard(
-                injection_mode,
-                &final_text,
-                skip_clipboard_restore_for_override,
-                focus_roundtrip_pid,
-                guard,
-            )
+            inject_serialized_with_resolver(&final_text, guard, || {
+                TextInjector::with_mode(injection_mode, skip_clipboard_restore_for_override)
+                    .with_clipboard_bridge(clipboard_bridge)
+                    .with_focus_roundtrip_target(focus_roundtrip_pid)
+            })
         })
         .await
         .map_err(|err| format!("注入任务失败: {err}"))?

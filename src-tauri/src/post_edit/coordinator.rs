@@ -17,16 +17,7 @@ pub fn known_remote_target(
     app: &crate::foreground_app::ForegroundAppInfo,
     clipboard_bridge: bool,
 ) -> bool {
-    clipboard_bridge
-        || app
-            .bundle_id
-            .as_deref()
-            .is_some_and(|id| id.eq_ignore_ascii_case("com.microsoft.rdc.macos"))
-        || app.process_name.as_deref().is_some_and(|name| {
-            ["mstsc.exe", "msrdc.exe", "windowsapp.exe"]
-                .iter()
-                .any(|candidate| name.eq_ignore_ascii_case(candidate))
-        })
+    crate::foreground_app::is_clipboard_bridge_target(app, clipboard_bridge)
 }
 
 type Stop = Arc<Mutex<Option<EndReason>>>;

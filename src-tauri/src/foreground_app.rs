@@ -169,6 +169,23 @@ fn all_match_candidates(info: &ForegroundAppInfo) -> Vec<AppMatchCandidate> {
     candidates
 }
 
+/// Returns `true` when `app` bridges the system clipboard to a remote session
+/// (either explicitly marked via `skip_clipboard_restore` or a known RDP client
+/// on macOS/Windows). Shared by text injection (tiered pre-paste delay) and
+/// post-edit observation (excluding remote targets).
+pub fn is_clipboard_bridge_target(app: &ForegroundAppInfo, skip_clipboard_restore: bool) -> bool {
+    skip_clipboard_restore
+        || app
+            .bundle_id
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("com.microsoft.rdc.macos"))
+        || app.process_name.as_deref().is_some_and(|name| {
+            ["mstsc.exe", "msrdc.exe", "windowsapp.exe"]
+                .iter()
+                .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        })
+}
+
 pub(crate) fn clean_app_display_name(platform: &str, raw: &str) -> String {
     let trimmed = raw.trim();
     if platform == "windows"
@@ -656,8 +673,8 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::{
-        match_text_injection_override, ForegroundAppInfo, TextInjectionAppOverride,
-        APP_USER_MODEL_ID_MATCH,
+        is_clipboard_bridge_target, match_text_injection_override, ForegroundAppInfo,
+        TextInjectionAppOverride, APP_USER_MODEL_ID_MATCH,
     };
 
     fn sample_macos_app() -> ForegroundAppInfo {
@@ -852,5 +869,39 @@ mod tests {
                 .mode,
             "pasteboard"
         );
+    }
+
+    #[test]
+    fn clipboard_bridge_detection_matches_explicit_flag_and_known_rdp_clients() {
+        let local_mac = ForegroundAppInfo {
+            platform: "macos".into(),
+            process_id: 100,
+            display_name: Some("Notes".into()),
+            process_name: Some("Notes".into()),
+            bundle_id: Some("com.apple.Notes".into()),
+            executable_path: None,
+            app_user_model_id: None,
+            is_self: false,
+        };
+        assert!(!is_clipboard_bridge_target(&local_mac, false));
+        assert!(is_clipboard_bridge_target(&local_mac, true));
+
+        let mac_rdp = ForegroundAppInfo {
+            bundle_id: Some("COM.MICROSOFT.RDC.MACOS".into()),
+            ..local_mac.clone()
+        };
+        assert!(is_clipboard_bridge_target(&mac_rdp, false));
+
+        let win_rdp = ForegroundAppInfo {
+            platform: "windows".into(),
+            process_id: 200,
+            display_name: Some("Remote Desktop".into()),
+            process_name: Some("MSTSC.EXE".into()),
+            bundle_id: None,
+            executable_path: None,
+            app_user_model_id: None,
+            is_self: false,
+        };
+        assert!(is_clipboard_bridge_target(&win_rdp, false));
     }
 }

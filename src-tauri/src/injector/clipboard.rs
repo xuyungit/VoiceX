@@ -83,12 +83,31 @@ const UNICODE_EVENT_MAX_UTF16_UNITS: usize = 20;
 #[cfg(target_os = "macos")]
 const UNICODE_EVENT_SETTLE_MS: u64 = 20;
 
-/// Give clipboard bridges (for example remote desktop sessions) a brief window
-/// to observe the new clipboard payload before we synthesize paste.
+/// Pre-paste wait for ordinary local apps: writing `NSPasteboard` on macOS is
+/// synchronous (and returns the new `changeCount`), while Windows already
+/// verified the clipboard readback before waiting. A brief window still gives
+/// local pasteboard observers and runloops headroom before the paste shortcut
+/// arrives without paying remote-bridge latency on every dictation.
 #[cfg(target_os = "macos")]
-const CLIPBOARD_PRE_PASTE_DELAY_MS: u64 = 120;
+const CLIPBOARD_LOCAL_PRE_PASTE_DELAY_MS: u64 = 25;
 #[cfg(not(target_os = "macos"))]
-const CLIPBOARD_PRE_PASTE_DELAY_MS: u64 = 80;
+const CLIPBOARD_LOCAL_PRE_PASTE_DELAY_MS: u64 = 20;
+
+/// Give variable-latency clipboard bridges (for example remote desktop
+/// sessions) a longer window to observe the new clipboard payload before we
+/// synthesize paste (or when focus round-trip self-activation is denied).
+#[cfg(target_os = "macos")]
+const CLIPBOARD_BRIDGE_PRE_PASTE_DELAY_MS: u64 = 120;
+#[cfg(not(target_os = "macos"))]
+const CLIPBOARD_BRIDGE_PRE_PASTE_DELAY_MS: u64 = 80;
+
+fn pre_paste_delay_for_target(clipboard_bridge: bool) -> u64 {
+    if clipboard_bridge {
+        CLIPBOARD_BRIDGE_PRE_PASTE_DELAY_MS
+    } else {
+        CLIPBOARD_LOCAL_PRE_PASTE_DELAY_MS
+    }
+}
 
 /// Physical keycodes for a layout-independent Command+V shortcut on macOS.
 #[cfg(target_os = "macos")]
@@ -626,7 +645,7 @@ impl TextInjector {
     pub fn new() -> Self {
         Self {
             mode: TextInjectionMode::Pasteboard,
-            pre_paste_delay_ms: CLIPBOARD_PRE_PASTE_DELAY_MS,
+            pre_paste_delay_ms: pre_paste_delay_for_target(false),
             restore_delay_ms: CLIPBOARD_RESTORE_DELAY_MS,
             skip_clipboard_restore: false,
             focus_roundtrip_pid: None,
@@ -646,13 +665,20 @@ impl TextInjector {
     pub fn with_mode(mode: TextInjectionMode, skip_clipboard_restore: bool) -> Self {
         Self {
             mode,
-            pre_paste_delay_ms: CLIPBOARD_PRE_PASTE_DELAY_MS,
+            pre_paste_delay_ms: pre_paste_delay_for_target(skip_clipboard_restore),
             restore_delay_ms: CLIPBOARD_RESTORE_DELAY_MS,
             skip_clipboard_restore,
             focus_roundtrip_pid: None,
             guard: InjectionGuard::default(),
             dispatch_tracker: None,
         }
+    }
+
+    /// Select the pre-paste wait tier based on whether the resolved destination
+    /// is a variable-latency clipboard bridge (or unknown).
+    pub fn with_clipboard_bridge(mut self, clipboard_bridge: bool) -> Self {
+        self.pre_paste_delay_ms = pre_paste_delay_for_target(clipboard_bridge);
+        self
     }
 
     /// Make the pasteboard path bounce focus through VoiceX before pasting.
@@ -1390,5 +1416,27 @@ mod tests {
             );
             pasteboard.clearContents();
         });
+    }
+
+    #[test]
+    fn pre_paste_delay_tiers_distinguish_local_and_bridge_targets() {
+        assert!(CLIPBOARD_LOCAL_PRE_PASTE_DELAY_MS < CLIPBOARD_BRIDGE_PRE_PASTE_DELAY_MS);
+
+        let local = TextInjector::with_mode(TextInjectionMode::Pasteboard, false);
+        assert_eq!(local.pre_paste_delay_ms, CLIPBOARD_LOCAL_PRE_PASTE_DELAY_MS);
+
+        let explicit_bridge = TextInjector::with_mode(TextInjectionMode::Pasteboard, true);
+        assert_eq!(
+            explicit_bridge.pre_paste_delay_ms,
+            CLIPBOARD_BRIDGE_PRE_PASTE_DELAY_MS
+        );
+
+        let known_rdp_without_skip_restore =
+            TextInjector::with_mode(TextInjectionMode::Pasteboard, false)
+                .with_clipboard_bridge(true);
+        assert_eq!(
+            known_rdp_without_skip_restore.pre_paste_delay_ms,
+            CLIPBOARD_BRIDGE_PRE_PASTE_DELAY_MS
+        );
     }
 }
