@@ -148,6 +148,7 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         persisted_settings.input_device_uid.clone(),
         persisted_settings.remove_trailing_punctuation,
         persisted_settings.short_sentence_threshold,
+        persisted_settings.remove_blank_lines,
         persisted_settings.replacement_rules.clone(),
         persisted_settings.translation_enabled,
         &persisted_settings.translation_trigger_mode,

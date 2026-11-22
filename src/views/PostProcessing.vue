@@ -19,6 +19,11 @@ const shortSentenceThreshold = computed({
   set: (v) => settingsStore.updateSetting('shortSentenceThreshold', v)
 })
 
+const removeBlankLines = computed({
+  get: () => settingsStore.settings.removeBlankLines,
+  set: (v) => settingsStore.updateSetting('removeBlankLines', v)
+})
+
 const matchModeOptions = computed(() => [
   { label: t('postProcessing.exactMatch'), value: 'exact' },
   { label: t('postProcessing.contains'), value: 'contains' },
@@ -50,7 +55,7 @@ function removeRule(id: string) {
       <h1 class="page-title">{{ t('postProcessing.title') }}</h1>
     </div>
 
-    <SettingsSection :title="t('postProcessing.smartPunctuation')" :help="t('postProcessing.smartPunctuationSub')">
+    <SettingsSection :title="t('postProcessing.textFormatting')">
       <SettingRow :label="t('postProcessing.removeTrailingPunctuation')" :help="t('postProcessing.removeTrailingPunctuationNote')">
         <NSwitch v-model:value="removeTrailingPunctuation" />
       </SettingRow>
@@ -61,6 +66,9 @@ function removeRule(id: string) {
           :max="100"
           class="compact"
         />
+      </SettingRow>
+      <SettingRow :label="t('postProcessing.removeBlankLines')" :help="t('postProcessing.removeBlankLinesNote')">
+        <NSwitch v-model:value="removeBlankLines" :aria-label="t('postProcessing.removeBlankLines')" />
       </SettingRow>
     </SettingsSection>
 

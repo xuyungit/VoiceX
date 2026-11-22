@@ -311,6 +311,7 @@ export interface AppSettings {
     // Post-Processing
     removeTrailingPunctuation: boolean
     shortSentenceThreshold: number
+    removeBlankLines: boolean
     replacementRules: Array<{
         id: string
         keyword: string
@@ -578,6 +579,7 @@ const defaultSettings: AppSettings = {
 
     removeTrailingPunctuation: true,
     shortSentenceThreshold: 5,
+    removeBlankLines: false,
     replacementRules: [],
 
     volcAccessKey: '',

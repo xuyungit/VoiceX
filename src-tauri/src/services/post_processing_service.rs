@@ -8,6 +8,7 @@ impl PostProcessingService {
         text: &str,
         remove_punctuation: bool,
         threshold: u32,
+        remove_blank_lines: bool,
         rules: &[ReplacementRule],
     ) -> String {
         let mut processed = text.to_string();
@@ -53,7 +54,16 @@ impl PostProcessingService {
             }
         }
 
-        processed
+        if remove_blank_lines {
+            // Keep each non-blank line and its original line ending. Run last
+            // so blank lines inserted by keyword substitutions are removed too.
+            processed
+                .split_inclusive('\n')
+                .filter(|line| !line.trim().is_empty())
+                .collect()
+        } else {
+            processed
+        }
     }
 
     fn exact_match_key(text: &str) -> String {
@@ -103,7 +113,7 @@ mod tests {
     fn exact_match_ignores_case() {
         let rules = vec![rule("hello", "Hi", "exact")];
 
-        let processed = PostProcessingService::process("  HELLO  ", false, 5, &rules);
+        let processed = PostProcessingService::process("  HELLO  ", false, 5, false, &rules);
 
         assert_eq!(processed, "Hi");
     }
@@ -112,17 +122,17 @@ mod tests {
     fn contains_match_ignores_case() {
         let rules = vec![rule("world", "VoiceX", "contains")];
 
-        let processed = PostProcessingService::process("Hello WORLD", false, 5, &rules);
+        let processed = PostProcessingService::process("Hello WORLD", false, 5, false, &rules);
 
         assert_eq!(processed, "Hello VoiceX");
     }
 
     #[test]
     fn threshold_counts_characters_without_trailing_punctuation() {
-        let processed = PostProcessingService::process("我家的地址。", true, 5, &[]);
+        let processed = PostProcessingService::process("我家的地址。", true, 5, false, &[]);
         assert_eq!(processed, "我家的地址");
 
-        let processed = PostProcessingService::process("下一步该做什么？", true, 5, &[]);
+        let processed = PostProcessingService::process("下一步该做什么？", true, 5, false, &[]);
         assert_eq!(processed, "下一步该做什么？");
     }
 
@@ -130,7 +140,7 @@ mod tests {
     fn exact_match_ignores_trailing_punctuation() {
         let rules = vec![rule("目前公司的地址", "公司地址", "exact")];
 
-        let processed = PostProcessingService::process("目前公司的地址。", true, 5, &rules);
+        let processed = PostProcessingService::process("目前公司的地址。", true, 5, false, &rules);
 
         assert_eq!(processed, "公司地址");
     }
@@ -139,8 +149,37 @@ mod tests {
     fn regex_match_remains_case_sensitive_by_default() {
         let rules = vec![rule("world", "VoiceX", "regex")];
 
-        let processed = PostProcessingService::process("Hello WORLD", false, 5, &rules);
+        let processed = PostProcessingService::process("Hello WORLD", false, 5, false, &rules);
 
         assert_eq!(processed, "Hello WORLD");
+    }
+
+    #[test]
+    fn remove_blank_lines_preserves_regular_line_breaks() {
+        for (text, expected) in [
+            (
+                "\n第一段。\n\n \t\n第二段。\n  - 列表项",
+                "第一段。\n第二段。\n  - 列表项",
+            ),
+            ("First\r\n\r\n \t\r\nSecond\r\n", "First\r\nSecond\r\n"),
+        ] {
+            assert_eq!(
+                PostProcessingService::process(text, false, 5, true, &[]),
+                expected
+            );
+            assert_eq!(
+                PostProcessingService::process(text, false, 5, false, &[]),
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn remove_blank_lines_runs_after_keyword_substitution() {
+        let rules = vec![rule("交接", "第一项\n\n第二项", "exact")];
+        assert_eq!(
+            PostProcessingService::process("交接", false, 5, true, &rules),
+            "第一项\n第二项"
+        );
     }
 }

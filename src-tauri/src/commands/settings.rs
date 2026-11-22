@@ -375,6 +375,7 @@ pub struct AppSettings {
     // Post-processing settings
     pub remove_trailing_punctuation: bool,
     pub short_sentence_threshold: u32,
+    pub remove_blank_lines: bool,
     pub replacement_rules: Vec<ReplacementRule>,
 
     // Online Hotword Management
@@ -693,6 +694,7 @@ impl Default for AppSettings {
 
             remove_trailing_punctuation: true,
             short_sentence_threshold: 5,
+            remove_blank_lines: false,
             replacement_rules: Vec::new(),
 
             volc_access_key: String::new(),
@@ -1591,6 +1593,7 @@ pub fn save_settings(
         settings.input_device_uid.clone(),
         settings.remove_trailing_punctuation,
         settings.short_sentence_threshold,
+        settings.remove_blank_lines,
         settings.replacement_rules.clone(),
         settings.translation_enabled,
         &settings.translation_trigger_mode,

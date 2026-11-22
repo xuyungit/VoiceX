@@ -79,6 +79,7 @@ pub enum SessionMessage {
         input_device_uid: Option<String>,
         remove_trailing_punctuation: bool,
         short_sentence_threshold: u32,
+        remove_blank_lines: bool,
         replacement_rules: Vec<crate::commands::settings::ReplacementRule>,
         translation_enabled: bool,
         translation_trigger_mode: String,

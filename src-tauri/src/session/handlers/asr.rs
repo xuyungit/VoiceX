@@ -376,6 +376,7 @@ impl SessionController {
         let post_edit_attempt = crate::post_edit::coordinator::begin_attempt();
         let remove_punctuation = state.remove_trailing_punctuation;
         let threshold = state.short_sentence_threshold;
+        let remove_blank_lines = state.remove_blank_lines;
         let rules = state.replacement_rules.clone();
         // Reset cancel flag for this injection.
         self.injection_cancel_flag
@@ -448,6 +449,7 @@ impl SessionController {
                         &llm_text,
                         remove_punctuation,
                         threshold,
+                        remove_blank_lines,
                         &rules,
                     );
                 let changed = processed != llm_text;

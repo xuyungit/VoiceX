@@ -369,6 +369,7 @@ async fn run_transcription_pipeline(
             &llm_or_asr_text,
             settings.remove_trailing_punctuation,
             settings.short_sentence_threshold,
+            settings.remove_blank_lines,
             &settings.replacement_rules,
         )
     } else {

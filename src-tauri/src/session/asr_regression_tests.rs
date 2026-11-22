@@ -211,6 +211,21 @@ async fn run_regressions(directory: &Path) {
         assert!(path.exists());
     }
 
+    // Re-transcription reads the saved text rule and only formats the final text.
+    settings.openai_asr_api_key = "private-test-credential".into();
+    let raw_text = "第一段。\n\n \t\n第二段。";
+    for (remove_blank_lines, expected) in [(false, raw_text), (true, "第一段。\n第二段。")] {
+        let (endpoint, server) =
+            mock_transcription("200 OK", r#"{"text":"第一段。\n\n \t\n第二段。"}"#);
+        settings.openai_asr_base_url = endpoint;
+        settings.remove_blank_lines = remove_blank_lines;
+        crate::storage::save_settings(&settings).unwrap();
+        let result = re_transcribe(request(&path, "openai")).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(result.asr_text, raw_text);
+        assert_eq!(result.final_text, expected);
+    }
+
     let logs = std::fs::read_to_string(log_path).unwrap();
     assert!(
         logs.contains(raw_body),

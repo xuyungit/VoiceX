@@ -237,6 +237,7 @@ impl SessionController {
         input_device_uid: Option<String>,
         remove_trailing_punctuation: bool,
         short_sentence_threshold: u32,
+        remove_blank_lines: bool,
         replacement_rules: Vec<crate::commands::settings::ReplacementRule>,
         translation_enabled: bool,
         translation_trigger_mode: &str,
@@ -258,6 +259,7 @@ impl SessionController {
                 input_device_uid,
                 remove_trailing_punctuation,
                 short_sentence_threshold,
+                remove_blank_lines,
                 replacement_rules,
                 translation_enabled,
                 translation_trigger_mode: translation_trigger_mode.to_string(),
@@ -277,6 +279,7 @@ impl SessionController {
             input_device_uid.as_deref(),
             remove_trailing_punctuation,
             short_sentence_threshold,
+            remove_blank_lines,
             replacement_rules,
             translation_enabled,
             translation_trigger_mode,
@@ -294,6 +297,7 @@ impl SessionController {
         input_device_uid: Option<&str>,
         remove_trailing_punctuation: bool,
         short_sentence_threshold: u32,
+        remove_blank_lines: bool,
         replacement_rules: Vec<crate::commands::settings::ReplacementRule>,
         translation_enabled: bool,
         translation_trigger_mode: &str,
@@ -305,6 +309,7 @@ impl SessionController {
         state.text_injection_overrides = text_injection_overrides;
         state.remove_trailing_punctuation = remove_trailing_punctuation;
         state.short_sentence_threshold = short_sentence_threshold;
+        state.remove_blank_lines = remove_blank_lines;
         state.replacement_rules = replacement_rules;
         state.translation_enabled = translation_enabled;
         state.translation_trigger_mode = TranslationTriggerMode::from_str(translation_trigger_mode);
@@ -411,6 +416,7 @@ impl SessionController {
                 input_device_uid,
                 remove_trailing_punctuation,
                 short_sentence_threshold,
+                remove_blank_lines,
                 replacement_rules,
                 translation_enabled,
                 translation_trigger_mode,
@@ -424,6 +430,7 @@ impl SessionController {
                 input_device_uid.as_deref(),
                 remove_trailing_punctuation,
                 short_sentence_threshold,
+                remove_blank_lines,
                 replacement_rules,
                 translation_enabled,
                 &translation_trigger_mode,
@@ -1593,7 +1600,7 @@ mod tests {
             hold_threshold_ms: 410, max_recording_minutes: 12,
             text_injection_mode: "clipboard".into(), text_injection_overrides: vec![],
             input_device_uid: None, remove_trailing_punctuation: true,
-            short_sentence_threshold: 27, replacement_rules: vec![],
+            short_sentence_threshold: 27, remove_blank_lines: true, replacement_rules: vec![],
             translation_enabled: true, translation_trigger_mode: "double_tap".into(),
             double_tap_window_ms: 320,
         });
@@ -1601,6 +1608,7 @@ mod tests {
         assert_eq!(state.max_recording_minutes, 12);
         assert!(state.remove_trailing_punctuation);
         assert_eq!(state.short_sentence_threshold, 27);
+        assert!(state.remove_blank_lines);
         assert!(state.translation_enabled);
         assert_eq!(state.double_tap_window_ms, 320);
         controller.handle_coordinated_message(&mut state, SessionMessage::HotkeyPressed);

@@ -132,6 +132,7 @@ pub struct AppState {
     // Post-processing
     pub(crate) remove_trailing_punctuation: bool,
     pub(crate) short_sentence_threshold: u32,
+    pub(crate) remove_blank_lines: bool,
     pub(crate) replacement_rules: Vec<crate::commands::settings::ReplacementRule>,
 
     // Gesture/intent settings
@@ -193,6 +194,7 @@ impl AppState {
             active_asr_refinement_provider: None,
             remove_trailing_punctuation: true,
             short_sentence_threshold: 5,
+            remove_blank_lines: false,
             replacement_rules: Vec::new(),
             translation_enabled: true,
             translation_trigger_mode: TranslationTriggerMode::DoubleTap,
