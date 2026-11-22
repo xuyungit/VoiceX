@@ -170,21 +170,29 @@ pub struct AppSettings {
     pub llm_qwen_base_url: String,
     pub llm_qwen_api_key: String,
     pub llm_qwen_model: String,
+    #[serde(default)]
+    pub llm_qwen_reasoning_effort: Option<String>,
 
     // LLM Provider: DeepSeek (official OpenAI-compatible API)
     pub llm_deepseek_base_url: String,
     pub llm_deepseek_api_key: String,
     pub llm_deepseek_model: String,
+    #[serde(default)]
+    pub llm_deepseek_reasoning_effort: Option<String>,
 
     // LLM Provider: Gemini (Google Generative AI)
     pub llm_gemini_base_url: String,
     pub llm_gemini_api_key: String,
     pub llm_gemini_model: String,
+    #[serde(default)]
+    pub llm_gemini_reasoning_effort: Option<String>,
 
     // LLM Provider: Anthropic (native Messages API)
     pub llm_anthropic_base_url: String,
     pub llm_anthropic_api_key: String,
     pub llm_anthropic_model: String,
+    #[serde(default)]
+    pub llm_anthropic_reasoning_effort: Option<String>,
 
     // LLM Provider: Custom (multiple named OpenAI-compatible endpoints)
     pub llm_custom_endpoints: Vec<CustomLlmEndpoint>,
@@ -385,7 +393,7 @@ pub struct AppSettings {
     pub auto_check_updates: bool,
 }
 
-/// A single named OpenAI-compatible custom endpoint.
+/// A single named custom LLM endpoint (OpenAI-compatible or Gemini native).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomLlmEndpoint {
@@ -394,7 +402,7 @@ pub struct CustomLlmEndpoint {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
-    pub api_mode: String, // "chat_completions" | "responses"
+    pub api_mode: String, // "chat_completions" | "responses" | "gemini"
     /// Blank asks for the lowest reasoning known for this host and model,
     /// `server_default` sends nothing, anything else goes out as
     /// `reasoning_effort`. Endpoints differ in what they accept.
@@ -436,6 +444,12 @@ pub struct LlmProviderProbeResult {
     pub response_text: String,
     pub expected_match: bool,
     pub error_message: Option<String>,
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+    pub reasoning_tokens: Option<u32>,
+    pub generated_tokens: Option<u32>,
+    pub tokens_per_second: Option<f64>,
+    pub reasoning_applied: String,
 }
 
 /// The reasoning fields the LLM page's current selection puts on the wire.
@@ -445,6 +459,9 @@ pub struct LlmReasoningPreview {
     /// Compact JSON of the fields; empty when nothing is sent.
     pub fields: String,
     pub source: crate::llm::reasoning::ReasoningSource,
+    /// Explicit reasoning levels supported by the active `(provider, model)`
+    /// pair (`"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`).
+    pub supported_efforts: Vec<&'static str>,
 }
 
 impl Default for AppSettings {
@@ -562,18 +579,22 @@ impl Default for AppSettings {
             llm_qwen_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             llm_qwen_api_key: String::new(),
             llm_qwen_model: "qwen3.5-flash".to_string(),
+            llm_qwen_reasoning_effort: None,
 
             llm_deepseek_base_url: crate::llm::default_deepseek_base_url().to_string(),
             llm_deepseek_api_key: String::new(),
             llm_deepseek_model: crate::llm::default_deepseek_model().to_string(),
+            llm_deepseek_reasoning_effort: None,
 
-            llm_gemini_base_url: "https://generativelanguage.googleapis.com".to_string(),
+            llm_gemini_base_url: crate::llm::default_gemini_base_url().to_string(),
             llm_gemini_api_key: String::new(),
-            llm_gemini_model: "gemini-3.5-flash-lite".to_string(),
+            llm_gemini_model: crate::llm::default_gemini_model().to_string(),
+            llm_gemini_reasoning_effort: None,
 
             llm_anthropic_base_url: "https://api.anthropic.com".to_string(),
             llm_anthropic_api_key: String::new(),
             llm_anthropic_model: "claude-haiku-5-5".to_string(),
+            llm_anthropic_reasoning_effort: None,
 
             llm_custom_endpoints: Vec::new(),
             llm_active_custom_endpoint_id: String::new(),
@@ -989,6 +1010,86 @@ pub fn migrate_llm_custom_endpoints(value: &mut serde_json::Value) -> bool {
     true
 }
 
+/// Migrate a legacy non-official `llmGeminiBaseUrl` (third-party Gemini proxy or
+/// relay) into a `CustomLlmEndpoint` with `apiMode: "gemini"`, keeping the
+/// built-in Gemini provider strictly for Google's official endpoint.
+pub fn migrate_non_official_gemini_endpoint(value: &mut serde_json::Value) -> bool {
+    let Some(obj) = value.as_object_mut() else {
+        return false;
+    };
+    let read = |key: &str| -> String {
+        obj.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let base_url = read("llmGeminiBaseUrl");
+    if base_url.is_empty() || crate::llm::is_official_gemini_base_url(&base_url) {
+        return false;
+    }
+
+    let api_key = read("llmGeminiApiKey");
+    let model = read("llmGeminiModel");
+    let provider_type = read("llmProviderType");
+    let meaningful = !api_key.is_empty()
+        || provider_type == "gemini"
+        || (!model.is_empty() && model != crate::llm::default_gemini_model());
+
+    if meaningful {
+        let endpoint_model = if model.is_empty() {
+            crate::llm::default_gemini_model().to_string()
+        } else {
+            model
+        };
+        let reasoning_effort = read("llmGeminiReasoningEffort");
+        let id = uuid::Uuid::new_v4().to_string();
+        let name = custom_endpoint_name_from_base_url(&base_url);
+        let endpoints = obj
+            .entry("llmCustomEndpoints")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let Some(arr) = endpoints.as_array_mut() {
+            let duplicate = arr.iter().any(|item| {
+                item.get("apiMode").and_then(|v| v.as_str()) == Some("gemini")
+                    && item.get("baseUrl").and_then(|v| v.as_str()).map(str::trim) == Some(base_url.as_str())
+                    && item.get("apiKey").and_then(|v| v.as_str()).map(str::trim) == Some(api_key.as_str())
+            });
+            if !duplicate {
+                arr.push(serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "baseUrl": base_url,
+                    "apiKey": api_key,
+                    "model": endpoint_model,
+                    "apiMode": "gemini",
+                    "reasoningEffort": reasoning_effort,
+                    "extraBody": "",
+                }));
+                if provider_type == "gemini" {
+                    obj.insert(
+                        "llmProviderType".to_string(),
+                        serde_json::Value::String("custom".to_string()),
+                    );
+                    obj.insert(
+                        "llmActiveCustomEndpointId".to_string(),
+                        serde_json::Value::String(id),
+                    );
+                }
+            }
+        }
+        obj.insert(
+            "llmGeminiApiKey".to_string(),
+            serde_json::Value::String(String::new()),
+        );
+    }
+
+    obj.insert(
+        "llmGeminiBaseUrl".to_string(),
+        serde_json::Value::String(crate::llm::default_gemini_base_url().to_string()),
+    );
+    true
+}
+
 /// One-time migration for the `skipClipboardRestore` flag on
 /// text-injection overrides.
 ///
@@ -1248,6 +1349,12 @@ async fn probe_current_llm_provider_impl(
     let provider_name = config.provider_type.display_name().to_string();
     let request_text = LLM_PROVIDER_PROBE_INPUT.to_string();
     let missing_fields = config.missing_request_fields();
+    let plan = crate::llm::reasoning::plan(&config);
+    let reasoning_applied = if plan.fields.is_empty() {
+        String::new()
+    } else {
+        serde_json::Value::Object(plan.fields).to_string()
+    };
 
     if !missing_fields.is_empty() {
         return Ok(LlmProviderProbeResult {
@@ -1261,6 +1368,12 @@ async fn probe_current_llm_provider_impl(
                 "Current LLM configuration is incomplete or invalid: missing {}.",
                 missing_fields.join(", ")
             )),
+            input_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            generated_tokens: None,
+            tokens_per_second: None,
+            reasoning_applied,
         });
     }
 
@@ -1268,7 +1381,7 @@ async fn probe_current_llm_provider_impl(
     let started_at = Instant::now();
     let probe = timeout(
         Duration::from_secs(LLM_PROVIDER_PROBE_TIMEOUT_SECS),
-        client.correct(
+        client.correct_with_usage(
             LLM_PROVIDER_PROBE_INPUT,
             LLM_PROVIDER_PROBE_PROMPT,
             "",
@@ -1283,8 +1396,16 @@ async fn probe_current_llm_provider_impl(
 
     let response_time_ms = Some(elapsed_ms(started_at));
     let result = match probe {
-        Ok(Ok(text)) => {
-            let trimmed = text.trim().to_string();
+        Ok(Ok(completion)) => {
+            let trimmed = completion.text.trim().to_string();
+            let usage = completion.usage;
+            let tokens_per_second = match (usage.generated_tokens, response_time_ms) {
+                (Some(tokens), Some(ms)) if tokens > 0 && ms > 0 => {
+                    let rate = (tokens as f64) / (ms as f64 / 1000.0);
+                    Some((rate * 10.0).round() / 10.0)
+                }
+                _ => None,
+            };
             if trimmed.is_empty() {
                 LlmProviderProbeResult {
                     provider: provider_name,
@@ -1294,6 +1415,12 @@ async fn probe_current_llm_provider_impl(
                     response_text: String::new(),
                     expected_match: false,
                     error_message: Some("The provider returned an empty response.".to_string()),
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    reasoning_tokens: usage.reasoning_tokens,
+                    generated_tokens: usage.generated_tokens,
+                    tokens_per_second,
+                    reasoning_applied,
                 }
             } else {
                 let expected_match = trimmed.contains("纪要");
@@ -1305,6 +1432,12 @@ async fn probe_current_llm_provider_impl(
                     response_text: trimmed,
                     expected_match,
                     error_message: None,
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    reasoning_tokens: usage.reasoning_tokens,
+                    generated_tokens: usage.generated_tokens,
+                    tokens_per_second,
+                    reasoning_applied,
                 }
             }
         }
@@ -1316,6 +1449,12 @@ async fn probe_current_llm_provider_impl(
             response_text: String::new(),
             expected_match: false,
             error_message: Some(err.to_string()),
+            input_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            generated_tokens: None,
+            tokens_per_second: None,
+            reasoning_applied,
         },
         Err(_) => LlmProviderProbeResult {
             provider: provider_name,
@@ -1328,6 +1467,12 @@ async fn probe_current_llm_provider_impl(
                 "LLM test timed out after {} seconds.",
                 LLM_PROVIDER_PROBE_TIMEOUT_SECS
             )),
+            input_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            generated_tokens: None,
+            tokens_per_second: None,
+            reasoning_applied,
         },
     };
 
@@ -1514,6 +1659,96 @@ pub async fn list_openai_models(base_url: String, api_key: String) -> Result<Vec
     Ok(ids)
 }
 
+/// Fetch available Gemini models from the Gemini `models.list` endpoint.
+///
+/// When `base_url` is omitted or matches Google's official endpoint, results are
+/// filtered to `gemini-*` text models suitable for dictation polishing and
+/// correction; custom relay URLs skip the strict official filter so custom
+/// aliases remain visible.
+#[tauri::command]
+pub async fn list_gemini_models(
+    base_url: Option<String>,
+    api_key: String,
+) -> Result<Vec<String>, String> {
+    let resolved_base = base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::llm::default_gemini_base_url());
+    let official = crate::llm::is_official_gemini_base_url(resolved_base);
+    let endpoint = crate::llm::gemini_models_url(resolved_base);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GeminiModelList {
+        #[serde(default)]
+        models: Vec<GeminiModelEntry>,
+        next_page_token: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct GeminiModelEntry {
+        name: String,
+        #[serde(default)]
+        supported_generation_methods: Vec<String>,
+    }
+
+    const MAX_PAGES: usize = 20;
+    let mut ids: Vec<String> = Vec::new();
+    let mut page_token: Option<String> = None;
+
+    for _ in 0..MAX_PAGES {
+        let mut req = client
+            .get(&endpoint)
+            .header("x-goog-api-key", api_key.trim())
+            .query(&[("pageSize", "100")]);
+        if let Some(token) = page_token.as_deref().filter(|t| !t.is_empty()) {
+            req = req.query(&[("pageToken", token)]);
+        }
+        let response = req.send().await.map_err(|e| e.to_string())?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("Gemini models HTTP {}", status.as_u16()));
+        }
+        let parsed: GeminiModelList = response.json().await.map_err(|e| e.to_string())?;
+        for entry in parsed.models {
+            let short_id = entry
+                .name
+                .trim()
+                .strip_prefix("models/")
+                .unwrap_or(entry.name.trim());
+            if short_id.is_empty() {
+                continue;
+            }
+            let supports_generate = entry
+                .supported_generation_methods
+                .iter()
+                .any(|m| m == "generateContent");
+            if official {
+                if supports_generate && crate::gemini::is_suitable_polishing_model(short_id) {
+                    ids.push(short_id.to_string());
+                }
+            } else if entry.supported_generation_methods.is_empty() || supports_generate {
+                ids.push(short_id.to_string());
+            }
+        }
+        match parsed.next_page_token.filter(|t| !t.is_empty()) {
+            Some(next) if page_token.as_deref() != Some(next.as_str()) => {
+                page_token = Some(next);
+            }
+            _ => break,
+        }
+    }
+
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
 #[tauri::command]
 pub async fn probe_local_asr(
     command_path: Option<String>,
@@ -1543,7 +1778,9 @@ pub async fn probe_current_llm_provider() -> Result<LlmProviderProbeResult, Stri
 /// the fields as they are edited.
 #[tauri::command]
 pub fn preview_llm_reasoning(settings: AppSettings) -> LlmReasoningPreview {
-    let plan = crate::llm::reasoning::plan(&build_llm_config_from_settings(&settings));
+    let config = build_llm_config_from_settings(&settings);
+    let plan = crate::llm::reasoning::plan(&config);
+    let supported_efforts = crate::llm::reasoning::supported_efforts(&config);
     LlmReasoningPreview {
         fields: if plan.fields.is_empty() {
             String::new()
@@ -1551,6 +1788,7 @@ pub fn preview_llm_reasoning(settings: AppSettings) -> LlmReasoningPreview {
             serde_json::Value::Object(plan.fields).to_string()
         },
         source: plan.source,
+        supported_efforts,
     }
 }
 
@@ -2222,15 +2460,140 @@ mod tests {
         let volc = preview_llm_reasoning(settings.clone());
         assert_eq!(volc.fields, r#"{"thinking":{"type":"disabled"}}"#);
         assert_eq!(volc.source, crate::llm::reasoning::ReasoningSource::Lowest);
+        assert_eq!(volc.supported_efforts, vec!["low", "medium", "high"]);
 
         settings.llm_provider_type = "openai".to_string();
         let current = preview_llm_reasoning(settings.clone());
         assert_eq!(current.fields, r#"{"reasoning_effort":"none"}"#);
         assert_eq!(current.source, crate::llm::reasoning::ReasoningSource::Lowest);
+        assert_eq!(
+            current.supported_efforts,
+            vec!["none", "low", "medium", "high"]
+        );
         settings.llm_openai_model = "gpt-4o-mini".to_string();
-        let plain = preview_llm_reasoning(settings);
+        let plain = preview_llm_reasoning(settings.clone());
         assert_eq!(plain.fields, "");
         assert_eq!(plain.source, crate::llm::reasoning::ReasoningSource::NotNeeded);
+        assert!(plain.supported_efforts.is_empty());
+
+        settings.llm_provider_type = "gemini".to_string();
+        settings.llm_gemini_model = "gemini-3.8-flash".to_string();
+        settings.llm_gemini_reasoning_effort = Some("high".to_string());
+        let gem = preview_llm_reasoning(settings.clone());
+        assert_eq!(gem.fields, r#"{"thinkingConfig":{"thinkingLevel":"HIGH"}}"#);
+        assert_eq!(gem.source, crate::llm::reasoning::ReasoningSource::Chosen);
+        assert_eq!(gem.supported_efforts, vec!["low", "medium", "high"]);
+
+        settings.llm_gemini_model = "gemini-4-hydrogen".to_string();
+        settings.llm_gemini_reasoning_effort = None;
+        let hydrogen = preview_llm_reasoning(settings);
+        assert_eq!(hydrogen.fields, r#"{"thinkingConfig":{"thinkingLevel":"LOW"}}"#);
+        assert_eq!(hydrogen.source, crate::llm::reasoning::ReasoningSource::Lowest);
+        assert_eq!(
+            hydrogen.supported_efforts,
+            vec!["low", "medium", "high", "xhigh"]
+        );
+    }
+
+    #[test]
+    fn non_official_gemini_base_url_migrates_into_custom_gemini_endpoint_once() {
+        let mut value = serde_json::json!({
+            "llmProviderType": "gemini",
+            "llmGeminiBaseUrl": "https://gemini-proxy.example.com/v1beta",
+            "llmGeminiApiKey": "proxy-key",
+            "llmGeminiModel": "gemini-2.5-flash",
+            "llmGeminiReasoningEffort": "low"
+        });
+        assert!(super::migrate_non_official_gemini_endpoint(&mut value));
+        assert_eq!(value["llmProviderType"], "custom");
+        assert_eq!(
+            value["llmGeminiBaseUrl"],
+            crate::llm::default_gemini_base_url()
+        );
+        assert_eq!(value["llmGeminiApiKey"], "");
+        let endpoints = value["llmCustomEndpoints"].as_array().unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0]["apiMode"], "gemini");
+        assert_eq!(endpoints[0]["baseUrl"], "https://gemini-proxy.example.com/v1beta");
+        assert_eq!(endpoints[0]["apiKey"], "proxy-key");
+        assert_eq!(endpoints[0]["model"], "gemini-2.5-flash");
+        assert_eq!(endpoints[0]["reasoningEffort"], "low");
+        assert_eq!(value["llmActiveCustomEndpointId"], endpoints[0]["id"]);
+
+        // Second run is a no-op.
+        assert!(!super::migrate_non_official_gemini_endpoint(&mut value));
+
+        let settings: AppSettings = serde_json::from_value(value).unwrap();
+        let config = build_llm_config_from_settings(&settings);
+        assert!(config.is_gemini_protocol());
+        assert_eq!(config.base_url, "https://gemini-proxy.example.com/v1beta");
+        assert_eq!(config.model_name, "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn official_gemini_base_url_is_not_migrated_to_custom() {
+        let mut value = serde_json::json!({
+            "llmProviderType": "gemini",
+            "llmGeminiBaseUrl": "https://generativelanguage.googleapis.com/v1beta/",
+            "llmGeminiApiKey": "official-key",
+            "llmGeminiModel": "gemini-3.5-flash-lite"
+        });
+        assert!(!super::migrate_non_official_gemini_endpoint(&mut value));
+        assert_eq!(value["llmProviderType"], "gemini");
+        assert!(value.get("llmCustomEndpoints").is_none());
+    }
+
+    #[tokio::test]
+    async fn list_gemini_models_paginates_and_normalizes_custom_relay_entries() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            for page in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]);
+                assert!(req.to_ascii_lowercase().contains("x-goog-api-key: test-gem-key"));
+                let body = if page == 0 {
+                    assert!(req.contains("GET /v1beta/models?"));
+                    serde_json::json!({
+                        "models": [
+                            { "name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"] },
+                            { "name": "models/text-embedding-004", "supportedGenerationMethods": ["embedContent"] }
+                        ],
+                        "nextPageToken": "page-2"
+                    })
+                } else {
+                    assert!(req.contains("pageToken=page-2"));
+                    serde_json::json!({
+                        "models": [
+                            { "name": "models/custom-gemini-alias", "supportedGenerationMethods": ["generateContent"] },
+                            { "name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"] }
+                        ]
+                    })
+                }
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let models = super::list_gemini_models(
+            Some(format!("http://{addr}")),
+            " test-gem-key ".to_string(),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(models, vec!["custom-gemini-alias", "gemini-2.5-flash"]);
     }
 
     #[test]
@@ -2378,6 +2741,89 @@ mod tests {
         value["openaiAsrRefineModel"] = "whisper-1".into();
         assert!(!super::migrate_openai_refine_model(&mut value));
         assert_eq!(value["openaiAsrRefineModel"], "whisper-1");
+    }
+
+    #[tokio::test]
+    async fn probe_current_llm_provider_reports_gemini_thinking_tokens_and_speed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut req_bytes = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                req_bytes.extend_from_slice(&buf[..n]);
+                if let Some(header_end) = req_bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&req_bytes[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, val) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| val.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if req_bytes.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+            }
+            let req = String::from_utf8_lossy(&req_bytes);
+            assert!(req.contains("gemini-4-hydrogen:generateContent"));
+            assert!(req.contains("\"thinkingLevel\":\"LOW\""));
+            let body = serde_json::json!({
+                "candidates": [{
+                    "content": { "parts": [{ "text": "明天上午十点开会，请把会议纪要发给我。" }] },
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": 90,
+                    "candidatesTokenCount": 14,
+                    "thoughtsTokenCount": 36,
+                    "totalTokenCount": 140
+                }
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let config = crate::llm::LLMConfig {
+            provider_type: crate::llm::LLMProviderType::Custom,
+            base_url: format!("http://{addr}"),
+            api_key: "test-key".to_string(),
+            model_name: "gemini-4-hydrogen".to_string(),
+            api_mode: crate::llm::LLMApiMode::Gemini,
+            reasoning: crate::llm::ReasoningChoice::Lowest,
+            openai_service_tier: None,
+            extra_body: None,
+        };
+
+        let probe = super::probe_current_llm_provider_impl(config).await.unwrap();
+        server.await.unwrap();
+
+        assert!(probe.ok);
+        assert!(probe.expected_match);
+        assert_eq!(
+            probe.reasoning_applied,
+            r#"{"thinkingConfig":{"thinkingLevel":"LOW"}}"#
+        );
+        assert_eq!(probe.input_tokens, Some(90));
+        assert_eq!(probe.output_tokens, Some(14));
+        assert_eq!(probe.reasoning_tokens, Some(36));
+        assert_eq!(probe.generated_tokens, Some(50));
+        assert!(probe.tokens_per_second.is_some());
     }
 
 }

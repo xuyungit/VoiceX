@@ -160,21 +160,25 @@ export interface AppSettings {
     llmQwenBaseUrl: string
     llmQwenApiKey: string
     llmQwenModel: string
+    llmQwenReasoningEffort: string | null
 
     // LLM Provider: DeepSeek (official OpenAI-compatible API)
     llmDeepseekBaseUrl: string
     llmDeepseekApiKey: string
     llmDeepseekModel: string
+    llmDeepseekReasoningEffort: string | null
 
     // LLM Provider: Gemini (Google Generative AI)
     llmGeminiBaseUrl: string
     llmGeminiApiKey: string
     llmGeminiModel: string
+    llmGeminiReasoningEffort: string | null
 
     // LLM Provider: Anthropic (native Messages API)
     llmAnthropicBaseUrl: string
     llmAnthropicApiKey: string
     llmAnthropicModel: string
+    llmAnthropicReasoningEffort: string | null
 
     // LLM Provider: Custom (multiple named OpenAI-compatible endpoints)
     llmCustomEndpoints: CustomLlmEndpoint[]
@@ -467,18 +471,22 @@ const defaultSettings: AppSettings = {
     llmQwenBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     llmQwenApiKey: '',
     llmQwenModel: 'qwen3.5-flash',
+    llmQwenReasoningEffort: null,
 
     llmDeepseekBaseUrl: llmModels.deepseekBaseUrl,
     llmDeepseekApiKey: '',
     llmDeepseekModel: llmModels.deepseekDefaultModel,
+    llmDeepseekReasoningEffort: null,
 
-    llmGeminiBaseUrl: 'https://generativelanguage.googleapis.com',
+    llmGeminiBaseUrl: llmModels.geminiBaseUrl,
     llmGeminiApiKey: '',
-    llmGeminiModel: 'gemini-3.5-flash-lite',
+    llmGeminiModel: llmModels.geminiDefaultModel,
+    llmGeminiReasoningEffort: null,
 
     llmAnthropicBaseUrl: 'https://api.anthropic.com',
     llmAnthropicApiKey: '',
     llmAnthropicModel: 'claude-haiku-5-5',
+    llmAnthropicReasoningEffort: null,
 
     llmCustomEndpoints: [],
     llmActiveCustomEndpointId: '',

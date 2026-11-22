@@ -76,25 +76,19 @@ pub struct ReasoningPlan {
 
 /// The reasoning fields `config` puts on the wire.
 pub fn plan(config: &LLMConfig) -> ReasoningPlan {
-    // These provider pages always ask for the lowest reasoning.
-    let choice = match config.provider_type {
-        LLMProviderType::Qwen
-        | LLMProviderType::Deepseek
-        | LLMProviderType::Gemini
-        | LLMProviderType::Anthropic => &ReasoningChoice::Lowest,
-        _ => &config.reasoning,
-    };
-    match choice {
+    match &config.reasoning {
         ReasoningChoice::ServerDefault => ReasoningPlan {
             fields: Map::new(),
             source: ReasoningSource::Chosen,
         },
-        ReasoningChoice::Effort(effort) => ReasoningPlan {
-            fields: effort_fields(effort, config),
-            source: ReasoningSource::Chosen,
-        },
+        ReasoningChoice::Effort(effort) => explicit_effort_plan(effort, config),
         ReasoningChoice::Lowest => {
-            match lowest_knob(&config.provider_type, &config.base_url, &config.model_name) {
+            let knob = if config.is_gemini_protocol() {
+                gemini_knob(&config.model_name.trim().to_ascii_lowercase())
+            } else {
+                lowest_knob(&config.provider_type, &config.base_url, &config.model_name)
+            };
+            match knob {
                 Some(LowestKnob::Effort(effort)) => ReasoningPlan {
                     fields: effort_fields(effort, config),
                     source: ReasoningSource::Lowest,
@@ -116,6 +110,121 @@ pub fn plan(config: &LLMConfig) -> ReasoningPlan {
     }
 }
 
+/// Supported explicit reasoning-effort levels for the current `(provider, api_mode, base_url, model)`.
+/// Always excludes `""` (Auto lowest) and `"server_default"`, which the UI offers separately.
+pub fn supported_efforts(config: &LLMConfig) -> Vec<&'static str> {
+    if config.is_gemini_protocol() {
+        return crate::gemini::supported_efforts(&config.model_name);
+    }
+    let model = config.model_name.trim().to_ascii_lowercase();
+    match config.provider_type {
+        LLMProviderType::Volcengine => vec!["low", "medium", "high"],
+        LLMProviderType::Openai => openai_supported_efforts(&model),
+        LLMProviderType::Qwen | LLMProviderType::Deepseek => Vec::new(),
+        LLMProviderType::Gemini => crate::gemini::supported_efforts(&model),
+        LLMProviderType::Anthropic => anthropic_supported_efforts(&model),
+        LLMProviderType::Custom => {
+            if let Some(host) = host_of(&config.base_url) {
+                let under = |domain: &str| {
+                    host == domain
+                        || host
+                            .strip_suffix(domain)
+                            .is_some_and(|rest| rest.ends_with('.'))
+                };
+                if under("openai.com") {
+                    return openai_supported_efforts(&model);
+                }
+            }
+            if model.contains("gpt-oss") {
+                return vec!["low", "medium", "high"];
+            }
+            vec!["none", "minimal", "low", "medium", "high"]
+        }
+    }
+}
+
+fn explicit_effort_plan(effort: &str, config: &LLMConfig) -> ReasoningPlan {
+    let effort_lower = effort.trim().to_ascii_lowercase();
+    if config.is_gemini_protocol() {
+        let Some(thinking_config) =
+            crate::gemini::thinking_config_for_effort(&config.model_name, &effort_lower)
+        else {
+            return ReasoningPlan {
+                fields: Map::new(),
+                source: ReasoningSource::Unknown,
+            };
+        };
+        let mut fields = Map::new();
+        fields.insert("thinkingConfig".to_string(), json!(thinking_config));
+        return ReasoningPlan {
+            fields,
+            source: ReasoningSource::Chosen,
+        };
+    }
+
+    match config.provider_type {
+        LLMProviderType::Anthropic => {
+            let model = config.model_name.trim().to_ascii_lowercase();
+            let base = without_date_suffix(&model);
+            if effort_lower == "none" {
+                let fields = match base {
+                    "claude-haiku-5-5" | "claude-sonnet-5" => {
+                        let LowestKnob::Fields(fields) = anthropic_thinking("disabled") else {
+                            unreachable!()
+                        };
+                        fields
+                    }
+                    "claude-sonnet-5-5" => {
+                        let LowestKnob::Fields(fields) = anthropic_thinking("between_tools") else {
+                            unreachable!()
+                        };
+                        fields
+                    }
+                    _ => {
+                        return ReasoningPlan {
+                            fields: Map::new(),
+                            source: ReasoningSource::Unknown,
+                        };
+                    }
+                };
+                return ReasoningPlan {
+                    fields,
+                    source: ReasoningSource::Chosen,
+                };
+            }
+            if matches!(effort_lower.as_str(), "low" | "medium" | "high")
+                && matches!(
+                    base,
+                    "claude-haiku-5-5"
+                        | "claude-sonnet-5"
+                        | "claude-sonnet-5-5"
+                        | "claude-opus-5-5"
+                        | "claude-opus-5"
+                        | "claude-fable-5-1"
+                        | "claude-fable-5"
+                )
+            {
+                return ReasoningPlan {
+                    fields: effort_fields(&effort_lower, config),
+                    source: ReasoningSource::Chosen,
+                };
+            }
+            ReasoningPlan {
+                fields: Map::new(),
+                source: ReasoningSource::Unknown,
+            }
+        }
+        LLMProviderType::Qwen | LLMProviderType::Deepseek => ReasoningPlan {
+            fields: Map::new(),
+            source: ReasoningSource::Unknown,
+        },
+        _ => ReasoningPlan {
+            fields: effort_fields(&effort_lower, config),
+            source: ReasoningSource::Chosen,
+        },
+    }
+}
+
 fn effort_fields(effort: &str, config: &LLMConfig) -> Map<String, Value> {
     let mut fields = Map::new();
     if config.provider_type == LLMProviderType::Anthropic {
@@ -129,6 +238,7 @@ fn effort_fields(effort: &str, config: &LLMConfig) -> Map<String, Value> {
         LLMApiMode::Responses => {
             fields.insert("reasoning".to_string(), json!({ "effort": effort }));
         }
+        LLMApiMode::Gemini => {}
     }
     fields
 }
@@ -240,6 +350,16 @@ fn openai_knob(model: &str) -> Option<LowestKnob> {
     None
 }
 
+fn openai_supported_efforts(model: &str) -> Vec<&'static str> {
+    match openai_knob(model) {
+        Some(LowestKnob::Effort("none")) => vec!["none", "low", "medium", "high"],
+        Some(LowestKnob::Effort("minimal")) => vec!["minimal", "low", "medium", "high"],
+        Some(LowestKnob::Effort("low")) => vec!["low", "medium", "high"],
+        Some(LowestKnob::NotNeeded) => Vec::new(),
+        _ => vec!["none", "minimal", "low", "medium", "high"],
+    }
+}
+
 /// Resolve only documented models; unknown IDs use server defaults.
 fn gemini_knob(model: &str) -> Option<LowestKnob> {
     let Some(thinking_config) = crate::gemini::lowest_thinking_config(model) else {
@@ -267,6 +387,18 @@ fn anthropic_knob(model: &str) -> Option<LowestKnob> {
         "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" | "claude-sonnet-4-6"
         | "claude-haiku-4-5" => Some(LowestKnob::NotNeeded),
         _ => None,
+    }
+}
+
+fn anthropic_supported_efforts(model: &str) -> Vec<&'static str> {
+    match without_date_suffix(model) {
+        "claude-haiku-5-5" | "claude-sonnet-5" | "claude-sonnet-5-5" => {
+            vec!["none", "low", "medium", "high"]
+        }
+        "claude-opus-5-5" | "claude-opus-5" | "claude-fable-5-1" | "claude-fable-5" => {
+            vec!["low", "medium", "high"]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -399,21 +531,38 @@ mod tests {
     }
 
     #[test]
-    fn an_anthropic_effort_goes_into_output_config_whatever_the_page_says() {
+    fn an_anthropic_effort_respects_per_model_capabilities() {
         let mut claude = config(
             LLMProviderType::Anthropic,
             "https://api.anthropic.com",
-            ReasoningChoice::Effort("high".to_string()),
+            ReasoningChoice::Lowest,
         );
         claude.model_name = "claude-opus-5-5".to_string();
-        let opus = plan(&claude);
-        assert_eq!(Value::Object(opus.fields), json!({ "output_config": { "effort": "low" } }));
-        assert_eq!(opus.source, ReasoningSource::Lowest);
+        let opus_lowest = plan(&claude);
+        assert_eq!(
+            Value::Object(opus_lowest.fields),
+            json!({ "output_config": { "effort": "low" } })
+        );
+        assert_eq!(opus_lowest.source, ReasoningSource::Lowest);
+
+        claude.reasoning = ReasoningChoice::Effort("high".to_string());
+        let opus_high = plan(&claude);
+        assert_eq!(
+            Value::Object(opus_high.fields),
+            json!({ "output_config": { "effort": "high" } })
+        );
+        assert_eq!(opus_high.source, ReasoningSource::Chosen);
 
         claude.model_name = "claude-haiku-4-5".to_string();
+        claude.reasoning = ReasoningChoice::Lowest;
         let quiet = plan(&claude);
         assert!(quiet.fields.is_empty());
         assert_eq!(quiet.source, ReasoningSource::NotNeeded);
+
+        claude.reasoning = ReasoningChoice::ServerDefault;
+        let silent = plan(&claude);
+        assert!(silent.fields.is_empty());
+        assert_eq!(silent.source, ReasoningSource::Chosen);
     }
 
     fn config(provider_type: LLMProviderType, base_url: &str, reasoning: ReasoningChoice) -> LLMConfig {
@@ -469,13 +618,52 @@ mod tests {
     }
 
     #[test]
-    fn qwen_and_gemini_stay_at_the_lowest_whatever_the_config_says() {
-        let qwen = plan(&config(
+    fn qwen_uses_lowest_by_default_and_honors_server_default() {
+        let mut qwen_cfg = config(
             LLMProviderType::Qwen,
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            ReasoningChoice::Effort("high".to_string()),
-        ));
+            ReasoningChoice::Lowest,
+        );
+        let qwen = plan(&qwen_cfg);
         assert_eq!(Value::Object(qwen.fields), json!({ "enable_thinking": false }));
         assert_eq!(qwen.source, ReasoningSource::Lowest);
+
+        qwen_cfg.reasoning = ReasoningChoice::ServerDefault;
+        let silent = plan(&qwen_cfg);
+        assert!(silent.fields.is_empty());
+        assert_eq!(silent.source, ReasoningSource::Chosen);
+    }
+
+    #[test]
+    fn gemini_effort_and_custom_gemini_mode_translate_to_thinking_config() {
+        let mut cfg = config(
+            LLMProviderType::Custom,
+            "https://proxy.example.com",
+            ReasoningChoice::Effort("medium".to_string()),
+        );
+        cfg.api_mode = LLMApiMode::Gemini;
+        cfg.model_name = "gemini-3.8-flash".to_string();
+        assert_eq!(supported_efforts(&cfg), vec!["low", "medium", "high"]);
+        let planned = plan(&cfg);
+        assert_eq!(
+            Value::Object(planned.fields),
+            json!({ "thinkingConfig": { "thinkingLevel": "MEDIUM" } })
+        );
+        assert_eq!(planned.source, ReasoningSource::Chosen);
+
+        cfg.model_name = "gemini-2.5-pro".to_string();
+        cfg.reasoning = ReasoningChoice::Effort("low".to_string());
+        assert_eq!(supported_efforts(&cfg), vec!["low", "medium", "high"]);
+        let pro = plan(&cfg);
+        assert_eq!(
+            Value::Object(pro.fields),
+            json!({ "thinkingConfig": { "thinkingBudget": 128 } })
+        );
+
+        cfg.model_name = "gemini-3.8-flash".to_string();
+        cfg.reasoning = ReasoningChoice::Effort("minimal".to_string());
+        let unsupported = plan(&cfg);
+        assert!(unsupported.fields.is_empty());
+        assert_eq!(unsupported.source, ReasoningSource::Unknown);
     }
 }

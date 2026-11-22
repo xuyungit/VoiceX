@@ -3,7 +3,12 @@ import llmModels from '../shared/llmModels.json'
 import asrModels from '../shared/asrModels.json'
 import { isMacOS } from '../utils/platform'
 import { useSettingsStore } from './settings'
-import { buildLlmProviderOptions, providerSelectionKey } from '../utils/llmOptions'
+import {
+  buildLlmApiModeOptions,
+  buildLlmProviderOptions,
+  buildReasoningEffortOptions,
+  providerSelectionKey
+} from '../utils/llmOptions'
 import { buildAsrProviderOptions } from '../utils/providerOptions'
 import { checkAsrDictionarySettings } from '../utils/asrDictionary.spec'
 
@@ -23,6 +28,17 @@ export function checkLlmDefault(expectedMacOS: boolean) {
     }
     if (store.settings.llmDeepseekBaseUrl !== llmModels.deepseekBaseUrl || store.settings.llmDeepseekModel !== llmModels.deepseekDefaultModel || store.settings.llmDeepseekApiKey !== '') {
       throw new Error('DeepSeek must have independent credentials and the shared official defaults')
+    }
+    if (store.settings.llmGeminiBaseUrl !== llmModels.geminiBaseUrl || store.settings.llmGeminiModel !== llmModels.geminiDefaultModel || store.settings.llmGeminiReasoningEffort !== null) {
+      throw new Error('Gemini must use the shared official defaults and auto-lowest reasoning by default')
+    }
+    const apiModes = buildLlmApiModeOptions(key => key)
+    if (!apiModes.some(option => option.value === 'gemini')) {
+      throw new Error('Custom endpoints must offer Gemini native API mode')
+    }
+    const effortOptions = buildReasoningEffortOptions(key => key, ['low', 'medium', 'high'])
+    if (effortOptions[0].value !== '' || effortOptions[1].value !== 'server_default' || effortOptions.length !== 5) {
+      throw new Error('Reasoning effort options must begin with auto-lowest and server_default')
     }
     const options = buildLlmProviderOptions(key => key)
     if (!options.some(option => !('type' in option) && option.value === 'deepseek')) {

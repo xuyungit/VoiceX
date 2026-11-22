@@ -24,6 +24,7 @@ enum Support {
     Levels {
         minimal: bool,
         default_minimal: bool,
+        xhigh: bool,
     },
     NoThinking,
     Unknown,
@@ -94,6 +95,7 @@ fn support(model: &str) -> Support {
         Support::Levels {
             minimal: true,
             default_minimal: true,
+            xhigh: false,
         }
     } else if ["gemini-3-flash", "gemini-3.5-flash", "gemini-3.6-flash"]
         .iter()
@@ -102,6 +104,7 @@ fn support(model: &str) -> Support {
         Support::Levels {
             minimal: true,
             default_minimal: false,
+            xhigh: false,
         }
     } else if ["gemini-3.1-pro", "gemini-3.7-flash", "gemini-3.8-flash"]
         .iter()
@@ -110,6 +113,25 @@ fn support(model: &str) -> Support {
         Support::Levels {
             minimal: false,
             default_minimal: false,
+            xhigh: false,
+        }
+    } else if ["gemini-4-hydrogen", "gemini-4-neon"]
+        .iter()
+        .any(|name| family(&model, name))
+    {
+        Support::Levels {
+            minimal: false,
+            default_minimal: false,
+            xhigh: true,
+        }
+    } else if ["gemini-4-carbon", "gemini-4-argon"]
+        .iter()
+        .any(|name| family(&model, name))
+    {
+        Support::Levels {
+            minimal: false,
+            default_minimal: false,
+            xhigh: false,
         }
     } else if [
         "gemini-1.5-pro",
@@ -129,6 +151,121 @@ fn support(model: &str) -> Support {
 #[allow(dead_code)] // Used by the app reasoning preview.
 pub(crate) fn is_known_model(model: &str) -> bool {
     !matches!(support(model), Support::Unknown)
+}
+
+/// Supported UI reasoning-effort choices for a recognized Gemini model.
+pub(crate) fn supported_efforts(model: &str) -> Vec<&'static str> {
+    match support(model) {
+        Support::Budget { off: true, .. } => vec!["none", "low", "medium", "high"],
+        Support::Budget { off: false, .. } => vec!["low", "medium", "high"],
+        Support::Levels {
+            minimal: true,
+            xhigh: false,
+            ..
+        } => vec!["minimal", "low", "medium", "high"],
+        Support::Levels {
+            minimal: false,
+            xhigh: true,
+            ..
+        } => vec!["low", "medium", "high", "xhigh"],
+        Support::Levels {
+            minimal: true,
+            xhigh: true,
+            ..
+        } => vec!["minimal", "low", "medium", "high", "xhigh"],
+        Support::Levels {
+            minimal: false,
+            xhigh: false,
+            ..
+        } => vec!["low", "medium", "high"],
+        Support::NoThinking | Support::Unknown => Vec::new(),
+    }
+}
+
+/// Map a user-selected logical effort (`"none"`, `"minimal"`, `"low"`, `"medium"`,
+/// `"high"`, `"xhigh"`) into the model's `thinkingConfig`. Returns `None` when
+/// the model does not support explicit control or the effort is incompatible with it.
+pub(crate) fn thinking_config_for_effort(model: &str, effort: &str) -> Option<ThinkingConfig> {
+    let effort = effort.trim().to_ascii_lowercase();
+    match support(model) {
+        Support::Budget { min, max, off, .. } => {
+            let budget = match effort.as_str() {
+                "none" if off => 0,
+                "low" => (if off { min.max(1024) } else { min }).clamp(min, max),
+                "medium" => 8192_i32.clamp(min, max),
+                "high" => 24576_i32.clamp(min, max),
+                _ => return None,
+            };
+            Some(ThinkingConfig {
+                thinking_budget: Some(budget),
+                ..Default::default()
+            })
+        }
+        Support::Levels { minimal, xhigh, .. } => {
+            let level = match effort.as_str() {
+                "minimal" if minimal => "MINIMAL",
+                "low" => "LOW",
+                "medium" => "MEDIUM",
+                "high" => "HIGH",
+                "xhigh" if xhigh => "XHIGH",
+                _ => return None,
+            };
+            Some(ThinkingConfig {
+                thinking_level: Some(level.to_string()),
+                ..Default::default()
+            })
+        }
+        Support::NoThinking | Support::Unknown => None,
+    }
+}
+
+/// Filter official `models.list` entries to Gemini text models suitable for
+/// dictation polishing and correction (excluding specialized modalities,
+/// legacy 1.x generations, experimental snapshots, and dated/numbered builds).
+pub(crate) fn is_suitable_polishing_model(id: &str) -> bool {
+    let model = normalized_model(id);
+    if !model.starts_with("gemini-") {
+        return false;
+    }
+    if [
+        "-image",
+        "-tts",
+        "-live",
+        "-transcribe",
+        "-thinking",
+        "embedding",
+        "aqa",
+        "deep-research",
+        "computer-use",
+        "robotics",
+        "nano-banana",
+        "-customtools",
+        "-audio",
+        "-video",
+        "-vision",
+    ]
+    .iter()
+    .any(|kw| model.contains(kw))
+    {
+        return false;
+    }
+    if model == "gemini-pro"
+        || model.starts_with("gemini-1.")
+        || model.starts_with("gemini-ultra")
+        || model.starts_with("gemini-exp")
+        || model.ends_with("-exp")
+        || model.contains("-exp-")
+    {
+        return false;
+    }
+    if model
+        .rsplit('-')
+        .next()
+        .is_some_and(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return false;
+    }
+    true
 }
 
 /// Retain VoiceX's sampling only for recognized pre-3 models. Gemini 3.x
@@ -176,8 +313,10 @@ pub(crate) fn validate_thinking_config(model: &str, config: &ThinkingConfig) -> 
         Support::Budget { min, max, off, .. } => config.thinking_budget.is_some_and(|budget| {
             budget == -1 || (off && budget == 0) || (min..=max).contains(&budget)
         }),
-        Support::Levels { minimal, .. } => config.thinking_level.as_deref().is_some_and(|level| {
-            matches!(level, "LOW" | "MEDIUM" | "HIGH") || (minimal && level == "MINIMAL")
+        Support::Levels { minimal, xhigh, .. } => config.thinking_level.as_deref().is_some_and(|level| {
+            matches!(level, "LOW" | "MEDIUM" | "HIGH")
+                || (minimal && level == "MINIMAL")
+                || (xhigh && level == "XHIGH")
         }),
         _ => false,
     };
@@ -345,5 +484,134 @@ mod tests {
         )
         .is_err());
         assert!(validate_thinking_config("gemini-4-flash", &ThinkingConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn supported_efforts_and_explicit_configs_match_model_capabilities() {
+        assert_eq!(
+            supported_efforts("gemini-2.5-pro"),
+            vec!["low", "medium", "high"]
+        );
+        assert_eq!(
+            supported_efforts("gemini-2.5-flash"),
+            vec!["none", "low", "medium", "high"]
+        );
+        assert_eq!(
+            supported_efforts("gemini-3.5-flash-lite"),
+            vec!["minimal", "low", "medium", "high"]
+        );
+        assert_eq!(
+            supported_efforts("gemini-3.8-flash"),
+            vec!["low", "medium", "high"]
+        );
+        assert_eq!(
+            supported_efforts("gemini-4-hydrogen"),
+            vec!["low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(
+            supported_efforts("gemini-4-neon"),
+            vec!["low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(
+            supported_efforts("gemini-4-carbon"),
+            vec!["low", "medium", "high"]
+        );
+        assert_eq!(
+            supported_efforts("gemini-4-argon"),
+            vec!["low", "medium", "high"]
+        );
+        assert!(supported_efforts("gemini-2.0-flash").is_empty());
+        assert!(supported_efforts("gemini-4-flash").is_empty());
+
+        for model in [
+            "gemini-4-hydrogen",
+            "gemini-4-neon",
+            "gemini-4-carbon",
+            "gemini-4-argon",
+        ] {
+            assert_eq!(
+                lowest_thinking_config(model),
+                Some(ThinkingConfig {
+                    thinking_level: Some("LOW".into()),
+                    ..Default::default()
+                }),
+                "{model}"
+            );
+            assert_eq!(temperature(model), None, "{model}");
+        }
+        assert_eq!(
+            thinking_config_for_effort("gemini-4-hydrogen", "xhigh"),
+            Some(ThinkingConfig {
+                thinking_level: Some("XHIGH".into()),
+                ..Default::default()
+            })
+        );
+        assert_eq!(thinking_config_for_effort("gemini-4-carbon", "xhigh"), None);
+
+        assert_eq!(
+            thinking_config_for_effort("gemini-2.5-pro", "low"),
+            Some(ThinkingConfig {
+                thinking_budget: Some(128),
+                ..Default::default()
+            })
+        );
+        assert_eq!(thinking_config_for_effort("gemini-2.5-pro", "none"), None);
+        assert_eq!(
+            thinking_config_for_effort("gemini-2.5-flash", "none"),
+            Some(ThinkingConfig {
+                thinking_budget: Some(0),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            thinking_config_for_effort("gemini-3.8-flash", "minimal"),
+            None
+        );
+        assert_eq!(
+            thinking_config_for_effort("gemini-3.8-flash", "high"),
+            Some(ThinkingConfig {
+                thinking_level: Some("HIGH".into()),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn polishing_model_filter_keeps_gemini_text_aliases_and_excludes_specialties() {
+        for id in [
+            "models/gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-3-flash-preview",
+            "gemini-3.1-pro-preview",
+            "gemini-3.5-flash-lite",
+            "gemini-flash-latest",
+            "gemini-pro-latest",
+            "gemini-4-hydrogen",
+            "gemini-4-neon",
+            "gemini-4-carbon",
+            "gemini-4-argon",
+            "gemini-4-flash",
+        ] {
+            assert!(is_suitable_polishing_model(id), "expected suitable: {id}");
+        }
+        for id in [
+            "gemma-3-27b-it",
+            "imagen-3.0-generate-002",
+            "veo-2.0-generate-001",
+            "gemini-2.5-flash-image",
+            "gemini-2.5-flash-preview-tts",
+            "gemini-2.5-flash-live",
+            "gemini-3.5-transcribe",
+            "gemini-2.5-flash-thinking",
+            "gemini-embedding-001",
+            "gemini-1.5-pro",
+            "gemini-pro-vision",
+            "gemini-2.5-flash-001",
+            "gemini-2.5-flash-preview-09-2025",
+            "gemini-exp-1206",
+        ] {
+            assert!(!is_suitable_polishing_model(id), "expected excluded: {id}");
+        }
     }
 }

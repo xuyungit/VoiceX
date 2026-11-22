@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, type ComputedRef } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { NInput, NSwitch, NButton, NSelect, NTabs, NTabPane, NTooltip, useDialog } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
@@ -9,6 +9,7 @@ import { getDefaultPrompt } from '../utils/llmPrompts'
 import {
   buildLlmApiModeOptions,
   buildLlmProviderOptions,
+  buildReasoningEffortOptions,
   isOfficialOpenAiBaseUrl,
   providerSelectionKey,
   ADD_CUSTOM_ENDPOINT_VALUE,
@@ -32,40 +33,25 @@ interface LlmProviderProbeResult {
   responseText: string
   expectedMatch: boolean
   errorMessage: string | null
+  inputTokens: number | null
+  outputTokens: number | null
+  reasoningTokens: number | null
+  generatedTokens: number | null
+  tokensPerSecond: number | null
+  reasoningApplied: string
 }
 
 interface LlmReasoningPreview {
   // Compact JSON of the fields, '' when nothing is sent.
   fields: string
   source: 'lowest' | 'not_needed' | 'unknown' | 'chosen'
+  supportedEfforts: string[]
 }
 
 const providerOptions = computed(() =>
   buildLlmProviderOptions(t, settingsStore.settings.llmCustomEndpoints, { includeAddAction: true })
 )
 const apiModeOptions = computed(() => buildLlmApiModeOptions(t))
-
-// '' is the default everywhere: the backend spells "lowest" per vendor and
-// model (`llm/reasoning.rs`). Ark has no level below `low` that every model
-// honors, so its list starts there.
-const reasoningEffortOptions = computed(() => [
-  { label: t('llm.reasoningLowest'), value: '' },
-  { label: t('llm.low'), value: 'low' },
-  { label: t('llm.medium'), value: 'medium' },
-  { label: t('llm.high'), value: 'high' }
-])
-
-// OpenAI-style endpoints: each vendor accepts its own subset of the levels,
-// and `server_default` sends no reasoning field at all.
-const optionalReasoningEffortOptions = computed(() => [
-  { label: t('llm.reasoningLowest'), value: '' },
-  { label: t('llm.reasoningServerDefault'), value: 'server_default' },
-  { label: t('llm.reasoningNone'), value: 'none' },
-  { label: t('llm.reasoningMinimal'), value: 'minimal' },
-  { label: t('llm.low'), value: 'low' },
-  { label: t('llm.medium'), value: 'medium' },
-  { label: t('llm.high'), value: 'high' }
-])
 
 // Common settings
 const enableLlmCorrection = computed({
@@ -155,6 +141,10 @@ const llmQwenModel = computed({
   get: () => settingsStore.settings.llmQwenModel,
   set: (v: string) => settingsStore.updateSetting('llmQwenModel', v)
 })
+const llmQwenReasoningEffort = computed({
+  get: () => settingsStore.settings.llmQwenReasoningEffort ?? '',
+  set: (v: string) => settingsStore.updateSetting('llmQwenReasoningEffort', v || null)
+})
 
 // DeepSeek-specific
 const llmDeepseekBaseUrl = computed({
@@ -169,19 +159,23 @@ const llmDeepseekModel = computed({
   get: () => settingsStore.settings.llmDeepseekModel,
   set: (v: string) => settingsStore.updateSetting('llmDeepseekModel', v)
 })
-
-// Gemini-specific
-const llmGeminiBaseUrl = computed({
-  get: () => settingsStore.settings.llmGeminiBaseUrl,
-  set: (v: string) => settingsStore.updateSetting('llmGeminiBaseUrl', v)
+const llmDeepseekReasoningEffort = computed({
+  get: () => settingsStore.settings.llmDeepseekReasoningEffort ?? '',
+  set: (v: string) => settingsStore.updateSetting('llmDeepseekReasoningEffort', v || null)
 })
+
+// Gemini-specific (Google's official API)
 const llmGeminiApiKey = computed({
   get: () => settingsStore.settings.llmGeminiApiKey,
   set: (v: string) => settingsStore.updateSetting('llmGeminiApiKey', v)
 })
 const llmGeminiModel = computed({
-  get: () => settingsStore.settings.llmGeminiModel,
-  set: (v: string) => settingsStore.updateSetting('llmGeminiModel', v)
+  get: () => settingsStore.settings.llmGeminiModel || null,
+  set: (v: string | null) => settingsStore.updateSetting('llmGeminiModel', v?.trim() ?? '')
+})
+const llmGeminiReasoningEffort = computed({
+  get: () => settingsStore.settings.llmGeminiReasoningEffort ?? '',
+  set: (v: string) => settingsStore.updateSetting('llmGeminiReasoningEffort', v || null)
 })
 
 // Anthropic-specific
@@ -196,6 +190,10 @@ const llmAnthropicApiKey = computed({
 const llmAnthropicModel = computed({
   get: () => settingsStore.settings.llmAnthropicModel,
   set: (v: string) => settingsStore.updateSetting('llmAnthropicModel', v)
+})
+const llmAnthropicReasoningEffort = computed({
+  get: () => settingsStore.settings.llmAnthropicReasoningEffort ?? '',
+  set: (v: string) => settingsStore.updateSetting('llmAnthropicReasoningEffort', v || null)
 })
 
 // Custom-specific: the currently selected named endpoint within llmCustomEndpoints.
@@ -227,9 +225,9 @@ const llmCustomApiKey = computed({
   }
 })
 const llmCustomModel = computed({
-  get: () => activeCustomEndpoint.value?.model ?? '',
-  set: (v: string) => {
-    if (activeCustomEndpoint.value) activeCustomEndpoint.value.model = v
+  get: () => activeCustomEndpoint.value?.model || null,
+  set: (v: string | null) => {
+    if (activeCustomEndpoint.value) activeCustomEndpoint.value.model = v?.trim() ?? ''
   }
 })
 const llmCustomApiMode = computed({
@@ -345,63 +343,149 @@ const activePromptTab = ref<'assistant' | 'translation'>('assistant')
 const llmProbeLoading = ref(false)
 const llmProbeResult = ref<LlmProviderProbeResult | null>(null)
 const llmProbeError = ref('')
-const isOfficialOpenai = computed(() => isOfficialOpenAiBaseUrl(llmOpenaiBaseUrl.value))
-const canLoadOpenaiModels = computed(() => Boolean(llmOpenaiBaseUrl.value.trim() && llmOpenaiApiKey.value.trim()))
-const openaiModels = ref<string[] | null>(null)
-const openaiModelOptions = computed(() => (openaiModels.value ?? []).map(value => ({ value, label: value })))
-const openaiModelsLoading = ref(false)
-const openaiModelsError = ref('')
-let openaiModelsRequest = 0
+function useRemoteModelList(options: {
+  active: ComputedRef<boolean>
+  autoFetch: ComputedRef<boolean>
+  credentialsKey: ComputedRef<string>
+  canLoad: ComputedRef<boolean>
+  fetchModels: () => Promise<string[]>
+}) {
+  const models = ref<string[] | null>(null)
+  const modelOptions = computed(() => (models.value ?? []).map((value) => ({ value, label: value })))
+  const loading = ref(false)
+  const error = ref('')
+  let requestId = 0
 
-async function loadOpenaiModels() {
-  if (!canLoadOpenaiModels.value || openaiModelsLoading.value) return
-  const request = ++openaiModelsRequest
-  openaiModelsLoading.value = true
-  openaiModelsError.value = ''
-  try {
-    const models = await invoke<string[]>('list_openai_models', {
-      baseUrl: llmOpenaiBaseUrl.value, apiKey: llmOpenaiApiKey.value
-    })
-    if (request === openaiModelsRequest) openaiModels.value = models
-  } catch (error) {
-    if (request === openaiModelsRequest) openaiModelsError.value = String(error)
-  } finally {
-    if (request === openaiModelsRequest) openaiModelsLoading.value = false
+  async function load() {
+    if (!options.canLoad.value || loading.value) return
+    const request = ++requestId
+    loading.value = true
+    error.value = ''
+    try {
+      const list = await options.fetchModels()
+      if (request === requestId) models.value = list
+    } catch (err) {
+      if (request === requestId) error.value = String(err)
+    } finally {
+      if (request === requestId) loading.value = false
+    }
   }
+
+  watch(
+    [options.credentialsKey, options.active, options.autoFetch, () => settingsStore.isLoading],
+    ([key, active, autoFetch, settingsLoading], [prevKey, wasActive, _prevAuto, wasLoading], onCleanup) => {
+      const credentialsChanged = key !== prevKey
+      if (credentialsChanged) {
+        requestId++
+        models.value = null
+        error.value = ''
+        loading.value = false
+      }
+      if (settingsLoading || !active || !autoFetch || !options.canLoad.value) return
+
+      const prefetch = () => {
+        if (models.value === null && !error.value) void load()
+      }
+      // Load saved credentials immediately. Give edits time to settle before
+      // asking the provider to list models for the new credentials.
+      if (credentialsChanged && wasActive && !wasLoading) {
+        const timer = window.setTimeout(prefetch, 500)
+        onCleanup(() => window.clearTimeout(timer))
+      } else {
+        prefetch()
+      }
+    },
+    { immediate: true }
+  )
+
+  return { models, modelOptions, loading, error, load }
 }
 
-watch(
-  [llmOpenaiBaseUrl, llmOpenaiApiKey, isOpenai, () => settingsStore.isLoading],
-  ([baseUrl, apiKey, selected, settingsLoading], [previousUrl, previousKey, wasSelected, wasLoading], onCleanup) => {
-    const credentialsChanged = baseUrl !== previousUrl || apiKey !== previousKey
-    if (credentialsChanged) {
-      openaiModelsRequest++
-      openaiModels.value = null
-      openaiModelsError.value = ''
-      openaiModelsLoading.value = false
-    }
-    if (settingsLoading || !selected || !isOfficialOpenai.value || !canLoadOpenaiModels.value) return
+const isOfficialOpenai = computed(() => isOfficialOpenAiBaseUrl(llmOpenaiBaseUrl.value))
+const canLoadOpenaiModels = computed(() => Boolean(llmOpenaiBaseUrl.value.trim() && llmOpenaiApiKey.value.trim()))
+const openaiModelList = useRemoteModelList({
+  active: isOpenai,
+  autoFetch: isOfficialOpenai,
+  credentialsKey: computed(() => `${llmOpenaiBaseUrl.value}\0${llmOpenaiApiKey.value}`),
+  canLoad: canLoadOpenaiModels,
+  fetchModels: () =>
+    invoke<string[]>('list_openai_models', {
+      baseUrl: llmOpenaiBaseUrl.value,
+      apiKey: llmOpenaiApiKey.value
+    })
+})
 
-    const prefetch = () => {
-      if (openaiModels.value === null && !openaiModelsError.value) void loadOpenaiModels()
-    }
-    // Load saved credentials immediately. Give edits time to settle before
-    // asking OpenAI to list models for the new credentials.
-    if (credentialsChanged && wasSelected && !wasLoading) {
-      const timer = window.setTimeout(prefetch, 500)
-      onCleanup(() => window.clearTimeout(timer))
-    } else {
-      prefetch()
-    }
-  },
-  { immediate: true }
+const canLoadGeminiModels = computed(() => Boolean(llmGeminiApiKey.value.trim()))
+const geminiModelList = useRemoteModelList({
+  active: isGemini,
+  autoFetch: computed(() => true),
+  credentialsKey: computed(() => llmGeminiApiKey.value),
+  canLoad: canLoadGeminiModels,
+  fetchModels: () =>
+    invoke<string[]>('list_gemini_models', {
+      baseUrl: null,
+      apiKey: llmGeminiApiKey.value
+    })
+})
+
+const canLoadCustomModels = computed(() =>
+  Boolean(llmCustomBaseUrl.value.trim() && llmCustomApiKey.value.trim())
 )
+const customModelList = useRemoteModelList({
+  active: isCustom,
+  autoFetch: computed(() => false),
+  credentialsKey: computed(
+    () =>
+      `${activeCustomEndpoint.value?.id ?? ''}\0${llmCustomApiMode.value}\0${llmCustomBaseUrl.value}\0${llmCustomApiKey.value}`
+  ),
+  canLoad: canLoadCustomModels,
+  fetchModels: () =>
+    llmCustomApiMode.value === 'gemini'
+      ? invoke<string[]>('list_gemini_models', {
+          baseUrl: llmCustomBaseUrl.value,
+          apiKey: llmCustomApiKey.value
+        })
+      : invoke<string[]>('list_openai_models', {
+          baseUrl: llmCustomBaseUrl.value,
+          apiKey: llmCustomApiKey.value
+        })
+})
 
 // The reasoning fields the selected provider will be sent, resolved by the
 // backend from the page's current values, saved or not.
 const reasoningPreview = ref<LlmReasoningPreview | null>(null)
 const reasoningPreviewError = ref('')
 let reasoningPreviewRequest = 0
+
+const activeReasoningEffort = computed({
+  get: (): string => {
+    switch (llmProviderType.value) {
+      case 'volcengine': return llmVolcengineReasoningEffort.value
+      case 'openai': return llmOpenaiReasoningEffort.value
+      case 'qwen': return llmQwenReasoningEffort.value
+      case 'deepseek': return llmDeepseekReasoningEffort.value
+      case 'gemini': return llmGeminiReasoningEffort.value
+      case 'anthropic': return llmAnthropicReasoningEffort.value
+      case 'custom': return llmCustomReasoningEffort.value
+      default: return ''
+    }
+  },
+  set: (v: string) => {
+    switch (llmProviderType.value) {
+      case 'volcengine': llmVolcengineReasoningEffort.value = v; break
+      case 'openai': llmOpenaiReasoningEffort.value = v; break
+      case 'qwen': llmQwenReasoningEffort.value = v; break
+      case 'deepseek': llmDeepseekReasoningEffort.value = v; break
+      case 'gemini': llmGeminiReasoningEffort.value = v; break
+      case 'anthropic': llmAnthropicReasoningEffort.value = v; break
+      case 'custom': llmCustomReasoningEffort.value = v; break
+    }
+  }
+})
+
+const activeReasoningEffortOptions = computed(() =>
+  buildReasoningEffortOptions(t, reasoningPreview.value?.supportedEfforts ?? [])
+)
 
 watch(
   () => {
@@ -411,11 +495,12 @@ watch(
       s.llmProviderType,
       s.llmVolcengineBaseUrl, s.llmVolcengineModel, s.llmVolcengineReasoningEffort,
       s.llmOpenaiBaseUrl, s.llmOpenaiModel, s.llmOpenaiReasoningEffort,
-      s.llmQwenBaseUrl, s.llmQwenModel,
-      s.llmDeepseekBaseUrl, s.llmDeepseekModel,
-      s.llmGeminiBaseUrl, s.llmGeminiModel,
-      s.llmAnthropicBaseUrl, s.llmAnthropicModel,
-      endpoint?.id, endpoint?.baseUrl, endpoint?.model, endpoint?.apiMode, endpoint?.reasoningEffort
+      s.llmQwenBaseUrl, s.llmQwenModel, s.llmQwenReasoningEffort,
+      s.llmDeepseekBaseUrl, s.llmDeepseekModel, s.llmDeepseekReasoningEffort,
+      s.llmGeminiModel, s.llmGeminiReasoningEffort,
+      s.llmAnthropicBaseUrl, s.llmAnthropicModel, s.llmAnthropicReasoningEffort,
+      endpoint?.id, endpoint?.baseUrl, endpoint?.model, endpoint?.apiMode, endpoint?.reasoningEffort,
+      endpoint?.extraBody
     ]
   },
   async () => {
@@ -427,6 +512,16 @@ watch(
       if (request !== reasoningPreviewRequest) return
       reasoningPreview.value = preview
       reasoningPreviewError.value = ''
+
+      const current = activeReasoningEffort.value
+      if (
+        !settingsStore.isLoading &&
+        current &&
+        current !== 'server_default' &&
+        !preview.supportedEfforts.includes(current)
+      ) {
+        activeReasoningEffort.value = ''
+      }
     } catch (error) {
       if (request !== reasoningPreviewRequest) return
       reasoningPreview.value = null
@@ -441,7 +536,9 @@ const reasoningPreviewText = computed(() => {
   if (!preview) return reasoningPreviewError.value
   if (preview.source === 'unknown') {
     // Gemini and Anthropic offer neither a level nor extra fields to fill in.
-    if (isGemini.value || isAnthropic.value) return t('llm.reasoningPreviewUnknownModel')
+    if (isGemini.value || isAnthropic.value || (isCustom.value && llmCustomApiMode.value === 'gemini')) {
+      return t('llm.reasoningPreviewUnknownModel')
+    }
     return t(llmCustomExtraBody.value.trim() ? 'llm.reasoningPreviewUnknownExtra' : 'llm.reasoningPreviewUnknown')
   }
   if (preview.fields) return t('llm.reasoningPreviewSends')
@@ -501,6 +598,25 @@ const probeDiff = computed(() => {
   const result = llmProbeResult.value
   return result?.responseText ? diffText(result.requestText, result.responseText) : null
 })
+
+const probeUsageSummary = computed(() => {
+  const result = llmProbeResult.value
+  if (!result) return ''
+  const parts: string[] = []
+  if (result.reasoningTokens !== null) {
+    parts.push(`${t('llm.providerProbeReasoningTokens')} ${result.reasoningTokens}`)
+  }
+  if (result.outputTokens !== null) {
+    parts.push(`${t('llm.providerProbeOutputTokens')} ${result.outputTokens}`)
+  }
+  if (result.generatedTokens !== null) {
+    parts.push(`${t('llm.providerProbeTotalGenerated')} ${result.generatedTokens}`)
+  }
+  if (result.tokensPerSecond !== null) {
+    parts.push(`${result.tokensPerSecond.toFixed(1)} tok/s`)
+  }
+  return parts.join(' · ')
+})
 </script>
 
 <template>
@@ -535,6 +651,14 @@ const probeDiff = computed(() => {
               <DiffText v-if="probeDiff" :diff="probeDiff" view="after" />
               <template v-else>{{ t('llm.providerProbeOutputEmpty') }}</template>
             </div>
+            <div class="probe-detail-label">{{ t('llm.providerProbeReasoning') }}</div>
+            <div class="probe-detail-text mono-inline">
+              {{ llmProbeResult.reasoningApplied || t('llm.providerProbeNoReasoningField') }}
+            </div>
+            <template v-if="probeUsageSummary">
+              <div class="probe-detail-label">{{ t('llm.providerProbeUsage') }}</div>
+              <div class="probe-detail-text">{{ probeUsageSummary }}</div>
+            </template>
           </template>
         </ProbeStatus>
         <NTooltip :delay="400" style="max-width: 280px">
@@ -585,18 +709,6 @@ const probeDiff = computed(() => {
         <SettingRow :label="t('llm.modelName')">
           <NInput v-model:value="llmVolcengineModel" />
         </SettingRow>
-        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortSub')">
-          <template #status>
-            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-              {{ reasoningPreviewText }}
-              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-            </div>
-          </template>
-          <NSelect
-            v-model:value="llmVolcengineReasoningEffort"
-            :options="reasoningEffortOptions"
-          />
-        </SettingRow>
       </template>
 
       <!-- OpenAI Settings -->
@@ -614,43 +726,31 @@ const probeDiff = computed(() => {
         </SettingRow>
         <SettingRow :label="t('llm.modelName')" :help="t(isOfficialOpenai ? 'llm.openaiModelsNote' : 'llm.openaiGatewayModelsNote')">
           <template #status>
-            <div v-if="openaiModelsError">{{ openaiModelsError }}</div>
+            <div v-if="openaiModelList.error.value">{{ openaiModelList.error.value }}</div>
           </template>
           <div class="control-group">
             <NSelect
               v-model:value="llmOpenaiModel"
-              :options="openaiModelOptions"
-              :loading="openaiModelsLoading"
+              :options="openaiModelList.modelOptions.value"
+              :loading="openaiModelList.loading.value"
               :placeholder="t('llm.openaiModelPlaceholder')"
               filterable
               tag
             >
-              <template v-if="openaiModelsLoading && openaiModels === null" #empty>
+              <template v-if="openaiModelList.loading.value && openaiModelList.models.value === null" #empty>
                 {{ t('llm.openaiModelsLoading') }}
               </template>
             </NSelect>
             <NButton
               size="small"
               :disabled="!canLoadOpenaiModels"
-              :loading="openaiModelsLoading"
-              @click="loadOpenaiModels"
+              :loading="openaiModelList.loading.value"
+              @click="openaiModelList.load"
             >{{ t('llm.openaiModelsFetch') }}</NButton>
           </div>
         </SettingRow>
         <SettingRow v-if="isOfficialOpenai" :label="t('llm.openaiServiceTier')" :help="t('llm.openaiServiceTierHelp')">
           <NSelect v-model:value="llmOpenaiServiceTier" :options="openaiServiceTierOptions" />
-        </SettingRow>
-        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortOptionalSub')">
-          <template #status>
-            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-              {{ reasoningPreviewText }}
-              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-            </div>
-          </template>
-          <NSelect
-            v-model:value="llmOpenaiReasoningEffort"
-            :options="optionalReasoningEffortOptions"
-          />
         </SettingRow>
       </template>
 
@@ -670,15 +770,6 @@ const probeDiff = computed(() => {
         <SettingRow :label="t('llm.modelName')">
           <NInput v-model:value="llmQwenModel" />
         </SettingRow>
-        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortFixedSub')">
-          <template #status>
-            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-              {{ reasoningPreviewText }}
-              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-            </div>
-          </template>
-          <div class="reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
-        </SettingRow>
       </template>
 
       <!-- DeepSeek Settings -->
@@ -697,22 +788,10 @@ const probeDiff = computed(() => {
         <SettingRow :label="t('llm.modelName')">
           <NInput v-model:value="llmDeepseekModel" />
         </SettingRow>
-        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortFixedSub')">
-          <template #status>
-            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-              {{ reasoningPreviewText }}
-              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-            </div>
-          </template>
-          <div class="reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
-        </SettingRow>
       </template>
 
-      <!-- Gemini Settings -->
+      <!-- Gemini Settings (official endpoint only) -->
       <template v-if="isGemini">
-        <SettingRow :label="t('llm.baseUrl')">
-          <NInput v-model:value="llmGeminiBaseUrl" />
-        </SettingRow>
         <SettingRow :label="t('llm.apiKey')">
           <NInput
             v-model:value="llmGeminiApiKey"
@@ -721,17 +800,30 @@ const probeDiff = computed(() => {
             :placeholder="t('llm.enterApiKey')"
           />
         </SettingRow>
-        <SettingRow :label="t('llm.modelName')">
-          <NInput v-model:value="llmGeminiModel" />
-        </SettingRow>
-        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortFixedSub')">
+        <SettingRow :label="t('llm.modelName')" :help="t('llm.geminiModelsNote')">
           <template #status>
-            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-              {{ reasoningPreviewText }}
-              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-            </div>
+            <div v-if="geminiModelList.error.value">{{ geminiModelList.error.value }}</div>
           </template>
-          <div class="reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
+          <div class="control-group">
+            <NSelect
+              v-model:value="llmGeminiModel"
+              :options="geminiModelList.modelOptions.value"
+              :loading="geminiModelList.loading.value"
+              :placeholder="t('llm.openaiModelPlaceholder')"
+              filterable
+              tag
+            >
+              <template v-if="geminiModelList.loading.value && geminiModelList.models.value === null" #empty>
+                {{ t('llm.openaiModelsLoading') }}
+              </template>
+            </NSelect>
+            <NButton
+              size="small"
+              :disabled="!canLoadGeminiModels"
+              :loading="geminiModelList.loading.value"
+              @click="geminiModelList.load"
+            >{{ t('llm.openaiModelsFetch') }}</NButton>
+          </div>
         </SettingRow>
       </template>
 
@@ -751,15 +843,6 @@ const probeDiff = computed(() => {
         <SettingRow :label="t('llm.modelName')">
           <NInput v-model:value="llmAnthropicModel" />
         </SettingRow>
-        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortFixedSub')">
-          <template #status>
-            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-              {{ reasoningPreviewText }}
-              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-            </div>
-          </template>
-          <div class="reasoning-fixed">{{ t('llm.reasoningLowest') }}</div>
-        </SettingRow>
       </template>
 
       <!-- Custom Settings -->
@@ -773,8 +856,14 @@ const probeDiff = computed(() => {
         <SettingRow :label="t('llm.customEndpointName')" :help="t('llm.customEndpointNameSub')">
           <NInput v-model:value="llmCustomName" :placeholder="t('llm.customEndpointNamePlaceholder')" />
         </SettingRow>
-        <SettingRow :label="t('llm.baseUrl')" :help="t('llm.customBaseUrlSub')">
-          <NInput v-model:value="llmCustomBaseUrl" placeholder="https://your-api.example.com/v1" />
+        <SettingRow :label="t('llm.apiMode')" :help="t('llm.customApiModeSub')">
+          <NSelect v-model:value="llmCustomApiMode" :options="apiModeOptions" />
+        </SettingRow>
+        <SettingRow :label="t('llm.baseUrl')" :help="t(llmCustomApiMode === 'gemini' ? 'llm.customGeminiBaseUrlSub' : 'llm.customBaseUrlSub')">
+          <NInput
+            v-model:value="llmCustomBaseUrl"
+            :placeholder="llmCustomApiMode === 'gemini' ? 'https://your-gemini-proxy.example.com' : 'https://your-api.example.com/v1'"
+          />
         </SettingRow>
         <SettingRow :label="t('llm.apiKey')">
           <NInput
@@ -784,39 +873,69 @@ const probeDiff = computed(() => {
             :placeholder="t('llm.enterApiKey')"
           />
         </SettingRow>
-        <SettingRow :label="t('llm.modelName')">
-          <NInput v-model:value="llmCustomModel" placeholder="your-model-id" />
-        </SettingRow>
-        <SettingRow :label="t('llm.apiMode')" :help="t('llm.customApiModeSub')">
-          <NSelect v-model:value="llmCustomApiMode" :options="apiModeOptions" />
-        </SettingRow>
-        <SettingRow :label="t('llm.reasoningEffort')" :help="t('llm.reasoningEffortOptionalSub')">
+        <SettingRow :label="t('llm.modelName')" :help="t('llm.customModelsNote')">
           <template #status>
-            <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
-              {{ reasoningPreviewText }}
-              <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
-            </div>
+            <div v-if="customModelList.error.value">{{ customModelList.error.value }}</div>
           </template>
-          <NSelect
-            v-model:value="llmCustomReasoningEffort"
-            :options="optionalReasoningEffortOptions"
-          />
-        </SettingRow>
-        <SettingRow stacked :label="t('llm.extraBody')" :help="t('llm.extraBodySub')">
-          <template #status>
-            <div v-if="llmCustomExtraBodyError" class="is-error">{{ llmCustomExtraBodyError }}</div>
-          </template>
-          <NInput
-            v-model:value="llmCustomExtraBody"
-            type="textarea"
-            :rows="3"
-            :status="llmCustomExtraBodyError ? 'error' : undefined"
-            :placeholder="t('llm.extraBodyPlaceholder')"
-            class="mono"
-          />
+          <div class="control-group">
+            <NSelect
+              v-model:value="llmCustomModel"
+              :options="customModelList.modelOptions.value"
+              :loading="customModelList.loading.value"
+              :placeholder="t('llm.openaiModelPlaceholder')"
+              filterable
+              tag
+            >
+              <template v-if="customModelList.loading.value && customModelList.models.value === null" #empty>
+                {{ t('llm.openaiModelsLoading') }}
+              </template>
+            </NSelect>
+            <NButton
+              size="small"
+              :disabled="!canLoadCustomModels"
+              :loading="customModelList.loading.value"
+              @click="customModelList.load"
+            >{{ t('llm.openaiModelsFetch') }}</NButton>
+          </div>
         </SettingRow>
         </template>
       </template>
+
+      <SettingRow
+        v-if="!isCustom || activeCustomEndpoint"
+        :label="t('llm.reasoningEffort')"
+        :help="t('llm.reasoningEffortOptionalSub')"
+      >
+        <template #status>
+          <div class="reasoning-preview" :class="{ warns: reasoningPreviewWarns }">
+            {{ reasoningPreviewText }}
+            <code v-if="reasoningPreview?.fields">{{ reasoningPreview.fields }}</code>
+          </div>
+        </template>
+        <NSelect
+          v-model:value="activeReasoningEffort"
+          :options="activeReasoningEffortOptions"
+        />
+      </SettingRow>
+
+      <SettingRow
+        v-if="isCustom && activeCustomEndpoint"
+        stacked
+        :label="t('llm.extraBody')"
+        :help="t('llm.extraBodySub')"
+      >
+        <template #status>
+          <div v-if="llmCustomExtraBodyError" class="is-error">{{ llmCustomExtraBodyError }}</div>
+        </template>
+        <NInput
+          v-model:value="llmCustomExtraBody"
+          type="textarea"
+          :rows="3"
+          :status="llmCustomExtraBodyError ? 'error' : undefined"
+          :placeholder="t('llm.extraBodyPlaceholder')"
+          class="mono"
+        />
+      </SettingRow>
 
 
     </SettingsSection>
@@ -861,13 +980,12 @@ const probeDiff = computed(() => {
   color: color-mix(in srgb, var(--color-warning) 72%, var(--color-text-secondary));
 }
 
-.reasoning-fixed {
-  font-size: var(--font-sm);
-  color: var(--color-text-secondary);
-  text-align: right;
+.mono :deep(textarea) {
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
 }
 
-.mono :deep(textarea) {
+.mono-inline {
   font-family: var(--font-mono);
   font-size: var(--font-xs);
 }

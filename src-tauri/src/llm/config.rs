@@ -14,6 +14,8 @@ struct ModelDefaults {
     openai_default_model: String,
     deepseek_base_url: String,
     deepseek_default_model: String,
+    gemini_base_url: String,
+    gemini_default_model: String,
     openai_previous_default_models: Vec<String>,
 }
 
@@ -57,6 +59,23 @@ pub fn default_deepseek_base_url() -> &'static str {
 
 pub fn default_deepseek_model() -> &'static str {
     &model_defaults().deepseek_default_model
+}
+
+pub fn default_gemini_base_url() -> &'static str {
+    &model_defaults().gemini_base_url
+}
+
+pub fn default_gemini_model() -> &'static str {
+    &model_defaults().gemini_default_model
+}
+
+pub fn is_official_gemini_base_url(base_url: &str) -> bool {
+    let base_url = base_url.trim().trim_end_matches('/');
+    let official = default_gemini_base_url().trim_end_matches('/');
+    base_url == official
+        || base_url == format!("{official}/v1beta")
+        || base_url == format!("{official}/v1")
+        || base_url == format!("{official}/v1alpha")
 }
 
 pub fn replacement_for_previous_openai_default(model: &str) -> Option<&'static str> {
@@ -107,19 +126,21 @@ impl LLMProviderType {
     }
 }
 
-/// OpenAI-compatible API mode
+/// API protocol mode for OpenAI-compatible and custom endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LLMApiMode {
     #[default]
     ChatCompletions,
     Responses,
+    Gemini,
 }
 
 impl LLMApiMode {
     pub fn from_str(s: &str) -> Self {
         match s {
             "responses" => Self::Responses,
+            "gemini" => Self::Gemini,
             _ => Self::ChatCompletions,
         }
     }
@@ -170,6 +191,11 @@ impl Default for LLMConfig {
 }
 
 impl LLMConfig {
+    pub fn is_gemini_protocol(&self) -> bool {
+        self.provider_type == LLMProviderType::Gemini
+            || (self.provider_type == LLMProviderType::Custom && self.api_mode == LLMApiMode::Gemini)
+    }
+
     pub fn is_valid(&self) -> bool {
         !self.api_key.trim().is_empty()
     }

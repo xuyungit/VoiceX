@@ -289,6 +289,8 @@ fn migrate_settings_blob(conn: &Connection) {
     };
 
     let migrated_endpoints = crate::commands::settings::migrate_llm_custom_endpoints(&mut value);
+    let migrated_gemini_relay =
+        crate::commands::settings::migrate_non_official_gemini_endpoint(&mut value);
     let migrated_restore =
         crate::commands::settings::migrate_text_injection_override_restore_flag(&mut value);
     let migrated_asr = crate::commands::settings::migrate_openai_refine_model(&mut value);
@@ -304,6 +306,7 @@ fn migrate_settings_blob(conn: &Connection) {
         crate::commands::settings::migrate_tts_provider_without_system_voice(&mut value);
     let migrated_hotkey_default = crate::commands::settings::migrate_hotkey_defaults(&mut value);
     if !migrated_endpoints
+        && !migrated_gemini_relay
         && !migrated_restore
         && !migrated_asr
         && !migrated_hotkeys
@@ -1927,6 +1930,7 @@ fn read_settings_from_connection(conn: &Connection) -> Result<AppSettings, Stora
         match serde_json::from_str::<serde_json::Value>(&json) {
             Ok(mut raw) => {
                 crate::commands::settings::migrate_llm_custom_endpoints(&mut raw);
+                crate::commands::settings::migrate_non_official_gemini_endpoint(&mut raw);
                 crate::commands::settings::migrate_openai_refine_model(&mut raw);
                 crate::commands::settings::migrate_text_injection_override_restore_flag(&mut raw);
                 crate::commands::settings::migrate_hotkey_digit_key_codes(&mut raw);

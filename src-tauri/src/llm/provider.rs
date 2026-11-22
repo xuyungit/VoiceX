@@ -55,6 +55,16 @@ pub fn create_provider(provider_type: &LLMProviderType) -> Box<dyn LLMProvider> 
     }
 }
 
+/// Create the appropriate provider for a full [`LLMConfig`], routing custom
+/// endpoints configured with Gemini native mode to [`GeminiProvider`].
+pub fn create_provider_for_config(config: &LLMConfig) -> Box<dyn LLMProvider> {
+    if config.is_gemini_protocol() {
+        Box::new(GeminiProvider)
+    } else {
+        create_provider(&config.provider_type)
+    }
+}
+
 /// Put the reasoning fields `config` resolves to into `target`: the request
 /// body, or Gemini's `generation_config`.
 fn insert_reasoning_fields(target: &mut Value, config: &LLMConfig) {

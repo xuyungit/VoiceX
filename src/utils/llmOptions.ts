@@ -21,10 +21,37 @@ type Translate = (key: string) => string
 export const LLM_PROVIDER_VALUES = ['volcengine', 'openai', 'qwen', 'deepseek', 'gemini', 'anthropic', 'custom'] as const
 export type LlmProviderValue = typeof LLM_PROVIDER_VALUES[number]
 
-export const LLM_API_MODE_VALUES = ['chat_completions', 'responses'] as const
+export const LLM_API_MODE_VALUES = ['chat_completions', 'responses', 'gemini'] as const
 export type LlmApiModeValue = typeof LLM_API_MODE_VALUES[number]
 
 export type OpenAiServiceTier = 'default' | 'fast'
+
+export const REASONING_EFFORT_LABEL_KEYS: Record<string, string> = {
+  none: 'llm.reasoningNone',
+  minimal: 'llm.reasoningMinimal',
+  low: 'llm.low',
+  medium: 'llm.medium',
+  high: 'llm.high',
+  xhigh: 'llm.xhigh'
+}
+
+export function buildReasoningEffortOptions(
+  t: Translate,
+  supportedEfforts: readonly string[]
+): Array<ProviderOption<string>> {
+  const options: Array<ProviderOption<string>> = [
+    { label: t('llm.reasoningLowest'), value: '' },
+    { label: t('llm.reasoningServerDefault'), value: 'server_default' }
+  ]
+  for (const effort of supportedEfforts) {
+    const key = REASONING_EFFORT_LABEL_KEYS[effort]
+    options.push({
+      label: key ? t(key) : effort,
+      value: effort
+    })
+  }
+  return options
+}
 
 export function isOfficialOpenAiBaseUrl(baseUrl: string): boolean {
   const url = baseUrl.trim().replace(/\/+$/, '')
@@ -47,7 +74,8 @@ const BUILTIN_PROVIDER_LABEL_KEYS: Array<{ key: string; value: Exclude<LlmProvid
 
 const LLM_API_MODE_LABEL_KEYS: Array<{ key: string; value: LlmApiModeValue }> = [
   { key: 'llm.apiModeChatCompletions', value: 'chat_completions' },
-  { key: 'llm.apiModeResponses', value: 'responses' }
+  { key: 'llm.apiModeResponses', value: 'responses' },
+  { key: 'llm.apiModeGemini', value: 'gemini' }
 ]
 
 /**

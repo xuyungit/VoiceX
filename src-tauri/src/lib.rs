@@ -393,6 +393,7 @@ pub fn run() {
             commands::local_models::pause_local_model_download,
             commands::local_models::delete_local_model,
             commands::settings::list_openai_models,
+            commands::settings::list_gemini_models,
             commands::settings::probe_current_asr_provider,
             commands::settings::probe_current_llm_provider,
             commands::settings::preview_llm_reasoning,
