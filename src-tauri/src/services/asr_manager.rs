@@ -65,8 +65,8 @@ impl AsrManager {
         on_event: impl Fn(AsrEvent) + Send + Sync + 'static,
         on_finished: impl Fn(Option<AsrFailure>) + Send + Sync + 'static,
     ) -> Result<(), String> {
-        let settings = storage::get_settings().map_err(|err| err.to_string())?;
-        let config = AsrConfig::from(&settings);
+        let settings = storage::get_settings_cached().map_err(|err| err.to_string())?;
+        let config = AsrConfig::from(settings.as_ref());
         self.stream_with_config(
             config,
             sample_rate,

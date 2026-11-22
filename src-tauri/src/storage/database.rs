@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::commands::settings::AppSettings;
 use crate::foreground_app::RecentTargetApp;
@@ -16,7 +16,62 @@ use crate::services::history_service::{
 use uuid::Uuid;
 
 static DB: std::sync::OnceLock<Mutex<Connection>> = std::sync::OnceLock::new();
+static SETTINGS_CACHE: SettingsCache = SettingsCache::new();
 const RECENT_TARGET_APPS_KEY: &str = "recent_target_apps";
+
+/// Write-through in-memory cache for [`AppSettings`].
+///
+/// Hot-path readers acquire only a shared read lock and avoid touching the
+/// SQLite mutex, parsing JSON, or running migrations. Cache misses and writes
+/// both run under the SQLite `DB` mutex so a slow read can never overwrite a
+/// newer `save_settings`.
+struct SettingsCache {
+    slot: RwLock<Option<Arc<AppSettings>>>,
+}
+
+impl SettingsCache {
+    const fn new() -> Self {
+        Self {
+            slot: RwLock::new(None),
+        }
+    }
+
+    fn get(&self) -> Option<Arc<AppSettings>> {
+        self.slot
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(Arc::clone)
+    }
+
+    fn set(&self, settings: Option<Arc<AppSettings>>) {
+        *self.slot.write().unwrap_or_else(|e| e.into_inner()) = settings;
+    }
+
+    fn get_or_load_with<E>(
+        &self,
+        load: impl FnOnce() -> Result<AppSettings, E>,
+    ) -> Result<Arc<AppSettings>, E> {
+        if let Some(cached) = self.get() {
+            return Ok(cached);
+        }
+        let loaded = Arc::new(load()?);
+        self.set(Some(Arc::clone(&loaded)));
+        Ok(loaded)
+    }
+
+    fn write_through<E>(
+        &self,
+        settings: &AppSettings,
+        persist: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        persist()?;
+        let mut normalized = settings.clone();
+        crate::commands::settings::normalize_text_injection_overrides(&mut normalized);
+        self.set(Some(Arc::new(normalized)));
+        Ok(())
+    }
+}
 const MAX_RECENT_TARGET_APPS: usize = 5;
 const DAILY_USAGE_BACKFILL_KEY: &str = "daily_usage_backfilled_v1";
 pub const FEATURE_KIND_DICTATION: &str = "dictation";
@@ -187,7 +242,10 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
 
     crate::post_edit::records::create_schema(&conn)?;
     super::history_search::init(path)?;
-    let _ = DB.set(Mutex::new(conn));
+    let initial_settings = read_settings_from_connection(&conn).ok().map(Arc::new);
+    if DB.set(Mutex::new(conn)).is_ok() {
+        SETTINGS_CACHE.set(initial_settings);
+    }
     log::info!("Database initialized at {:?}", path);
     Ok(())
 }
@@ -1901,9 +1959,19 @@ fn get_daily_activity_in(
     })
 }
 
+/// Get settings as a shared read-only snapshot from the write-through cache.
+///
+/// Prefer this on read-only hot paths to avoid cloning [`AppSettings`].
+pub fn get_settings_cached() -> Result<Arc<AppSettings>, StorageError> {
+    if let Some(cached) = SETTINGS_CACHE.get() {
+        return Ok(cached);
+    }
+    with_db(|conn| SETTINGS_CACHE.get_or_load_with(|| read_settings_from_connection(conn)))
+}
+
 /// Get settings
 pub fn get_settings() -> Result<AppSettings, StorageError> {
-    with_db(read_settings_from_connection)
+    get_settings_cached().map(|settings| (*settings).clone())
 }
 
 /// Read [`AppSettings`] from an existing database file without opening it for
@@ -1972,13 +2040,15 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), StorageError> {
         .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
 
     with_db(|conn| {
-        conn.execute(
-            "INSERT INTO user_config (key, value) VALUES ('app_settings', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![payload],
-        )
-        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        Ok(())
+        SETTINGS_CACHE.write_through(settings, || {
+            conn.execute(
+                "INSERT INTO user_config (key, value) VALUES ('app_settings', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![payload],
+            )
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+            Ok(())
+        })
     })
 }
 
@@ -3315,5 +3385,75 @@ mod tests {
             .unwrap();
         // old-ok (1, 3, 1000, 1) + new-ok (1, 5, 1200, 1) = (2, 8, 2200, 2)
         assert_eq!(totals, (2, 8, 2200, 2));
+    }
+
+    #[test]
+    fn settings_cache_avoids_redundant_reads_and_updates_on_write_through() {
+        let cache = SettingsCache::new();
+        let mut loads = 0usize;
+
+        let first = cache
+            .get_or_load_with(|| -> Result<AppSettings, &'static str> {
+                loads += 1;
+                let mut settings = AppSettings::default();
+                settings.short_sentence_threshold = 9;
+                Ok(settings)
+            })
+            .unwrap();
+        let second = cache
+            .get_or_load_with(|| -> Result<AppSettings, &'static str> {
+                loads += 1;
+                Ok(AppSettings::default())
+            })
+            .unwrap();
+        assert_eq!(loads, 1);
+        assert_eq!(first.short_sentence_threshold, 9);
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let mut updated = AppSettings::default();
+        updated.short_sentence_threshold = 17;
+        updated
+            .text_injection_overrides
+            .push(crate::foreground_app::TextInjectionAppOverride {
+                platform: " MACOS ".into(),
+                match_kind: " bundle_id ".into(),
+                match_value: " Com.Example.App ".into(),
+                app_name: " Example ".into(),
+                mode: " typing ".into(),
+                skip_clipboard_restore: false,
+            });
+        cache
+            .write_through(&updated, || -> Result<(), &'static str> { Ok(()) })
+            .unwrap();
+
+        let after_write = cache.get().expect("cache populated after write-through");
+        assert_eq!(after_write.short_sentence_threshold, 17);
+        assert_eq!(after_write.text_injection_overrides.len(), 1);
+        assert_eq!(after_write.text_injection_overrides[0].platform, "macos");
+        assert_eq!(
+            after_write.text_injection_overrides[0].match_value,
+            "com.example.app"
+        );
+        assert_eq!(after_write.text_injection_overrides[0].mode, "typing");
+    }
+
+    #[test]
+    fn settings_cache_preserves_previous_value_when_persist_fails() {
+        let cache = SettingsCache::new();
+        let mut initial = AppSettings::default();
+        initial.short_sentence_threshold = 12;
+        cache
+            .write_through(&initial, || -> Result<(), &'static str> { Ok(()) })
+            .unwrap();
+
+        let mut failed_update = AppSettings::default();
+        failed_update.short_sentence_threshold = 99;
+        let err = cache
+            .write_through(&failed_update, || Err("disk full"))
+            .unwrap_err();
+        assert_eq!(err, "disk full");
+
+        let current = cache.get().expect("previous cached value retained");
+        assert_eq!(current.short_sentence_threshold, 12);
     }
 }

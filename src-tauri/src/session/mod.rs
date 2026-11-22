@@ -310,7 +310,10 @@ impl SessionController {
         state.remove_trailing_punctuation = remove_trailing_punctuation;
         state.short_sentence_threshold = short_sentence_threshold;
         state.remove_blank_lines = remove_blank_lines;
-        state.replacement_rules = replacement_rules;
+        state.compiled_replacement_rules =
+            crate::services::post_processing_service::PostProcessingService::compile_rules(
+                &replacement_rules,
+            );
         state.translation_enabled = translation_enabled;
         state.translation_trigger_mode = TranslationTriggerMode::from_str(translation_trigger_mode);
         state.double_tap_window_ms = double_tap_window_ms as u64;
@@ -679,8 +682,8 @@ impl SessionController {
 
     pub(crate) fn show_hud(&self) {
         if let Some(hud) = self.hud_service() {
-            let is_batch = crate::storage::get_settings()
-                .map(|s| crate::asr::AsrConfig::from(&s).is_batch())
+            let is_batch = crate::storage::get_settings_cached()
+                .map(|s| crate::asr::AsrConfig::from(s.as_ref()).is_batch())
                 .unwrap_or(false);
             hud.show(if is_batch {
                 crate::services::hud_service::HudPresentation::Batch
@@ -825,7 +828,7 @@ impl SessionController {
         // Stop slightly before DeepSeek's 120-second hard limit to allow the
         // capture thread to finish. Settings updates must not restart that
         // provider's clock from zero while recording is already underway.
-        if minutes == 2 && crate::storage::get_settings().ok().is_some_and(|s| s.asr_provider_type == "deepseek") {
+        if minutes == 2 && crate::storage::get_settings_cached().ok().is_some_and(|s| s.asr_provider_type == "deepseek") {
             let elapsed = state.session_start.map(|start| start.elapsed().as_secs()).unwrap_or(0);
             total_secs = 118_u64.saturating_sub(elapsed).max(1);
         }
@@ -1004,8 +1007,8 @@ impl SessionController {
                 HotkeySessionState::Idle | HotkeySessionState::Finalizing => None,
                 _ => state.recording_style,
             };
-            let is_batch = crate::storage::get_settings()
-                .map(|s| crate::asr::AsrConfig::from(&s).is_batch())
+            let is_batch = crate::storage::get_settings_cached()
+                .map(|s| crate::asr::AsrConfig::from(s.as_ref()).is_batch())
                 .unwrap_or(false);
             hud.emit_recording_style(recording_style_for_hud, is_batch);
             hud.emit_correcting(state.is_correcting);
@@ -1055,9 +1058,9 @@ impl SessionController {
 
     fn effective_max_recording_minutes(&self, state: &AppState) -> u32 {
         let user_limit = state.max_recording_minutes;
-        let provider_limit = crate::storage::get_settings()
+        let provider_limit = crate::storage::get_settings_cached()
             .ok()
-            .map(|settings| crate::asr::AsrConfig::from(&settings))
+            .map(|settings| crate::asr::AsrConfig::from(settings.as_ref()))
             .and_then(|config| config.max_recording_minutes_limit());
 
         match provider_limit {
@@ -1419,15 +1422,15 @@ impl SessionController {
         }
 
         crate::llm::warm::rewarm(
-            crate::storage::get_settings()
+            crate::storage::get_settings_cached()
                 .ok()
-                .as_ref()
+                .as_deref()
                 .and_then(crate::services::llm_service::dictation_llm_config),
         );
 
         // Batch mode: no streaming ASR was running — hand off to batch recognition.
-        let is_batch = crate::storage::get_settings()
-            .map(|s| crate::asr::AsrConfig::from(&s).is_batch())
+        let is_batch = crate::storage::get_settings_cached()
+            .map(|s| crate::asr::AsrConfig::from(s.as_ref()).is_batch())
             .unwrap_or(false);
         if is_batch {
             log::info!(

@@ -54,10 +54,10 @@ impl HistoryService {
     }
 
     pub fn capture_model_snapshot() -> (Option<String>, Option<String>) {
-        match storage::get_settings() {
+        match storage::get_settings_cached() {
             Ok(settings) => (
-                Self::resolve_asr_model_name(&settings),
-                Self::resolve_llm_model_name(&settings),
+                Self::resolve_asr_model_name(settings.as_ref()),
+                Self::resolve_llm_model_name(settings.as_ref()),
             ),
             Err(err) => {
                 log::warn!("Failed to capture history model snapshot: {}", err);
@@ -103,7 +103,7 @@ impl HistoryService {
         target_app: Option<TargetAppIdentity>,
         app_handle: Option<AppHandle>,
     ) -> Result<tauri::async_runtime::JoinHandle<Result<bool, String>>, String> {
-        let settings = match storage::get_settings() {
+        let settings = match storage::get_settings_cached() {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("History not persisted (failed to load settings): {}", e);
@@ -148,7 +148,7 @@ impl HistoryService {
         error_message: String,
         app_handle: Option<AppHandle>,
     ) {
-        let settings = match storage::get_settings() {
+        let settings = match storage::get_settings_cached() {
             Ok(s) => s,
             Err(e) => {
                 log::warn!(

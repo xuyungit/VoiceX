@@ -377,7 +377,7 @@ impl SessionController {
         let remove_punctuation = state.remove_trailing_punctuation;
         let threshold = state.short_sentence_threshold;
         let remove_blank_lines = state.remove_blank_lines;
-        let rules = state.replacement_rules.clone();
+        let rules = std::sync::Arc::clone(&state.compiled_replacement_rules);
         // Reset cancel flag for this injection.
         self.injection_cancel_flag
             .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -445,7 +445,7 @@ impl SessionController {
             }
             let (final_text, was_processed) = if intent == ProcessingIntent::Assistant {
                 let processed =
-                    crate::services::post_processing_service::PostProcessingService::process(
+                    crate::services::post_processing_service::PostProcessingService::process_compiled(
                         &llm_text,
                         remove_punctuation,
                         threshold,
@@ -657,7 +657,7 @@ impl SessionController {
     }
 
     fn configured_post_recording_refine_provider(&self) -> Option<PostRecordingRefineProvider> {
-        let settings = match crate::storage::get_settings() {
+        let settings = match crate::storage::get_settings_cached() {
             Ok(settings) => settings,
             Err(err) => {
                 log::warn!(
@@ -667,12 +667,12 @@ impl SessionController {
                 return None;
             }
         };
-        let config = AsrConfig::from(&settings);
+        let config = AsrConfig::from(settings.as_ref());
         PostRecordingRefineProvider::from_config(&config)
     }
 
     fn start_post_recording_refinement(&self, state: &mut AppState) {
-        let settings = match crate::storage::get_settings() {
+        let settings = match crate::storage::get_settings_cached() {
             Ok(settings) => settings,
             Err(err) => {
                 log::warn!("ASR refinement skipped, failed to load settings: {}", err);
@@ -680,7 +680,7 @@ impl SessionController {
                 return;
             }
         };
-        let config = AsrConfig::from(&settings);
+        let config = AsrConfig::from(settings.as_ref());
         let Some(provider) = PostRecordingRefineProvider::from_config(&config) else {
             log::info!("ASR_REFINE skipped reason=mode_off");
             state.asr_refinement_done = true;
@@ -868,9 +868,11 @@ impl SessionController {
         let message = provider.map(|provider| provider.failure_message_for_reason(state, &reason));
         if has_stream_fallback_result(state) {
             if let Some(provider) = provider.filter(|provider| provider.uses_recognizing_hud()) {
-                state.session_asr_model_name = crate::storage::get_settings()
+                state.session_asr_model_name = crate::storage::get_settings_cached()
                     .ok()
-                    .and_then(|settings| provider.streaming_model_name_from_settings(&settings));
+                    .and_then(|settings| {
+                        provider.streaming_model_name_from_settings(settings.as_ref())
+                    });
             }
         }
         state.asr_refinement_in_progress = false;
@@ -903,7 +905,7 @@ impl SessionController {
 
     /// Start batch ASR on the recorded audio file after capture stops.
     pub fn start_batch_asr(&self, state: &mut AppState) {
-        let settings = match crate::storage::get_settings() {
+        let settings = match crate::storage::get_settings_cached() {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Batch ASR skipped, failed to load settings: {}", e);
@@ -911,14 +913,16 @@ impl SessionController {
                 return;
             }
         };
-        let mut config = AsrConfig::from(&settings);
+        let mut config = AsrConfig::from(settings.as_ref());
         if let Err(failure) = config.validate_for_recognition(crate::asr::AsrPhase::Finalizing) {
             failure.log("Batch ASR configuration validation failed");
             self.fail_asr_with_recording_state(state, failure.display_message);
             return;
         }
         state.session_asr_model_name =
-            crate::services::history_service::HistoryService::resolve_asr_model_name(&settings);
+            crate::services::history_service::HistoryService::resolve_asr_model_name(
+                settings.as_ref(),
+            );
 
         let audio_path = match select_batch_audio_path(state, &config) {
             Some(path) => path,
@@ -990,9 +994,9 @@ impl SessionController {
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() {
             log::info!("Batch ASR returned empty result; surfacing visible failure");
-            let provider = crate::storage::get_settings()
+            let provider = crate::storage::get_settings_cached()
                 .ok()
-                .map(|settings| AsrConfig::from(&settings).provider_type);
+                .map(|settings| AsrConfig::from(settings.as_ref()).provider_type);
             self.fail_asr_with_recording_state(
                 state,
                 build_batch_asr_hud_message(provider, "Batch ASR returned empty result"),
@@ -1025,9 +1029,9 @@ impl SessionController {
             hud.emit_recognizing(false);
         }
 
-        let provider = crate::storage::get_settings()
+        let provider = crate::storage::get_settings_cached()
             .ok()
-            .map(|settings| AsrConfig::from(&settings).provider_type);
+            .map(|settings| AsrConfig::from(settings.as_ref()).provider_type);
         self.fail_asr_with_recording_state(
             state,
             build_batch_asr_hud_message(provider, reason.as_str()),

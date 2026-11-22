@@ -98,7 +98,7 @@ fn hud_bottom_margin(reserved_bottom: f64, work_height: f64, height: f64) -> f64
 }
 
 fn hud_transparent_from_settings() -> bool {
-    crate::storage::get_settings()
+    crate::storage::get_settings_cached()
         .map(|settings| settings.hud_transparent)
         .unwrap_or(false)
 }

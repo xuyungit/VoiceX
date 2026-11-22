@@ -1,15 +1,102 @@
+use std::sync::Arc;
+
 use crate::commands::settings::ReplacementRule;
 use regex::{Regex, RegexBuilder};
+
+#[derive(Debug, Clone)]
+enum CompiledReplacementMatcher {
+    Exact { key: String },
+    Regex(Regex),
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledReplacementRule {
+    matcher: CompiledReplacementMatcher,
+    replacement: String,
+}
 
 pub struct PostProcessingService;
 
 impl PostProcessingService {
+    /// Pre-compile enabled replacement rules so the dictation hot path never
+    /// recompiles regular expressions on every utterance.
+    pub fn compile_rules(rules: &[ReplacementRule]) -> Arc<[CompiledReplacementRule]> {
+        let mut compiled = Vec::with_capacity(rules.len());
+        for rule in rules {
+            if !rule.enabled {
+                continue;
+            }
+            match rule.match_mode.as_str() {
+                "exact" => compiled.push(CompiledReplacementRule {
+                    matcher: CompiledReplacementMatcher::Exact {
+                        key: Self::exact_match_key(&rule.keyword),
+                    },
+                    replacement: rule.replacement.clone(),
+                }),
+                "contains" => match RegexBuilder::new(&regex::escape(&rule.keyword))
+                    .case_insensitive(true)
+                    .build()
+                {
+                    Ok(re) => compiled.push(CompiledReplacementRule {
+                        matcher: CompiledReplacementMatcher::Regex(re),
+                        replacement: rule.replacement.clone(),
+                    }),
+                    Err(err) => {
+                        log::warn!(
+                            "Skipping invalid contains replacement rule '{}': {}",
+                            rule.id,
+                            err
+                        );
+                    }
+                },
+                "regex" => match Regex::new(&rule.keyword) {
+                    Ok(re) => compiled.push(CompiledReplacementRule {
+                        matcher: CompiledReplacementMatcher::Regex(re),
+                        replacement: rule.replacement.clone(),
+                    }),
+                    Err(err) => {
+                        log::warn!(
+                            "Skipping invalid regex replacement rule '{}': {}",
+                            rule.id,
+                            err
+                        );
+                    }
+                },
+                other => {
+                    log::warn!(
+                        "Skipping replacement rule '{}' with unknown match_mode '{}'",
+                        rule.id,
+                        other
+                    );
+                }
+            }
+        }
+        Arc::from(compiled)
+    }
+
     pub fn process(
         text: &str,
         remove_punctuation: bool,
         threshold: u32,
         remove_blank_lines: bool,
         rules: &[ReplacementRule],
+    ) -> String {
+        let compiled = Self::compile_rules(rules);
+        Self::process_compiled(
+            text,
+            remove_punctuation,
+            threshold,
+            remove_blank_lines,
+            &compiled,
+        )
+    }
+
+    pub fn process_compiled(
+        text: &str,
+        remove_punctuation: bool,
+        threshold: u32,
+        remove_blank_lines: bool,
+        rules: &[CompiledReplacementRule],
     ) -> String {
         let mut processed = text.to_string();
 
@@ -25,32 +112,17 @@ impl PostProcessingService {
 
         // 2. Keyword Substitution
         for rule in rules {
-            if !rule.enabled {
-                continue;
-            }
-
-            match rule.match_mode.as_str() {
-                "exact" => {
+            match &rule.matcher {
+                CompiledReplacementMatcher::Exact { key } => {
                     // Compare the spoken content only, so "keyword。" from a long
                     // sentence (not stripped above) still matches.
-                    if Self::exact_match_key(&processed) == Self::exact_match_key(&rule.keyword) {
+                    if Self::exact_match_key(&processed) == *key {
                         processed = rule.replacement.clone();
                     }
                 }
-                "contains" => {
-                    if let Ok(re) = RegexBuilder::new(&regex::escape(&rule.keyword))
-                        .case_insensitive(true)
-                        .build()
-                    {
-                        processed = re.replace_all(&processed, &rule.replacement).to_string();
-                    }
+                CompiledReplacementMatcher::Regex(re) => {
+                    processed = re.replace_all(&processed, &rule.replacement).to_string();
                 }
-                "regex" => {
-                    if let Ok(re) = Regex::new(&rule.keyword) {
-                        processed = re.replace_all(&processed, &rule.replacement).to_string();
-                    }
-                }
-                _ => {}
             }
         }
 
@@ -180,6 +252,27 @@ mod tests {
         assert_eq!(
             PostProcessingService::process("交接", false, 5, true, &rules),
             "第一项\n第二项"
+        );
+    }
+
+    #[test]
+    fn compile_rules_omits_disabled_and_invalid_regex_while_keeping_valid_rules() {
+        let mut disabled = rule("foo", "DISABLED", "contains");
+        disabled.enabled = false;
+        let invalid_regex = rule("[unclosed", "BROKEN", "regex");
+        let valid_contains = rule("foo", "bar", "contains");
+        let valid_regex = rule(r"\bbar\b", "VoiceX", "regex");
+
+        let compiled = PostProcessingService::compile_rules(&[
+            disabled,
+            invalid_regex,
+            valid_contains,
+            valid_regex,
+        ]);
+        assert_eq!(compiled.len(), 2);
+        assert_eq!(
+            PostProcessingService::process_compiled("Say FOO now", false, 5, false, &compiled),
+            "Say VoiceX now"
         );
     }
 }

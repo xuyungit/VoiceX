@@ -181,7 +181,7 @@ impl LlmService {
             };
         }
 
-        let settings = match storage::get_settings() {
+        let settings = match storage::get_settings_cached() {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("LLM correction skipped (load settings failed): {}", e);
@@ -194,7 +194,7 @@ impl LlmService {
         };
 
         let client = LLMClient::with_http(
-            build_llm_config_from_settings(&settings),
+            build_llm_config_from_settings(settings.as_ref()),
             crate::llm::warm::session_client(),
         );
 
