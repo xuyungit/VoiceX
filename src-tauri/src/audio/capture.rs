@@ -9,9 +9,10 @@ use std::{
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc as std_mpsc, Arc,
     },
+    thread::JoinHandle,
     time::Instant,
 };
 
@@ -33,6 +34,11 @@ use super::{device::AudioInputDeviceManager, resample::LinearResampler, AudioChu
 const AUDIO_VIZ_BAND_EDGES: [f32; 9] = [
     120.0, 220.0, 400.0, 700.0, 1200.0, 2000.0, 3200.0, 4800.0, 7200.0,
 ];
+
+/// Bounded frame backlog between the real-time cpal audio callback and the
+/// background worker thread. Absorbs several seconds of OS disk/scheduling
+/// jitter without ever blocking the audio callback thread.
+const AUDIO_CALLBACK_QUEUE_CAPACITY: usize = 256;
 
 /// Audio capture configuration
 #[derive(Debug, Clone)]
@@ -79,160 +85,68 @@ pub struct AudioRecordingResult {
     pub channels: u16,
 }
 
+enum WorkerCommand {
+    Frame(Vec<i16>),
+    Stop,
+}
+
 struct ActiveCapture {
-    shared: Arc<CaptureShared>,
-    stream: SendableStream,
+    stream: Option<SendableStream>,
+    callback_state: Arc<CallbackState>,
+    stop_tx: std_mpsc::Sender<WorkerCommand>,
+    worker: Option<JoinHandle<WorkerOutput>>,
     sample_rate: u32,
     channels: u16,
+}
+
+impl Drop for ActiveCapture {
+    fn drop(&mut self) {
+        self.callback_state.running.store(false, Ordering::SeqCst);
+        if let Some(stream) = self.stream.take() {
+            let _ = stream.0.pause();
+            drop(stream);
+        }
+        let _ = self.stop_tx.send(WorkerCommand::Stop);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 struct SendableStream(cpal::Stream);
 unsafe impl Send for SendableStream {}
 unsafe impl Sync for SendableStream {}
 
-struct CaptureShared {
-    tx: Mutex<Option<Sender<Vec<u8>>>>,
-    viz_tx: Mutex<Option<Sender<AudioVisualizationFrame>>>,
-    chunker: Mutex<AudioChunker>,
-    sink: Mutex<Option<OggOpusSink>>,
-    wav_sink: Mutex<Option<WavSink>>,
-    refinement_pcm: Mutex<Option<Vec<u8>>>,
+/// Lock-free state shared with the real-time cpal input callback.
+struct CallbackState {
     sample_rate: u32,
     start_instant: Instant,
     first_frame_logged: AtomicBool,
-    samples_written: AtomicU64,
+    queued_frames: AtomicUsize,
+    dropped_callbacks: AtomicU64,
     running: AtomicBool,
+    queue_capacity: usize,
 }
 
-impl CaptureShared {
-    fn new(
-        tx: Sender<Vec<u8>>,
-        viz_tx: Sender<AudioVisualizationFrame>,
-        chunker: AudioChunker,
-        sink: Option<OggOpusSink>,
-        wav_sink: Option<WavSink>,
-        capture_refinement_pcm: bool,
-        sample_rate: u32,
-    ) -> Self {
+impl CallbackState {
+    fn new(sample_rate: u32) -> Self {
+        Self::with_capacity(sample_rate, AUDIO_CALLBACK_QUEUE_CAPACITY)
+    }
+
+    fn with_capacity(sample_rate: u32, queue_capacity: usize) -> Self {
         Self {
-            tx: Mutex::new(Some(tx)),
-            viz_tx: Mutex::new(Some(viz_tx)),
-            chunker: Mutex::new(chunker),
-            sink: Mutex::new(sink),
-            wav_sink: Mutex::new(wav_sink),
-            refinement_pcm: Mutex::new(if capture_refinement_pcm {
-                Some(Vec::new())
-            } else {
-                None
-            }),
             sample_rate,
             start_instant: Instant::now(),
             first_frame_logged: AtomicBool::new(false),
-            samples_written: AtomicU64::new(0),
+            queued_frames: AtomicUsize::new(0),
+            dropped_callbacks: AtomicU64::new(0),
             running: AtomicBool::new(true),
+            queue_capacity,
         }
     }
 
-    fn dispatch(&self, samples: &[i16]) {
-        if !self.running.load(Ordering::SeqCst) {
-            return;
-        }
-
-        let mut data = Vec::with_capacity(samples.len() * 2);
-        for sample in samples {
-            data.extend_from_slice(&sample.to_le_bytes());
-        }
-
-        if let Ok(mut chunker) = self.chunker.lock() {
-            let chunks = chunker.append(&data);
-            drop(chunker);
-
-            if let Ok(mut tx_guard) = self.tx.lock() {
-                if let Some(tx) = tx_guard.as_mut() {
-                    for chunk in chunks {
-                        let _ = tx.try_send(chunk);
-                    }
-                }
-            }
-        }
-
-        if let Ok(mut sink_guard) = self.sink.lock() {
-            let failed = sink_guard.as_mut().and_then(|sink| {
-                sink.write(samples)
-                    .err()
-                    .map(|error| (sink.path.clone(), error))
-            });
-            if let Some((path, error)) = failed {
-                log::error!("Failed to write recording {}: {}", path.display(), error);
-                drop(sink_guard.take());
-                remove_incomplete_recording(&path);
-            }
-        }
-
-        if let Ok(mut wav_guard) = self.wav_sink.lock() {
-            if let Some(wav) = wav_guard.as_mut() {
-                let _ = wav.write(&data);
-            }
-        }
-
-        if let Ok(mut refinement_guard) = self.refinement_pcm.lock() {
-            if let Some(buffer) = refinement_guard.as_mut() {
-                buffer.extend_from_slice(&data);
-            }
-        }
-    }
-
-    fn dispatch_visualization(&self, level: f32, bands: &[f32]) {
-        if !self.running.load(Ordering::SeqCst) {
-            return;
-        }
-
-        if let Ok(mut viz_guard) = self.viz_tx.lock() {
-            if let Some(tx) = viz_guard.as_mut() {
-                let _ = tx.try_send(AudioVisualizationFrame {
-                    level: level.clamp(0.0, 1.0),
-                    bands: bands.to_vec(),
-                });
-            }
-        }
-    }
-
-    fn increment_samples(&self, frames: usize) {
-        self.samples_written
-            .fetch_add(frames as u64, Ordering::SeqCst);
-    }
-
-    fn flush_and_close(&self) -> (Option<OggOpusSink>, Option<WavSink>, Option<Vec<u8>>) {
-        self.running.store(false, Ordering::SeqCst);
-
-        // Flush remaining audio and send it BEFORE closing the channel,
-        // so the ASR client receives the final audio segment.
-        if let Ok(mut chunker) = self.chunker.lock() {
-            if let Some(final_chunk) = chunker.flush() {
-                if let Ok(tx_guard) = self.tx.lock() {
-                    if let Some(tx) = tx_guard.as_ref() {
-                        let _ = tx.try_send(final_chunk);
-                    }
-                }
-            }
-        }
-
-        // Now drop sender so downstream consumers see channel closure.
-        if let Ok(mut tx_guard) = self.tx.lock() {
-            tx_guard.take();
-        }
-        if let Ok(mut viz_guard) = self.viz_tx.lock() {
-            viz_guard.take();
-        }
-
-        let sink = self.sink.lock().ok().and_then(|mut s| s.take());
-        let wav_sink = self.wav_sink.lock().ok().and_then(|mut s| s.take());
-        let refinement_pcm = self.refinement_pcm.lock().ok().and_then(|mut s| s.take());
-        (sink, wav_sink, refinement_pcm)
-    }
-
-    fn samples_written(&self) -> u64 {
-        self.samples_written.load(Ordering::SeqCst)
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
     }
 
     fn mark_first_frame_if_needed(&self) {
@@ -244,6 +158,169 @@ impl CaptureShared {
                 self.sample_rate
             );
         }
+    }
+
+    fn dropped_callbacks(&self) -> u64 {
+        self.dropped_callbacks.load(Ordering::Relaxed)
+    }
+}
+
+/// Owned by the cpal callback closure. Shutdown NEVER depends on cpal dropping
+/// this closure (cpal 0.15.3 on macOS has an Arc cycle in its non-default
+/// device disconnect listener that retains StreamInner); `stop()` instead
+/// sends an explicit `WorkerCommand::Stop` sentinel.
+struct CallbackProducer {
+    raw_tx: std_mpsc::Sender<WorkerCommand>,
+    state: Arc<CallbackState>,
+}
+
+impl CallbackProducer {
+    fn enqueue_mono(&self, mono: Vec<i16>) {
+        let prev = self.state.queued_frames.fetch_add(1, Ordering::AcqRel);
+        if prev >= self.state.queue_capacity {
+            self.state.queued_frames.fetch_sub(1, Ordering::AcqRel);
+            self.state.dropped_callbacks.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if self.raw_tx.send(WorkerCommand::Frame(mono)).is_err() {
+            self.state.queued_frames.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+struct WorkerOutput {
+    sink: Option<OggOpusSink>,
+    wav_sink: Option<WavSink>,
+    refinement_pcm: Option<Vec<u8>>,
+    samples_written: u64,
+}
+
+/// Dedicated background worker that owns visualization, chunking, Opus
+/// encoding, and disk persistence off the real-time audio callback thread.
+struct AudioCaptureWorker {
+    tx: Sender<Vec<u8>>,
+    viz_tx: Sender<AudioVisualizationFrame>,
+    chunker: AudioChunker,
+    sink: Option<OggOpusSink>,
+    wav_sink: Option<WavSink>,
+    refinement_pcm: Option<Vec<u8>>,
+    pcm_scratch: Vec<u8>,
+    sample_rate: u32,
+    samples_written: u64,
+}
+
+impl AudioCaptureWorker {
+    fn new(
+        tx: Sender<Vec<u8>>,
+        viz_tx: Sender<AudioVisualizationFrame>,
+        chunker: AudioChunker,
+        sink: Option<OggOpusSink>,
+        wav_sink: Option<WavSink>,
+        capture_refinement_pcm: bool,
+        sample_rate: u32,
+    ) -> Self {
+        Self {
+            tx,
+            viz_tx,
+            chunker,
+            sink,
+            wav_sink,
+            refinement_pcm: capture_refinement_pcm.then(Vec::new),
+            pcm_scratch: Vec::new(),
+            sample_rate,
+            samples_written: 0,
+        }
+    }
+
+    fn run(
+        mut self,
+        raw_rx: std_mpsc::Receiver<WorkerCommand>,
+        callback_state: Arc<CallbackState>,
+    ) -> WorkerOutput {
+        while let Ok(command) = raw_rx.recv() {
+            match command {
+                WorkerCommand::Frame(mono) => {
+                    callback_state.queued_frames.fetch_sub(1, Ordering::AcqRel);
+                    self.process_frame(&mono);
+                }
+                WorkerCommand::Stop => break,
+            }
+        }
+
+        // Flush remaining audio and send it BEFORE dropping `tx`,
+        // so the ASR client receives the final audio segment.
+        if let Some(final_chunk) = self.chunker.flush() {
+            let _ = self.tx.try_send(final_chunk);
+        }
+        drop(self.tx);
+        drop(self.viz_tx);
+
+        WorkerOutput {
+            sink: self.sink,
+            wav_sink: self.wav_sink,
+            refinement_pcm: self.refinement_pcm,
+            samples_written: self.samples_written,
+        }
+    }
+
+    fn process_frame(&mut self, mono: &[i16]) {
+        if mono.is_empty() {
+            return;
+        }
+
+        let rms = mono
+            .iter()
+            .map(|s| (*s as f32 / i16::MAX as f32).powi(2))
+            .sum::<f32>()
+            .sqrt()
+            / (mono.len() as f32).sqrt();
+        let bands = compute_visualization_bands(mono, self.sample_rate, rms);
+        let _ = self.viz_tx.try_send(AudioVisualizationFrame {
+            level: rms.clamp(0.0, 1.0),
+            bands: bands.to_vec(),
+        });
+
+        self.samples_written = self.samples_written.saturating_add(mono.len() as u64);
+
+        self.pcm_scratch.clear();
+        self.pcm_scratch.reserve(mono.len() * 2);
+        for sample in mono {
+            self.pcm_scratch.extend_from_slice(&sample.to_le_bytes());
+        }
+
+        for chunk in self.chunker.append(&self.pcm_scratch) {
+            let _ = self.tx.try_send(chunk);
+        }
+
+        if let Some(sink) = self.sink.as_mut() {
+            if let Err(error) = sink.write(mono) {
+                let path = sink.path.clone();
+                log::error!("Failed to write recording {}: {}", path.display(), error);
+                drop(self.sink.take());
+                remove_incomplete_recording(&path);
+            }
+        }
+
+        if let Some(wav) = self.wav_sink.as_mut() {
+            let _ = wav.write(&self.pcm_scratch);
+        }
+
+        if let Some(buffer) = self.refinement_pcm.as_mut() {
+            buffer.extend_from_slice(&self.pcm_scratch);
+        }
+    }
+}
+
+fn cleanup_unused_sinks(file_sink: Option<OggOpusSink>, wav_sink: Option<WavSink>) {
+    if let Some(sink) = file_sink {
+        let path = sink.path.clone();
+        drop(sink);
+        remove_incomplete_recording(&path);
+    }
+    if let Some(wav) = wav_sink {
+        let path = wav.path.clone();
+        drop(wav);
+        remove_incomplete_recording(&path);
     }
 }
 
@@ -601,7 +678,35 @@ impl AudioCaptureService {
 
         let (tx, rx) = mpsc::channel(32);
         let (viz_tx, viz_rx) = mpsc::channel(64);
-        let shared = Arc::new(CaptureShared::new(
+        let (raw_tx, raw_rx) = std_mpsc::channel();
+        let stop_tx = raw_tx.clone();
+        let file_path = file_sink.as_ref().map(|sink| sink.path.clone());
+        let debug_wav_path = wav_sink.as_ref().map(|wav| wav.path.clone());
+        let callback_state = Arc::new(CallbackState::new(config.sample_rate.0));
+        let producer = CallbackProducer {
+            raw_tx,
+            state: Arc::clone(&callback_state),
+        };
+
+        let stream = match Self::build_stream(device, config.clone(), sample_format, producer) {
+            Ok(stream) => stream,
+            Err(err) => {
+                cleanup_unused_sinks(file_sink, wav_sink);
+                return Err(err);
+            }
+        };
+        if let Err(e) = stream.0.play() {
+            callback_state.running.store(false, Ordering::SeqCst);
+            let _ = stream.0.pause();
+            drop(stream);
+            cleanup_unused_sinks(file_sink, wav_sink);
+            return Err(AudioCaptureError::StartFailed(format!(
+                "Failed to start stream: {}",
+                e
+            )));
+        }
+
+        let worker_state = AudioCaptureWorker::new(
             tx,
             viz_tx,
             chunker,
@@ -609,22 +714,35 @@ impl AudioCaptureService {
             wav_sink,
             capture_refinement_pcm,
             config.sample_rate.0,
-        ));
-
-        let stream = Self::build_stream(device, config.clone(), sample_format, shared.clone())?;
-        stream.0.play().map_err(|e| {
-            AudioCaptureError::StartFailed(format!("Failed to start stream: {}", e))
-        })?;
-
-        let file_path = shared
-            .sink
-            .lock()
-            .ok()
-            .and_then(|sink| sink.as_ref().map(|s| s.path.clone()));
+        );
+        let worker_callback_state = Arc::clone(&callback_state);
+        let worker = match std::thread::Builder::new()
+            .name("voicex-audio-worker".into())
+            .spawn(move || worker_state.run(raw_rx, worker_callback_state))
+        {
+            Ok(handle) => handle,
+            Err(err) => {
+                callback_state.running.store(false, Ordering::SeqCst);
+                let _ = stream.0.pause();
+                drop(stream);
+                if let Some(path) = file_path.as_deref() {
+                    remove_incomplete_recording(path);
+                }
+                if let Some(path) = debug_wav_path.as_deref() {
+                    remove_incomplete_recording(path);
+                }
+                return Err(AudioCaptureError::StartFailed(format!(
+                    "Failed to spawn audio worker thread: {}",
+                    err
+                )));
+            }
+        };
 
         self.active = Some(ActiveCapture {
-            shared,
-            stream,
+            stream: Some(stream),
+            callback_state,
+            stop_tx,
+            worker: Some(worker),
             sample_rate: config.sample_rate.0,
             channels: output_channels,
         });
@@ -650,23 +768,49 @@ impl AudioCaptureService {
 
     /// Stop audio capture and finalize the recording.
     pub fn stop(&mut self) -> Result<AudioRecordingResult, AudioCaptureError> {
-        let active = self.active.take().ok_or(AudioCaptureError::NotRunning)?;
-        let ActiveCapture {
-            shared,
-            stream,
-            sample_rate,
-            channels,
-        } = active;
-        let elapsed = shared.start_instant.elapsed();
+        let mut active = self.active.take().ok_or(AudioCaptureError::NotRunning)?;
+        let elapsed = active.callback_state.start_instant.elapsed();
+        let sample_rate = active.sample_rate;
+        let channels = active.channels;
 
-        // Pause the stream before dropping to ensure proper device release on macOS
-        if let Err(e) = stream.0.pause() {
-            log::warn!("Failed to pause audio stream: {}", e);
+        // Pause the stream first so the audio backend stops invoking callbacks
+        // and releases the device cleanly on macOS.
+        if let Some(stream) = active.stream.take() {
+            if let Err(e) = stream.0.pause() {
+                log::warn!("Failed to pause audio stream: {}", e);
+            }
+            active.callback_state.running.store(false, Ordering::SeqCst);
+            drop(stream);
+        } else {
+            active.callback_state.running.store(false, Ordering::SeqCst);
         }
-        drop(stream);
-        let (sink, wav_sink, refinement_pcm) = shared.flush_and_close();
 
-        let samples = shared.samples_written();
+        // Explicitly signal the worker to stop after draining every frame
+        // already queued ahead of this sentinel. Do NOT rely on `drop(stream)`
+        // releasing the callback closure (cpal 0.15.3 leaks `StreamInner` on
+        // macOS non-default devices via an Arc cycle in its disconnect listener).
+        let _ = active.stop_tx.send(WorkerCommand::Stop);
+
+        let WorkerOutput {
+            sink,
+            wav_sink,
+            refinement_pcm,
+            samples_written: samples,
+        } = active
+            .worker
+            .take()
+            .ok_or_else(|| AudioCaptureError::StopFailed("Audio worker already stopped".into()))?
+            .join()
+            .map_err(|_| AudioCaptureError::StopFailed("Audio worker thread panicked".into()))?;
+
+        let dropped = active.callback_state.dropped_callbacks();
+        if dropped > 0 {
+            log::warn!(
+                "Audio capture dropped {} callback frame(s) because the worker queue was full",
+                dropped
+            );
+        }
+
         let duration_ms = if sample_rate > 0 {
             samples.saturating_mul(1000) / (sample_rate as u64)
         } else {
@@ -827,19 +971,57 @@ impl AudioCaptureService {
         device: cpal::Device,
         config: StreamConfig,
         sample_format: SampleFormat,
-        shared: Arc<CaptureShared>,
+        producer: CallbackProducer,
     ) -> Result<SendableStream, AudioCaptureError> {
         match sample_format {
-            SampleFormat::I8 => Self::build_stream_i8(device, config, shared),
-            SampleFormat::U8 => Self::build_stream_u8(device, config, shared),
-            SampleFormat::I16 => Self::build_stream_i16(device, config, shared),
-            SampleFormat::U16 => Self::build_stream_u16(device, config, shared),
-            SampleFormat::I32 => Self::build_stream_i32(device, config, shared),
-            SampleFormat::U32 => Self::build_stream_u32(device, config, shared),
-            SampleFormat::I64 => Self::build_stream_i64(device, config, shared),
-            SampleFormat::U64 => Self::build_stream_u64(device, config, shared),
-            SampleFormat::F32 => Self::build_stream_f32(device, config, shared),
-            SampleFormat::F64 => Self::build_stream_f64(device, config, shared),
+            SampleFormat::I8 => {
+                Self::build_typed_stream::<i8, _>(device, config, producer, |s| {
+                    *s as f32 / i8::MAX as f32
+                })
+            }
+            SampleFormat::U8 => {
+                Self::build_typed_stream::<u8, _>(device, config, producer, |s| {
+                    // Convert 0..255 to -1.0..1.0
+                    (*s as f32 / u8::MAX as f32) * 2.0 - 1.0
+                })
+            }
+            SampleFormat::I16 => {
+                Self::build_typed_stream::<i16, _>(device, config, producer, |s| {
+                    *s as f32 / i16::MAX as f32
+                })
+            }
+            SampleFormat::U16 => {
+                Self::build_typed_stream::<u16, _>(device, config, producer, |s| {
+                    // Convert 0..65535 to -1.0..1.0
+                    (*s as f32 / u16::MAX as f32) * 2.0 - 1.0
+                })
+            }
+            SampleFormat::I32 => {
+                Self::build_typed_stream::<i32, _>(device, config, producer, |s| {
+                    *s as f32 / i32::MAX as f32
+                })
+            }
+            SampleFormat::U32 => {
+                Self::build_typed_stream::<u32, _>(device, config, producer, |s| {
+                    (*s as f32 / u32::MAX as f32) * 2.0 - 1.0
+                })
+            }
+            SampleFormat::I64 => {
+                Self::build_typed_stream::<i64, _>(device, config, producer, |s| {
+                    *s as f32 / i64::MAX as f32
+                })
+            }
+            SampleFormat::U64 => {
+                Self::build_typed_stream::<u64, _>(device, config, producer, |s| {
+                    (*s as f32 / u64::MAX as f32) * 2.0 - 1.0
+                })
+            }
+            SampleFormat::F32 => {
+                Self::build_typed_stream::<f32, _>(device, config, producer, |s| *s)
+            }
+            SampleFormat::F64 => {
+                Self::build_typed_stream::<f64, _>(device, config, producer, |s| *s as f32)
+            }
             other => Err(AudioCaptureError::StartFailed(format!(
                 "Unsupported sample format: {:?}",
                 other
@@ -847,244 +1029,22 @@ impl AudioCaptureService {
         }
     }
 
-    fn build_stream_i8(
+    fn build_typed_stream<T, F>(
         device: cpal::Device,
         config: StreamConfig,
-        shared: Arc<CaptureShared>,
-    ) -> Result<SendableStream, AudioCaptureError> {
+        producer: CallbackProducer,
+        to_f32: F,
+    ) -> Result<SendableStream, AudioCaptureError>
+    where
+        T: cpal::SizedSample,
+        F: Fn(&T) -> f32 + Send + 'static,
+    {
         let channels = config.channels as usize;
         let stream = device
             .build_input_stream(
                 &config,
-                move |data: &[i8], _: &cpal::InputCallbackInfo| {
-                    process_input(data, channels, &shared, |s| *s as f32 / i8::MAX as f32);
-                },
-                move |err| {
-                    log::error!("Audio input error: {}", err);
-                },
-                None,
-            )
-            .map_err(|e| {
-                AudioCaptureError::StartFailed(format!("Failed to build stream: {}", e))
-            })?;
-
-        Ok(SendableStream(stream))
-    }
-
-    fn build_stream_u8(
-        device: cpal::Device,
-        config: StreamConfig,
-        shared: Arc<CaptureShared>,
-    ) -> Result<SendableStream, AudioCaptureError> {
-        let channels = config.channels as usize;
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[u8], _: &cpal::InputCallbackInfo| {
-                    process_input(data, channels, &shared, |s| {
-                        // Convert 0..255 to -1.0..1.0
-                        (*s as f32 / u8::MAX as f32) * 2.0 - 1.0
-                    });
-                },
-                move |err| {
-                    log::error!("Audio input error: {}", err);
-                },
-                None,
-            )
-            .map_err(|e| {
-                AudioCaptureError::StartFailed(format!("Failed to build stream: {}", e))
-            })?;
-
-        Ok(SendableStream(stream))
-    }
-
-    fn build_stream_i16(
-        device: cpal::Device,
-        config: StreamConfig,
-        shared: Arc<CaptureShared>,
-    ) -> Result<SendableStream, AudioCaptureError> {
-        let channels = config.channels as usize;
-
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    process_input(data, channels, &shared, |s| *s as f32 / i16::MAX as f32);
-                },
-                move |err| {
-                    log::error!("Audio input error: {}", err);
-                },
-                None,
-            )
-            .map_err(|e| {
-                AudioCaptureError::StartFailed(format!("Failed to build stream: {}", e))
-            })?;
-
-        Ok(SendableStream(stream))
-    }
-
-    fn build_stream_u16(
-        device: cpal::Device,
-        config: StreamConfig,
-        shared: Arc<CaptureShared>,
-    ) -> Result<SendableStream, AudioCaptureError> {
-        let channels = config.channels as usize;
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[u16], _: &cpal::InputCallbackInfo| {
-                    process_input(data, channels, &shared, |s| {
-                        // Convert 0..65535 to -1.0..1.0
-                        (*s as f32 / u16::MAX as f32) * 2.0 - 1.0
-                    });
-                },
-                move |err| {
-                    log::error!("Audio input error: {}", err);
-                },
-                None,
-            )
-            .map_err(|e| {
-                AudioCaptureError::StartFailed(format!("Failed to build stream: {}", e))
-            })?;
-
-        Ok(SendableStream(stream))
-    }
-
-    fn build_stream_i32(
-        device: cpal::Device,
-        config: StreamConfig,
-        shared: Arc<CaptureShared>,
-    ) -> Result<SendableStream, AudioCaptureError> {
-        let channels = config.channels as usize;
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[i32], _: &cpal::InputCallbackInfo| {
-                    process_input(data, channels, &shared, |s| *s as f32 / i32::MAX as f32);
-                },
-                move |err| {
-                    log::error!("Audio input error: {}", err);
-                },
-                None,
-            )
-            .map_err(|e| {
-                AudioCaptureError::StartFailed(format!("Failed to build stream: {}", e))
-            })?;
-
-        Ok(SendableStream(stream))
-    }
-
-    fn build_stream_u32(
-        device: cpal::Device,
-        config: StreamConfig,
-        shared: Arc<CaptureShared>,
-    ) -> Result<SendableStream, AudioCaptureError> {
-        let channels = config.channels as usize;
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[u32], _: &cpal::InputCallbackInfo| {
-                    process_input(data, channels, &shared, |s| {
-                        (*s as f32 / u32::MAX as f32) * 2.0 - 1.0
-                    });
-                },
-                move |err| {
-                    log::error!("Audio input error: {}", err);
-                },
-                None,
-            )
-            .map_err(|e| {
-                AudioCaptureError::StartFailed(format!("Failed to build stream: {}", e))
-            })?;
-
-        Ok(SendableStream(stream))
-    }
-
-    fn build_stream_i64(
-        device: cpal::Device,
-        config: StreamConfig,
-        shared: Arc<CaptureShared>,
-    ) -> Result<SendableStream, AudioCaptureError> {
-        let channels = config.channels as usize;
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[i64], _: &cpal::InputCallbackInfo| {
-                    process_input(data, channels, &shared, |s| *s as f32 / i64::MAX as f32);
-                },
-                move |err| {
-                    log::error!("Audio input error: {}", err);
-                },
-                None,
-            )
-            .map_err(|e| {
-                AudioCaptureError::StartFailed(format!("Failed to build stream: {}", e))
-            })?;
-
-        Ok(SendableStream(stream))
-    }
-
-    fn build_stream_u64(
-        device: cpal::Device,
-        config: StreamConfig,
-        shared: Arc<CaptureShared>,
-    ) -> Result<SendableStream, AudioCaptureError> {
-        let channels = config.channels as usize;
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[u64], _: &cpal::InputCallbackInfo| {
-                    process_input(data, channels, &shared, |s| {
-                        (*s as f32 / u64::MAX as f32) * 2.0 - 1.0
-                    });
-                },
-                move |err| {
-                    log::error!("Audio input error: {}", err);
-                },
-                None,
-            )
-            .map_err(|e| {
-                AudioCaptureError::StartFailed(format!("Failed to build stream: {}", e))
-            })?;
-
-        Ok(SendableStream(stream))
-    }
-
-    fn build_stream_f32(
-        device: cpal::Device,
-        config: StreamConfig,
-        shared: Arc<CaptureShared>,
-    ) -> Result<SendableStream, AudioCaptureError> {
-        let channels = config.channels as usize;
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    process_input(data, channels, &shared, |s| *s);
-                },
-                move |err| {
-                    log::error!("Audio input error: {}", err);
-                },
-                None,
-            )
-            .map_err(|e| {
-                AudioCaptureError::StartFailed(format!("Failed to build stream: {}", e))
-            })?;
-
-        Ok(SendableStream(stream))
-    }
-
-    fn build_stream_f64(
-        device: cpal::Device,
-        config: StreamConfig,
-        shared: Arc<CaptureShared>,
-    ) -> Result<SendableStream, AudioCaptureError> {
-        let channels = config.channels as usize;
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[f64], _: &cpal::InputCallbackInfo| {
-                    process_input(data, channels, &shared, |s| *s as f32);
+                move |data: &[T], _: &cpal::InputCallbackInfo| {
+                    process_input(data, channels, &producer, &to_f32);
                 },
                 move |err| {
                     log::error!("Audio input error: {}", err);
@@ -1099,11 +1059,14 @@ impl AudioCaptureService {
     }
 }
 
-fn process_input<T, F>(data: &[T], channels: usize, shared: &Arc<CaptureShared>, to_f32: F)
+fn process_input<T, F>(data: &[T], channels: usize, producer: &CallbackProducer, to_f32: F)
 where
     F: Fn(&T) -> f32,
 {
-    shared.mark_first_frame_if_needed();
+    if !producer.state.is_running() {
+        return;
+    }
+    producer.state.mark_first_frame_if_needed();
 
     let frames = data.len() / channels;
     if frames == 0 {
@@ -1121,19 +1084,7 @@ where
         mono.push(clamped);
     }
 
-    let rms = mono
-        .iter()
-        .map(|s| (*s as f32 / i16::MAX as f32).powi(2))
-        .sum::<f32>()
-        .sqrt()
-        / (mono.len() as f32).sqrt();
-
-    let bands = compute_visualization_bands(&mono, shared.sample_rate, rms);
-    shared.dispatch_visualization(rms, &bands);
-
-    shared.increment_samples(frames);
-
-    shared.dispatch(&mono);
+    producer.enqueue_mono(mono);
 }
 
 fn compute_visualization_bands(samples: &[i16], sample_rate: u32, level: f32) -> [f32; 8] {
@@ -1490,5 +1441,117 @@ mod opus_finalization_tests {
                 std::fs::remove_dir_all(dir).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn audio_worker_drains_all_frames_and_stops_even_if_callback_producer_is_retained() {
+        let dir =
+            std::env::temp_dir().join(format!("voicex-worker-test-{}", uuid::Uuid::new_v4()));
+        let sample_rate = 16_000u32;
+        let chunk_bytes = bytes_per_ms(sample_rate, 100); // 3200 bytes = 1600 samples
+        let (tx, mut rx) = mpsc::channel(32);
+        let (viz_tx, mut viz_rx) = mpsc::channel(32);
+        let (raw_tx, raw_rx) = std_mpsc::channel();
+        let stop_tx = raw_tx.clone();
+
+        let callback_state = Arc::new(CallbackState::new(sample_rate));
+        let sink = OggOpusSink::create(&dir, sample_rate).unwrap();
+        let worker = AudioCaptureWorker::new(
+            tx,
+            viz_tx,
+            AudioChunker::new(chunk_bytes),
+            Some(sink),
+            None,
+            true,
+            sample_rate,
+        );
+        let worker_state = Arc::clone(&callback_state);
+        let handle = std::thread::spawn(move || worker.run(raw_rx, worker_state));
+
+        let producer = CallbackProducer {
+            raw_tx,
+            state: Arc::clone(&callback_state),
+        };
+
+        // Push 2,000 stereo frames across uneven callbacks (100ms chunk = 1,600 samples,
+        // leaving a 400-sample tail that must be flushed before `rx` closes).
+        let frame_counts = [512usize, 700, 788];
+        let mut sample_idx = 0usize;
+        for count in frame_counts {
+            let mut stereo = Vec::with_capacity(count * 2);
+            for _ in 0..count {
+                let value = 0.4 * (TAU * 440.0 * sample_idx as f32 / sample_rate as f32).sin();
+                stereo.push(value);
+                stereo.push(value);
+                sample_idx += 1;
+            }
+            process_input(&stereo, 2, &producer, |s| *s);
+        }
+
+        // Deliberately KEEP `producer` alive while sending `Stop` to mirror
+        // cpal 0.15.3 retaining `StreamInner` on macOS non-default devices.
+        callback_state.running.store(false, Ordering::SeqCst);
+        stop_tx.send(WorkerCommand::Stop).unwrap();
+
+        let output = handle.join().unwrap();
+        drop(producer);
+        assert_eq!(output.samples_written, 2_000);
+        assert_eq!(callback_state.dropped_callbacks(), 0);
+
+        // Drain emitted ASR chunks: one full 3200-byte chunk + one flushed 800-byte tail.
+        let mut chunks = Vec::new();
+        while let Some(chunk) = rx.blocking_recv() {
+            chunks.push(chunk);
+        }
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 3_200);
+        assert_eq!(chunks[1].len(), 800);
+
+        // Visualization channel received one frame per callback and then closed cleanly.
+        let mut viz_frames = Vec::new();
+        while let Some(frame) = viz_rx.blocking_recv() {
+            viz_frames.push(frame);
+        }
+        assert_eq!(viz_frames.len(), frame_counts.len());
+        assert!(viz_frames.iter().all(|f| f.level > 0.0 && f.bands.len() == 8));
+
+        // Refinement PCM matches total bytes (2000 samples * 2 bytes).
+        let refinement_pcm = output.refinement_pcm.expect("refinement PCM captured");
+        assert_eq!(refinement_pcm.len(), 4_000);
+
+        // Finalized Opus recording is valid and decodable.
+        let (path, bytes) = output.sink.expect("opus sink present").finish().unwrap();
+        assert!(bytes > 0);
+        let decoded = crate::asr::ogg_decoder::decode_ogg_opus_to_pcm16k(&path).unwrap();
+        assert!(!decoded.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn callback_producer_drops_nonblockingly_when_queue_is_full_and_respects_stop() {
+        let (raw_tx, raw_rx) = std_mpsc::channel();
+        let callback_state = Arc::new(CallbackState::with_capacity(16_000, 2));
+        let producer = CallbackProducer {
+            raw_tx,
+            state: Arc::clone(&callback_state),
+        };
+
+        let samples = [0.25f32; 64];
+        for _ in 0..5 {
+            process_input(&samples, 1, &producer, |s| *s);
+        }
+        assert_eq!(callback_state.dropped_callbacks(), 3);
+
+        // Once stopped, callbacks must immediately return without enqueueing or dropping.
+        callback_state.running.store(false, Ordering::SeqCst);
+        process_input(&samples, 1, &producer, |s| *s);
+        assert_eq!(callback_state.dropped_callbacks(), 3);
+
+        drop(producer);
+        let mut received = 0usize;
+        while let Ok(WorkerCommand::Frame(_)) = raw_rx.recv() {
+            received += 1;
+        }
+        assert_eq!(received, 2);
     }
 }
