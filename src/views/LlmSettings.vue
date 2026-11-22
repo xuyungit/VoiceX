@@ -5,6 +5,8 @@ import { NInput, NSwitch, NButton, NSelect, NTabs, NTabPane, NTooltip, useDialog
 import { useI18n } from 'vue-i18n'
 import type { ResolvedLocale } from '../i18n'
 import { useSettingsStore, type AppSettings, type CustomLlmEndpoint } from '../stores/settings'
+import { buildModelCacheKey, shouldAutoFetchModels, useLlmModelCacheStore } from '../stores/llmModels'
+import llmModels from '../shared/llmModels.json'
 import { getDefaultPrompt } from '../utils/llmPrompts'
 import {
   buildLlmApiModeOptions,
@@ -23,6 +25,7 @@ import { diffText } from '../utils/textDiff'
 import DiffText from '../components/DiffText.vue'
 
 const settingsStore = useSettingsStore()
+const modelCacheStore = useLlmModelCacheStore()
 const { t, locale } = useI18n()
 
 interface LlmProviderProbeResult {
@@ -346,49 +349,46 @@ const llmProbeError = ref('')
 function useRemoteModelList(options: {
   active: ComputedRef<boolean>
   autoFetch: ComputedRef<boolean>
-  credentialsKey: ComputedRef<string>
+  cacheKey: ComputedRef<string>
   canLoad: ComputedRef<boolean>
   fetchModels: () => Promise<string[]>
 }) {
-  const models = ref<string[] | null>(null)
+  const models = computed(() => modelCacheStore.getEntry(options.cacheKey.value)?.models ?? null)
   const modelOptions = computed(() => (models.value ?? []).map((value) => ({ value, label: value })))
-  const loading = ref(false)
-  const error = ref('')
-  let requestId = 0
+  const loading = computed(() => modelCacheStore.isLoading(options.cacheKey.value))
+  const error = computed(() => modelCacheStore.getEntry(options.cacheKey.value)?.lastError ?? '')
 
   async function load() {
-    if (!options.canLoad.value || loading.value) return
-    const request = ++requestId
-    loading.value = true
-    error.value = ''
-    try {
-      const list = await options.fetchModels()
-      if (request === requestId) models.value = list
-    } catch (err) {
-      if (request === requestId) error.value = String(err)
-    } finally {
-      if (request === requestId) loading.value = false
-    }
+    if (!options.canLoad.value) return
+    await modelCacheStore.refresh(options.cacheKey.value, options.fetchModels, { force: true })
   }
 
   watch(
-    [options.credentialsKey, options.active, options.autoFetch, () => settingsStore.isLoading],
-    ([key, active, autoFetch, settingsLoading], [prevKey, wasActive, _prevAuto, wasLoading], onCleanup) => {
-      const credentialsChanged = key !== prevKey
-      if (credentialsChanged) {
-        requestId++
-        models.value = null
-        error.value = ''
-        loading.value = false
+    [
+      options.cacheKey,
+      options.active,
+      options.autoFetch,
+      () => settingsStore.isLoading,
+      () => modelCacheStore.isLoaded
+    ],
+    (
+      [key, active, autoFetch, settingsLoading, cacheLoaded],
+      [prevKey, wasActive, _prevAuto, wasLoading],
+      onCleanup
+    ) => {
+      if (!cacheLoaded) {
+        void modelCacheStore.ensureLoaded()
+        return
       }
       if (settingsLoading || !active || !autoFetch || !options.canLoad.value) return
+      if (!shouldAutoFetchModels(modelCacheStore.getEntry(key))) return
 
       const prefetch = () => {
-        if (models.value === null && !error.value) void load()
+        void modelCacheStore.refresh(key, options.fetchModels, { force: false })
       }
       // Load saved credentials immediately. Give edits time to settle before
       // asking the provider to list models for the new credentials.
-      if (credentialsChanged && wasActive && !wasLoading) {
+      if (prevKey !== undefined && key !== prevKey && wasActive && !wasLoading) {
         const timer = window.setTimeout(prefetch, 500)
         onCleanup(() => window.clearTimeout(timer))
       } else {
@@ -406,26 +406,29 @@ const canLoadOpenaiModels = computed(() => Boolean(llmOpenaiBaseUrl.value.trim()
 const openaiModelList = useRemoteModelList({
   active: isOpenai,
   autoFetch: isOfficialOpenai,
-  credentialsKey: computed(() => `${llmOpenaiBaseUrl.value}\0${llmOpenaiApiKey.value}`),
+  cacheKey: computed(() =>
+    buildModelCacheKey('openai', llmOpenaiBaseUrl.value, llmOpenaiApiKey.value)
+  ),
   canLoad: canLoadOpenaiModels,
-  fetchModels: () =>
-    invoke<string[]>('list_openai_models', {
-      baseUrl: llmOpenaiBaseUrl.value,
-      apiKey: llmOpenaiApiKey.value
-    })
+  fetchModels: () => {
+    const baseUrl = llmOpenaiBaseUrl.value
+    const apiKey = llmOpenaiApiKey.value
+    return invoke<string[]>('list_openai_models', { baseUrl, apiKey })
+  }
 })
 
 const canLoadGeminiModels = computed(() => Boolean(llmGeminiApiKey.value.trim()))
 const geminiModelList = useRemoteModelList({
   active: isGemini,
   autoFetch: computed(() => true),
-  credentialsKey: computed(() => llmGeminiApiKey.value),
+  cacheKey: computed(() =>
+    buildModelCacheKey('gemini', llmModels.geminiBaseUrl, llmGeminiApiKey.value)
+  ),
   canLoad: canLoadGeminiModels,
-  fetchModels: () =>
-    invoke<string[]>('list_gemini_models', {
-      baseUrl: null,
-      apiKey: llmGeminiApiKey.value
-    })
+  fetchModels: () => {
+    const apiKey = llmGeminiApiKey.value
+    return invoke<string[]>('list_gemini_models', { baseUrl: null, apiKey })
+  }
 })
 
 const canLoadCustomModels = computed(() =>
@@ -434,21 +437,22 @@ const canLoadCustomModels = computed(() =>
 const customModelList = useRemoteModelList({
   active: isCustom,
   autoFetch: computed(() => false),
-  credentialsKey: computed(
-    () =>
-      `${activeCustomEndpoint.value?.id ?? ''}\0${llmCustomApiMode.value}\0${llmCustomBaseUrl.value}\0${llmCustomApiKey.value}`
+  cacheKey: computed(() =>
+    buildModelCacheKey(
+      llmCustomApiMode.value === 'gemini' ? 'custom-gemini' : 'custom-openai',
+      llmCustomBaseUrl.value,
+      llmCustomApiKey.value
+    )
   ),
   canLoad: canLoadCustomModels,
-  fetchModels: () =>
-    llmCustomApiMode.value === 'gemini'
-      ? invoke<string[]>('list_gemini_models', {
-          baseUrl: llmCustomBaseUrl.value,
-          apiKey: llmCustomApiKey.value
-        })
-      : invoke<string[]>('list_openai_models', {
-          baseUrl: llmCustomBaseUrl.value,
-          apiKey: llmCustomApiKey.value
-        })
+  fetchModels: () => {
+    const apiMode = llmCustomApiMode.value
+    const baseUrl = llmCustomBaseUrl.value
+    const apiKey = llmCustomApiKey.value
+    return apiMode === 'gemini'
+      ? invoke<string[]>('list_gemini_models', { baseUrl, apiKey })
+      : invoke<string[]>('list_openai_models', { baseUrl, apiKey })
+  }
 })
 
 // The reasoning fields the selected provider will be sent, resolved by the
@@ -726,7 +730,7 @@ const probeUsageSummary = computed(() => {
         </SettingRow>
         <SettingRow :label="t('llm.modelName')" :help="t(isOfficialOpenai ? 'llm.openaiModelsNote' : 'llm.openaiGatewayModelsNote')">
           <template #status>
-            <div v-if="openaiModelList.error.value">{{ openaiModelList.error.value }}</div>
+            <div v-if="openaiModelList.error.value" class="is-error">{{ openaiModelList.error.value }}</div>
           </template>
           <div class="control-group">
             <NSelect
@@ -802,7 +806,7 @@ const probeUsageSummary = computed(() => {
         </SettingRow>
         <SettingRow :label="t('llm.modelName')" :help="t('llm.geminiModelsNote')">
           <template #status>
-            <div v-if="geminiModelList.error.value">{{ geminiModelList.error.value }}</div>
+            <div v-if="geminiModelList.error.value" class="is-error">{{ geminiModelList.error.value }}</div>
           </template>
           <div class="control-group">
             <NSelect
@@ -875,7 +879,7 @@ const probeUsageSummary = computed(() => {
         </SettingRow>
         <SettingRow :label="t('llm.modelName')" :help="t('llm.customModelsNote')">
           <template #status>
-            <div v-if="customModelList.error.value">{{ customModelList.error.value }}</div>
+            <div v-if="customModelList.error.value" class="is-error">{{ customModelList.error.value }}</div>
           </template>
           <div class="control-group">
             <NSelect

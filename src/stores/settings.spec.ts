@@ -3,6 +3,7 @@ import llmModels from '../shared/llmModels.json'
 import asrModels from '../shared/asrModels.json'
 import { isMacOS } from '../utils/platform'
 import { useSettingsStore } from './settings'
+import { checkLlmModelCache } from './llmModels.spec'
 import {
   buildLlmApiModeOptions,
   buildLlmProviderOptions,
@@ -19,6 +20,7 @@ export function checkLlmDefault(expectedMacOS: boolean) {
     // Inspect initial state only: no backend load, save, API call, or timer.
     const store = useSettingsStore(pinia)
     checkAsrDictionarySettings(store.settings)
+    checkLlmModelCache()
     const model = store.settings.llmVolcengineModel
     if (model !== llmModels.volcengineDefaultModel || model !== 'doubao-seed-2-0-mini-260428') {
       throw new Error('The settings UI must use the shared current Doubao default')

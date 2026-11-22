@@ -1756,6 +1756,16 @@ pub async fn list_gemini_models(
 }
 
 #[tauri::command]
+pub fn get_llm_model_cache() -> Result<Option<String>, String> {
+    crate::storage::get_llm_model_cache().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_llm_model_cache(json: String) -> Result<(), String> {
+    crate::storage::save_llm_model_cache(&json).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn probe_local_asr(
     command_path: Option<String>,
     sensevoice_model_path: Option<String>,

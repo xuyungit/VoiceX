@@ -395,6 +395,8 @@ pub fn run() {
             commands::local_models::delete_local_model,
             commands::settings::list_openai_models,
             commands::settings::list_gemini_models,
+            commands::settings::get_llm_model_cache,
+            commands::settings::save_llm_model_cache,
             commands::settings::probe_current_asr_provider,
             commands::settings::probe_current_llm_provider,
             commands::settings::preview_llm_reasoning,

@@ -2374,6 +2374,15 @@ pub(crate) fn save_output_mute_recovery(json: &str) -> Result<(), StorageError> 
     set_user_config_value("output_mute_recovery", json)
 }
 
+/// Machine-local cache of fetched LLM model lists (`user_config`, outside `app_settings`).
+pub fn get_llm_model_cache() -> Result<Option<String>, StorageError> {
+    get_user_config_value("llm_model_cache")
+}
+
+pub fn save_llm_model_cache(json: &str) -> Result<(), StorageError> {
+    set_user_config_value("llm_model_cache", json)
+}
+
 fn get_user_config_value(key: &str) -> Result<Option<String>, StorageError> {
     with_db(|conn| {
         conn.query_row(
