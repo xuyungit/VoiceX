@@ -183,6 +183,8 @@ pub struct SessionController {
     injection_epoch: Arc<AtomicU64>,
     injection_cancel_flag: Arc<AtomicBool>,
     audio_epoch: Arc<AtomicU64>,
+    audio_capture_opened_epoch: Arc<AtomicU64>,
+    output_mute_lock: Arc<Mutex<()>>,
 }
 
 impl SessionController {
@@ -1164,11 +1166,16 @@ impl SessionController {
 
         // Stop capture/asr first so downstream callbacks won't emit into a stale state.
         if state.is_recording {
-            self.stop_audio_capture("cancelled");
+            if state.audio_capture_started {
+                self.stop_audio_capture("cancelled");
+                self.invalidate_audio_epoch();
+            } else {
+                self.abort_pending_audio_start("cancelled_before_audio_started");
+            }
         } else {
             self.abort_asr_task();
+            self.invalidate_audio_epoch();
         }
-        self.invalidate_audio_epoch();
 
         self.discard_session_audio_file(state, "session_cancelled");
         self.discard_session_refinement_audio_file(state, "session_cancelled");
@@ -1181,36 +1188,68 @@ impl SessionController {
 
     fn start_audio_capture(&self) {
         let audio_epoch = self.next_audio_epoch();
-        if let Some(manager) = self.audio_manager() {
-            let settings = match crate::storage::get_settings() {
-                Ok(settings) => Some(settings),
-                Err(err) => {
-                    log::warn!("Cannot read settings for capture, using defaults: {}", err);
-                    None
-                }
-            };
-            let asr_config = settings.as_ref().map(crate::asr::AsrConfig::from);
-            let is_batch = asr_config.as_ref().is_some_and(|config| config.is_batch());
-            // Batch mode always needs the full PCM buffer for post-recording recognition.
-            let capture_refinement_pcm = is_batch
-                || asr_config.as_ref().is_some_and(|config| {
-                    config.provider_type == crate::asr::AsrProviderType::Coli
-                        && config.coli_final_refinement_mode != crate::asr::ColiRefinementMode::Off
-                });
-            let mute_output = settings
-                .as_ref()
-                .is_some_and(|settings| settings.mute_output_while_recording);
-            log::info!(
-                "capture_buffer_enabled={} is_batch={}",
+        let settings = match crate::storage::get_settings_cached() {
+            Ok(settings) => Some(settings),
+            Err(err) => {
+                log::warn!("Cannot read settings for capture, using defaults: {}", err);
+                None
+            }
+        };
+        // Overlap LLM connection warm-up with microphone startup too.
+        crate::llm::warm::begin_session(
+            settings
+                .as_deref()
+                .and_then(crate::services::llm_service::dictation_llm_config),
+        );
+
+        let Some(manager) = self.audio_manager() else {
+            let reason = "Audio manager not initialized; cannot start capture".to_string();
+            log::error!("{}", reason);
+            self.send_message(SessionMessage::AudioStartFailed {
+                audio_epoch,
+                kind: AudioStartFailure::Other,
+                reason,
+            });
+            return;
+        };
+
+        let asr_config = settings.as_deref().map(crate::asr::AsrConfig::from);
+        let is_batch = asr_config.as_ref().is_some_and(|config| config.is_batch());
+        // Batch mode always needs the full PCM buffer for post-recording recognition.
+        let capture_refinement_pcm = is_batch
+            || asr_config.as_ref().is_some_and(|config| {
+                config.provider_type == crate::asr::AsrProviderType::Coli
+                    && config.coli_final_refinement_mode != crate::asr::ColiRefinementMode::Off
+            });
+        let mute_output = settings
+            .as_ref()
+            .is_some_and(|settings| settings.mute_output_while_recording);
+        let play_ready_sound = settings
+            .as_ref()
+            .map(|settings| settings.play_recording_ready_sound)
+            .unwrap_or(true);
+        log::info!(
+            "capture_buffer_enabled={} is_batch={} ready_sound={}",
+            capture_refinement_pcm,
+            is_batch,
+            play_ready_sound
+        );
+
+        let controller = self.clone();
+        let opened_epoch = Arc::clone(&self.audio_capture_opened_epoch);
+        tauri::async_runtime::spawn_blocking(move || {
+            let epoch_check = controller.clone();
+            let result = manager.start_capture_if_current(
+                audio_epoch,
                 capture_refinement_pcm,
-                is_batch
+                &opened_epoch,
+                move || epoch_check.is_current_audio_epoch(audio_epoch),
             );
-            match manager.start_capture(capture_refinement_pcm) {
+            match result {
                 Ok(handle) => {
-                    // Only once the microphone is actually open: a capture that
-                    // fails to start never touches the output.
-                    if mute_output {
-                        crate::audio::output_mute::engage();
+                    if !controller.is_current_audio_epoch(audio_epoch) {
+                        controller.cleanup_superseded_capture(&manager, audio_epoch);
+                        return;
                     }
                     let crate::audio::AudioCaptureHandle {
                         receiver: rx,
@@ -1220,12 +1259,12 @@ impl SessionController {
                         channels,
                     } = handle;
                     let path_str = file_path.as_ref().map(|p| p.to_string_lossy().to_string());
-                    self.spawn_audio_level_bridge(level_rx);
-                    self.send_message(SessionMessage::AudioStarted {
+                    controller.spawn_audio_level_bridge(level_rx);
+                    controller.send_message(SessionMessage::AudioStarted {
                         audio_epoch,
                         sample_rate,
                         channels,
-                        path: path_str.clone(),
+                        path: path_str,
                     });
                     log::info!(
                         "Audio capture started ({} Hz, {} ch, batch={})",
@@ -1233,44 +1272,118 @@ impl SessionController {
                         channels,
                         is_batch
                     );
-                    crate::llm::warm::begin_session(
-                        settings
-                            .as_ref()
-                            .and_then(crate::services::llm_service::dictation_llm_config),
-                    );
                     if is_batch {
                         // In batch mode we do NOT spawn a streaming ASR task.
                         // The receiver is dropped so audio chunks are discarded;
                         // the refinement PCM buffer captures the full recording.
                         drop(rx);
                     } else {
-                        self.start_asr_audio_bridge(rx);
-                        self.spawn_asr(sample_rate, channels);
+                        controller.start_asr_audio_bridge(rx);
+                        controller.spawn_asr(sample_rate, channels);
+                    }
+
+                    // Play the soft ready cue once the microphone is open. When
+                    // "Mute while recording" is also enabled, mute right after
+                    // the cue finishes so the user still hears it cleanly.
+                    if play_ready_sound {
+                        let cue_controller = controller.clone();
+                        crate::audio::cue::play_ready_chime_async(move || {
+                            if mute_output {
+                                cue_controller.engage_output_mute_if_current(audio_epoch);
+                            }
+                        });
+                    } else if mute_output {
+                        controller.engage_output_mute_if_current(audio_epoch);
                     }
                 }
+                Err(crate::audio::AudioCaptureError::Cancelled) => {
+                    log::info!(
+                        "Async audio capture startup aborted before completion (epoch={})",
+                        audio_epoch
+                    );
+                }
                 Err(err) => {
+                    if !controller.is_current_audio_epoch(audio_epoch) {
+                        return;
+                    }
                     let kind = match err {
                         crate::audio::AudioCaptureError::NoDevice => AudioStartFailure::NoInputDevice,
                         _ => AudioStartFailure::Other,
                     };
                     let reason = format!("Failed to start audio capture: {}", err);
                     log::error!("{}", reason);
-                    self.send_message(SessionMessage::AudioStartFailed {
+                    controller.send_message(SessionMessage::AudioStartFailed {
                         audio_epoch,
                         kind,
                         reason,
                     });
                 }
             }
-        } else {
-            let reason = "Audio manager not initialized; cannot start capture".to_string();
-            log::error!("{}", reason);
-            self.send_message(SessionMessage::AudioStartFailed {
-                audio_epoch,
-                kind: AudioStartFailure::Other,
-                reason,
-            });
+        });
+    }
+
+    /// Abort an in-flight asynchronous microphone open without blocking the
+    /// session actor loop. Uses Dekker SeqCst ordering against
+    /// `start_capture_if_current` so the device is always released either by
+    /// the startup rollback or by the detached cleanup task here.
+    pub(crate) fn abort_pending_audio_start(&self, reason: &str) {
+        self.cancel_recording_timeout();
+        let old_epoch = self.current_audio_epoch();
+        self.invalidate_audio_epoch();
+        self.abort_asr_task();
+        self.stop_asr_audio_bridge();
+        self.cancel_audio_level_task();
+
+        let opened = self.audio_capture_opened_epoch.load(Ordering::SeqCst);
+        self.release_output_mute();
+
+        if opened == old_epoch && old_epoch != 0 {
+            if let Some(manager) = self.audio_manager() {
+                let controller = self.clone();
+                let reason = reason.to_string();
+                tauri::async_runtime::spawn_blocking(move || {
+                    log::info!(
+                        "Stopping just-opened capture after early abort (reason={}, epoch={})",
+                        reason,
+                        old_epoch
+                    );
+                    controller.cleanup_superseded_capture(&manager, old_epoch);
+                });
+            }
         }
+    }
+
+    fn cleanup_superseded_capture(&self, manager: &AudioManager, epoch: u64) {
+        if let Ok(Some(summary)) = manager.stop_capture_for_epoch(epoch) {
+            if let Some(path) = summary.path.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
+            if let Some(path) = summary.refinement_path.as_deref() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        self.release_output_mute();
+    }
+
+    fn engage_output_mute_if_current(&self, expected_epoch: u64) {
+        let _guard = self
+            .output_mute_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.is_current_audio_epoch(expected_epoch)
+            && self.audio_capture_opened_epoch.load(Ordering::SeqCst) == expected_epoch
+        {
+            crate::audio::output_mute::engage();
+        }
+    }
+
+    fn release_output_mute(&self) {
+        let _guard = self
+            .output_mute_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.audio_capture_opened_epoch.store(0, Ordering::SeqCst);
+        crate::audio::output_mute::release();
     }
 
     fn stop_audio_capture(&self, reason: &str) {
@@ -1279,8 +1392,8 @@ impl SessionController {
         let audio_epoch = self.current_audio_epoch();
 
         if let Some(manager) = self.audio_manager() {
-            match manager.stop_capture() {
-                Ok(summary) => {
+            match manager.stop_capture_for_epoch(audio_epoch) {
+                Ok(Some(summary)) => {
                     let path_str = summary
                         .path
                         .as_ref()
@@ -1319,6 +1432,13 @@ impl SessionController {
                         path_str
                     );
                 }
+                Ok(None) => {
+                    log::debug!(
+                        "Audio capture already stopped or rolled back (reason={}, epoch={})",
+                        reason,
+                        audio_epoch
+                    );
+                }
                 Err(err) => {
                     log::error!("Failed to stop audio capture (reason: {}): {}", reason, err);
                     self.send_message(SessionMessage::AudioStopFailed {
@@ -1339,7 +1459,7 @@ impl SessionController {
         // terminal ASR error), whether or not the stop succeeded, so this is
         // where a muted output comes back. Unconditional: turning the setting
         // off mid-recording must not strand the output muted.
-        crate::audio::output_mute::release();
+        self.release_output_mute();
     }
 
     fn next_audio_epoch(&self) -> u64 {
@@ -1397,6 +1517,7 @@ impl SessionController {
         channels: u16,
         path: Option<String>,
     ) {
+        state.audio_capture_started = true;
         state.session_audio_path = path.map(|p| p.into());
         state.session_start = Some(Instant::now());
         state.session_sample_rate = Some(sample_rate);
@@ -1410,6 +1531,7 @@ impl SessionController {
         refinement_path: Option<String>,
         duration_ms: Option<u64>,
     ) {
+        state.audio_capture_started = false;
         state.session_audio_path = path.as_ref().map(|p| p.into());
         state.session_refinement_audio_path = refinement_path.as_ref().map(|p| p.into());
         state.session_duration_ms = duration_ms;
@@ -1579,6 +1701,8 @@ impl Default for SessionController {
             injection_epoch: Arc::new(AtomicU64::new(0)),
             injection_cancel_flag: Arc::new(AtomicBool::new(false)),
             audio_epoch: Arc::new(AtomicU64::new(0)),
+            audio_capture_opened_epoch: Arc::new(AtomicU64::new(0)),
+            output_mute_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -1936,5 +2060,58 @@ mod tests {
 
         assert_eq!(state.session_state, HotkeySessionState::Finalizing);
         assert!(!state.is_recording);
+    }
+
+    #[test]
+    fn early_release_before_audio_started_aborts_pending_start_and_resets_cleanly() {
+        let controller = SessionController::default();
+        let (tx, mut rx) = unbounded_channel();
+        controller.attach_sender(tx);
+        let mut state = AppState::new();
+        let epoch = controller.next_audio_epoch();
+        let t0 = Instant::now();
+
+        state.handle_hotkey_pressed_at(t0);
+        state.on_hold_threshold_reached();
+        assert_eq!(state.session_state, HotkeySessionState::PushToTalk);
+        assert!(state.is_recording);
+        assert!(!state.audio_capture_started);
+
+        // User releases Push-to-Talk before async audio startup finishes.
+        controller.on_hotkey_released(&mut state);
+
+        assert_eq!(state.session_state, HotkeySessionState::Idle);
+        assert!(!state.is_recording);
+        assert!(state.terminal_error_message.is_none());
+        assert!(
+            !controller.is_current_audio_epoch(epoch),
+            "pending audio startup epoch must be invalidated"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "early stop before AudioStarted must not emit AudioStopFailed"
+        );
+    }
+
+    #[test]
+    fn cancel_before_audio_started_invalidates_pending_epoch() {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _post_edit_guard = crate::post_edit::diagnostics::TEST_LOCK.lock().unwrap();
+        let controller = SessionController::default();
+        let mut state = AppState::new();
+        let epoch = controller.next_audio_epoch();
+
+        state.handle_hotkey_pressed();
+        assert!(state.is_recording);
+        assert!(!state.audio_capture_started);
+
+        controller.handle_message(
+            &mut state,
+            SessionMessage::CancelSession(CancelReason::EscapeKey),
+        );
+
+        assert_eq!(state.session_state, HotkeySessionState::Idle);
+        assert!(!state.is_recording);
+        assert!(!controller.is_current_audio_epoch(epoch));
     }
 }

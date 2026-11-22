@@ -284,6 +284,8 @@ const zhCN = {
     defaultDevice: '{name}（默认）',
     refreshDevices: '刷新设备',
     noInputDevice: '未检测到麦克风。连接耳机或 USB 麦克风等设备后即可使用，无需重启。',
+    recordingReadySound: '开始录音提示音',
+    recordingReadySoundNote: '麦克风就绪可开始说话时播放一声柔和提示音。开启「录音时静音」时会在提示音结束后再静音。',
     muteWhileRecording: '录音时静音',
     muteWhileRecordingNote: '录音期间静音系统默认输出，结束后恢复原状态。只切换静音，不改音量，音乐会继续播放。',
     muteWhileRecordingUnsupported: '当前输出设备「{device}」不支持软件静音，录音时声音不会被静音。',

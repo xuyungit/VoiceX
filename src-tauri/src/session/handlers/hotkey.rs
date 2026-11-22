@@ -40,26 +40,29 @@ impl SessionController {
                     if !app_info.is_self {
                         crate::app_icons::record_foreground_app_async(&app_info);
                         if let Some(recent_app) = app_info.to_recent_target_app() {
-                            if let Err(err) =
-                                crate::storage::remember_recent_target_app(&recent_app)
-                            {
-                                log::warn!("Failed to remember target app: {}", err);
-                            } else if let Some(app_handle) = self.app_handle() {
-                                if let Err(err) = app_handle.emit(
-                                    "input:recent-target-apps-updated",
-                                    serde_json::json!({
-                                        "appName": recent_app.app_name,
-                                        "platform": recent_app.platform,
-                                        "matchKind": recent_app.match_kind,
-                                        "matchValue": recent_app.match_value,
-                                    }),
-                                ) {
-                                    log::warn!(
-                                        "Failed to emit recent target apps update event: {}",
-                                        err
-                                    );
+                            let app_handle = self.app_handle();
+                            tauri::async_runtime::spawn_blocking(move || {
+                                if let Err(err) =
+                                    crate::storage::remember_recent_target_app(&recent_app)
+                                {
+                                    log::warn!("Failed to remember target app: {}", err);
+                                } else if let Some(app_handle) = app_handle {
+                                    if let Err(err) = app_handle.emit(
+                                        "input:recent-target-apps-updated",
+                                        serde_json::json!({
+                                            "appName": recent_app.app_name,
+                                            "platform": recent_app.platform,
+                                            "matchKind": recent_app.match_kind,
+                                            "matchValue": recent_app.match_value,
+                                        }),
+                                    ) {
+                                        log::warn!(
+                                            "Failed to emit recent target apps update event: {}",
+                                            err
+                                        );
+                                    }
                                 }
-                            }
+                            });
                         }
                     }
                     state.session_target_app = Some(app_info);
@@ -77,24 +80,30 @@ impl SessionController {
 
             // Default HUD to hands-free icon immediately; will switch to push-to-talk if hold threshold is reached.
             state.recording_style = Some(RecordingStyle::HandsFree);
-            self.start_audio_capture();
-            self.start_recording_timeout(self.effective_max_recording_minutes(state), state);
             if let Some(hud) = self.hud_service() {
                 hud.reset_display();
             } else {
                 self.emit_transcript("", false);
             }
+            // Show the HUD immediately before opening the microphone so slow
+            // Bluetooth/USB devices never make the hotkey feel unresponsive.
             // Only the press that starts a session shows the HUD. Showing it
             // again — on the press that stops a hands-free recording, or the
             // second tap of a translation upgrade — restarts the capsule's
             // entrance under a capsule already on screen, and it flickers.
             self.show_hud();
+            self.emit_state_from(state);
+
+            self.start_audio_capture();
+            self.start_recording_timeout(self.effective_max_recording_minutes(state), state);
         }
 
         if let Some(threshold) = start_hold_timer {
             self.start_hold_timer(threshold);
         }
-        self.emit_state_from(state);
+        if !start_recording {
+            self.emit_state_from(state);
+        }
     }
 
     pub fn on_hotkey_released(&self, state: &mut AppState) {
@@ -114,7 +123,19 @@ impl SessionController {
         }
 
         if was_recording && !state.is_recording {
-            self.stop_audio_capture("hotkey_release");
+            if state.audio_capture_started {
+                self.stop_audio_capture("hotkey_release");
+            } else {
+                // Recording ended before asynchronous microphone startup
+                // finished: abort startup cleanly with nothing to transcribe.
+                log::info!(
+                    "Recording stopped before microphone startup finished; aborting pending capture"
+                );
+                self.abort_pending_audio_start("hotkey_release_before_audio_started");
+                self.emit_countdown(None);
+                self.hide_hud_and_reset_state(state);
+                return;
+            }
         }
 
         if schedule_finalize {

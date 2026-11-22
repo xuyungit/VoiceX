@@ -150,6 +150,13 @@ const outputMuteQueryError = ref<string | null>(null)
 let unlistenOutputMute: UnlistenFn | null = null
 let inputSettingsDisposed = false
 
+const playRecordingReadySound = computed({
+  get: () => settingsStore.settings.playRecordingReadySound,
+  set: (v) => {
+    settingsStore.updateSetting('playRecordingReadySound', v)
+  }
+})
+
 const muteOutputWhileRecording = computed({
   get: () => settingsStore.settings.muteOutputWhileRecording,
   set: (v: boolean) => {
@@ -687,6 +694,10 @@ onBeforeUnmount(() => {
           </template>
           {{ t('input.refreshDevices') }}
         </NTooltip>
+      </SettingRow>
+
+      <SettingRow :label="t('input.recordingReadySound')" :help="t('input.recordingReadySoundNote')">
+        <NSwitch v-model:value="playRecordingReadySound" />
       </SettingRow>
 
       <SettingRow :label="t('input.muteWhileRecording')" :help="t('input.muteWhileRecordingNote')">

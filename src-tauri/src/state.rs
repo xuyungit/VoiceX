@@ -90,6 +90,7 @@ pub struct AppState {
     pub(crate) session_id: Option<uuid::Uuid>,
     pub(crate) session_record_id: Option<uuid::Uuid>,
     pub(crate) session_start: Option<Instant>,
+    pub(crate) audio_capture_started: bool,
     pub(crate) session_audio_path: Option<PathBuf>,
     pub(crate) session_refinement_audio_path: Option<PathBuf>,
     pub(crate) session_duration_ms: Option<u64>,
@@ -158,6 +159,7 @@ impl AppState {
             is_correcting: false,
             transcript_text: String::new(),
             session_start: None,
+            audio_capture_started: false,
             session_audio_path: None,
             session_refinement_audio_path: None,
             session_id: None,
@@ -233,6 +235,7 @@ impl AppState {
                 self.intent = ProcessingIntent::Assistant;
                 self.is_recording = true;
                 self.session_start = Some(now);
+                self.audio_capture_started = false;
                 self.session_audio_path = None;
                 self.session_refinement_audio_path = None;
                 self.session_duration_ms = None;
@@ -395,6 +398,7 @@ impl AppState {
         self.is_correcting = false;
         self.transcript_text.clear();
         self.session_start = None;
+        self.audio_capture_started = false;
         self.session_id = None;
         self.session_record_id = None;
         self.session_audio_path = None;

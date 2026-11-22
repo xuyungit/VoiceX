@@ -282,6 +282,7 @@ export interface AppSettings {
 
     // Input
     inputDeviceUid: string | null
+    playRecordingReadySound: boolean
     muteOutputWhileRecording: boolean
     textInjectionMode: 'pasteboard' | 'typing'
     textInjectionOverrides: Array<{
@@ -561,6 +562,7 @@ const defaultSettings: AppSettings = {
     edgeTtsVolume: 1,
 
     inputDeviceUid: null,
+    playRecordingReadySound: true,
     muteOutputWhileRecording: false,
     textInjectionMode: 'pasteboard',
     textInjectionOverrides: [],

@@ -284,6 +284,8 @@ const enUS = {
     defaultDevice: '{name} (default)',
     refreshDevices: 'Refresh devices',
     noInputDevice: 'No microphone found. Connect one, such as a headset or USB mic; it is picked up right away.',
+    recordingReadySound: 'Ready sound when recording starts',
+    recordingReadySoundNote: 'Plays a soft cue once the microphone is open and ready for speech. When Mute while recording is enabled, output is muted right after the cue finishes.',
     muteWhileRecording: 'Mute while recording',
     muteWhileRecordingNote: 'Mutes the default system output while recording and restores it afterwards. Only the mute switch changes: volume stays the same and music keeps playing.',
     muteWhileRecordingUnsupported: 'The current output device "{device}" cannot be muted by software, so it stays audible while recording.',

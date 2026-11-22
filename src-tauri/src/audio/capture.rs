@@ -1334,6 +1334,9 @@ pub enum AudioCaptureError {
     #[error("No input device available")]
     NoDevice,
 
+    #[error("Audio capture cancelled before start completed")]
+    Cancelled,
+
     #[error("Failed to start capture: {0}")]
     StartFailed(String),
 
