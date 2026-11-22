@@ -17,7 +17,12 @@ try {
       const { checkLlmDefault } = await server.ssrLoadModule('/src/stores/settings.spec.ts')
       checkLlmDefault(expectedMacOS)
       const { checkAsrModelOptions } = await server.ssrLoadModule('/src/utils/asrModels.spec.ts')
-      console.log(`Model defaults and ${checkAsrModelOptions()} ASR option assertions passed (${platform} fixture).`)
+      const { checkSonioxEndpointDelay } = await server.ssrLoadModule('/src/utils/sonioxSettings.spec.ts')
+      const asrOptionCount = checkAsrModelOptions()
+      const sonioxCount = checkSonioxEndpointDelay()
+      console.log(
+        `Model defaults, ${asrOptionCount} ASR option assertions, and ${sonioxCount} Soniox delay assertions passed (${platform} fixture).`
+      )
     } finally {
       await server.close()
     }

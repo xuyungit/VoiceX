@@ -38,7 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let id = history_search::begin()?;
     let started = Instant::now();
-    let count = history_search::count(id, "未出现的关键词".into(), HistoryRecordType::All).await?;
+    let count =
+        history_search::count(id, "未出现的关键词".into(), HistoryRecordType::All, None).await?;
     let full_count_ms = started.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(count, 0);
 
@@ -46,11 +47,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         id,
         "未出现的关键词".into(),
         HistoryRecordType::All,
+        None,
     ));
     tokio::time::sleep(Duration::from_millis(10)).await;
     let count_running_before_operations = !count.is_finished();
     let started = Instant::now();
-    let page = history_search::page(id, 20, 0, "合成".into(), HistoryRecordType::All).await?;
+    let page =
+        history_search::page(id, 20, 0, "合成".into(), HistoryRecordType::All, None).await?;
     let page_ms = started.elapsed().as_secs_f64() * 1000.0;
     let started = Instant::now();
     tauri::async_runtime::spawn_blocking(|| {

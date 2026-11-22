@@ -1,0 +1,104 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend build & checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@9 --activate
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and type-check frontend
+        run: pnpm build
+
+      - name: Run frontend test suite
+        run: pnpm test
+
+  rust:
+    name: Rust checks & tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Enable pnpm
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@9 --activate
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend dist for Tauri context
+        run: pnpm build
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Prepare CMake wrapper on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cmake = (Get-Command cmake -ErrorAction Stop).Source
+          $wrapper = Join-Path $PWD 'cmake-wrap.cmd'
+
+          @"
+          @echo off
+          setlocal
+          echo %* | findstr /C:"--build" >nul
+          if %errorlevel%==0 (
+            "$cmake" %*
+          ) else (
+            "$cmake" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 %*
+          )
+          "@ | Set-Content -Path $wrapper -Encoding ASCII
+
+          "CMAKE=$wrapper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Cargo check all targets
+        run: pnpm check:rust
+
+      - name: Cargo test lib and bins
+        run: pnpm test:rust
