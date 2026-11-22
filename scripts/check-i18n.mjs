@@ -4,7 +4,7 @@ import { createServer } from 'vite'
 process.env.NODE_ENV = 'production'
 const server = await createServer({
   configFile: false,
-  server: { middlewareMode: true, watch: null, hmr: false },
+  server: { middlewareMode: true, watch: null, hmr: false, ws: false },
   optimizeDeps: { noDiscovery: true, include: [] },
   appType: 'custom'
 })

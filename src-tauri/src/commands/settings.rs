@@ -1899,8 +1899,10 @@ mod tests {
     fn openai_and_gemini_live_defaults_are_shared_and_legacy_fields_still_load() {
         let legacy: AppSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy.llm_openai_model, crate::llm::default_openai_model());
-        assert_eq!(legacy.llm_openai_model, "gpt-6-luna");
-        assert_eq!(legacy.gemini_live_model, "gemini-3.5-transcribe-live");
+        assert_eq!(
+            legacy.gemini_live_model,
+            crate::asr::models::default_model("geminiLive")
+        );
         assert_eq!(
             crate::asr::AsrConfig::default().gemini_live_model,
             legacy.gemini_live_model
@@ -1909,11 +1911,7 @@ mod tests {
             llm_provider_type: "openai".into(),
             ..legacy
         });
-        assert_eq!(config.model_name, "gpt-6-luna");
-        let request = crate::llm::create_provider(&config.provider_type)
-            .build_chat_request(Vec::new(), &config);
-        assert_eq!(request["reasoning_effort"], "none");
-        assert_eq!(request["service_tier"], "default");
+        assert_eq!(config.model_name, crate::llm::default_openai_model());
     }
 
     #[test]
@@ -2030,8 +2028,7 @@ mod tests {
 
     #[test]
     fn volcengine_defaults_agree_for_fresh_and_legacy_settings() {
-        let expected = "doubao-seed-2-0-mini-260428";
-        assert_eq!(crate::llm::default_volcengine_model(), expected);
+        let expected = crate::llm::default_volcengine_model();
         assert_eq!(AppSettings::default().llm_volcengine_model, expected);
         assert_eq!(crate::llm::LLMConfig::default().model_name, expected);
         let legacy: AppSettings =

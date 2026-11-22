@@ -364,7 +364,17 @@ pub fn optimize_text_for_speech(
     config: &LLMConfig,
     system_prompt: &str,
     text: &str,
+    on_event: impl FnMut(RenderEvent<'_>),
+) -> Result<String, LlmStageError> {
+    optimize_text_with_retry_wait(config, system_prompt, text, on_event, wait_before_retry)
+}
+
+fn optimize_text_with_retry_wait(
+    config: &LLMConfig,
+    system_prompt: &str,
+    text: &str,
     mut on_event: impl FnMut(RenderEvent<'_>),
+    wait_for_retry: fn(&CancelToken, Duration) -> Result<(), LlmStageError>,
 ) -> Result<String, LlmStageError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -392,6 +402,7 @@ pub fn optimize_text_for_speech(
             piece_trimmed,
             &token,
             correction_timeout_for_text(piece_trimmed),
+            wait_for_retry,
             |attempt, delay, reason| {
                 on_event(RenderEvent::LlmRetry {
                     index,
@@ -432,6 +443,7 @@ fn run_piece_with_retry(
     text: &str,
     token: &CancelToken,
     timeout: Duration,
+    wait_for_retry: fn(&CancelToken, Duration) -> Result<(), LlmStageError>,
     mut on_retry: impl FnMut(usize, Duration, String),
 ) -> Result<String, (usize, LlmStageError)> {
     let mut attempt = 1;
@@ -461,7 +473,7 @@ fn run_piece_with_retry(
             ));
         }
         on_retry(attempt + 1, delay, failure.retry_reason());
-        wait_before_retry(token, delay).map_err(|error| (attempt, error))?;
+        wait_for_retry(token, delay).map_err(|error| (attempt, error))?;
         attempt += 1;
     }
 }
@@ -650,23 +662,33 @@ mod tests {
     const SECOND_REPLY: &str =
         r#"{"choices":[{"message":{"content":"second"},"finish_reason":"stop"}]}"#;
 
+    fn skip_retry_wait(_: &CancelToken, _: Duration) -> Result<(), LlmStageError> {
+        Ok(())
+    }
+
     #[test]
     fn only_the_failed_piece_is_retried_and_its_output_is_appended_once() {
         let (config, requests, worker) =
             serve_replies(vec![(200, FIRST_REPLY), (503, "busy"), (200, SECOND_REPLY)]);
         let text = format!("{}尾", "字".repeat(LLM_CHUNK_MAX_CHARS));
         let mut retries = Vec::new();
-        let result = optimize_text_for_speech(&config, "prepare", &text, |event| {
-            if let RenderEvent::LlmRetry {
-                index,
-                attempt,
-                reason,
-                ..
-            } = event
-            {
-                retries.push((index, attempt, reason));
-            }
-        })
+        let result = optimize_text_with_retry_wait(
+            &config,
+            "prepare",
+            &text,
+            |event| {
+                if let RenderEvent::LlmRetry {
+                    index,
+                    attempt,
+                    reason,
+                    ..
+                } = event
+                {
+                    retries.push((index, attempt, reason));
+                }
+            },
+            skip_retry_wait,
+        )
         .unwrap();
         worker.join().unwrap();
         let requests: Vec<_> = requests.into_iter().collect();
@@ -684,9 +706,21 @@ mod tests {
     #[test]
     fn retry_budget_exhaustion_reports_the_failed_chunk() {
         let (config, requests, worker) = serve_replies(vec![(503, "busy"); 3]);
-        let result = optimize_text_for_speech(&config, "prepare", "hello", |_| {});
+        let mut delays = Vec::new();
+        let result = optimize_text_with_retry_wait(
+            &config,
+            "prepare",
+            "hello",
+            |event| {
+                if let RenderEvent::LlmRetry { delay, .. } = event {
+                    delays.push(delay);
+                }
+            },
+            skip_retry_wait,
+        );
         worker.join().unwrap();
         assert_eq!(requests.into_iter().count(), 3);
+        assert_eq!(delays, LLM_RETRY_DELAYS);
         assert!(matches!(
             result,
             Err(LlmStageError::ChunkFailed {
@@ -721,6 +755,7 @@ mod tests {
             "hello",
             &token,
             Duration::from_secs(1),
+            wait_before_retry,
             |_, _, _| {
                 slot.release();
             },

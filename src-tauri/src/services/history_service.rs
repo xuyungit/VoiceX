@@ -606,18 +606,16 @@ mod tests {
     }
 
     #[test]
-    fn elevenlabs_refine_snapshot_uses_defaults_when_models_are_empty() {
+    fn elevenlabs_snapshots_use_shared_defaults_when_models_are_empty() {
+        let realtime = crate::asr::models::default_model("elevenlabsRealtime");
+        let batch = crate::asr::models::default_model("elevenlabsBatch");
         assert_eq!(
             HistoryService::elevenlabs_realtime_batch_refine_model_name(" ", ""),
-            Some("ElevenLabs / scribe_v3_live + batch refine(scribe_v3)".to_string())
+            Some(format!("ElevenLabs / {realtime} + batch refine({batch})"))
         );
-    }
-
-    #[test]
-    fn elevenlabs_realtime_snapshot_uses_default_model() {
         assert_eq!(
             HistoryService::elevenlabs_realtime_model_name(" "),
-            Some("ElevenLabs / scribe_v3_live".to_string())
+            Some(format!("ElevenLabs / {realtime}"))
         );
     }
 

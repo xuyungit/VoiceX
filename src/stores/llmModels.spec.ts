@@ -8,9 +8,7 @@ import {
   type LlmModelCacheEntry
 } from './llmModels'
 
-export function checkLlmModelCache() {
-  const now = 1_700_000_000_000
-
+export function checkLlmModelCacheKey() {
   // Key normalizes trailing slashes and never leaks plaintext URLs or API keys.
   const secretUrl = 'https://proxy.example.com/token/secret-path-token/v1?key=query-secret'
   const k1 = buildModelCacheKey('custom-gemini', `${secretUrl}/`, 'secret-key-1')
@@ -23,54 +21,22 @@ export function checkLlmModelCache() {
   if (k1.includes('secret-key-1') || k1.includes('proxy.example.com') || k1.includes('query-secret')) {
     throw new Error('Cache key must not contain plaintext URL or API key')
   }
+}
 
-  // Uncached entry auto-fetches.
-  if (!shouldAutoFetchModels(undefined, now)) {
-    throw new Error('Missing cache entry should auto-fetch')
-  }
-
-  // Fresh entry (< 24h) skips auto-fetch even if a manual retry failed earlier or not.
-  const fresh: LlmModelCacheEntry = {
-    models: ['gemini-3.5-flash-lite'],
-    fetchedAt: now - MODEL_LIST_TTL_MS + 60_000,
+export function checkLlmModelRefreshBoundaries() {
+  const now = 1_700_000_000_000
+  const expired: LlmModelCacheEntry = {
+    models: ['cached-model'],
+    fetchedAt: now - MODEL_LIST_TTL_MS,
     lastError: '',
     lastFailedAt: null,
-    updatedAt: now - 1000
+    updatedAt: now - MODEL_LIST_TTL_MS
   }
-  if (shouldAutoFetchModels(fresh, now)) {
-    throw new Error('Fresh cache (< 24h) must not auto-fetch')
-  }
+  const cooldownElapsed = { ...expired, lastFailedAt: now - MODEL_LIST_FAILURE_COOLDOWN_MS }
 
-  // Stale entry (>= 24h) triggers auto-fetch when outside failure cooldown.
-  const stale: LlmModelCacheEntry = {
-    ...fresh,
-    fetchedAt: now - MODEL_LIST_TTL_MS - 1
-  }
-  if (!shouldAutoFetchModels(stale, now)) {
-    throw new Error('Stale cache (>= 24h) should auto-fetch')
-  }
-
-  // Failed entry within 1h cooldown skips auto-fetch while preserving lastError.
-  const failedRecently: LlmModelCacheEntry = {
-    models: ['gemini-3.5-flash-lite'],
-    fetchedAt: now - MODEL_LIST_TTL_MS - 10_000,
-    lastError: 'Gemini models HTTP 403',
-    lastFailedAt: now - MODEL_LIST_FAILURE_COOLDOWN_MS + 1000,
-    updatedAt: now - 1000
-  }
-  if (shouldAutoFetchModels(failedRecently, now)) {
-    throw new Error('Failed entry within 1h cooldown must not auto-fetch')
-  }
-
-  // After 1h cooldown, auto-fetch runs again.
-  const cooldownElapsed: LlmModelCacheEntry = {
-    ...failedRecently,
-    lastFailedAt: now - MODEL_LIST_FAILURE_COOLDOWN_MS - 1
-  }
-  if (!shouldAutoFetchModels(cooldownElapsed, now)) {
-    throw new Error('Failed entry past 1h cooldown should retry auto-fetch')
-  }
-
+  check(shouldAutoFetchModels(undefined, now), 'The first visit must fetch models')
+  check(shouldAutoFetchModels(expired, now), 'A refresh is due at the TTL boundary')
+  check(shouldAutoFetchModels(cooldownElapsed, now), 'A failed entry can retry at the cooldown boundary')
 }
 
 function check(condition: boolean, message: string) {

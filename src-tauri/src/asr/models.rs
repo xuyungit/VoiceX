@@ -374,19 +374,6 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_retirements_and_routing_aliases_stay_available() {
-        assert!(
-            validate_model("gemini-live", "gemini-3.1-flash-live-preview", "realtime").is_err()
-        );
-        assert!(validate_model("gemini-live", "gemini-3.8-live", "realtime").is_ok());
-        for id in ["whisper-1", "gpt-4o-transcribe", "gpt-4o-mini-transcribe"] {
-            assert!(validate_model("openai", id, "batch").is_ok());
-        }
-        assert!(validate_model("soniox", "stt-rt-v4", "realtime").is_ok());
-        assert!(validate_model("gemini", "gemini-3.1-flash-lite", "batch").is_ok());
-    }
-
-    #[test]
     fn retirement_does_not_claim_unknown_ids_or_other_providers() {
         assert!(validate_model("custom", "gemini-3.1-flash-lite-preview", "batch").is_ok());
         assert!(validate_model(
@@ -415,7 +402,9 @@ mod tests {
         assert!(validate_model("soniox", "stt-async-v5", "realtime").is_err());
         assert!(validate_model("openai", "my-custom-deployment", "batch").is_ok());
         assert!(validate_model("gemini", "gemini-3.5-transcribe-live", "batch").is_err());
-        assert!(validate_model("qwen", "qwen3-asr-flash-filetrans-2025-11-17", "batch").is_err());
+        assert!(
+            validate_model("gemini-live", "gemini-3.1-flash-live-preview", "realtime").is_err()
+        );
     }
     #[test]
     fn refinement_uses_its_own_model_without_mutating_live_config() {

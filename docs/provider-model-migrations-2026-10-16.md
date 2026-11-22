@@ -76,7 +76,7 @@ Soniox 继续使用原共享 WebSocket 网络层、代理与取消路径；未�
 复现入口（Soniox 和代理测试需允许本地回环监听）：
 
 ```sh
-node scripts/check-llm-defaults.mjs
+pnpm test:defaults
 pnpm build
 cargo check --offline --locked --manifest-path src-tauri/Cargo.toml
 cargo test --offline --locked --manifest-path src-tauri/Cargo.toml --lib <上表过滤器>

@@ -1,8 +1,13 @@
 import { ASR_DICTIONARY_POLICIES, isAsrDictionaryEnabled } from './asrDictionary'
 import type { AppSettings } from '../stores/settings'
 
-export function checkAsrDictionarySettings(settings: AppSettings) {
-  const fixture = { ...settings, asrDictionaryEnabled: {} }
+export function checkAsrDictionarySettings() {
+  const fixture: Parameters<typeof isAsrDictionaryEnabled>[0] = {
+    asrProviderType: 'volcengine',
+    asrDictionaryEnabled: {},
+    qwenLocalUseDictionary: true,
+    elevenlabsEnableKeyterms: true
+  }
   for (const provider of Object.keys(ASR_DICTIONARY_POLICIES) as AppSettings['asrProviderType'][]) {
     const expected = ASR_DICTIONARY_POLICIES[provider].defaultEnabled
     if (isAsrDictionaryEnabled(fixture, provider) !== expected) throw new Error(`Wrong default: ${provider}`)
