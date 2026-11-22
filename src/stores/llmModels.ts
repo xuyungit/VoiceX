@@ -5,6 +5,7 @@ import { reactive, ref } from 'vue'
 export const MODEL_LIST_TTL_MS = 24 * 60 * 60 * 1000
 export const MODEL_LIST_FAILURE_COOLDOWN_MS = 60 * 60 * 1000
 const MAX_CACHED_ENTRIES = 32
+const MODEL_CACHE_KEY_PATTERN = /^(?:openai|gemini|custom-openai|custom-gemini)\|[0-9a-f]{16}$/
 
 export type ModelCacheScope = 'openai' | 'gemini' | 'custom-openai' | 'custom-gemini'
 
@@ -38,7 +39,7 @@ export function buildModelCacheKey(
   apiKey: string
 ): string {
   const normalizedUrl = baseUrl.trim().replace(/\/+$/, '')
-  return `${scope}|${normalizedUrl}|${fingerprintSecret(apiKey.trim())}`
+  return `${scope}|${fingerprintSecret(`${normalizedUrl}\0${apiKey.trim()}`)}`
 }
 
 export function shouldAutoFetchModels(
@@ -63,7 +64,6 @@ function normalizeEntry(raw: unknown): LlmModelCacheEntry | null {
   const fetchedAt = typeof record.fetchedAt === 'number' && Number.isFinite(record.fetchedAt)
     ? record.fetchedAt
     : null
-  const lastError = typeof record.lastError === 'string' ? record.lastError : ''
   const lastFailedAt =
     typeof record.lastFailedAt === 'number' && Number.isFinite(record.lastFailedAt)
       ? record.lastFailedAt
@@ -72,22 +72,35 @@ function normalizeEntry(raw: unknown): LlmModelCacheEntry | null {
     typeof record.updatedAt === 'number' && Number.isFinite(record.updatedAt)
       ? record.updatedAt
       : fetchedAt ?? lastFailedAt ?? 0
-  return { models, fetchedAt, lastError, lastFailedAt, updatedAt }
+  return { models, fetchedAt, lastError: '', lastFailedAt, updatedAt }
 }
 
-export function parseModelCacheJson(rawJson: string | null | undefined): Record<string, LlmModelCacheEntry> {
-  if (!rawJson) return {}
+function parseModelCacheJson(rawJson: string | null) {
+  const entries: Record<string, LlmModelCacheEntry> = {}
+  if (!rawJson) return { entries, needsRewrite: false }
   try {
     const parsed: unknown = JSON.parse(rawJson)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-    const result: Record<string, LlmModelCacheEntry> = {}
-    for (const [key, value] of Object.entries(parsed)) {
-      const normalized = normalizeEntry(value)
-      if (normalized) result[key] = normalized
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { entries, needsRewrite: true }
     }
-    return result
+    let needsRewrite = false
+    for (const [key, value] of Object.entries(parsed)) {
+      // Older cache keys embedded the full endpoint URL.
+      if (!MODEL_CACHE_KEY_PATTERN.test(key)) {
+        needsRewrite = true
+        continue
+      }
+      const normalized = normalizeEntry(value)
+      if (normalized) {
+        entries[key] = normalized
+        if ('lastError' in value) needsRewrite = true
+      } else {
+        needsRewrite = true
+      }
+    }
+    return { entries, needsRewrite }
   } catch {
-    return {}
+    return { entries, needsRewrite: true }
   }
 }
 
@@ -115,12 +128,9 @@ export const useLlmModelCacheStore = defineStore('llmModelCache', () => {
     loadPromise = (async () => {
       try {
         const raw = await invoke<string | null>('get_llm_model_cache')
-        const parsed = parseModelCacheJson(raw)
-        for (const [key, entry] of Object.entries(parsed)) {
-          if (!entries[key]) {
-            entries[key] = entry
-          }
-        }
+        const { entries: savedEntries, needsRewrite } = parseModelCacheJson(raw)
+        Object.assign(entries, savedEntries)
+        if (needsRewrite) await persist()
       } catch (err) {
         console.warn('Failed to load LLM model list cache:', err)
       } finally {
@@ -133,8 +143,15 @@ export const useLlmModelCacheStore = defineStore('llmModelCache', () => {
 
   async function persist(): Promise<void> {
     pruneEntries(entries)
+    // Keep detailed failures in memory. Timestamps alone drive the retry cooldown.
+    const savedEntries = Object.fromEntries(
+      Object.entries(entries).map(([key, { models, fetchedAt, lastFailedAt, updatedAt }]) => [
+        key,
+        { models, fetchedAt, lastFailedAt, updatedAt }
+      ])
+    )
     try {
-      await invoke('save_llm_model_cache', { json: JSON.stringify(entries) })
+      await invoke('save_llm_model_cache', { json: JSON.stringify(savedEntries) })
     } catch (err) {
       console.warn('Failed to persist LLM model list cache:', err)
     }
@@ -178,10 +195,11 @@ export const useLlmModelCacheStore = defineStore('llmModelCache', () => {
       } catch (err) {
         const now = Date.now()
         const previous = entries[key]
+        const rawMessage = err instanceof Error ? err.message : String(err)
         entries[key] = {
           models: previous?.models ?? null,
           fetchedAt: previous?.fetchedAt ?? null,
-          lastError: err instanceof Error ? err.message : String(err),
+          lastError: rawMessage,
           lastFailedAt: now,
           updatedAt: now
         }

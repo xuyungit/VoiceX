@@ -565,6 +565,7 @@ const zhCN = {
     openaiModelsFetch: '刷新模型',
     openaiModelsNote: '自动加载当前账户可见的常用文本模型。也可输入其他模型 ID 后按回车确认。',
     openaiModelsLoading: '正在加载模型…',
+    modelListLastRefreshFailed: '上次刷新失败，可点击「刷新模型」重试。',
     openaiGatewayModelsNote: '刷新可获取网关的模型列表，也可输入模型 ID 后按回车确认。',
     geminiModelsNote: '自动加载适合文本润色与纠错的 Gemini 模型。也可输入其他模型 ID 后按回车确认。',
     customModelsNote: '点击刷新尝试获取该节点提供的模型列表，也可输入模型 ID 后按回车确认。',

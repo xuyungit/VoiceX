@@ -346,26 +346,37 @@ const activePromptTab = ref<'assistant' | 'translation'>('assistant')
 const llmProbeLoading = ref(false)
 const llmProbeResult = ref<LlmProviderProbeResult | null>(null)
 const llmProbeError = ref('')
+interface RemoteModelSnapshot {
+  canLoad: boolean
+  cacheKey: string
+  fetchModels: () => Promise<string[]>
+}
+
 function useRemoteModelList(options: {
   active: ComputedRef<boolean>
   autoFetch: ComputedRef<boolean>
-  cacheKey: ComputedRef<string>
-  canLoad: ComputedRef<boolean>
-  fetchModels: () => Promise<string[]>
+  snapshot: ComputedRef<RemoteModelSnapshot>
 }) {
-  const models = computed(() => modelCacheStore.getEntry(options.cacheKey.value)?.models ?? null)
+  const models = computed(() => modelCacheStore.getEntry(options.snapshot.value.cacheKey)?.models ?? null)
   const modelOptions = computed(() => (models.value ?? []).map((value) => ({ value, label: value })))
-  const loading = computed(() => modelCacheStore.isLoading(options.cacheKey.value))
-  const error = computed(() => modelCacheStore.getEntry(options.cacheKey.value)?.lastError ?? '')
+  const loading = computed(() => modelCacheStore.isLoading(options.snapshot.value.cacheKey))
+  const error = computed(() => {
+    const entry = modelCacheStore.getEntry(options.snapshot.value.cacheKey)
+    if (entry?.lastFailedAt == null) return ''
+    return entry.lastError || t('llm.modelListLastRefreshFailed')
+  })
 
+  // Snapshot credentials synchronously so any async await inside refresh()
+  // still pairs the response with the exact cacheKey that initiated it.
   async function load() {
-    if (!options.canLoad.value) return
-    await modelCacheStore.refresh(options.cacheKey.value, options.fetchModels, { force: true })
+    const req = options.snapshot.value
+    if (!req.canLoad) return
+    await modelCacheStore.refresh(req.cacheKey, req.fetchModels, { force: true })
   }
 
   watch(
     [
-      options.cacheKey,
+      () => options.snapshot.value.cacheKey,
       options.active,
       options.autoFetch,
       () => settingsStore.isLoading,
@@ -380,11 +391,12 @@ function useRemoteModelList(options: {
         void modelCacheStore.ensureLoaded()
         return
       }
-      if (settingsLoading || !active || !autoFetch || !options.canLoad.value) return
+      const req = options.snapshot.value
+      if (settingsLoading || !active || !autoFetch || !req.canLoad) return
       if (!shouldAutoFetchModels(modelCacheStore.getEntry(key))) return
 
       const prefetch = () => {
-        void modelCacheStore.refresh(key, options.fetchModels, { force: false })
+        void modelCacheStore.refresh(req.cacheKey, req.fetchModels, { force: false })
       }
       // Load saved credentials immediately. Give edits time to settle before
       // asking the provider to list models for the new credentials.
@@ -402,57 +414,56 @@ function useRemoteModelList(options: {
 }
 
 const isOfficialOpenai = computed(() => isOfficialOpenAiBaseUrl(llmOpenaiBaseUrl.value))
-const canLoadOpenaiModels = computed(() => Boolean(llmOpenaiBaseUrl.value.trim() && llmOpenaiApiKey.value.trim()))
+const openaiSnapshot = computed<RemoteModelSnapshot>(() => {
+  const baseUrl = llmOpenaiBaseUrl.value
+  const apiKey = llmOpenaiApiKey.value
+  return {
+    canLoad: Boolean(baseUrl.trim() && apiKey.trim()),
+    cacheKey: buildModelCacheKey('openai', baseUrl, apiKey),
+    fetchModels: () => invoke<string[]>('list_openai_models', { baseUrl, apiKey })
+  }
+})
+const canLoadOpenaiModels = computed(() => openaiSnapshot.value.canLoad)
 const openaiModelList = useRemoteModelList({
   active: isOpenai,
   autoFetch: isOfficialOpenai,
-  cacheKey: computed(() =>
-    buildModelCacheKey('openai', llmOpenaiBaseUrl.value, llmOpenaiApiKey.value)
-  ),
-  canLoad: canLoadOpenaiModels,
-  fetchModels: () => {
-    const baseUrl = llmOpenaiBaseUrl.value
-    const apiKey = llmOpenaiApiKey.value
-    return invoke<string[]>('list_openai_models', { baseUrl, apiKey })
-  }
+  snapshot: openaiSnapshot
 })
 
-const canLoadGeminiModels = computed(() => Boolean(llmGeminiApiKey.value.trim()))
+const geminiSnapshot = computed<RemoteModelSnapshot>(() => {
+  const apiKey = llmGeminiApiKey.value
+  return {
+    canLoad: Boolean(apiKey.trim()),
+    cacheKey: buildModelCacheKey('gemini', llmModels.geminiBaseUrl, apiKey),
+    fetchModels: () => invoke<string[]>('list_gemini_models', { baseUrl: null, apiKey })
+  }
+})
+const canLoadGeminiModels = computed(() => geminiSnapshot.value.canLoad)
 const geminiModelList = useRemoteModelList({
   active: isGemini,
   autoFetch: computed(() => true),
-  cacheKey: computed(() =>
-    buildModelCacheKey('gemini', llmModels.geminiBaseUrl, llmGeminiApiKey.value)
-  ),
-  canLoad: canLoadGeminiModels,
-  fetchModels: () => {
-    const apiKey = llmGeminiApiKey.value
-    return invoke<string[]>('list_gemini_models', { baseUrl: null, apiKey })
-  }
+  snapshot: geminiSnapshot
 })
 
-const canLoadCustomModels = computed(() =>
-  Boolean(llmCustomBaseUrl.value.trim() && llmCustomApiKey.value.trim())
-)
+const customSnapshot = computed<RemoteModelSnapshot>(() => {
+  const apiMode = llmCustomApiMode.value
+  const baseUrl = llmCustomBaseUrl.value
+  const apiKey = llmCustomApiKey.value
+  const scope = apiMode === 'gemini' ? 'custom-gemini' : 'custom-openai'
+  return {
+    canLoad: Boolean(baseUrl.trim() && apiKey.trim()),
+    cacheKey: buildModelCacheKey(scope, baseUrl, apiKey),
+    fetchModels: () =>
+      apiMode === 'gemini'
+        ? invoke<string[]>('list_gemini_models', { baseUrl, apiKey })
+        : invoke<string[]>('list_openai_models', { baseUrl, apiKey })
+  }
+})
+const canLoadCustomModels = computed(() => customSnapshot.value.canLoad)
 const customModelList = useRemoteModelList({
   active: isCustom,
   autoFetch: computed(() => false),
-  cacheKey: computed(() =>
-    buildModelCacheKey(
-      llmCustomApiMode.value === 'gemini' ? 'custom-gemini' : 'custom-openai',
-      llmCustomBaseUrl.value,
-      llmCustomApiKey.value
-    )
-  ),
-  canLoad: canLoadCustomModels,
-  fetchModels: () => {
-    const apiMode = llmCustomApiMode.value
-    const baseUrl = llmCustomBaseUrl.value
-    const apiKey = llmCustomApiKey.value
-    return apiMode === 'gemini'
-      ? invoke<string[]>('list_gemini_models', { baseUrl, apiKey })
-      : invoke<string[]>('list_openai_models', { baseUrl, apiKey })
-  }
+  snapshot: customSnapshot
 })
 
 // The reasoning fields the selected provider will be sent, resolved by the

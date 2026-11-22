@@ -1622,36 +1622,57 @@ fn is_openai_text_model_alias(id: &str) -> bool {
     TEXT_ALIAS.is_match(id)
 }
 
+fn model_list_provider_error(provider: &str, error: &serde_json::Value) -> String {
+    // A gateway can echo credentials in its error body.
+    let code = error
+        .get("code")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|code| (400..=599).contains(code));
+    match code {
+        Some(code) => format!("{provider} models request rejected (provider status {code})"),
+        None => format!("{provider} models request rejected by provider"),
+    }
+}
+
 #[tauri::command]
 pub async fn list_openai_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
     let endpoint = format!("{}/models", base_url.trim().trim_end_matches('/'));
     let response = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.without_url().to_string())?
         .get(endpoint)
         .bearer_auth(api_key.trim())
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.without_url().to_string())?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("OpenAI models HTTP {}", status.as_u16()));
     }
     #[derive(Deserialize)]
     struct ModelList {
-        data: Vec<Model>,
+        data: Option<Vec<Model>>,
+        error: Option<serde_json::Value>,
     }
     #[derive(Deserialize)]
     struct Model {
         id: String,
         shutdown_date: Option<chrono::NaiveDate>,
     }
-    let result: ModelList = response.json().await.map_err(|e| e.to_string())?;
+    let result: ModelList = response
+        .json()
+        .await
+        .map_err(|e| e.without_url().to_string())?;
+    if let Some(err) = result.error {
+        return Err(model_list_provider_error("OpenAI", &err));
+    }
+    let data = result
+        .data
+        .ok_or_else(|| "OpenAI models response missing `data` field".to_string())?;
     let official = is_official_openai_base_url(&base_url);
     let today = chrono::Utc::now().date_naive();
-    let mut ids: Vec<String> = result
-        .data
+    let mut ids: Vec<String> = data
         .into_iter()
         .filter(|model| {
             !official
@@ -1686,13 +1707,13 @@ pub async fn list_gemini_models(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.without_url().to_string())?;
 
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct GeminiModelList {
-        #[serde(default)]
-        models: Vec<GeminiModelEntry>,
+        models: Option<Vec<GeminiModelEntry>>,
+        error: Option<serde_json::Value>,
         next_page_token: Option<String>,
     }
     #[derive(Deserialize)]
@@ -1715,13 +1736,22 @@ pub async fn list_gemini_models(
         if let Some(token) = page_token.as_deref().filter(|t| !t.is_empty()) {
             req = req.query(&[("pageToken", token)]);
         }
-        let response = req.send().await.map_err(|e| e.to_string())?;
+        let response = req.send().await.map_err(|e| e.without_url().to_string())?;
         let status = response.status();
         if !status.is_success() {
             return Err(format!("Gemini models HTTP {}", status.as_u16()));
         }
-        let parsed: GeminiModelList = response.json().await.map_err(|e| e.to_string())?;
-        for entry in parsed.models {
+        let parsed: GeminiModelList = response
+            .json()
+            .await
+            .map_err(|e| e.without_url().to_string())?;
+        if let Some(err) = parsed.error {
+            return Err(model_list_provider_error("Gemini", &err));
+        }
+        let entries = parsed
+            .models
+            .ok_or_else(|| "Gemini models response missing `models` field".to_string())?;
+        for entry in entries {
             let short_id = entry
                 .name
                 .trim()
@@ -2842,4 +2872,61 @@ mod tests {
         assert!(probe.tokens_per_second.is_some());
     }
 
+    async fn serve_model_list_pages(
+        pages: Vec<serde_json::Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for page in pages {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await.unwrap();
+                let body = page.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (base_url, server)
+    }
+
+    #[tokio::test]
+    async fn model_lists_report_provider_errors_without_echoing_credentials() {
+        let key = "fixture-api-key";
+        let response = serde_json::json!({
+            "error": { "code": 401, "message": format!("Invalid API key {key}") },
+        });
+        let (base_url, server) = serve_model_list_pages(vec![response.clone()]).await;
+        let err = super::list_openai_models(base_url, key.into()).await.unwrap_err();
+        server.await.unwrap();
+        assert_eq!(err, "OpenAI models request rejected (provider status 401)");
+
+        let (base_url, server) = serve_model_list_pages(vec![response]).await;
+        let err = super::list_gemini_models(Some(base_url), key.into()).await.unwrap_err();
+        server.await.unwrap();
+        assert_eq!(err, "Gemini models request rejected (provider status 401)");
+    }
+
+    #[tokio::test]
+    async fn list_gemini_models_rejects_wrong_schema_on_any_page() {
+        let first_page = serde_json::json!({
+            "models": [{ "name": "models/valid-model" }],
+            "nextPageToken": "page-2",
+        });
+        let wrong_schema = serde_json::json!({ "data": [{ "id": "gpt-5" }] });
+        for pages in [vec![wrong_schema.clone()], vec![first_page, wrong_schema]] {
+            let (base_url, server) = serve_model_list_pages(pages).await;
+            let err = super::list_gemini_models(Some(base_url), "fixture".into())
+                .await
+                .unwrap_err();
+            server.await.unwrap();
+            assert_eq!(err, "Gemini models response missing `models` field");
+        }
+    }
 }

@@ -565,6 +565,7 @@ const enUS = {
     openaiModelsFetch: 'Refresh models',
     openaiModelsNote: 'Common text models visible to your account load automatically. To use another ID, type it and press Enter.',
     openaiModelsLoading: 'Loading models…',
+    modelListLastRefreshFailed: 'The last refresh failed. Use Refresh models to try again.',
     openaiGatewayModelsNote: 'Refresh to list IDs from the gateway, or type a model ID and press Enter.',
     geminiModelsNote: 'Gemini models suitable for text polishing and correction load automatically. To use another ID, type it and press Enter.',
     customModelsNote: 'Refresh to try fetching models from this endpoint, or type a model ID and press Enter.',

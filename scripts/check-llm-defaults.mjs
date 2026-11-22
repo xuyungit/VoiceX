@@ -16,12 +16,15 @@ try {
     try {
       const { checkLlmDefault } = await server.ssrLoadModule('/src/stores/settings.spec.ts')
       checkLlmDefault(expectedMacOS)
+      const { checkLlmModelCache, checkLlmModelCachePersistence } = await server.ssrLoadModule('/src/stores/llmModels.spec.ts')
+      checkLlmModelCache()
+      await checkLlmModelCachePersistence()
       const { checkAsrModelOptions } = await server.ssrLoadModule('/src/utils/asrModels.spec.ts')
       const { checkSonioxEndpointDelay } = await server.ssrLoadModule('/src/utils/sonioxSettings.spec.ts')
       const asrOptionCount = checkAsrModelOptions()
       const sonioxCount = checkSonioxEndpointDelay()
       console.log(
-        `Model defaults, ${asrOptionCount} ASR option assertions, and ${sonioxCount} Soniox delay assertions passed (${platform} fixture).`
+        `Model defaults and list cache, ${asrOptionCount} ASR option assertions, and ${sonioxCount} Soniox delay assertions passed (${platform} fixture).`
       )
     } finally {
       await server.close()
