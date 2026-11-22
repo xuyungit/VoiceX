@@ -8,7 +8,7 @@
 //! `RUST_LOG`.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
@@ -63,8 +63,8 @@ struct DiagnosticWriter {
 
 impl DiagnosticWriter {
     fn new(path: PathBuf, limit: u64) -> io::Result<Self> {
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
-        let bytes = file.metadata()?.len();
+        let mut file = OpenOptions::new().create(true).write(true).open(&path)?;
+        let bytes = file.seek(SeekFrom::End(0))?;
         Ok(Self {
             file,
             path,
@@ -80,6 +80,7 @@ impl DiagnosticWriter {
             self.file.flush()?;
             std::fs::copy(&self.path, self.path.with_extension("log.1"))?;
             self.file.set_len(0)?;
+            self.file.seek(SeekFrom::Start(0))?;
             self.bytes = 0;
         }
         self.file.write_all(record)?;

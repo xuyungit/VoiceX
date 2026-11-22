@@ -658,10 +658,9 @@ impl AliyunBackend {
     fn begin(&self, request: TtsRequest, token: CancelToken) -> Result<(), TtsError> {
         let config = self.config()?;
         let spec = spec_for(&config.model);
+        let voice = voice_for(spec, &request).map_err(TtsError::Backend)?;
         let sample_rate = negotiate_sample_rate_among(spec.sample_rates)
             .map_err(|err| TtsError::Backend(format!("{} ({})", err, err.code())))?;
-
-        let voice = voice_for(spec, &request).map_err(TtsError::Backend)?;
         // Pitch is deliberately not sent. `pitch_rate` does apply, but halving
         // it stretched the audio to 4.2x rather than the 2x a resampling pitch
         // shift would give, so what it actually changes is unclear and the

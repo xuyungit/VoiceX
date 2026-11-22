@@ -440,7 +440,7 @@ mod tests {
     fn the_frontend_reset_button_restores_exactly_these_prompts() {
         // `llmPrompts.ts` holds the copy the settings page resets to; if the
         // two drift, "restore default" silently changes the prompt.
-        let ts = include_str!("../../../src/utils/llmPrompts.ts");
+        let ts = include_str!("../../../src/utils/llmPrompts.ts").replace("\r\n", "\n");
         assert!(
             ts.contains(DEFAULT_TRANSLATE_PROMPT_ZH),
             "zh translate prompt differs from llmPrompts.ts"

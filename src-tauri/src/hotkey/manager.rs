@@ -1430,10 +1430,12 @@ mod tests {
         let one = HotkeySnapshot::from_event(Key::Num1, &mods).unwrap();
         assert_ne!(one.to_config(), dictation);
         assert!(!one.matches_active(dictation.key_code, dictation.modifiers, dictation.uses_fn));
-        assert_eq!(
-            one.to_config().display_string(),
+        let expected_display = if cfg!(target_os = "macos") {
             "Control + Option + Command + 1"
-        );
+        } else {
+            "Ctrl + Alt + Win + 1"
+        };
+        assert_eq!(one.to_config().display_string(), expected_display);
 
         let space = HotkeySnapshot::from_event(Key::Space, &mods).unwrap();
         assert_eq!(space.to_config(), dictation);
