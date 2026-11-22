@@ -250,19 +250,25 @@ body.inserted .status-icon {
     color: var(--hud-text-pending);
 }
 
-/* Polishing: a light sweep across the text while the LLM edits it. */
+/* Polishing: a single calm non-linear light sweep across the text, followed by
+   a brief breath before the next cycle. `300%` width + `no-repeat` ensures
+   exactly one highlight crosses from off-left (`100%`) to off-right (`0%`)
+   with zero tile-wrap double-flashes. */
 body.correcting:not(.compact-batch-mode):not(.caption-mode) .text-area {
-    background: linear-gradient(100deg,
-            rgba(255, 255, 255, 0.5) 0%,
-            rgba(255, 255, 255, 0.5) 35%,
+    background-image: linear-gradient(105deg,
+            rgba(255, 255, 255, 0.56) 0%,
+            rgba(255, 255, 255, 0.56) 36%,
+            rgba(220, 226, 255, 0.80) 44%,
             #ffffff 50%,
-            rgba(255, 255, 255, 0.5) 65%,
-            rgba(255, 255, 255, 0.5) 100%);
-    background-size: 250% 100%;
+            rgba(220, 226, 255, 0.80) 56%,
+            rgba(255, 255, 255, 0.56) 64%,
+            rgba(255, 255, 255, 0.56) 100%);
+    background-size: 300% 100%;
+    background-repeat: no-repeat;
     -webkit-background-clip: text;
     background-clip: text;
     color: transparent;
-    animation: shimmer 1.3s linear infinite;
+    animation: shimmer 1.65s infinite;
 }
 
 body.correcting:not(.compact-batch-mode):not(.caption-mode) .text-area span {
@@ -270,12 +276,14 @@ body.correcting:not(.compact-batch-mode):not(.caption-mode) .text-area span {
 }
 
 @keyframes shimmer {
-    from {
+    0% {
         background-position: 100% 0;
+        animation-timing-function: cubic-bezier(0.37, 0, 0.63, 1);
     }
 
-    to {
-        background-position: -150% 0;
+    82%,
+    100% {
+        background-position: 0% 0;
     }
 }
 

@@ -1027,7 +1027,10 @@ impl SessionController {
                 && ((!state.asr_stream_finished && !state.is_correcting)
                     || is_post_recording_batch_refine);
             hud.emit_recognizing(is_recognizing);
-            if state.session_state == HotkeySessionState::Finalizing && state.asr_stream_finished {
+            if state.session_state == HotkeySessionState::Finalizing
+                && state.asr_stream_finished
+                && !state.is_correcting
+            {
                 hud.emit_recognition_stopped();
             }
         }

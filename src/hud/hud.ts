@@ -841,10 +841,10 @@ function renderMiniWave(time: number, liveLevel: number) {
   if (!miniWave || miniWave.hidden) return;
   const t = time / 1000;
   const processing = currentMode === "recognizing" || currentMode === "correcting";
-  const speed = currentMode === "correcting" ? 8 : 6;
+  const speed = 5.2;
   miniWaveNodes.forEach((bar, index) => {
     const level = processing
-      ? 0.22 + 0.42 * Math.pow(Math.max(0, Math.sin(t * speed - index * 0.9)), 1.5)
+      ? 0.22 + 0.42 * Math.pow(Math.max(0, Math.sin(t * speed - index * 0.72)), 1.5)
       : liveLevel *
         MINI_WAVE_SHAPE[index] *
         (0.85 + 0.15 * Math.sin(t * 17 + index * 2.1)) *
@@ -1236,6 +1236,7 @@ async function initListeners() {
     (event: { payload?: { is_correcting?: boolean } }) => {
       if (event.payload?.is_correcting) {
         updateStatus("correcting");
+        startWaveformLoop();
       } else if (currentMode === "correcting") {
         updateStatus("idle");
       }
@@ -1332,7 +1333,9 @@ async function initListeners() {
 
   await add("recognition:stopped", () => {
     if (!isCompactBatchMode()) {
-      updateStatus("idle");
+      if (currentMode !== "correcting" && currentMode !== "error") {
+        updateStatus("idle");
+      }
     } else {
       renderTranscript();
     }
