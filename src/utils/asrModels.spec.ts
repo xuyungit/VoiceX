@@ -33,7 +33,11 @@ export function checkAsrModelOptions() {
     ['openai', 'gpt-4o-mini-transcribe', 'batch'],
     ['soniox', 'stt-rt-v4', 'realtime'],
     ['soniox', 'stt-rt-v5', 'realtime'],
-    ['soniox', 'stt-rt-v6', 'realtime']
+    ['soniox', 'stt-rt-v6', 'realtime'],
+    ['elevenlabs', 'scribe_v3_live', 'realtime'],
+    ['elevenlabs', 'scribe_v2_realtime', 'realtime'],
+    ['elevenlabs', 'scribe_v3', 'batch'],
+    ['elevenlabs', 'scribe_v2', 'batch']
   ] as const) {
     const option = buildModelOptions(provider, mode, id, t).find(candidate => candidate.value === id)
     assert(option && !option.disabled, `Still-served option must remain selectable: ${id}`)
@@ -46,6 +50,8 @@ export function checkAsrModelOptions() {
   const gemini31 = buildModelOptions('gemini', 'batch', '', t).find(option => option.value === 'gemini-3.1-flash-lite')
   assert(gemini31 && !gemini31.disabled && gemini31.label.includes('asr.modelGemini31EarliestShutdown'), 'Gemini 3.1 Flash-Lite remains usable with its future shutdown notice')
   assert(ASR_MODEL_DEFAULTS.soniox === 'stt-rt-v6', 'Soniox must default to v6')
+  assert(ASR_MODEL_DEFAULTS.elevenlabsRealtime === 'scribe_v3_live', 'ElevenLabs realtime must default to scribe_v3_live')
+  assert(ASR_MODEL_DEFAULTS.elevenlabsBatch === 'scribe_v3', 'ElevenLabs batch must default to scribe_v3')
   assert(findAsrModel('soniox', 'stt-rt-v5')?.status === 'legacy', 'Soniox v5 must remain available as a legacy model')
   const retiredSnapshots = [
     ['qwen', 'qwen3-asr-flash-2025-09-08', 'batch'],
@@ -67,5 +73,5 @@ export function checkAsrModelOptions() {
     }
   }
   assert(findRetiredAsrModel('qwen', 'qwen3-asr-flash-filetrans-2025-11-17')?.note === 'modelRetiredFiletransNote', 'Unsupported asynchronous migration must explain its limitation')
-  return 55
+  return 61
 }

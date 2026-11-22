@@ -50,6 +50,14 @@ export function checkLlmDefault(expectedMacOS: boolean) {
     if (store.settings.geminiLiveModel !== asrModels.defaults.geminiLive || store.settings.geminiLiveModel !== 'gemini-3.5-transcribe-live') {
       throw new Error('The settings UI must use the shared current Gemini Live default')
     }
+    if (
+      store.settings.elevenlabsRealtimeModel !== asrModels.defaults.elevenlabsRealtime ||
+      store.settings.elevenlabsRealtimeModel !== 'scribe_v3_live' ||
+      store.settings.elevenlabsBatchModel !== asrModels.defaults.elevenlabsBatch ||
+      store.settings.elevenlabsBatchModel !== 'scribe_v3'
+    ) {
+      throw new Error('The settings UI must use the shared current ElevenLabs Scribe v3 defaults')
+    }
     if (store.settings.geminiRecognitionMode !== 'batch' || store.settings.geminiPostRecordingRefine !== 'off') {
       throw new Error('Gemini defaults must preserve batch mode and disable refinement')
     }

@@ -436,16 +436,18 @@ impl HistoryService {
     }
 
     pub fn elevenlabs_realtime_model_name(model: &str) -> Option<String> {
+        let default = crate::asr::models::default_model("elevenlabsRealtime");
         Some(format!(
             "ElevenLabs / {}",
-            Self::normalize_model_or_default(model, "scribe_v2_realtime")
+            Self::normalize_model_or_default(model, &default)
         ))
     }
 
     pub fn elevenlabs_batch_model_name(model: &str) -> Option<String> {
+        let default = crate::asr::models::default_model("elevenlabsBatch");
         Some(format!(
             "ElevenLabs / {}",
-            Self::normalize_model_or_default(model, "scribe_v2")
+            Self::normalize_model_or_default(model, &default)
         ))
     }
 
@@ -453,10 +455,12 @@ impl HistoryService {
         realtime_model: &str,
         batch_model: &str,
     ) -> Option<String> {
+        let realtime_default = crate::asr::models::default_model("elevenlabsRealtime");
+        let batch_default = crate::asr::models::default_model("elevenlabsBatch");
         Some(format!(
             "ElevenLabs / {} + batch refine({})",
-            Self::normalize_model_or_default(realtime_model, "scribe_v2_realtime"),
-            Self::normalize_model_or_default(batch_model, "scribe_v2")
+            Self::normalize_model_or_default(realtime_model, &realtime_default),
+            Self::normalize_model_or_default(batch_model, &batch_default)
         ))
     }
 
@@ -605,7 +609,7 @@ mod tests {
     fn elevenlabs_refine_snapshot_uses_defaults_when_models_are_empty() {
         assert_eq!(
             HistoryService::elevenlabs_realtime_batch_refine_model_name(" ", ""),
-            Some("ElevenLabs / scribe_v2_realtime + batch refine(scribe_v2)".to_string())
+            Some("ElevenLabs / scribe_v3_live + batch refine(scribe_v3)".to_string())
         );
     }
 
@@ -613,7 +617,7 @@ mod tests {
     fn elevenlabs_realtime_snapshot_uses_default_model() {
         assert_eq!(
             HistoryService::elevenlabs_realtime_model_name(" "),
-            Some("ElevenLabs / scribe_v2_realtime".to_string())
+            Some("ElevenLabs / scribe_v3_live".to_string())
         );
     }
 

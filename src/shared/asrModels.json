@@ -10,8 +10,8 @@
     "qwenBatch": "qwen3-asr-flash",
     "funasr": "fun-asr-realtime",
     "cohere": "cohere-transcribe-03-2026",
-    "elevenlabsRealtime": "scribe_v2_realtime",
-    "elevenlabsBatch": "scribe_v2",
+    "elevenlabsRealtime": "scribe_v3_live",
+    "elevenlabsBatch": "scribe_v3",
     "stepaudio": "stepaudio-3-asr-max",
     "mimo": "mimo-v2.5-asr"
   },
