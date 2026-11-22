@@ -164,12 +164,12 @@ impl SessionController {
         }
         state.transition_to_finalizing();
         if state.audio_capture_started {
-            self.stop_audio_capture("recording_timeout");
+            self.stop_audio_capture(state, "recording_timeout");
             self.emit_state_from(state);
             self.emit_countdown(None);
             self.schedule_finalize_cleanup();
         } else {
-            self.abort_pending_audio_start("recording_timeout_before_audio_started");
+            self.discard_audio_capture(state);
             self.emit_countdown(None);
             self.hide_hud_and_reset_state(state);
         }

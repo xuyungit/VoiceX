@@ -40,29 +40,26 @@ impl SessionController {
                     if !app_info.is_self {
                         crate::app_icons::record_foreground_app_async(&app_info);
                         if let Some(recent_app) = app_info.to_recent_target_app() {
-                            let app_handle = self.app_handle();
-                            tauri::async_runtime::spawn_blocking(move || {
-                                if let Err(err) =
-                                    crate::storage::remember_recent_target_app(&recent_app)
-                                {
-                                    log::warn!("Failed to remember target app: {}", err);
-                                } else if let Some(app_handle) = app_handle {
-                                    if let Err(err) = app_handle.emit(
-                                        "input:recent-target-apps-updated",
-                                        serde_json::json!({
-                                            "appName": recent_app.app_name,
-                                            "platform": recent_app.platform,
-                                            "matchKind": recent_app.match_kind,
-                                            "matchValue": recent_app.match_value,
-                                        }),
-                                    ) {
-                                        log::warn!(
-                                            "Failed to emit recent target apps update event: {}",
-                                            err
-                                        );
-                                    }
+                            if let Err(err) =
+                                crate::storage::remember_recent_target_app(&recent_app)
+                            {
+                                log::warn!("Failed to remember target app: {}", err);
+                            } else if let Some(app_handle) = self.app_handle() {
+                                if let Err(err) = app_handle.emit(
+                                    "input:recent-target-apps-updated",
+                                    serde_json::json!({
+                                        "appName": recent_app.app_name,
+                                        "platform": recent_app.platform,
+                                        "matchKind": recent_app.match_kind,
+                                        "matchValue": recent_app.match_value,
+                                    }),
+                                ) {
+                                    log::warn!(
+                                        "Failed to emit recent target apps update event: {}",
+                                        err
+                                    );
                                 }
-                            });
+                            }
                         }
                     }
                     state.session_target_app = Some(app_info);
@@ -94,7 +91,7 @@ impl SessionController {
             self.show_hud();
             self.emit_state_from(state);
 
-            self.start_audio_capture();
+            self.start_audio_capture(state);
             self.start_recording_timeout(self.effective_max_recording_minutes(state), state);
         }
 
@@ -124,14 +121,14 @@ impl SessionController {
 
         if was_recording && !state.is_recording {
             if state.audio_capture_started {
-                self.stop_audio_capture("hotkey_release");
+                self.stop_audio_capture(state, "hotkey_release");
             } else {
                 // Recording ended before asynchronous microphone startup
                 // finished: abort startup cleanly with nothing to transcribe.
                 log::info!(
                     "Recording stopped before microphone startup finished; aborting pending capture"
                 );
-                self.abort_pending_audio_start("hotkey_release_before_audio_started");
+                self.discard_audio_capture(state);
                 self.emit_countdown(None);
                 self.hide_hud_and_reset_state(state);
                 return;

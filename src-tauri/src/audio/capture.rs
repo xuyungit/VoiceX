@@ -59,6 +59,7 @@ impl Default for AudioConfig {
 }
 
 /// Handle returned when capture starts
+#[derive(Debug)]
 pub struct AudioCaptureHandle {
     pub receiver: Receiver<Vec<u8>>,
     pub viz_receiver: Receiver<AudioVisualizationFrame>,
@@ -884,6 +885,56 @@ impl AudioCaptureService {
         self.active.is_some()
     }
 
+    #[cfg(test)]
+    pub(super) fn start_synthetic_capture(
+        &mut self,
+        samples: &[i16],
+    ) -> Result<AudioCaptureHandle, AudioCaptureError> {
+        if self.is_running() {
+            return Err(AudioCaptureError::AlreadyRunning);
+        }
+
+        let sample_rate = self.config.sample_rate;
+        let channels = self.config.channels;
+        let (tx, receiver) = mpsc::channel(4);
+        let (viz_tx, viz_receiver) = mpsc::channel(4);
+        let (raw_tx, raw_rx) = std_mpsc::channel();
+        let stop_tx = raw_tx.clone();
+        let callback_state = Arc::new(CallbackState::new(sample_rate));
+        let producer = CallbackProducer {
+            raw_tx,
+            state: Arc::clone(&callback_state),
+        };
+        let worker = AudioCaptureWorker::new(
+            tx,
+            viz_tx,
+            AudioChunker::new(bytes_per_ms(sample_rate, self.config.chunk_ms)),
+            None,
+            None,
+            false,
+            sample_rate,
+        );
+        let worker_state = Arc::clone(&callback_state);
+        let worker = std::thread::spawn(move || worker.run(raw_rx, worker_state));
+        producer.enqueue_mono(samples.to_vec());
+        self.active = Some(ActiveCapture {
+            stream: None,
+            callback_state,
+            stop_tx,
+            worker: Some(worker),
+            sample_rate,
+            channels,
+        });
+
+        Ok(AudioCaptureHandle {
+            receiver,
+            viz_receiver,
+            file_path: None,
+            sample_rate,
+            channels,
+        })
+    }
+
     fn select_config(
         device: &cpal::Device,
         channels: u16,
@@ -1480,10 +1531,14 @@ mod opus_finalization_tests {
         // leaving a 400-sample tail that must be flushed before `rx` closes).
         let frame_counts = [512usize, 700, 788];
         let mut sample_idx = 0usize;
-        for count in frame_counts {
+        for (index, count) in frame_counts.into_iter().enumerate() {
             let mut stereo = Vec::with_capacity(count * 2);
             for _ in 0..count {
-                let value = 0.4 * (TAU * 440.0 * sample_idx as f32 / sample_rate as f32).sin();
+                let value = if index == 0 {
+                    0.0
+                } else {
+                    0.4 * (TAU * 440.0 * sample_idx as f32 / sample_rate as f32).sin()
+                };
                 stereo.push(value);
                 stereo.push(value);
                 sample_idx += 1;
@@ -1516,7 +1571,9 @@ mod opus_finalization_tests {
             viz_frames.push(frame);
         }
         assert_eq!(viz_frames.len(), frame_counts.len());
-        assert!(viz_frames.iter().all(|f| f.level > 0.0 && f.bands.len() == 8));
+        assert_eq!(viz_frames[0].level, 0.0);
+        assert!(viz_frames[1..].iter().all(|f| f.level > 0.0));
+        assert!(viz_frames.iter().all(|f| f.bands.len() == 8));
 
         // Refinement PCM matches total bytes (2000 samples * 2 bytes).
         let refinement_pcm = output.refinement_pcm.expect("refinement PCM captured");

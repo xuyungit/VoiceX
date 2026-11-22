@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
+use tokio_util::sync::CancellationToken;
 
 /// Soft peak gain (~ -17 dBFS) so the cue is clearly audible yet unobtrusive.
 const CUE_PEAK_GAIN: f32 = 0.13;
@@ -104,23 +105,18 @@ fn add_soft_tone(
     }
 }
 
-/// Play the ready chime on a short-lived background thread, then run
-/// `after_played` regardless of whether an output device was available.
-pub fn play_ready_chime_async(after_played: impl FnOnce() + Send + 'static) {
-    let spawned = thread::Builder::new()
-        .name("voicex-audio-cue".into())
-        .spawn(move || {
-            if let Err(err) = play_ready_chime_blocking() {
-                log::debug!("Ready audio cue skipped: {}", err);
-            }
-            after_played();
-        });
-    if let Err(err) = spawned {
-        log::warn!("Failed to spawn audio cue thread: {}", err);
+/// Called on a blocking worker with the cancellation token of the recording.
+pub fn play_ready_chime(cancellation: &CancellationToken) {
+    if let Err(err) = play_ready_chime_blocking(cancellation) {
+        log::debug!("Ready audio cue skipped: {}", err);
     }
 }
 
-fn play_ready_chime_blocking() -> Result<(), String> {
+fn play_ready_chime_blocking(cancellation: &CancellationToken) -> Result<(), String> {
+    if cancellation.is_cancelled() {
+        return Ok(());
+    }
+
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -150,15 +146,21 @@ fn play_ready_chime_blocking() -> Result<(), String> {
         Arc::clone(&finished),
     )?;
 
+    if cancellation.is_cancelled() {
+        return Ok(());
+    }
     stream
         .play()
         .map_err(|e| format!("failed to start audio cue stream: {e}"))?;
 
     let deadline = Instant::now() + Duration::from_millis(u64::from(CUE_DURATION_MS) + 220);
-    while !finished.load(Ordering::Acquire) && Instant::now() < deadline {
+    while !cancellation.is_cancelled()
+        && !finished.load(Ordering::Acquire)
+        && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(10));
     }
-    if finished.load(Ordering::Acquire) {
+    if !cancellation.is_cancelled() && finished.load(Ordering::Acquire) {
         thread::sleep(Duration::from_millis(HARDWARE_DRAIN_MS));
     }
 

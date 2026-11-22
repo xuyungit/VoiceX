@@ -43,6 +43,8 @@ jobs:
   rust:
     name: Rust checks & tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
     strategy:
       fail-fast: false
       matrix:

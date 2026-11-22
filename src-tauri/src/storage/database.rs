@@ -62,13 +62,11 @@ impl SettingsCache {
 
     fn write_through<E>(
         &self,
-        settings: &AppSettings,
+        settings: AppSettings,
         persist: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
         persist()?;
-        let mut normalized = settings.clone();
-        crate::commands::settings::normalize_text_injection_overrides(&mut normalized);
-        self.set(Some(Arc::new(normalized)));
+        self.set(Some(Arc::new(settings)));
         Ok(())
     }
 }
@@ -242,9 +240,10 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
 
     crate::post_edit::records::create_schema(&conn)?;
     super::history_search::init(path)?;
-    let initial_settings = read_settings_from_connection(&conn).ok().map(Arc::new);
     if DB.set(Mutex::new(conn)).is_ok() {
-        SETTINGS_CACHE.set(initial_settings);
+        if let Err(err) = get_settings_cached() {
+            log::warn!("Could not preload settings cache: {}", err);
+        }
     }
     log::info!("Database initialized at {:?}", path);
     Ok(())
@@ -1984,6 +1983,23 @@ pub fn load_settings_from_path(path: &Path) -> Result<AppSettings, StorageError>
     read_settings_from_connection(&conn)
 }
 
+fn decode_settings(mut raw: serde_json::Value) -> serde_json::Result<AppSettings> {
+    crate::commands::settings::migrate_llm_custom_endpoints(&mut raw);
+    crate::commands::settings::migrate_non_official_gemini_endpoint(&mut raw);
+    crate::commands::settings::migrate_openai_refine_model(&mut raw);
+    crate::commands::settings::migrate_text_injection_override_restore_flag(&mut raw);
+    crate::commands::settings::migrate_hotkey_digit_key_codes(&mut raw);
+    crate::commands::settings::migrate_volcengine_minimal_effort(&mut raw);
+    crate::commands::settings::migrate_retired_volcengine_default(&mut raw);
+    crate::commands::settings::migrate_scheduled_model_defaults(&mut raw);
+    crate::asr::models::migrate_known_model_settings(&mut raw);
+    crate::commands::settings::migrate_tts_provider_without_system_voice(&mut raw);
+    crate::commands::settings::migrate_hotkey_defaults(&mut raw);
+    let mut settings = serde_json::from_value::<AppSettings>(raw)?;
+    crate::commands::settings::normalize_text_injection_overrides(&mut settings);
+    Ok(settings)
+}
+
 fn read_settings_from_connection(conn: &Connection) -> Result<AppSettings, StorageError> {
     let value: Option<String> = conn
         .query_row(
@@ -1994,53 +2010,28 @@ fn read_settings_from_connection(conn: &Connection) -> Result<AppSettings, Stora
         .optional()
         .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
-    if let Some(json) = value {
-        match serde_json::from_str::<serde_json::Value>(&json) {
-            Ok(mut raw) => {
-                crate::commands::settings::migrate_llm_custom_endpoints(&mut raw);
-                crate::commands::settings::migrate_non_official_gemini_endpoint(&mut raw);
-                crate::commands::settings::migrate_openai_refine_model(&mut raw);
-                crate::commands::settings::migrate_text_injection_override_restore_flag(&mut raw);
-                crate::commands::settings::migrate_hotkey_digit_key_codes(&mut raw);
-                crate::commands::settings::migrate_volcengine_minimal_effort(&mut raw);
-                crate::commands::settings::migrate_retired_volcengine_default(&mut raw);
-                crate::commands::settings::migrate_scheduled_model_defaults(&mut raw);
-                crate::asr::models::migrate_known_model_settings(&mut raw);
-                crate::commands::settings::migrate_tts_provider_without_system_voice(&mut raw);
-                crate::commands::settings::migrate_hotkey_defaults(&mut raw);
-                match serde_json::from_value::<AppSettings>(raw) {
-                    Ok(mut settings) => {
-                        crate::commands::settings::normalize_text_injection_overrides(
-                            &mut settings,
-                        );
-                        Ok(settings)
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to parse settings, falling back to defaults: {}", e);
-                        Ok(AppSettings::default())
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to parse settings JSON, falling back to defaults: {}",
-                    e
-                );
-                Ok(AppSettings::default())
-            }
+    let Some(json) = value else {
+        return Ok(AppSettings::default());
+    };
+    match serde_json::from_str(&json).and_then(decode_settings) {
+        Ok(settings) => Ok(settings),
+        Err(e) => {
+            log::warn!("Failed to parse settings, falling back to defaults: {}", e);
+            Ok(AppSettings::default())
         }
-    } else {
-        Ok(AppSettings::default())
     }
 }
 
 /// Save settings
 pub fn save_settings(settings: &AppSettings) -> Result<(), StorageError> {
-    let payload = serde_json::to_string(settings)
+    let canonical = serde_json::to_value(settings)
+        .and_then(decode_settings)
+        .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
+    let payload = serde_json::to_string(&canonical)
         .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
 
     with_db(|conn| {
-        SETTINGS_CACHE.write_through(settings, || {
+        SETTINGS_CACHE.write_through(canonical, || {
             conn.execute(
                 "INSERT INTO user_config (key, value) VALUES ('app_settings', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -3422,8 +3413,10 @@ mod tests {
                 mode: " typing ".into(),
                 skip_clipboard_restore: false,
             });
+        updated.llm_volcengine_model = "doubao-seed-2-0-mini-260215".into();
+        let canonical = decode_settings(serde_json::to_value(updated).unwrap()).unwrap();
         cache
-            .write_through(&updated, || -> Result<(), &'static str> { Ok(()) })
+            .write_through(canonical, || -> Result<(), &'static str> { Ok(()) })
             .unwrap();
 
         let after_write = cache.get().expect("cache populated after write-through");
@@ -3435,6 +3428,7 @@ mod tests {
             "com.example.app"
         );
         assert_eq!(after_write.text_injection_overrides[0].mode, "typing");
+        assert_eq!(after_write.llm_volcengine_model, crate::llm::default_volcengine_model());
     }
 
     #[test]
@@ -3443,13 +3437,13 @@ mod tests {
         let mut initial = AppSettings::default();
         initial.short_sentence_threshold = 12;
         cache
-            .write_through(&initial, || -> Result<(), &'static str> { Ok(()) })
+            .write_through(initial, || -> Result<(), &'static str> { Ok(()) })
             .unwrap();
 
         let mut failed_update = AppSettings::default();
         failed_update.short_sentence_threshold = 99;
         let err = cache
-            .write_through(&failed_update, || Err("disk full"))
+            .write_through(failed_update, || Err("disk full"))
             .unwrap_err();
         assert_eq!(err, "disk full");
 

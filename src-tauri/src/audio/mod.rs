@@ -10,13 +10,7 @@ mod device;
 pub mod output_mute;
 pub(crate) mod resample;
 
-use std::{
-    path::PathBuf,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
-    },
-};
+use std::{path::PathBuf, sync::Mutex};
 
 pub use capture::{
     write_temp_wav, AudioCaptureError, AudioCaptureHandle, AudioCaptureService, AudioConfig,
@@ -36,6 +30,7 @@ struct CaptureSlot {
 pub struct AudioService {
     capture: Mutex<CaptureSlot>,
     recordings_dir: Mutex<Option<PathBuf>>,
+    preferred_device_uid: Mutex<Option<String>>,
 }
 
 impl AudioService {
@@ -60,30 +55,15 @@ impl AudioService {
         &self,
         capture_refinement_pcm: bool,
     ) -> Result<AudioCaptureHandle, AudioCaptureError> {
-        let dir = self
-            .recordings_dir
-            .lock()
-            .map_err(|_| AudioCaptureError::StartFailed("Failed to lock recordings dir".into()))?
-            .clone();
-
-        let mut slot = self
-            .capture
-            .lock()
-            .map_err(|_| AudioCaptureError::StartFailed("Audio service poisoned".into()))?;
-        let handle = slot.service.start(dir.as_deref(), capture_refinement_pcm)?;
-        slot.active_epoch = 0;
-        Ok(handle)
+        self.start_capture_if_current(0, capture_refinement_pcm, || true)
     }
 
-    /// Open microphone capture for `epoch`, atomically rolling back and
-    /// releasing the device if `is_current_epoch` becomes false before or
-    /// during startup. Publishes `opened_epoch` under the same mutex before
-    /// the post-start check so cancellation never races with a newer session.
+    /// Serialize release of a superseded session with opening the next one.
+    /// Epoch zero belongs to direct capture callers outside the session.
     pub fn start_capture_if_current(
         &self,
         epoch: u64,
         capture_refinement_pcm: bool,
-        opened_epoch: &Arc<AtomicU64>,
         is_current_epoch: impl Fn() -> bool,
     ) -> Result<AudioCaptureHandle, AudioCaptureError> {
         let dir = self
@@ -92,6 +72,18 @@ impl AudioService {
             .map_err(|_| AudioCaptureError::StartFailed("Failed to lock recordings dir".into()))?
             .clone();
 
+        self.open_capture_in_slot(epoch, is_current_epoch, |service| {
+            service.set_preferred_device(self.preferred_device()?);
+            service.start(dir.as_deref(), capture_refinement_pcm)
+        })
+    }
+
+    fn open_capture_in_slot(
+        &self,
+        epoch: u64,
+        is_current_epoch: impl Fn() -> bool,
+        open: impl FnOnce(&mut AudioCaptureService) -> Result<AudioCaptureHandle, AudioCaptureError>,
+    ) -> Result<AudioCaptureHandle, AudioCaptureError> {
         let mut slot = self
             .capture
             .lock()
@@ -100,20 +92,23 @@ impl AudioService {
             return Err(AudioCaptureError::Cancelled);
         }
 
-        let handle = slot.service.start(dir.as_deref(), capture_refinement_pcm)?;
-        slot.active_epoch = epoch;
-        opened_epoch.store(epoch, Ordering::SeqCst);
+        if epoch != 0 && slot.active_epoch != 0 && slot.active_epoch != epoch {
+            slot.active_epoch = 0;
+            discard_cancelled_files(&slot.service.stop()?);
+            if !is_current_epoch() {
+                return Err(AudioCaptureError::Cancelled);
+            }
+        }
 
+        let handle = open(&mut slot.service)?;
+        slot.active_epoch = epoch;
         if !is_current_epoch() {
             log::info!(
                 "Audio capture cancelled while opening (epoch={}); rolling back immediately",
                 epoch
             );
             slot.active_epoch = 0;
-            opened_epoch.store(0, Ordering::SeqCst);
-            if let Ok(summary) = slot.service.stop() {
-                discard_cancelled_files(&summary);
-            }
+            discard_cancelled_files(&slot.service.stop()?);
             return Err(AudioCaptureError::Cancelled);
         }
 
@@ -139,20 +134,33 @@ impl AudioService {
             .capture
             .lock()
             .map_err(|_| AudioCaptureError::StopFailed("Audio service poisoned".into()))?;
-        if !slot.service.is_running() || (slot.active_epoch != 0 && slot.active_epoch != epoch) {
+        if slot.active_epoch != epoch || !slot.service.is_running() {
             return Ok(None);
         }
         slot.active_epoch = 0;
         slot.service.stop().map(Some)
     }
 
-    pub fn set_preferred_device(&self, uid: Option<String>) -> Result<(), AudioCaptureError> {
-        let mut slot = self
-            .capture
-            .lock()
-            .map_err(|_| AudioCaptureError::StartFailed("Audio service poisoned".into()))?;
-        slot.service.set_preferred_device(uid);
+    pub fn discard_capture_for_epoch(&self, epoch: u64) -> Result<(), AudioCaptureError> {
+        if let Some(summary) = self.stop_capture_for_epoch(epoch)? {
+            discard_cancelled_files(&summary);
+        }
         Ok(())
+    }
+
+    pub fn set_preferred_device(&self, uid: Option<String>) -> Result<(), AudioCaptureError> {
+        *self
+            .preferred_device_uid
+            .lock()
+            .map_err(|_| AudioCaptureError::StartFailed("Preferred audio device lock poisoned".into()))? = uid;
+        Ok(())
+    }
+
+    fn preferred_device(&self) -> Result<Option<String>, AudioCaptureError> {
+        self.preferred_device_uid
+            .lock()
+            .map(|uid| uid.clone())
+            .map_err(|_| AudioCaptureError::StartFailed("Preferred audio device lock poisoned".into()))
     }
 
     pub fn is_running(&self) -> bool {
@@ -164,6 +172,78 @@ impl AudioService {
 
     pub fn recordings_dir(&self) -> Option<PathBuf> {
         self.recordings_dir.lock().ok().and_then(|d| d.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn new_capture_opens_before_delayed_cleanup_and_keeps_its_audio() {
+        let audio = AudioService::new();
+        let current = AtomicU64::new(1);
+        audio
+            .open_capture_in_slot(
+                1,
+                || current.load(Ordering::SeqCst) == 1,
+                |service| service.start_synthetic_capture(&[10; 1600]),
+            )
+            .unwrap();
+
+        // Force the replacement to acquire the slot before the old cleanup.
+        current.store(2, Ordering::SeqCst);
+        let mut replacement = audio
+            .open_capture_in_slot(
+                2,
+                || current.load(Ordering::SeqCst) == 2,
+                |service| service.start_synthetic_capture(&[123; 1600]),
+            )
+            .unwrap();
+        audio.discard_capture_for_epoch(1).unwrap();
+
+        assert!(audio.is_running());
+        let stopped = audio.stop_capture_for_epoch(2).unwrap().unwrap();
+        assert_eq!(stopped.duration_ms, 100);
+        let pcm = replacement.receiver.blocking_recv().unwrap();
+        assert_eq!(pcm, 123i16.to_le_bytes().repeat(1600));
+        assert!(!audio.is_running());
+    }
+
+    #[test]
+    fn cancelled_capture_is_released_when_the_blocked_device_open_returns() {
+        let audio = AudioService::new();
+        let current = AtomicU64::new(1);
+        let (opening, reached_open) = mpsc::channel();
+        let (unblock, continue_open) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let startup = scope.spawn(|| {
+                audio.open_capture_in_slot(
+                    1,
+                    || current.load(Ordering::SeqCst) == 1,
+                    move |service| {
+                        opening.send(()).unwrap();
+                        continue_open.recv_timeout(Duration::from_secs(5)).unwrap();
+                        service.start_synthetic_capture(&[0; 1600])
+                    },
+                )
+            });
+
+            reached_open.recv_timeout(Duration::from_secs(5)).unwrap();
+            current.store(2, Ordering::SeqCst);
+            unblock.send(()).unwrap();
+            assert!(matches!(
+                startup.join().unwrap(),
+                Err(AudioCaptureError::Cancelled)
+            ));
+        });
+        assert!(!audio.is_running());
+        assert!(audio.stop_capture_for_epoch(1).unwrap().is_none());
     }
 }
 

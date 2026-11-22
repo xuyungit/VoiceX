@@ -1,5 +1,6 @@
 use crate::{
     asr::{AsrEvent, AsrFailure},
+    audio::AudioCaptureHandle,
     state::{ProcessingIntent, RecordingStyle},
 };
 
@@ -62,11 +63,16 @@ pub enum SessionMessage {
     RecordingTimeout,
     FinalizeHideReady,
     ErrorDisplayDone,
-    AsrEvent(AsrEvent),
+    AsrEvent {
+        audio_epoch: u64,
+        event: AsrEvent,
+    },
     AsrStreamFinished {
+        audio_epoch: u64,
         error: Option<AsrFailure>,
     },
     AsrStartupFailed {
+        audio_epoch: u64,
         reason: String,
     },
     CorrectingStart,
@@ -85,15 +91,17 @@ pub enum SessionMessage {
         translation_trigger_mode: String,
         double_tap_window_ms: u32,
     },
-    AsrFinalTimeout,
-    RetryAsrStartup,
-    RetryAsrReconnect,
+    AsrFinalTimeout { audio_epoch: u64 },
+    RetryAsrStartup { audio_epoch: u64 },
+    RetryAsrReconnect { audio_epoch: u64 },
     AudioStarted {
         audio_epoch: u64,
-        sample_rate: u32,
-        channels: u16,
-        path: Option<String>,
+        handle: AudioCaptureHandle,
+        is_batch: bool,
     },
+    AudioInputReady { audio_epoch: u64 },
+    AudioInputTimedOut { audio_epoch: u64 },
+    AudioReadyCueFinished { audio_epoch: u64 },
     AudioStopped {
         audio_epoch: u64,
         path: Option<String>,

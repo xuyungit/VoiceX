@@ -91,6 +91,7 @@ pub struct AppState {
     pub(crate) session_record_id: Option<uuid::Uuid>,
     pub(crate) session_start: Option<Instant>,
     pub(crate) audio_capture_started: bool,
+    pub(crate) audio_feedback: Option<crate::session::AudioFeedback>,
     pub(crate) session_audio_path: Option<PathBuf>,
     pub(crate) session_refinement_audio_path: Option<PathBuf>,
     pub(crate) session_duration_ms: Option<u64>,
@@ -160,6 +161,7 @@ impl AppState {
             transcript_text: String::new(),
             session_start: None,
             audio_capture_started: false,
+            audio_feedback: None,
             session_audio_path: None,
             session_refinement_audio_path: None,
             session_id: None,
@@ -399,6 +401,7 @@ impl AppState {
         self.transcript_text.clear();
         self.session_start = None;
         self.audio_capture_started = false;
+        self.audio_feedback = None;
         self.session_id = None;
         self.session_record_id = None;
         self.session_audio_path = None;

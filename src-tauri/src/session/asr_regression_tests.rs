@@ -61,7 +61,11 @@ async fn run_regressions(directory: &Path) {
     let controller = SessionController::default();
     let mut state = AppState::new();
     state.handle_hotkey_pressed();
-    controller.handle_message(&mut state, SessionMessage::AsrStartupFailed { reason });
+    let audio_epoch = controller.next_audio_epoch();
+    controller.handle_message(
+        &mut state,
+        SessionMessage::AsrStartupFailed { audio_epoch, reason },
+    );
     assert!(!state.is_recording);
     assert!(state
         .terminal_error_message
@@ -72,6 +76,13 @@ async fn run_regressions(directory: &Path) {
 
     crate::storage::init_database(&directory.join("history.db")).unwrap();
     let mut settings = AppSettings::default();
+    let mut legacy_settings = settings.clone();
+    legacy_settings.llm_volcengine_model = "doubao-seed-2-0-mini-260215".into();
+    crate::storage::save_settings(&legacy_settings).unwrap();
+    let cached = crate::storage::get_settings_cached().unwrap();
+    let persisted = crate::storage::load_settings_from_path(&directory.join("history.db")).unwrap();
+    assert_eq!(cached.llm_volcengine_model, crate::llm::default_volcengine_model());
+    assert_eq!(cached.llm_volcengine_model, persisted.llm_volcengine_model);
     settings.asr_provider_type = "openai".into();
     settings.openai_asr_mode = "batch".into();
     settings.openai_asr_model = "whisper-1".into();

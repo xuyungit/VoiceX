@@ -1,4 +1,3 @@
-use serde_json::json;
 use std::path::PathBuf;
 
 use crate::{
@@ -93,12 +92,12 @@ impl SessionController {
             return;
         };
         let controller = self.clone();
+        let audio_epoch = self.current_audio_epoch();
         if let Ok(mut guard) = self.asr_task.lock() {
             if let Some(handle) = guard.take() {
                 handle.abort();
             }
 
-            let maybe_hud = self.hud_service();
             let controller_for_events = controller.clone();
             let controller_for_finish = controller.clone();
             let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -117,36 +116,23 @@ impl SessionController {
                             rx,
                             cancel_token,
                             move |evt| {
-                                if evt.is_final {
-                                    log::debug!("ASR event (final): {}", evt.text);
-                                } else {
-                                    log::debug!("ASR event (partial): {}", evt.text);
-                                }
-                                controller_for_events
-                                    .send_message(SessionMessage::AsrEvent(evt.clone()));
-
-                                if let Some(hud) = &maybe_hud {
-                                    hud.emit_transcript(
-                                        &evt.text,
-                                        evt.committed_len,
-                                        evt.is_final,
-                                    );
-                                    let event_name = if evt.is_final {
-                                        "recognition:final"
-                                    } else {
-                                        "recognition:partial"
-                                    };
-                                    hud.emit_recognition(event_name, json!({ "text": evt.text }));
-                                }
+                                controller_for_events.send_message(SessionMessage::AsrEvent {
+                                    audio_epoch,
+                                    event: evt,
+                                });
                             },
                             move |error| {
-                                controller_for_finish
-                                    .send_message(SessionMessage::AsrStreamFinished { error });
+                                controller_for_finish.send_message(
+                                    SessionMessage::AsrStreamFinished { audio_epoch, error },
+                                );
                             },
                         )
                         .await;
                     if let Err(reason) = result {
-                        controller.send_message(SessionMessage::AsrStartupFailed { reason });
+                        controller.send_message(SessionMessage::AsrStartupFailed {
+                            audio_epoch,
+                            reason,
+                        });
                     }
                 });
 
@@ -253,7 +239,7 @@ impl SessionController {
         self.cancel_auto_hide();
 
         if state.is_recording {
-            self.stop_audio_capture("asr_stream_failed");
+            self.stop_audio_capture(state, "asr_stream_failed");
         }
         state.transition_to_finalizing();
         self.stop_asr_audio_bridge();
