@@ -101,7 +101,7 @@ One hotkey, three gestures:
 
 | Gesture | Mode | Behavior |
 |---|---|---|
-| **Tap** (press & release) | Hands-free | Records until a silence timeout or the maximum duration; no need to hold anything. |
+| **Tap** (press & release) | Hands-free | Records until you tap the hotkey again or reach the maximum duration; no need to hold anything. |
 | **Hold** (press & hold) | Push-to-talk | Records while the hotkey is held; release to finish. |
 | **Double-tap** | Translate | Like hands-free, but an LLM translates the result to English (requires an LLM). |
 
@@ -166,7 +166,7 @@ Translate-and-read has its own target language, LLM, and voice options, plus swi
 
 Cloud engines stream audio; startup time varies by provider and network, and long selections are synthesized in pieces. Voice and supported controls are saved per engine and can be previewed; some Alibaba Cloud models also accept a one-line description of the speaking style.
 
-DeepSeek ASR and TTS share the DeepSeek LLM API key; speech rate is not adjustable. API calls have been tested; in-app validation remains pending.
+DeepSeek ASR and TTS share the DeepSeek LLM API key; speech rate is not adjustable.
 
 **Windows:** there is no system voice, so Edge online speech is the default. Apps running as administrator cannot be read unless VoiceX also runs as administrator.
 
