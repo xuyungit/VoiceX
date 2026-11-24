@@ -6,3 +6,4 @@ pub mod hlc;
 pub mod merge;
 pub mod payloads;
 pub mod scope;
+pub mod store;

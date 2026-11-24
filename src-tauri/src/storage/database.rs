@@ -240,6 +240,7 @@ pub fn init_database(path: &Path) -> Result<(), StorageError> {
     migrate_settings_blob(&conn);
 
     crate::post_edit::records::create_schema(&conn)?;
+    crate::sync_v2::store::init_schema(&conn)?;
     super::history_search::init(path)?;
     if DB.set(Mutex::new(conn)).is_ok() {
         if let Err(err) = get_settings_cached() {
@@ -919,6 +920,7 @@ fn delete_history_record_internal(id: &str, warn_on_missing: bool) -> Result<(),
         let tx = conn.unchecked_transaction()
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
         crate::post_edit::records::delete_source(&tx, id)?;
+        crate::sync_v2::store::on_local_history_deleted_tx(&tx, id, warn_on_missing)?;
         let affected = tx
             .execute("DELETE FROM history_record WHERE id = ?1", params![id])
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
@@ -1353,7 +1355,10 @@ pub fn increment_device_tts_stats(
     let now = Utc::now().to_rfc3339();
 
     with_db(|conn| {
-        conn.execute(
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        tx.execute(
             "UPDATE device_usage_stats
              SET tts_read_count = tts_read_count + ?1,
                  tts_translate_count = tts_translate_count + ?2,
@@ -1374,7 +1379,9 @@ pub fn increment_device_tts_stats(
         )
         .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
-        let counters = conn
+        crate::sync_v2::store::on_local_tts_incremented_tx(&tx, trimmed)?;
+
+        let counters = tx
             .query_row(
                 "SELECT tts_read_count, tts_translate_count, tts_characters,
                         tts_duration_ms, tts_llm_count
@@ -1382,6 +1389,9 @@ pub fn increment_device_tts_stats(
                 params![trimmed],
                 |row| TtsCounters::from_row(row, 0),
             )
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+        tx.commit()
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
         Ok(counters)
@@ -1714,7 +1724,8 @@ fn increment_local_usage_stats_for_record_conn(
         record.duration_ms,
         i64::from(record.llm_invoked),
         &record.timestamp,
-    )
+    )?;
+    crate::sync_v2::store::on_local_history_inserted_tx(conn, record, &local_date)
 }
 
 fn range_start_date(range: AppUsageRange, today: NaiveDate) -> Option<String> {
@@ -3038,6 +3049,7 @@ mod tests {
              );",
         )
         .unwrap();
+        crate::sync_v2::store::init_schema(&conn).unwrap();
         conn
     }
 

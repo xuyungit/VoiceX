@@ -151,6 +151,20 @@ pub fn create_schema(conn: &Connection) -> Result<(), StorageError> {
          CREATE TABLE IF NOT EXISTS post_edit_deleted (
             kind TEXT NOT NULL, id TEXT NOT NULL, timestamp TEXT NOT NULL,
             PRIMARY KEY(kind, id)
+         );
+         CREATE TABLE IF NOT EXISTS history_edit_versions (
+            edit_id TEXT PRIMARY KEY,
+            record_id TEXT NOT NULL,
+            space_id TEXT,
+            source_device_id TEXT NOT NULL,
+            edit_kind TEXT NOT NULL,
+            parent_edit_ids_json TEXT NOT NULL DEFAULT '[]',
+            hlc TEXT NOT NULL,
+            edited_at TEXT NOT NULL,
+            final_text TEXT,
+            metadata_json TEXT,
+            is_shared INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
          );",
     )
     .map_err(sql)?;
@@ -313,6 +327,8 @@ pub(super) fn insert(conn: &Connection, record: &Record) -> Result<bool, Storage
         "INSERT INTO post_edit_record(id,source_id,timestamp,payload)
          SELECT ?1,?2,?3,?4 WHERE NOT EXISTS (
             SELECT 1 FROM post_edit_deleted WHERE (kind='record' AND id=?1) OR (kind='source' AND id=?2)
+         ) AND NOT EXISTS (
+            SELECT 1 FROM history_edit_versions WHERE record_id=?2 AND edit_kind IN ('manual', 'manual_restore')
          ) AND EXISTS (
             SELECT 1 FROM history_record WHERE id=?2 AND text=?5
                 AND (edit_source IS NULL OR edit_source='observed')
@@ -342,8 +358,35 @@ pub fn set_final_text(source_id: &str, text: &str) -> Result<FinalText, StorageE
     let policy = POLICY.lock().unwrap();
     let records_enabled = policy.settings.mode == Mode::Records;
     let result = storage::with_db(|conn| {
+        let now = Utc::now();
         let tx = conn.unchecked_transaction().map_err(sql)?;
-        let result = apply_final_text(&tx, source_id, text, records_enabled, Utc::now())?;
+        let result = apply_final_text(&tx, source_id, text, records_enabled, now)?;
+        let edit_id = uuid::Uuid::new_v4().to_string();
+        let edited_at = timestamp(now);
+        match result.edited_text.as_deref() {
+            Some(final_text) => {
+                crate::sync_v2::store::on_local_edit_applied_tx(
+                    &tx,
+                    source_id,
+                    &edit_id,
+                    voicex_sync_protocol::EditKind::Manual,
+                    Some(final_text),
+                    &edited_at,
+                    None,
+                )?;
+            }
+            None => {
+                crate::sync_v2::store::on_local_edit_applied_tx(
+                    &tx,
+                    source_id,
+                    &edit_id,
+                    voicex_sync_protocol::EditKind::ManualRestore,
+                    None,
+                    &edited_at,
+                    None,
+                )?;
+            }
+        }
         tx.commit().map_err(sql)?;
         Ok(result)
     })?;
@@ -462,8 +505,29 @@ pub fn save(ticket: CaptureTicket, record: &Record) -> Result<(), StorageError> 
         return Ok(());
     }
     let result = storage::with_db(|conn| {
-        cleanup(conn)?;
-        insert(conn, record)
+        let tx = conn.unchecked_transaction().map_err(sql)?;
+        cleanup(&tx)?;
+        let inserted = insert(&tx, record)?;
+        if inserted {
+            let meta = crate::sync_v2::payloads::EditMetadataPayload {
+                complete: record.complete,
+                end_reason: Some(record.end_reason.clone()),
+                insertions: record.insertions,
+                deletions: record.deletions,
+                substitutions: record.substitutions,
+            };
+            crate::sync_v2::store::on_local_edit_applied_tx(
+                &tx,
+                &record.record_id,
+                &record.id,
+                voicex_sync_protocol::EditKind::Observed,
+                Some(&record.edited_text),
+                &record.last_observed_at,
+                Some(meta),
+            )?;
+        }
+        tx.commit().map_err(sql)?;
+        Ok(inserted)
     });
     match &result {
         Err(error) => *SAVE_ERROR.lock().unwrap() = Some(error.to_string()),
@@ -541,6 +605,19 @@ pub fn delete_record(id: &str, source: Option<&str>) -> Result<(), StorageError>
     let source = storage::with_db(|conn| {
         let tx = conn.unchecked_transaction().map_err(sql)?;
         let source = discard_edit(&tx, id, source)?;
+        if let Some(ref source_id) = source {
+            let edit_id = uuid::Uuid::new_v4().to_string();
+            let edited_at = timestamp(Utc::now());
+            crate::sync_v2::store::on_local_edit_applied_tx(
+                &tx,
+                source_id,
+                &edit_id,
+                voicex_sync_protocol::EditKind::ManualRestore,
+                None,
+                &edited_at,
+                None,
+            )?;
+        }
         tx.commit().map_err(sql)?;
         Ok(source)
     })?;

@@ -105,7 +105,19 @@ const enUS = {
     countUnit: '{count} uses',
     avgCharsPerUse: 'avg {count}',
     charsUnit: '{count} chars',
-    emptyApps: 'No app injection records in this period yet'
+    emptyApps: 'No app injection records in this period yet',
+    scopeAllDevices: 'All devices',
+    scopeLocalOnly: 'This device',
+    otherDevicesSynced: 'Other devices last synced',
+    syncTimeUnknown: 'Not synced',
+    modelUsageSection: 'Model usage',
+    modelKindAsr: 'ASR models',
+    modelKindLlm: 'LLM models',
+    emptyModels: 'No model usage records in this period yet',
+    modelUnattributedAsr: '{count} dictations have no recorded ASR model',
+    modelUnattributedLlm: '{count} dictations invoked an LLM without a recorded model name',
+    modelNoLlm: '{count} without LLM',
+    modelUndated: '{count} older dictations have no date or model breakdown'
   },
   permissions: {
     title: 'Finish setting up VoiceX',

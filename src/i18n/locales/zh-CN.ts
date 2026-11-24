@@ -105,7 +105,19 @@ const zhCN = {
     countUnit: '{count} 次',
     avgCharsPerUse: '均 {count} 字',
     charsUnit: '{count} 字',
-    emptyApps: '该时间段内暂无应用注入记录'
+    emptyApps: '该时间段内暂无应用注入记录',
+    scopeAllDevices: '全部设备',
+    scopeLocalOnly: '仅本机',
+    otherDevicesSynced: '其他设备最近同步',
+    syncTimeUnknown: '未同步',
+    modelUsageSection: '模型用量',
+    modelKindAsr: 'ASR 模型',
+    modelKindLlm: 'LLM 模型',
+    emptyModels: '该时间段内暂无模型用量记录',
+    modelUnattributedAsr: '另有 {count} 次听写未记录 ASR 模型',
+    modelUnattributedLlm: '另有 {count} 次调用过 LLM 但模型名未知',
+    modelNoLlm: '{count} 次未调用 LLM',
+    modelUndated: '另有 {count} 次早期听写无日期与模型明细'
   },
   permissions: {
     title: '完成 VoiceX 的权限设置',

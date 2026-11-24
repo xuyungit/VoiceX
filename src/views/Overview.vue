@@ -2,7 +2,13 @@
 import { onMounted, computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NEmpty } from 'naive-ui'
-import { useHistoryStore, type AppUsageRange, type AppUsageStat } from '../stores/history'
+import {
+  useHistoryStore,
+  type AppUsageRange,
+  type AppUsageStat,
+  type ModelUsageItem,
+  type OverviewScope,
+} from '../stores/history'
 import { useSettingsStore } from '../stores/settings'
 import { formatDictationHotkey } from '../utils/hotkey'
 import {
@@ -16,6 +22,7 @@ import AppIcon from '../components/AppIcon.vue'
 
 type OverviewTab = 'core' | 'insights'
 type AppSortBy = 'count' | 'chars' | 'duration'
+type ModelKindTab = 'asr' | 'llm'
 
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
@@ -25,6 +32,7 @@ const activeTab = ref<OverviewTab>('core')
 const activityMetric = ref<ActivityMetric>('chars')
 const activityMode = ref<ActivityMode>('daily')
 const appSortBy = ref<AppSortBy>('count')
+const modelKindTab = ref<ModelKindTab>('asr')
 
 const hoveredCell = ref<ActivityCell | null>(null)
 const tooltipStyle = ref<{ left: string; top: string }>({ left: '0px', top: '0px' })
@@ -369,13 +377,88 @@ function showAppSubKey(item: AppUsageStat): boolean {
 }
 
 function selectRange(range: AppUsageRange) {
-  void historyStore.loadAppStats(range)
+  void Promise.all([historyStore.loadAppStats(range), historyStore.loadModelStats(range)])
 }
+
+function selectOverviewScope(scope: OverviewScope) {
+  void historyStore.setOverviewScope(scope)
+}
+
+const otherSyncedDevices = computed(() =>
+  historyStore.overviewDevices.filter(device => !device.isLocal),
+)
+
+function formatDeviceSyncTime(iso: string | null): string {
+  if (!iso) return t('overview.syncTimeUnknown')
+  const dt = new Date(iso)
+  if (Number.isNaN(dt.getTime())) return t('overview.syncTimeUnknown')
+  return new Intl.DateTimeFormat(locale.value, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(dt)
+}
+
+function formatPlatformLabel(platform: string): string {
+  const lower = platform.trim().toLowerCase()
+  if (lower === 'macos') return 'macOS'
+  if (lower === 'windows') return 'Windows'
+  return platform
+}
+
+const activeModelItems = computed<ModelUsageItem[]>(() =>
+  modelKindTab.value === 'asr'
+    ? historyStore.modelStats.asrModels
+    : historyStore.modelStats.llmModels,
+)
+
+const activeModelTotals = computed(() => {
+  const items = activeModelItems.value
+  const totalCount = items.reduce((sum, item) => sum + item.usageCount, 0)
+  const maxCount = items.reduce((max, item) => Math.max(max, item.usageCount), 0)
+  return { totalCount, maxCount }
+})
+
+function modelSharePct(item: ModelUsageItem): number {
+  const total = activeModelTotals.value.totalCount
+  if (total <= 0) return 0
+  return Math.round((item.usageCount / total) * 100)
+}
+
+function modelBarWidthPct(item: ModelUsageItem): number {
+  const max = activeModelTotals.value.maxCount
+  if (max <= 0) return 0
+  return Math.max(4, Math.round((item.usageCount / max) * 100))
+}
+
+const modelFootnoteParts = computed<string[]>(() => {
+  const m = historyStore.modelStats
+  const parts: string[] = []
+  if (modelKindTab.value === 'asr') {
+    if (m.unattributedAsrCount > 0) {
+      parts.push(t('overview.modelUnattributedAsr', { count: formatCount(m.unattributedAsrCount) }))
+    }
+  } else {
+    if (m.unattributedLlmCount > 0) {
+      parts.push(t('overview.modelUnattributedLlm', { count: formatCount(m.unattributedLlmCount) }))
+    }
+    if (m.noLlmCount > 0) {
+      parts.push(t('overview.modelNoLlm', { count: formatCount(m.noLlmCount) }))
+    }
+  }
+  if (m.undatedCount > 0) {
+    parts.push(t('overview.modelUndated', { count: formatCount(m.undatedCount) }))
+  }
+  return parts
+})
 
 async function refreshInsights() {
   const tasks: Array<Promise<unknown>> = [
     historyStore.loadAppStats(historyStore.appUsageRange),
+    historyStore.loadModelStats(historyStore.appUsageRange),
     historyStore.loadDailyActivity(),
+    historyStore.loadOverviewDevices(),
   ]
   if (historyStore.appUsageRange !== 'week') {
     tasks.push(historyStore.loadWeeklyTopApps())
@@ -400,27 +483,47 @@ onMounted(async () => {
     <div class="page-header">
       <div class="header-top">
         <h1 class="page-title">{{ t('overview.title') }}</h1>
-        <div class="segmented-control" role="tablist" :aria-label="t('overview.title')">
-          <button
-            type="button"
-            role="tab"
-            class="segmented-item"
-            :class="{ active: activeTab === 'core' }"
-            :aria-selected="activeTab === 'core'"
-            @click="activeTab = 'core'"
-          >
-            {{ t('overview.tabCore') }}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            class="segmented-item"
-            :class="{ active: activeTab === 'insights' }"
-            :aria-selected="activeTab === 'insights'"
-            @click="activeTab = 'insights'"
-          >
-            {{ t('overview.tabActivityAndApps') }}
-          </button>
+        <div class="header-controls">
+          <div class="segmented-control compact" role="group" :aria-label="t('overview.scopeAllDevices')">
+            <button
+              type="button"
+              class="segmented-item"
+              :class="{ active: historyStore.overviewScope === 'all' }"
+              @click="selectOverviewScope('all')"
+            >
+              {{ t('overview.scopeAllDevices') }}
+            </button>
+            <button
+              type="button"
+              class="segmented-item"
+              :class="{ active: historyStore.overviewScope === 'local' }"
+              @click="selectOverviewScope('local')"
+            >
+              {{ t('overview.scopeLocalOnly') }}
+            </button>
+          </div>
+          <div class="segmented-control" role="tablist" :aria-label="t('overview.title')">
+            <button
+              type="button"
+              role="tab"
+              class="segmented-item"
+              :class="{ active: activeTab === 'core' }"
+              :aria-selected="activeTab === 'core'"
+              @click="activeTab = 'core'"
+            >
+              {{ t('overview.tabCore') }}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              class="segmented-item"
+              :class="{ active: activeTab === 'insights' }"
+              :aria-selected="activeTab === 'insights'"
+              @click="activeTab = 'insights'"
+            >
+              {{ t('overview.tabActivityAndApps') }}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -441,6 +544,20 @@ onMounted(async () => {
           <span class="info-pill-label">{{ t('overview.syncStatus') }}</span>
           <span class="info-pill-value" :class="{ off: !settingsStore.settings.syncEnabled }">{{ syncDisplay }}</span>
         </div>
+      </div>
+
+      <div
+        v-if="historyStore.overviewScope === 'all' && otherSyncedDevices.length > 0"
+        class="device-sync-strip"
+      >
+        <span class="device-sync-label">{{ t('overview.otherDevicesSynced') }}:</span>
+        <span
+          v-for="dev in otherSyncedDevices"
+          :key="dev.deviceId"
+          class="device-sync-item"
+        >
+          {{ dev.deviceName }} ({{ formatDeviceSyncTime(dev.lastSyncedAt) }})
+        </span>
       </div>
     </div>
 
@@ -658,6 +775,12 @@ onMounted(async () => {
                     <div class="app-title-line">
                       <span class="app-rank">{{ index + 1 }}.</span>
                       <span class="app-name">{{ item.appName }}</span>
+                      <span
+                        v-if="historyStore.overviewScope === 'all' && item.platform"
+                        class="platform-tag"
+                      >
+                        {{ formatPlatformLabel(item.platform) }}
+                      </span>
                       <span v-if="showAppSubKey(item)" class="app-key">{{ item.appKey }}</span>
                     </div>
                     <div class="app-bar-track">
@@ -677,6 +800,66 @@ onMounted(async () => {
               </div>
             </div>
           </template>
+        </div>
+      </section>
+
+      <section class="insights-section">
+        <div class="insights-header">
+          <h2 class="section-title">{{ t('overview.modelUsageSection') }}</h2>
+          <div class="insights-controls">
+            <div class="segmented-control compact">
+              <button
+                type="button"
+                class="segmented-item"
+                :class="{ active: modelKindTab === 'asr' }"
+                @click="modelKindTab = 'asr'"
+              >
+                {{ t('overview.modelKindAsr') }}
+              </button>
+              <button
+                type="button"
+                class="segmented-item"
+                :class="{ active: modelKindTab === 'llm' }"
+                @click="modelKindTab = 'llm'"
+              >
+                {{ t('overview.modelKindLlm') }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="surface-card app-panel">
+          <div v-if="activeModelItems.length === 0" class="app-empty">
+            <NEmpty :description="t('overview.emptyModels')" />
+          </div>
+          <div v-else class="app-list">
+            <div v-for="(item, index) in activeModelItems" :key="item.modelName" class="app-row">
+              <div class="app-main">
+                <div class="app-info">
+                  <div class="app-title-line">
+                    <span class="app-rank">{{ index + 1 }}.</span>
+                    <span class="app-name">{{ item.modelName }}</span>
+                  </div>
+                  <div class="app-bar-track">
+                    <div class="app-bar-fill" :style="{ width: `${modelBarWidthPct(item)}%` }" />
+                  </div>
+                </div>
+              </div>
+              <div class="app-metrics">
+                <div class="app-metric-primary">
+                  {{ t('overview.countUnit', { count: formatCount(item.usageCount) }) }}
+                  <span class="app-share">({{ modelSharePct(item) }}%)</span>
+                </div>
+                <div class="app-metric-secondary">
+                  {{ t('overview.charsUnit', { count: formatCharacters(item.totalCharacters) }) }}
+                  · {{ formatCompactAppDuration(item.totalDurationMs) }}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-if="modelFootnoteParts.length > 0" class="model-footnote">
+            {{ modelFootnoteParts.join(' · ') }}
+          </div>
         </div>
       </section>
     </template>
@@ -1196,6 +1379,48 @@ onMounted(async () => {
 
 .app-metric-secondary {
   margin-top: 2px;
+  font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.device-sync-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
+}
+
+.device-sync-label {
+  color: var(--color-text-secondary);
+}
+
+.device-sync-item {
+  font-variant-numeric: tabular-nums;
+}
+
+.platform-tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-tertiary);
+}
+
+.model-footnote {
+  padding-top: 10px;
+  margin-top: 6px;
+  border-top: 1px solid var(--color-border);
   font-size: var(--font-xs);
   color: var(--color-text-tertiary);
 }

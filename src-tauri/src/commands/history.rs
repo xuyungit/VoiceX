@@ -5,6 +5,7 @@ use crate::services::sync_service::SyncService;
 use crate::storage::{
     AppUsageRange, AppUsageStat, DailyActivityResponse, HistoryRecord, HistoryRecordType, UsageStats,
 };
+use crate::sync_v2::store::{ModelUsageResponse, OverviewDeviceSyncInfo, OverviewScope};
 use tauri::State;
 
 /// Allocate a search generation and cancel older reads without touching the writer.
@@ -92,13 +93,19 @@ pub async fn delete_history_record(id: String, sync: State<'_, SyncService>) -> 
     .map_err(|e| e.to_string())?
 }
 
-/// Get usage statistics
+/// Get usage statistics (defaults to all devices; pass `scope = "local"` for this device only).
 #[tauri::command]
-pub async fn get_usage_stats() -> Result<UsageStats, String> {
-    tauri::async_runtime::spawn_blocking(crate::storage::get_usage_stats)
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn get_usage_stats(scope: Option<OverviewScope>) -> Result<UsageStats, String> {
+    let scope = scope.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        let device_id = crate::storage::get_or_create_device_id().map_err(|e| e.to_string())?;
+        crate::storage::with_db(|conn| {
+            crate::sync_v2::store::get_overview_usage_stats_in(conn, &device_id, scope)
+        })
         .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Get usage statistics for the current device.
@@ -112,24 +119,85 @@ pub async fn get_local_usage_stats() -> Result<UsageStats, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Get per-app dictation usage statistics for the current device.
+/// Get per-app dictation usage statistics across all devices or the current device.
 #[tauri::command]
-pub async fn get_app_usage_stats(range: Option<AppUsageRange>) -> Result<Vec<AppUsageStat>, String> {
+pub async fn get_app_usage_stats(
+    range: Option<AppUsageRange>,
+    scope: Option<OverviewScope>,
+) -> Result<Vec<AppUsageStat>, String> {
     let range = range.unwrap_or_default();
+    let scope = scope.unwrap_or_default();
     tauri::async_runtime::spawn_blocking(move || {
         let device_id = crate::storage::get_or_create_device_id().map_err(|e| e.to_string())?;
-        crate::storage::get_app_usage_stats(&device_id, range).map_err(|e| e.to_string())
+        let today = chrono::Local::now().date_naive();
+        crate::storage::with_db(|conn| {
+            crate::sync_v2::store::get_app_usage_stats_scoped_in(
+                conn,
+                &device_id,
+                scope,
+                range,
+                today,
+            )
+        })
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// Get daily dictation activity for the 52-week dot grid on the current device.
+/// Get daily dictation activity for the 52-week dot grid.
 #[tauri::command]
-pub async fn get_daily_activity() -> Result<DailyActivityResponse, String> {
+pub async fn get_daily_activity(
+    scope: Option<OverviewScope>,
+) -> Result<DailyActivityResponse, String> {
+    let scope = scope.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        let device_id = crate::storage::get_or_create_device_id().map_err(|e| e.to_string())?;
+        let today = chrono::Local::now().date_naive();
+        crate::storage::with_db(|conn| {
+            crate::sync_v2::store::get_daily_activity_scoped_in(conn, &device_id, scope, today)
+        })
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Get ASR and LLM model usage breakdown for Overview insights.
+#[tauri::command]
+pub async fn get_model_usage_stats(
+    range: Option<AppUsageRange>,
+    scope: Option<OverviewScope>,
+) -> Result<ModelUsageResponse, String> {
+    let range = range.unwrap_or_default();
+    let scope = scope.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        let device_id = crate::storage::get_or_create_device_id().map_err(|e| e.to_string())?;
+        let today = chrono::Local::now().date_naive();
+        crate::storage::with_db(|conn| {
+            crate::sync_v2::store::get_model_usage_stats_scoped_in(
+                conn,
+                &device_id,
+                scope,
+                range,
+                today,
+            )
+        })
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// List known synced devices and their most recent sync time for Overview.
+#[tauri::command]
+pub async fn get_overview_devices() -> Result<Vec<OverviewDeviceSyncInfo>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let device_id = crate::storage::get_or_create_device_id().map_err(|e| e.to_string())?;
-        crate::storage::get_daily_activity(&device_id).map_err(|e| e.to_string())
+        crate::storage::with_db(|conn| {
+            crate::sync_v2::store::get_overview_devices_in(conn, &device_id)
+        })
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

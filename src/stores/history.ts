@@ -4,6 +4,33 @@ import { invoke } from '@tauri-apps/api/core'
 
 export type HistoryRecordType = 'all' | 'dictation' | 'translation' | 'translate_read' | 'failed'
 export type AppUsageRange = 'today' | 'week' | 'month' | 'all'
+export type OverviewScope = 'all' | 'local'
+
+export interface ModelUsageItem {
+    modelName: string
+    usageCount: number
+    totalCharacters: number
+    totalDurationMs: number
+    aiCorrectionCount: number
+}
+
+export interface ModelUsageResponse {
+    asrModels: ModelUsageItem[]
+    llmModels: ModelUsageItem[]
+    totalDictations: number
+    unattributedAsrCount: number
+    unattributedLlmCount: number
+    noLlmCount: number
+    undatedCount: number
+}
+
+export interface OverviewDeviceSyncInfo {
+    deviceId: string
+    deviceName: string
+    platform: string
+    isLocal: boolean
+    lastSyncedAt: string | null
+}
 
 export interface HistoryRecord {
     id: string
@@ -111,13 +138,25 @@ export const useHistoryStore = defineStore('history', () => {
     const targetAppKey = ref<string | null>(null)
     const hasFilters = computed(() => Boolean(searchQuery.value) || recordType.value !== 'all' || Boolean(targetAppKey.value))
     const statsRevision = ref(0)
+    const overviewScope = ref<OverviewScope>('all')
     const appUsageRange = ref<AppUsageRange>('week')
     const appStats = ref<AppUsageStat[]>([])
     const weeklyTopApps = ref<AppUsageStat[]>([])
     const weeklyTotalCount = ref(0)
     const allAppsForFilter = ref<AppUsageStat[]>([])
     const dailyActivity = ref<DailyActivityResponse | null>(null)
+    const modelStats = ref<ModelUsageResponse>({
+        asrModels: [],
+        llmModels: [],
+        totalDictations: 0,
+        unattributedAsrCount: 0,
+        unattributedLlmCount: 0,
+        noLlmCount: 0,
+        undatedCount: 0,
+    })
+    const overviewDevices = ref<OverviewDeviceSyncInfo[]>([])
     let appStatsGeneration = 0
+    let modelStatsGeneration = 0
     // The app list and teaser can request weekly data independently.
     let weeklyStatsGeneration = 0
     const pageSize = 20
@@ -184,7 +223,7 @@ export const useHistoryStore = defineStore('history', () => {
 
     async function loadStats() {
         try {
-            const result = await invoke<UsageStats>('get_usage_stats')
+            const result = await invoke<UsageStats>('get_usage_stats', { scope: overviewScope.value })
             stats.value = result
         } catch (error) {
             console.error('Failed to load stats:', error)
@@ -210,7 +249,10 @@ export const useHistoryStore = defineStore('history', () => {
         const generation = ++appStatsGeneration
         const weeklyGeneration = range === 'week' ? ++weeklyStatsGeneration : null
         try {
-            const result = await invoke<AppUsageStat[]>('get_app_usage_stats', { range })
+            const result = await invoke<AppUsageStat[]>('get_app_usage_stats', {
+                range,
+                scope: overviewScope.value,
+            })
             if (generation === appStatsGeneration) {
                 appStats.value = result
             }
@@ -225,7 +267,10 @@ export const useHistoryStore = defineStore('history', () => {
     async function loadWeeklyTopApps() {
         const generation = ++weeklyStatsGeneration
         try {
-            const result = await invoke<AppUsageStat[]>('get_app_usage_stats', { range: 'week' })
+            const result = await invoke<AppUsageStat[]>('get_app_usage_stats', {
+                range: 'week',
+                scope: overviewScope.value,
+            })
             if (generation === weeklyStatsGeneration) {
                 applyWeeklySnapshot(result)
             }
@@ -236,7 +281,10 @@ export const useHistoryStore = defineStore('history', () => {
 
     async function loadAllAppsForFilter() {
         try {
-            allAppsForFilter.value = await invoke<AppUsageStat[]>('get_app_usage_stats', { range: 'all' })
+            allAppsForFilter.value = await invoke<AppUsageStat[]>('get_app_usage_stats', {
+                range: 'all',
+                scope: 'all',
+            })
         } catch (error) {
             console.error('Failed to load app filter options:', error)
         }
@@ -244,10 +292,41 @@ export const useHistoryStore = defineStore('history', () => {
 
     async function loadDailyActivity() {
         try {
-            dailyActivity.value = await invoke<DailyActivityResponse>('get_daily_activity')
+            dailyActivity.value = await invoke<DailyActivityResponse>('get_daily_activity', {
+                scope: overviewScope.value,
+            })
         } catch (error) {
             console.error('Failed to load daily activity:', error)
         }
+    }
+
+    async function loadModelStats(range: AppUsageRange = appUsageRange.value) {
+        const generation = ++modelStatsGeneration
+        try {
+            const result = await invoke<ModelUsageResponse>('get_model_usage_stats', {
+                range,
+                scope: overviewScope.value,
+            })
+            if (generation === modelStatsGeneration) {
+                modelStats.value = result
+            }
+        } catch (error) {
+            console.error('Failed to load model usage stats:', error)
+        }
+    }
+
+    async function loadOverviewDevices() {
+        try {
+            overviewDevices.value = await invoke<OverviewDeviceSyncInfo[]>('get_overview_devices')
+        } catch (error) {
+            console.error('Failed to load overview devices:', error)
+        }
+    }
+
+    async function setOverviewScope(scope: OverviewScope) {
+        if (overviewScope.value === scope) return
+        overviewScope.value = scope
+        await loadStats()
     }
 
     async function loadHistory(reset = false) {
@@ -417,12 +496,15 @@ export const useHistoryStore = defineStore('history', () => {
         searching,
         total,
         statsRevision,
+        overviewScope,
         appUsageRange,
         appStats,
         weeklyTopApps,
         weeklyTotalCount,
         allAppsForFilter,
         dailyActivity,
+        modelStats,
+        overviewDevices,
         setSearch,
         recordsByDate,
         formattedStats,
@@ -432,6 +514,9 @@ export const useHistoryStore = defineStore('history', () => {
         loadWeeklyTopApps,
         loadAllAppsForFilter,
         loadDailyActivity,
+        loadModelStats,
+        loadOverviewDevices,
+        setOverviewScope,
         loadHistory,
         deleteRecord,
         setFinalText,
