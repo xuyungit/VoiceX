@@ -4,6 +4,7 @@
 pub mod crypto;
 pub mod hlc;
 pub mod merge;
+pub mod migrate;
 pub mod payloads;
 pub mod scope;
 pub mod store;

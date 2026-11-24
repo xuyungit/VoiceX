@@ -59,7 +59,7 @@ impl FromStr for SyncDomain {
 }
 
 /// Distinguishes uninvoked LLM, known model name, and legacy invoked-without-name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmUsageState {
     None,

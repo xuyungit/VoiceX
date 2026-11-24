@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "voicex-tts"
 path = "src/bin/voicex_tts.rs"
 
+[[bin]]
+name = "voicex-sync-migrate"
+path = "src/bin/voicex_sync_migrate.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 tonic-build = "0.12"
@@ -43,7 +47,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.31", features = ["bundled", "hooks", "backup"] }
 
 # Atomic MP3 file export with exclusive temporary files on macOS and Windows.
 tempfile = "3"
