@@ -17,6 +17,7 @@ dist-ssr
 src-tauri/target
 src-tauri/binaries/
 sync-server/target
+sync-protocol/target
 tools/llm-bench/target
 
 # Local config with credentials (use *.example.toml as template)
