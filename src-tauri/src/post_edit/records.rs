@@ -120,6 +120,7 @@ pub struct FinalText {
 pub struct ListedRecord {
     #[serde(flatten)]
     pub record: Record,
+    pub active_edit_id: Option<String>,
     pub target_app_platform: Option<String>,
     pub target_app_key: Option<String>,
 }
@@ -568,7 +569,7 @@ pub fn list(limit: u32, offset: u32) -> Result<RecordPage, StorageError> {
 fn list_in(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<ListedRecord>, StorageError> {
     let mut stmt = conn
         .prepare(
-            "SELECT p.payload, h.text, h.edited_text, h.target_app_platform, h.target_app_key
+            "SELECT p.payload, h.text, h.edited_text, h.target_app_platform, h.target_app_key, h.active_edit_id
              FROM post_edit_record p
              JOIN history_record h ON h.id = p.source_id
              WHERE h.edited_text IS NOT NULL
@@ -577,15 +578,28 @@ fn list_in(conn: &Connection, limit: u32, offset: u32) -> Result<Vec<ListedRecor
         .map_err(sql)?;
     let rows = stmt
         .query_map(params![limit.clamp(1, 100), offset], |r| {
-            Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })
         .map_err(sql)?;
     rows.map(|row| {
-        let (payload, original, edited, target_app_platform, target_app_key) = row.map_err(sql)?;
+        let (payload, original, edited, target_app_platform, target_app_key, active_edit_id) =
+            row.map_err(sql)?;
         let mut record: Record = serde_json::from_str(&payload).map_err(json)?;
         record.original_text = original;
         record.edited_text = edited;
-        Ok(ListedRecord { record, target_app_platform, target_app_key })
+        Ok(ListedRecord {
+            record,
+            active_edit_id,
+            target_app_platform,
+            target_app_key,
+        })
     })
     .collect()
 }
@@ -741,7 +755,7 @@ mod tests {
             "CREATE TABLE history_record (
                 id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, text TEXT NOT NULL, mode TEXT NOT NULL,
                 edited_text TEXT, edit_source TEXT, edited_at TEXT,
-                target_app_platform TEXT, target_app_key TEXT
+                target_app_platform TEXT, target_app_key TEXT, active_edit_id TEXT
              );",
         )
         .unwrap();
@@ -824,7 +838,13 @@ mod tests {
         let mut record = record();
         record.app_name = Some("Code.exe".into());
         assert!(insert(&conn, &record).unwrap());
+        conn.execute(
+            "UPDATE history_record SET active_edit_id='seen-at-open' WHERE id='source'",
+            [],
+        )
+        .unwrap();
         let legacy = list_in(&conn, 10, 0).unwrap();
+        assert_eq!(legacy[0].active_edit_id.as_deref(), Some("seen-at-open"));
         assert!(legacy[0].target_app_platform.is_none());
         assert!(legacy[0].target_app_key.is_none());
         conn.execute(

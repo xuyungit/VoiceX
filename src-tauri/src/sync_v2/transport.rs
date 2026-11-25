@@ -44,6 +44,17 @@ pub enum TransportError {
 }
 
 pub trait SyncTransport: Send + Sync {
+    fn server_url(&self) -> &str;
+
+    fn check_server_url(&self, expected: &str) -> Result<(), TransportError> {
+        if self.server_url() != expected.trim().trim_end_matches('/') {
+            return Err(TransportError::BadRequest(
+                "transport URL differs from the selected sync space".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn pair_redeem<'a>(
         &'a self,
         req: &'a PairRedeemRequest,
@@ -186,6 +197,10 @@ async fn parse_error_response(resp: reqwest::Response) -> TransportError {
 }
 
 impl SyncTransport for SelfHostTransport {
+    fn server_url(&self) -> &str {
+        &self.base_url
+    }
+
     fn pair_redeem<'a>(
         &'a self,
         req: &'a PairRedeemRequest,

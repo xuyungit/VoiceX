@@ -283,7 +283,7 @@ impl HistoryService {
             if behavior.enqueue_sync {
                 if let Some(app) = handle_for_emit.as_ref() {
                     let sync = app.state::<SyncService>();
-                    sync.enqueue_history_upsert(&record);
+                    sync.request_sync_now();
                 }
             }
             if let Some(app) = handle_for_emit.as_ref() {

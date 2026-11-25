@@ -119,10 +119,17 @@ function toggle(id: string) {
   expanded.value = next
 }
 
+const editingParentIds = ref<string[]>([])
+
+function startEditing(record: PostEditRecord) {
+  editingParentIds.value = record.activeEditId ? [record.activeEditId] : []
+  editingId.value = record.id
+}
+
 async function saveEdit(record: PostEditRecord, text: string) {
   savingEdit.value = true
   try {
-    await historyStore.setFinalText(record.recordId, text)
+    await historyStore.setFinalText(record.recordId, text, editingParentIds.value)
     editingId.value = null
   } catch (e) {
     message.error(t('postEdit.saveFailed', { reason: String(e) }))
@@ -190,7 +197,7 @@ onBeforeUnmount(() => { disposed = true; ++request; unlisten?.() })
             </span>
           </div>
           <div v-if="editingId !== record.id" class="record-actions">
-            <NButton text size="tiny" @click="editingId = record.id">{{ t('postEdit.edit') }}</NButton>
+            <NButton text size="tiny" @click="startEditing(record)">{{ t('postEdit.edit') }}</NButton>
             <NButton text size="tiny" @click="copy(record.editedText)">{{ t('postEdit.copy') }}</NButton>
             <NDropdown trigger="click" placement="bottom-end" :options="moreOptions" @select="key => onMore(key, record)">
               <NButton quaternary size="tiny" class="more-button" :disabled="busy" :aria-label="t('common.moreActions')">

@@ -37,6 +37,8 @@ pub struct SpaceCredentials {
 struct CredentialFile {
     version: u32,
     spaces: BTreeMap<String, SpaceCredentials>,
+    #[serde(default)]
+    pairing_proofs: BTreeMap<String, String>,
 }
 
 impl Default for CredentialFile {
@@ -44,6 +46,7 @@ impl Default for CredentialFile {
         Self {
             version: CREDENTIALS_SCHEMA_VERSION,
             spaces: BTreeMap::new(),
+            pairing_proofs: BTreeMap::new(),
         }
     }
 }
@@ -73,6 +76,25 @@ impl CredentialStore {
         Ok(file.spaces.get(space_id).cloned())
     }
 
+    pub fn pairing_proof(
+        &self,
+        server_url: &str,
+        device_id: &str,
+    ) -> Result<String, CredentialError> {
+        let key = serde_json::to_string(&(server_url, device_id))?;
+        let mut file = self.load_file()?;
+        if let Some(secret) = file.pairing_proofs.get(&key) {
+            return Ok(secret.clone());
+        }
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let secret = hex::encode(bytes);
+        file.pairing_proofs.insert(key, secret.clone());
+        self.write_file_atomic(&file)?;
+        Ok(secret)
+    }
+
     pub fn save(
         &self,
         space_id: &str,
@@ -83,12 +105,20 @@ impl CredentialStore {
         self.write_file_atomic(&file)
     }
 
-    pub fn remove(&self, space_id: &str) -> Result<(), CredentialError> {
+    pub fn remove(
+        &self,
+        space_id: &str,
+        server_url: &str,
+        device_id: &str,
+    ) -> Result<(), CredentialError> {
         if !self.path.exists() {
             return Ok(());
         }
         let mut file = self.load_file()?;
-        if file.spaces.remove(space_id).is_some() {
+        let binding_key =
+            serde_json::to_string(&(server_url.trim().trim_end_matches('/'), device_id))?;
+        let had_binding = file.pairing_proofs.remove(&binding_key).is_some();
+        if file.spaces.remove(space_id).is_some() || had_binding {
             self.write_file_atomic(&file)?;
         }
         Ok(())
@@ -163,6 +193,10 @@ impl DeviceIdentityStore {
         }
     }
 
+    pub fn exists(&self) -> bool {
+        self.path.exists()
+    }
+
     pub fn resolve_for_machine(
         &self,
         db_device_id: Option<&str>,
@@ -171,30 +205,33 @@ impl DeviceIdentityStore {
         let db_id_clean = db_device_id.map(str::trim).filter(|s| !s.is_empty());
         if self.path.exists() {
             let raw = fs::read_to_string(&self.path)?;
-            if let Ok(existing) = serde_json::from_str::<DeviceIdentityFile>(&raw) {
-                if !existing.device_id.trim().is_empty() {
-                    if existing.machine_fingerprint == machine_fingerprint {
-                        let rotated = db_id_clean.is_some_and(|d| d != existing.device_id);
-                        return Ok(ResolvedDeviceIdentity {
-                            device_id: existing.device_id,
-                            rotated_for_new_install: rotated,
-                            existed_on_disk: true,
-                        });
-                    }
-                    // Whole data directory was copied to a different machine -> mint a fresh device_id.
-                    let fresh_id = uuid::Uuid::new_v4().to_string();
-                    self.write_identity(&DeviceIdentityFile {
-                        version: DEVICE_IDENTITY_SCHEMA_VERSION,
-                        device_id: fresh_id.clone(),
-                        machine_fingerprint: machine_fingerprint.to_string(),
-                    })?;
-                    return Ok(ResolvedDeviceIdentity {
-                        device_id: fresh_id,
-                        rotated_for_new_install: true,
-                        existed_on_disk: false,
-                    });
-                }
+            let existing: DeviceIdentityFile = serde_json::from_str(&raw)?;
+            if existing.device_id.trim().is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "empty installation device ID",
+                )
+                .into());
             }
+            if existing.machine_fingerprint == machine_fingerprint {
+                let rotated = db_id_clean.is_some_and(|d| d != existing.device_id);
+                return Ok(ResolvedDeviceIdentity {
+                    device_id: existing.device_id,
+                    rotated_for_new_install: rotated,
+                    existed_on_disk: true,
+                });
+            }
+            let device_id = uuid::Uuid::new_v4().to_string();
+            self.write_identity(&DeviceIdentityFile {
+                version: DEVICE_IDENTITY_SCHEMA_VERSION,
+                device_id: device_id.clone(),
+                machine_fingerprint: machine_fingerprint.into(),
+            })?;
+            return Ok(ResolvedDeviceIdentity {
+                device_id,
+                rotated_for_new_install: true,
+                existed_on_disk: false,
+            });
         }
 
         // First initialization on this installation: adopt existing v1 DB device_id if present,
@@ -343,7 +380,12 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
 
-        store.remove("space-1").unwrap();
+        let proof = store.pairing_proof("http://local", "device").unwrap();
+        store.remove("space-1", "http://local", "device").unwrap();
+        assert_ne!(
+            proof,
+            store.pairing_proof("http://local", "device").unwrap()
+        );
         assert_eq!(store.get("space-1").unwrap(), None);
     }
 

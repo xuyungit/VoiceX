@@ -187,11 +187,12 @@ pub struct PairRedeemRequest {
     pub device_name: String,
     pub platform: String,
     pub app_version: String,
-    /// Must be explicitly `true` to replace an already-active v2 device's token on
-    /// the same `device_id` (e.g. same-machine re-pair after local disconnect).
-    /// Prevents cloned DBs from silently kicking a live peer offline (S4).
-    #[serde(default)]
-    pub allow_replace_active: bool,
+    /// Installation secret scoped to this server and device, persisted before redeem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_proof: Option<String>,
+    /// Authorizes enrollment of an existing device created before installation proofs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_device_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

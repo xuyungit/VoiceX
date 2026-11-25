@@ -205,6 +205,14 @@ pub async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS device_pair_bindings (
+           account_id TEXT NOT NULL, device_id TEXT NOT NULL, proof_hash TEXT NOT NULL,
+           last_code_hash TEXT NOT NULL, PRIMARY KEY(account_id, device_id))",
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS envelopes (
             account_id TEXT NOT NULL REFERENCES accounts(account_id),
@@ -434,11 +442,6 @@ pub async fn redeem_pairing_code(
             "account is disabled".into(),
         ));
     }
-    if redeemed_at.is_some() {
-        return Err(DbApiError::PairingInvalidOrExpired(
-            "pairing code has already been redeemed".into(),
-        ));
-    }
     let expired = chrono::DateTime::parse_from_rfc3339(&expires_at_str)
         .map(|dt| dt.with_timezone(&Utc) <= now)
         .unwrap_or(true);
@@ -448,31 +451,74 @@ pub async fn redeem_pairing_code(
         ));
     }
 
-    // S4: Reject silent takeover of an actively paired v2 device unless explicitly allowed.
-    // Migrated unpaired v1 devices (`token_hash LIKE 'migrated-unpaired:%'`) and revoked devices
-    // may always be claimed cleanly on first v2 pairing.
-    let existing_device = sqlx::query(
-        "SELECT token_hash, revoked_at FROM devices WHERE account_id = ?1 AND device_id = ?2",
+    let proof = req.installation_proof.as_deref();
+    if proof.is_some_and(|p| p.len() != 64 || !p.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err(DbApiError::BadRequest("invalid installation proof".into()));
+    }
+    let proof_hash = proof.map(sha256_hex);
+    let device = sqlx::query(
+        "SELECT d.token_hash, d.revoked_at, b.proof_hash, b.last_code_hash
+         FROM devices d LEFT JOIN device_pair_bindings b USING(account_id, device_id)
+         WHERE d.account_id = ?1 AND d.device_id = ?2",
     )
     .bind(&account_id)
     .bind(device_id)
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some(dev_row) = existing_device {
-        let existing_hash: String = dev_row.get(0);
-        let existing_revoked: Option<String> = dev_row.get(1);
-        let is_active_v2 =
-            existing_revoked.is_none() && !existing_hash.starts_with("migrated-unpaired:");
-        if is_active_v2 && !req.allow_replace_active {
-            return Err(DbApiError::DeviceIdConflict(format!(
-                "device '{device_id}' is already actively paired; use a new device identity or explicitly re-authorize"
-            )));
+    let mut resume = false;
+    if let Some(row) = device {
+        let hash: String = row.get(0);
+        let revoked: Option<String> = row.get(1);
+        let bound: Option<String> = row.get(2);
+        let last_code: Option<String> = row.get(3);
+        let active = revoked.is_none() && !hash.starts_with("migrated-unpaired:");
+        let owns_binding = proof_hash.is_some() && bound == proof_hash;
+        let owns_token = req
+            .previous_device_token
+            .as_deref()
+            .is_some_and(|t| sha256_hex(t) == hash);
+        resume = active && owns_binding && last_code.as_deref() == Some(code_hash.as_str());
+        if redeemed_at.is_none() && active && !owns_binding && !owns_token {
+            return Err(DbApiError::DeviceIdConflict(
+                "active device requires its original installation or credential".into(),
+            ));
         }
     }
+    if redeemed_at.is_some() && !resume {
+        return Err(DbApiError::PairingInvalidOrExpired(
+            "pairing code has already been redeemed".into(),
+        ));
+    }
 
+    // The same installation can recover the original result if the response was lost.
+    // Each newly issued code produces a distinct token, including after revocation.
+    let device_token = match proof {
+        Some(secret) => {
+            use hmac::{Hmac, Mac};
+            let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+                .expect("HMAC accepts any key length");
+            mac.update(
+                format!("voicex-pair-v2:{server_id}:{account_id}:{device_id}:{code_hash}")
+                    .as_bytes(),
+            );
+            format!(
+                "{TOKEN_PREFIX}{}",
+                URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+            )
+        }
+        None => generate_device_token(),
+    };
+    if resume {
+        return Ok(PairRedeemResponse {
+            account_id,
+            server_id: server_id.into(),
+            device_id: device_id.into(),
+            device_token,
+            key_check_tag,
+        });
+    }
     let updated = sqlx::query(
-        "UPDATE pairing_codes
-         SET redeemed_at = ?2, redeemed_device_id = ?3
+        "UPDATE pairing_codes SET redeemed_at = ?2, redeemed_device_id = ?3
          WHERE code_hash = ?1 AND redeemed_at IS NULL",
     )
     .bind(&code_hash)
@@ -485,8 +531,20 @@ pub async fn redeem_pairing_code(
             "pairing code was already redeemed".into(),
         ));
     }
-
-    let device_token = generate_device_token();
+    sqlx::query("DELETE FROM device_pair_bindings WHERE account_id=?1 AND device_id=?2")
+        .bind(&account_id)
+        .bind(device_id)
+        .execute(&mut *tx)
+        .await?;
+    if let Some(hash) = proof_hash {
+        sqlx::query("INSERT INTO device_pair_bindings VALUES (?1, ?2, ?3, ?4)")
+            .bind(&account_id)
+            .bind(device_id)
+            .bind(hash)
+            .bind(&code_hash)
+            .execute(&mut *tx)
+            .await?;
+    }
     let token_hash = sha256_hex(&device_token);
 
     sqlx::query(

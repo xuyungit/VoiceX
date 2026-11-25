@@ -76,7 +76,8 @@ async fn pair_device(
             device_name: device_name.into(),
             platform: platform.into(),
             app_version: "0.20.0".into(),
-            allow_replace_active: false,
+            installation_proof: None,
+            previous_device_token: None,
         })
         .send()
         .await
@@ -103,7 +104,8 @@ async fn pairing_is_single_use_and_revocation_only_blocks_revoked_device() {
         device_name: "MBP".into(),
         platform: "macos".into(),
         app_version: "0.20.0".into(),
-        allow_replace_active: false,
+        installation_proof: None,
+        previous_device_token: None,
     };
     let r1 = client
         .post(format!("{}/v2/pair/redeem", srv.base_url))
@@ -136,7 +138,8 @@ async fn pairing_is_single_use_and_revocation_only_blocks_revoked_device() {
             device_name: "Win".into(),
             platform: "windows".into(),
             app_version: "0.20.0".into(),
-            allow_replace_active: false,
+            installation_proof: None,
+            previous_device_token: None,
         })
         .send()
         .await
@@ -621,7 +624,8 @@ async fn authed_device_can_issue_one_time_pairing_code_for_peer() {
             device_name: "Windows PC".into(),
             platform: "windows".into(),
             app_version: "0.20.0".into(),
-            allow_replace_active: false,
+            installation_proof: None,
+            previous_device_token: None,
         })
         .send()
         .await
@@ -640,7 +644,8 @@ async fn authed_device_can_issue_one_time_pairing_code_for_peer() {
             device_name: "Other".into(),
             platform: "windows".into(),
             app_version: "0.20.0".into(),
-            allow_replace_active: false,
+            installation_proof: None,
+            previous_device_token: None,
         })
         .send()
         .await
@@ -648,7 +653,7 @@ async fn authed_device_can_issue_one_time_pairing_code_for_peer() {
     assert_eq!(reuse_resp.status(), StatusCode::CONFLICT);
 
     // S4: Trying to silently hijack an actively paired device_id fails with 409 device_id_conflict
-    // without consuming the pairing code, while explicit allow_replace_active=true succeeds.
+    // without consuming the pairing code, and the original credential remains valid.
     let hijack_code = db::create_pairing_code(&srv.pool, &acc.account_id, 15)
         .await
         .unwrap();
@@ -660,7 +665,8 @@ async fn authed_device_can_issue_one_time_pairing_code_for_peer() {
             device_name: "Cloned Mac".into(),
             platform: "macos".into(),
             app_version: "0.20.0".into(),
-            allow_replace_active: false,
+            installation_proof: None,
+            previous_device_token: None,
         })
         .send()
         .await
@@ -686,7 +692,8 @@ async fn authed_device_can_issue_one_time_pairing_code_for_peer() {
             device_name: "Cloned Mac".into(),
             platform: "macos".into(),
             app_version: "0.20.0".into(),
-            allow_replace_active: false,
+            installation_proof: None,
+            previous_device_token: None,
         })
         .send()
         .await
@@ -724,7 +731,8 @@ async fn c4_pairing_rate_limit_ignores_spoofed_xff_when_direct_and_respects_trus
                 device_name: "D1".into(),
                 platform: "macos".into(),
                 app_version: "0.20.0".into(),
-                allow_replace_active: false,
+                installation_proof: None,
+                previous_device_token: None,
             })
             .send()
             .await
@@ -749,7 +757,8 @@ async fn c4_pairing_rate_limit_ignores_spoofed_xff_when_direct_and_respects_trus
                 device_name: "D1".into(),
                 platform: "macos".into(),
                 app_version: "0.20.0".into(),
-                allow_replace_active: false,
+                installation_proof: None,
+                previous_device_token: None,
             })
             .send()
             .await

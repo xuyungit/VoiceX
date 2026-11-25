@@ -2376,6 +2376,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "hex",
+ "hmac",
  "hyper",
  "hyper-util",
  "rand",

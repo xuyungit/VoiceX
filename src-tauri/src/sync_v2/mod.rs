@@ -9,5 +9,6 @@ pub mod merge;
 pub mod migrate;
 pub mod payloads;
 pub mod scope;
+mod stats_baseline;
 pub mod store;
 pub mod transport;

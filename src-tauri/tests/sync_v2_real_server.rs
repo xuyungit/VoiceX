@@ -283,9 +283,30 @@ async fn real_tcp_two_clients_sse_e2ee_conflict_delete_and_cli_revoke() {
         .unwrap();
     assert!(invite.invite_code.starts_with("VXSYNC2-"));
 
+    // A successful redeem followed by a local key mismatch leaves no local
+    // space. Reopen the on-disk credential store and retry the same invite.
+    let decoded = voicex_lib::sync_v2::crypto::decode_sync_invite(&invite.invite_code).unwrap();
+    let bad_key = voicex_lib::sync_v2::crypto::MasterKey::generate().to_recovery_key();
+    assert!(matches!(
+        pair_space(
+            |f| win.with_db(f),
+            &win.creds,
+            &transport,
+            &server_url,
+            &decoded.pairing_code,
+            &win.device_id,
+            "Windows",
+            Some(&bad_key),
+            true,
+            true
+        )
+        .await,
+        Err(SyncEngineError::InvalidState(_))
+    ));
+    let reopened = CredentialStore::at_path(win.creds.path().to_owned());
     let win_pair = join_space_with_invite(
         |f| win.with_db(f),
-        &win.creds,
+        &reopened,
         &transport,
         &invite.invite_code,
         "win-real-1",
@@ -297,6 +318,12 @@ async fn real_tcp_two_clients_sse_e2ee_conflict_delete_and_cli_revoke() {
     .unwrap();
     assert!(!win_pair.generated_new_recovery_key);
     assert_eq!(win_pair.space_id, mac_pair.space_id);
+
+    let other = SelfHostTransport::new("http://127.0.0.1:0").unwrap();
+    assert!(matches!(
+        sync_once(|f| win.with_db(f), &win.creds, &other, 0).await,
+        Err(SyncEngineError::Transport(TransportError::BadRequest(_)))
+    ));
 
     // 4. Open real SSE stream on Windows BEFORE Mac dictates & pushes
     let win_token = win.creds.get(&win_pair.space_id).unwrap().unwrap().device_token;

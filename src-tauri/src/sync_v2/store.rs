@@ -384,12 +384,16 @@ fn backfill_daily_model_usage_and_corrections(conn: &Connection) -> Result<(), S
         return Ok(());
     }
 
+    let transaction = conn
+        .is_autocommit()
+        .then(|| conn.unchecked_transaction())
+        .transpose()
+        .map_err(sql_err)?;
     let local_device_id = local_device_id_in(conn)?;
-    let tx = conn.unchecked_transaction().map_err(sql_err)?;
 
     let mut local_ai_corrections: i64 = 0;
     {
-        let mut stmt = tx
+        let mut stmt = conn
             .prepare(
                 "SELECT timestamp, text, duration_ms, llm_invoked, ai_correction_applied,
                         asr_model_name, llm_model_name
@@ -425,7 +429,7 @@ fn backfill_daily_model_usage_and_corrections(conn: &Connection) -> Result<(), S
                 continue;
             };
             upsert_daily_model_usage_stats_tx(
-                &tx,
+                conn,
                 &local_device_id,
                 &local_date,
                 asr_model.as_deref(),
@@ -439,7 +443,7 @@ fn backfill_daily_model_usage_and_corrections(conn: &Connection) -> Result<(), S
         }
     }
 
-    tx.execute(
+    conn.execute(
         "UPDATE device_usage_stats
          SET ai_correction_count = MAX(ai_correction_count, ?1)
          WHERE device_id = ?2",
@@ -447,14 +451,17 @@ fn backfill_daily_model_usage_and_corrections(conn: &Connection) -> Result<(), S
     )
     .map_err(sql_err)?;
 
-    tx.execute(
+    conn.execute(
         "INSERT INTO user_config (key, value) VALUES (?1, '1')
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![DAILY_MODEL_BACKFILL_KEY],
     )
     .map_err(sql_err)?;
 
-    tx.commit().map_err(sql_err)
+    if let Some(tx) = transaction {
+        tx.commit().map_err(sql_err)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1113,16 +1120,17 @@ pub fn handoff_v1_outbox_to_v2_tx(
     device_id: &str,
     scope_history: bool,
 ) -> Result<V1OutboxHandoffSummary, StorageError> {
-    let flag_key = format!("v1_outbox_handoff_done:{space_id}");
-    let done: Option<String> = conn
+    // Older clients wrote a per-space completion marker. Its presence also
+    // consumes the single legacy queue, regardless of the next pair target.
+    let done: bool = conn
         .query_row(
-            "SELECT value FROM user_config WHERE key = ?1 LIMIT 1",
-            params![flag_key],
+            "SELECT EXISTS(SELECT 1 FROM user_config
+          WHERE key GLOB 'v1_outbox_handoff_done:*' AND value='1')",
+            [],
             |r| r.get(0),
         )
-        .optional()
         .map_err(sql_err)?;
-    if done.as_deref() == Some("1") {
+    if done {
         return Ok(V1OutboxHandoffSummary {
             already_completed: true,
             ..Default::default()
@@ -1139,6 +1147,35 @@ pub fn handoff_v1_outbox_to_v2_tx(
 
     let mut summary = V1OutboxHandoffSummary::default();
     if has_v1_outbox {
+        let pending: bool = conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM sync_outbox)", [], |r| r.get(0))
+            .map_err(sql_err)?;
+        if !pending {
+            return Ok(summary);
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO user_config(key,value)
+             SELECT 'v1_outbox_source_space', 'selfhost:' || current_server_id || ':' || current_account_id
+             FROM sync_state WHERE id=1 AND length(current_server_id)>0 AND length(current_account_id)>0",
+            [],
+        ).map_err(sql_err)?;
+        let source: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_config WHERE key='v1_outbox_source_space'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        match source {
+            Some(source) if source == space_id => {}
+            Some(_) => return Ok(summary), // Preserve it for its authenticated source.
+            None => {
+                return Err(StorageError::InvalidInput(
+                    "cannot identify the source account for the pending v1 queue".into(),
+                ))
+            }
+        }
         let outbox_rows: Vec<(String, Option<String>, String, String)> = {
             let mut stmt = conn
                 .prepare(
@@ -1344,6 +1381,7 @@ pub fn handoff_v1_outbox_to_v2_tx(
         }
     }
 
+    let flag_key = format!("v1_outbox_handoff_done:{space_id}");
     conn.execute(
         "INSERT INTO user_config (key, value) VALUES (?1, '1')
          ON CONFLICT(key) DO UPDATE SET value = '1'",
@@ -3367,7 +3405,9 @@ mod tests {
     fn m3_v1_outbox_handoff_is_idempotent_and_prevents_delete_resurrection() {
         let conn = open_test_db();
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS sync_outbox (
+            "CREATE TABLE sync_state(id INTEGER PRIMARY KEY, current_server_id TEXT, current_account_id TEXT);
+             INSERT INTO sync_state VALUES(1, 'srv', 'acc');
+             CREATE TABLE IF NOT EXISTS sync_outbox (
                 event_id TEXT PRIMARY KEY,
                 event_type TEXT NOT NULL,
                 record_id TEXT,
@@ -3408,6 +3448,12 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(
+            handoff_v1_outbox_to_v2_tx(&conn, "other", "win-dev", true)
+                .unwrap()
+                .deletes_handed_off,
+            0
+        );
         let first = handoff_v1_outbox_to_v2_tx(&conn, "selfhost:srv:acc", "win-dev", true).unwrap();
         assert!(!first.already_completed);
         assert_eq!(first.deletes_handed_off, 2);
@@ -3420,6 +3466,11 @@ mod tests {
         assert_eq!(second.deletes_handed_off, 0);
         assert_eq!(second.creates_handed_off, 0);
 
+        assert!(
+            handoff_v1_outbox_to_v2_tx(&conn, "other", "win-dev", true)
+                .unwrap()
+                .already_completed
+        );
         // Original v1 sync_outbox is preserved intact for reconciliation
         let v1_cnt: i64 = conn
             .query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get(0))

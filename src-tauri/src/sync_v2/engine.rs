@@ -153,40 +153,29 @@ where
     F: Fn(&dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError>,
     T: SyncTransport,
 {
-    pair_space_with_options(
-        with_conn,
-        creds,
-        transport,
-        server_url,
-        pairing_code,
-        device_id,
-        device_name,
-        recovery_key_input,
-        scope_history,
-        scope_edits,
-        false,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn pair_space_with_options<F, T>(
-    with_conn: F,
-    creds: &CredentialStore,
-    transport: &T,
-    server_url: &str,
-    pairing_code: &str,
-    device_id: &str,
-    device_name: &str,
-    recovery_key_input: Option<&str>,
-    scope_history: bool,
-    scope_edits: bool,
-    allow_replace_active: bool,
-) -> Result<PairSuccessResult, SyncEngineError>
-where
-    F: Fn(&dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError>,
-    T: SyncTransport,
-{
+    let endpoint = server_url.trim().trim_end_matches('/');
+    transport.check_server_url(endpoint)?;
+    let proof = creds.pairing_proof(endpoint, device_id)?;
+    let legacy_space = Mutex::new(None::<String>);
+    with_conn(&|conn| {
+        *legacy_space.lock().unwrap() = conn
+            .query_row(
+                "SELECT space_id FROM sync_spaces WHERE server_url=?1 AND device_id=?2
+             ORDER BY is_active DESC, updated_at DESC LIMIT 1",
+                params![endpoint, device_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        Ok(())
+    })?;
+    let previous_device_token = legacy_space
+        .into_inner()
+        .unwrap()
+        .map(|space| creds.get(&space))
+        .transpose()?
+        .flatten()
+        .map(|c| c.device_token);
     let redeem = transport
         .pair_redeem(&PairRedeemRequest {
             pairing_code: pairing_code.trim().to_string(),
@@ -194,14 +183,17 @@ where
             device_name: device_name.trim().to_string(),
             platform: current_platform_name().to_string(),
             app_version: app_version().to_string(),
-            allow_replace_active,
+            installation_proof: Some(proof),
+            previous_device_token,
         })
         .await?;
 
     let space_id = selfhost_space_id(&redeem.server_id, &redeem.account_id);
+    let stored_creds = creds.get(&space_id)?;
     let trimmed_rk = recovery_key_input
         .map(str::trim)
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .or_else(|| stored_creds.as_ref().map(|c| c.recovery_key.as_str()));
 
     let (master_key, generated_new) = match trimmed_rk {
         Some(rk) => (MasterKey::from_recovery_key(rk)?, false),
@@ -225,6 +217,15 @@ where
         }
     }
 
+    let recovery_key = master_key.to_recovery_key();
+    creds.save(
+        &space_id,
+        &SpaceCredentials {
+            device_token: redeem.device_token.clone(),
+            recovery_key: recovery_key.clone(),
+        },
+    )?;
+
     let effective_edits = scope_history && scope_edits;
     transport
         .update_device(
@@ -241,15 +242,6 @@ where
             },
         )
         .await?;
-
-    let recovery_key = master_key.to_recovery_key();
-    creds.save(
-        &space_id,
-        &SpaceCredentials {
-            device_token: redeem.device_token,
-            recovery_key: recovery_key.clone(),
-        },
-    )?;
 
     let server_url_clean = server_url.trim().trim_end_matches('/').to_string();
     let device_name_clean = device_name.trim().to_string();
@@ -388,6 +380,7 @@ where
             "Sync space is not active; reconnect this device first.".into(),
         ));
     }
+    transport.check_server_url(&space.server_url)?;
     let Some(space_creds) = creds.get(&space.space_id)? else {
         return Err(SyncEngineError::InvalidState(
             "Missing local sync credentials; please pair this device again.".into(),
@@ -425,38 +418,8 @@ where
     F: Fn(&dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError>,
     T: SyncTransport,
 {
-    join_space_with_invite_options(
-        with_conn,
-        creds,
-        transport,
-        invite_code,
-        device_id,
-        device_name,
-        scope_history,
-        scope_edits,
-        false,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn join_space_with_invite_options<F, T>(
-    with_conn: F,
-    creds: &CredentialStore,
-    transport: &T,
-    invite_code: &str,
-    device_id: &str,
-    device_name: &str,
-    scope_history: bool,
-    scope_edits: bool,
-    allow_replace_active: bool,
-) -> Result<PairSuccessResult, SyncEngineError>
-where
-    F: Fn(&dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError>,
-    T: SyncTransport,
-{
     let invite = decode_sync_invite(invite_code)?;
-    pair_space_with_options(
+    pair_space(
         with_conn,
         creds,
         transport,
@@ -467,7 +430,6 @@ where
         Some(&invite.recovery_key),
         scope_history,
         scope_edits,
-        allow_replace_active,
     )
     .await
 }
@@ -495,6 +457,7 @@ where
         return Ok(SyncCycleSummary::default());
     }
 
+    transport.check_server_url(&space.server_url)?;
     let Some(space_creds) = creds.get(&space.space_id)? else {
         let msg = "Missing local sync credentials; please pair this device again.".to_string();
         mark_space_status(&with_conn, &space.space_id, "error", Some(&msg), false)?;
@@ -702,6 +665,87 @@ where
         })?;
     }
 
+    let baseline_key = format!(
+        "own_stats_reconciled:{}:{}",
+        space.space_id, space.device_id
+    );
+    let reconciled = Mutex::new(false);
+    with_conn(&|conn| {
+        *reconciled.lock().unwrap() = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM user_config WHERE key=?1)",
+                [&baseline_key],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        Ok(())
+    })?;
+    if !reconciled.into_inner().unwrap() {
+        let mut cursor = 0;
+        let mut own = Vec::new();
+        loop {
+            let page = transport
+                .pull_envelopes(device_token, SyncDomain::Stats, cursor, DEFAULT_PULL_LIMIT)
+                .await?;
+            for item in page.items.iter().filter(|i| i.device_id == space.device_id) {
+                let plain = decrypt_envelope(
+                    master_key,
+                    EnvelopeContext {
+                        account_id: &space.account_id,
+                        space_id: &space.space_id,
+                        domain: SyncDomain::Stats,
+                        object_id: &item.object_id,
+                        revision: item.revision,
+                        op_id: &item.op_id,
+                    },
+                    &item.nonce,
+                    &item.ciphertext,
+                )?;
+                let payload: StatsShardPayload = serde_json::from_slice(&plain)
+                    .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
+                let (device, key, rev) = match &payload {
+                    StatsShardPayload::Totals(t) => {
+                        (&t.device_id, "totals".to_string(), t.revision)
+                    }
+                    StatsShardPayload::DailyMonth(d) => {
+                        (&d.device_id, format!("daily:{}", d.month), d.revision)
+                    }
+                };
+                if device != &space.device_id
+                    || stats_object_id(device, &key) != item.object_id
+                    || rev != item.revision
+                    || rev < 1
+                {
+                    return Err(SyncEngineError::InvalidState(
+                        "stats envelope and payload identity disagree".into(),
+                    ));
+                }
+                own.push(payload);
+            }
+            if !page.has_more {
+                break;
+            }
+            if page.next_cursor <= cursor {
+                return Err(SyncEngineError::InvalidState(
+                    "stats cursor did not advance".into(),
+                ));
+            }
+            cursor = page.next_cursor;
+        }
+        with_conn(&|conn| {
+            let tx = conn.unchecked_transaction().map_err(sql_err)?;
+            for shard in &own {
+                super::stats_baseline::reconcile(&tx, &space.space_id, &space.device_id, shard)?;
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO user_config(key,value) VALUES (?1,'1')",
+                [&baseline_key],
+            )
+            .map_err(sql_err)?;
+            tx.commit().map_err(sql_err)
+        })?;
+    }
+
     // 2. Push dirty local stats shards (`local_revision > acked_revision`) in size- and count-bounded batches (S9)
     let dirty_shards: Mutex<Vec<(String, i64, StatsShardPayload)>> = Mutex::new(Vec::new());
     with_conn(&|conn| {
@@ -806,10 +850,12 @@ where
                 for res in &resp.results {
                     if matches!(
                         res.status,
-                        EnvelopeStatus::Accepted
-                            | EnvelopeStatus::Duplicate
-                            | EnvelopeStatus::StaleIgnored
+                        EnvelopeStatus::Duplicate | EnvelopeStatus::StaleIgnored
                     ) {
+                        tx.execute("DELETE FROM user_config WHERE key=?1", [&baseline_key])
+                            .map_err(sql_err)?;
+                    }
+                    if res.status == EnvelopeStatus::Accepted {
                         if let Some((_, shard_key, rev)) =
                             batch_meta.iter().find(|(oid, _, _)| oid == &res.op_id)
                         {
@@ -1456,12 +1502,40 @@ pub fn reconcile_startup_device_identity_in(
         .or_else(|| active_space_in(conn).ok().flatten().map(|s| s.device_id));
 
     let id_store = DeviceIdentityStore::in_data_dir(data_dir);
-    let resolved = id_store.resolve_for_machine(db_device_id.as_deref(), machine_fingerprint)?;
+    // A pre-S4 original installation has credentials beside its v2 DB. A
+    // DB-only copy has neither external identity nor credentials for its spaces.
+    let mut db_only_clone = false;
+    if !id_store.exists() {
+        let mut stmt = conn
+            .prepare("SELECT space_id FROM sync_spaces WHERE device_id=?1")
+            .map_err(sql_err)?;
+        let spaces = stmt
+            .query_map(params![db_device_id], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?;
+        let creds = CredentialStore::in_data_dir(data_dir);
+        for space in spaces {
+            db_only_clone = true;
+            if creds.get(&space.map_err(sql_err)?)?.is_some() {
+                db_only_clone = false;
+                break;
+            }
+        }
+    }
+    let mut resolved = id_store.resolve_for_machine(
+        if db_only_clone {
+            None
+        } else {
+            db_device_id.as_deref()
+        },
+        machine_fingerprint,
+    )?;
+    resolved.rotated_for_new_install |= db_only_clone;
 
+    let tx = conn.unchecked_transaction().map_err(sql_err)?;
     if resolved.rotated_for_new_install
         || db_device_id.as_deref() != Some(resolved.device_id.as_str())
     {
-        conn.execute(
+        tx.execute(
             "INSERT INTO user_config (key, value) VALUES ('sync_device_id', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![resolved.device_id],
@@ -1470,18 +1544,20 @@ pub fn reconcile_startup_device_identity_in(
     }
 
     if resolved.rotated_for_new_install {
-        let mut stmt = conn
-            .prepare("SELECT space_id FROM sync_spaces WHERE device_id != ?1")
+        let mut stmt = tx
+            .prepare("SELECT space_id,server_url,device_id FROM sync_spaces WHERE device_id != ?1")
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        let mismatched_spaces: Vec<String> = stmt
-            .query_map(params![resolved.device_id], |r| r.get::<_, String>(0))
+        let mismatched_spaces: Vec<(String, String, String)> = stmt
+            .query_map(params![resolved.device_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
         if !mismatched_spaces.is_empty() {
             let now = Utc::now().to_rfc3339();
-            conn.execute(
+            tx.execute(
                 "UPDATE sync_spaces
                  SET is_active = 0,
                      status = 'disabled',
@@ -1493,23 +1569,18 @@ pub fn reconcile_startup_device_identity_in(
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
 
             let creds = CredentialStore::in_data_dir(data_dir);
-            for space_id in mismatched_spaces {
-                let _ = creds.remove(&space_id);
+            for (space_id, url, device) in mismatched_spaces {
+                creds.remove(&space_id, &url, &device)?;
             }
         }
     }
 
+    tx.commit().map_err(sql_err)?;
     Ok(resolved)
 }
 
 impl SyncV2Service {
     pub fn init(&self, app_handle: &AppHandle, app_data_dir: PathBuf) {
-        {
-            let mut inner = self.inner.lock().expect("sync_v2 lock");
-            inner.app_handle = Some(app_handle.clone());
-            inner.data_dir = Some(app_data_dir.clone());
-        }
-
         let fp = current_machine_fingerprint();
         match storage::with_db(|conn| {
             reconcile_startup_device_identity_in(conn, &app_data_dir, &fp)
@@ -1524,7 +1595,13 @@ impl SyncV2Service {
             Ok(_) => {}
             Err(err) => {
                 log::warn!("[sync-v2] failed to reconcile startup device identity: {err}");
+                return;
             }
+        }
+        {
+            let mut inner = self.inner.lock().expect("sync_v2 lock");
+            inner.app_handle = Some(app_handle.clone());
+            inner.data_dir = Some(app_data_dir.clone());
         }
     }
 
@@ -1693,6 +1770,10 @@ async fn run_background_loop(
     let mut sse_alive = true;
 
     loop {
+        let guard = sync_lock.lock().await;
+        if cancel.is_cancelled() {
+            break;
+        }
         let space = storage::with_db(active_space_in).ok().flatten();
         let Some(space) = space else {
             cancel.cancel();
@@ -1707,7 +1788,6 @@ async fn run_background_loop(
             let retention_days = storage::get_settings_cached()
                 .map(|s| s.text_retention_days)
                 .unwrap_or(0);
-            let _guard = sync_lock.lock().await;
             let res = sync_once(
                 |f| storage::with_db(f),
                 &creds,
@@ -1715,7 +1795,6 @@ async fn run_background_loop(
                 retention_days,
             )
             .await;
-            drop(_guard);
             emit_v2_status(&app, &data_dir);
             match res {
                 Ok(summary) => {
@@ -1736,6 +1815,8 @@ async fn run_background_loop(
                 Err(_) => {}
             }
         }
+
+        drop(guard);
 
         // S7: Explicitly handle closed channels so an exited SSE task never busy-loops.
         tokio::select! {
@@ -1837,6 +1918,10 @@ mod tests {
     }
 
     impl SyncTransport for MockV2Server {
+        fn server_url(&self) -> &str {
+            "http://mock"
+        }
+
         fn pair_redeem<'a>(
             &'a self,
             req: &'a PairRedeemRequest,
@@ -2191,6 +2276,49 @@ mod tests {
             on_local_history_inserted_tx(&tx, &rec, local_date).unwrap();
             tx.commit().unwrap();
         }
+    }
+
+    #[test]
+    fn own_totals_with_an_existing_revision_keep_both_baselines_and_publish_once() {
+        let client = TestClient::new("source");
+        let conn = client.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE device_usage_stats SET total_recording_count=12 WHERE device_id='source'",
+            [],
+        )
+        .unwrap();
+        let mut server = build_local_totals_shard_in(&conn, "source", 1).unwrap();
+        server.dictation.recording_count = 10;
+        server.tts.read_count = 3;
+        super::super::stats_baseline::reconcile(
+            &conn,
+            "space",
+            "source",
+            &StatsShardPayload::Totals(server),
+        )
+        .unwrap();
+        let merged = build_local_totals_shard_in(&conn, "source", 2).unwrap();
+        assert_eq!(
+            (merged.dictation.recording_count, merged.tts.read_count),
+            (12, 3)
+        );
+        let revisions = || {
+            conn.query_row(
+                "SELECT local_revision,acked_revision FROM sync_stats_shards",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(revisions(), (2, 1));
+        super::super::stats_baseline::reconcile(
+            &conn,
+            "space",
+            "source",
+            &StatsShardPayload::Totals(merged),
+        )
+        .unwrap();
+        assert_eq!(revisions(), (2, 2));
     }
 
     #[tokio::test]
@@ -2572,6 +2700,21 @@ mod tests {
         assert!(!r1.existed_on_disk);
         assert!(active_space_in(&conn).unwrap().is_some());
         assert!(creds.get("selfhost:srv1:acc1").unwrap().is_some());
+
+        // The normal startup path must also distinguish a DB-only copy.
+        let db_only = tempfile::tempdir().unwrap();
+        let mut copied = Connection::open_in_memory().unwrap();
+        rusqlite::backup::Backup::new(&conn, &mut copied)
+            .unwrap()
+            .run_to_completion(128, Duration::ZERO, None)
+            .unwrap();
+        let clone_id =
+            reconcile_startup_device_identity_in(&copied, db_only.path(), "fp-machine-c").unwrap();
+        assert_ne!(clone_id.device_id, r1.device_id);
+        assert!(active_space_in(&copied).unwrap().is_none());
+        let again =
+            reconcile_startup_device_identity_in(&copied, db_only.path(), "fp-machine-c").unwrap();
+        assert_eq!(again.device_id, clone_id.device_id);
 
         // Second boot on same machine A: `existed_on_disk == true`, stays active
         let r2 = reconcile_startup_device_identity_in(&conn, dir.path(), "fp-machine-a").unwrap();

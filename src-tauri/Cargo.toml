@@ -51,6 +51,7 @@ rusqlite = { version = "0.31", features = ["bundled", "hooks", "backup"] }
 
 # Atomic MP3 file export with exclusive temporary files on macOS and Windows.
 tempfile = "3"
+same-file = "1"
 
 # Clipboard
 arboard = "3"

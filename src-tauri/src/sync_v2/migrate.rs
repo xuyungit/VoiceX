@@ -2051,30 +2051,81 @@ pub fn run_forward_repair(cfg: &ForwardRepairConfig) -> Result<ForwardRepairRepo
         .query_row("SELECT server_id FROM server_info WHERE id = 1", [], |r| r.get(0))
         .map_err(sql_err)?;
 
-    // Copy input DB via SQLite online backup if out != in
-    if cfg.out_device_db != cfg.in_device_db {
-        if cfg.out_device_db.exists() {
-            std::fs::remove_file(&cfg.out_device_db)
-                .map_err(|e| StorageError::FileOpFailed(e.to_string()))?;
-        }
-        if let Some(parent) = cfg.out_device_db.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| StorageError::FileOpFailed(e.to_string()))?;
+    let output = &cfg.out_device_db;
+    let file_error = |e: std::io::Error| StorageError::FileOpFailed(e.to_string());
+    let in_place = output == &cfg.in_device_db;
+    if output.exists() {
+        for input in [
+            Some(&cfg.server_v2_db),
+            Some(&cfg.recovery_key_file),
+            cfg.v1_device_db.as_ref(),
+            cfg.v1_server_db.as_ref(),
+            cfg.initial_v2_device_db.as_ref(),
+            (!in_place).then_some(&cfg.in_device_db),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if same_file::is_same_file(input, output).map_err(file_error)? {
+                return Err(StorageError::InvalidInput(
+                    "repair output aliases an input file".into(),
+                ));
             }
         }
-        let src = open_ro(&cfg.in_device_db)?;
-        let mut dst = Connection::open(&cfg.out_device_db)
-            .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
-        let backup = rusqlite::backup::Backup::new(&src, &mut dst).map_err(sql_err)?;
-        backup
-            .run_to_completion(200, std::time::Duration::from_millis(5), None)
-            .map_err(sql_err)?;
     }
+    // Explicit in-place repair uses the device transaction. For a separate output,
+    // finish and validate the repair on a private snapshot before publishing.
+    if in_place {
+        return repair_device_snapshot(
+            cfg,
+            &srv,
+            &server_id,
+            &master_key,
+            open_existing_rw(output)?,
+        );
+    }
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(file_error)?;
+    let tmp = tempfile::NamedTempFile::new_in(parent).map_err(file_error)?;
+    let mut snapshot = open_existing_rw(tmp.path())?;
+    backup_database(&open_ro(&cfg.in_device_db)?, &mut snapshot)?;
+    snapshot
+        .pragma_update(None, "journal_mode", "DELETE")
+        .map_err(sql_err)?;
+    let report = repair_device_snapshot(cfg, &srv, &server_id, &master_key, snapshot)?;
+    if output.exists() {
+        // SQLite's backup transaction also handles an existing destination in WAL mode.
+        backup_database(&open_ro(tmp.path())?, &mut open_existing_rw(output)?)?;
+    } else {
+        tmp.persist_noclobber(output)
+            .map_err(|e| file_error(e.error))?;
+    }
+    Ok(report)
+}
 
-    let dev = Connection::open(&cfg.out_device_db)
-        .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
-    init_schema(&dev)?;
+fn open_existing_rw(path: &Path) -> Result<Connection, StorageError> {
+    Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(sql_err)
+}
+
+fn backup_database(source: &Connection, destination: &mut Connection) -> Result<(), StorageError> {
+    rusqlite::backup::Backup::new(source, destination)
+        .map_err(sql_err)?
+        .run_to_completion(200, std::time::Duration::from_millis(5), None)
+        .map_err(sql_err)
+}
+
+fn repair_device_snapshot(
+    cfg: &ForwardRepairConfig,
+    srv: &Connection,
+    server_id: &str,
+    master_key: &MasterKey,
+    dev: Connection,
+) -> Result<ForwardRepairReport, StorageError> {
+    let tx = dev.unchecked_transaction().map_err(sql_err)?;
+    init_schema(&tx)?;
 
     let space = active_space_in(&dev)?
         .ok_or_else(|| StorageError::InvalidInput("device DB has no active v2 sync space".into()))?;
@@ -2207,7 +2258,6 @@ pub fn run_forward_repair(cfg: &ForwardRepairConfig) -> Result<ForwardRepairRepo
         delta_llm = ((raw_llm - tr_llm).max(0) - init_llm).max(0);
     }
 
-    let tx = dev.unchecked_transaction().map_err(sql_err)?;
     let now = Utc::now().to_rfc3339();
 
     // 1. Apply one-time idempotent baseline delta + bump `totals` shard so next sync publishes to server
@@ -2392,7 +2442,6 @@ pub fn run_forward_repair(cfg: &ForwardRepairConfig) -> Result<ForwardRepairRepo
         params![space.space_id, max_history_seq, max_edits_seq, now],
     )
     .map_err(sql_err)?;
-    tx.commit().map_err(sql_err)?;
 
     let deleted_ids_resurrected: i64 = dev
         .query_row(
@@ -2410,6 +2459,13 @@ pub fn run_forward_repair(cfg: &ForwardRepairConfig) -> Result<ForwardRepairRepo
         )
         .map_err(sql_err)?;
     let after = snapshot_device_db(&dev, &space.space_id, &space.device_id)?;
+
+    if deleted_ids_resurrected != 0 || translate_read_leaked != 0 {
+        return Err(StorageError::InvalidInput(format!(
+            "repair validation failed: {deleted_ids_resurrected} resurrected records, {translate_read_leaked} shared translate-and-read records"
+        )));
+    }
+    tx.commit().map_err(sql_err)?;
 
     Ok(ForwardRepairReport {
         space_id: space.space_id,
@@ -2900,7 +2956,7 @@ mod tests {
         // preserve post-cutover dictations (8+3=11, 42+20=62, 6200+4000=10200, 3+1=4),
         // bump totals revision (5 -> 6), restore r-shared-1 edit version (is_shared=1),
         // seed r-local-private edit (is_shared=0), backfill r-server-only, and skip r-ancient.
-        let r1 = run_forward_repair(&ForwardRepairConfig {
+        let config = ForwardRepairConfig {
             server_v2_db: srv_v2.clone(),
             in_device_db: dev_a_live.clone(),
             out_device_db: dev_a_run1.clone(),
@@ -2909,8 +2965,16 @@ mod tests {
             v1_server_db: Some(srv_v1.clone()),
             initial_v2_device_db: Some(dev_a_init_v2.clone()),
             replay_history_within_retention: true,
+        };
+        let alias = dev_a_live.with_extension("alias");
+        std::fs::hard_link(&dev_a_live, &alias).unwrap();
+        let err = run_forward_repair(&ForwardRepairConfig {
+            out_device_db: alias,
+            ..config.clone()
         })
-        .unwrap();
+        .unwrap_err();
+        assert!(matches!(err, StorageError::InvalidInput(_)));
+        let r1 = run_forward_repair(&config).unwrap();
 
         assert!(!r1.baseline_repair_already_done);
         assert_eq!(r1.baseline_delta_recordings, 3);

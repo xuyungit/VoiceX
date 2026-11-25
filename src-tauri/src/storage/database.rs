@@ -803,6 +803,15 @@ pub fn insert_local_history_record_with_stats(
     with_db(|conn| insert_history_record_with_stats_conn(conn, record, update_stats, true))
 }
 
+fn legacy_outbox_enabled(conn: &Connection) -> Result<bool, StorageError> {
+    if crate::sync_v2::store::active_space_in(conn)?.is_some() {
+        return Ok(false);
+    }
+    Ok(crate::services::history_service::sync_owns_counters(
+        &read_settings_from_connection(conn)?,
+    ))
+}
+
 fn insert_history_record_with_stats_conn(
     conn: &Connection,
     record: &HistoryRecord,
@@ -851,6 +860,9 @@ fn insert_history_record_with_stats_conn(
         }
         if update_local_stats {
             increment_local_usage_stats_for_record_conn(&tx, record)?;
+            if legacy_outbox_enabled(&tx)? {
+                crate::services::sync_service::queue_legacy_create_tx(&tx, record)?;
+            }
         }
     }
     tx.commit()
@@ -924,22 +936,51 @@ fn delete_history_record_internal(id: &str, warn_on_missing: bool) -> Result<(),
         remove_audio_file_if_needed(path)?;
     }
 
-    with_db(|conn| {
-        let tx = conn.unchecked_transaction()
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        crate::post_edit::records::delete_source(&tx, id)?;
-        crate::sync_v2::store::on_local_history_deleted_tx(&tx, id, warn_on_missing)?;
-        let affected = tx
-            .execute("DELETE FROM history_record WHERE id = ?1", params![id])
-            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-        if affected == 0 && warn_on_missing {
-            log::warn!("History delete: record not found id={}", id);
-        }
-        tx.commit().map_err(|e| StorageError::QueryFailed(e.to_string()))
-    })?;
+    with_db(|conn| delete_history_record_conn(conn, id, warn_on_missing))?;
 
     crate::post_edit::records::changed();
     Ok(())
+}
+
+fn delete_history_record_conn(
+    conn: &Connection,
+    id: &str,
+    warn_on_missing: bool,
+) -> Result<(), StorageError> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    if warn_on_missing
+        && legacy_outbox_enabled(&tx)?
+        && history_record_mode_in(&tx, id)?.as_deref() != Some(HISTORY_MODE_TRANSLATE_READ)
+    {
+        tx.execute(
+            "DELETE FROM sync_outbox WHERE event_type='history.upsert' AND record_id=?1",
+            [id],
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO sync_outbox(event_id,event_type,record_id,payload,created_at)
+                    VALUES (?1,'history.delete',?2,?3,?4)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                id,
+                serde_json::json!({"recordId":id}).to_string(),
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    }
+    crate::post_edit::records::delete_source(&tx, id)?;
+    crate::sync_v2::store::on_local_history_deleted_tx(&tx, id, warn_on_missing)?;
+    let affected = tx
+        .execute("DELETE FROM history_record WHERE id = ?1", params![id])
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    if affected == 0 && warn_on_missing {
+        log::warn!("History delete: record not found id={}", id);
+    }
+    tx.commit()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))
 }
 
 fn remove_audio_file_if_needed(path: &str) -> Result<(), StorageError> {
@@ -3063,6 +3104,73 @@ mod tests {
         .unwrap();
         crate::sync_v2::store::init_schema(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn pre_pair_local_writes_and_outbox_handoff_share_the_database_boundary() {
+        let conn = daily_stats_conn();
+        conn.execute_batch("ALTER TABLE history_record ADD COLUMN edited_text TEXT;
+            ALTER TABLE history_record ADD COLUMN edit_source TEXT;
+            ALTER TABLE history_record ADD COLUMN edited_at TEXT;
+            CREATE TABLE sync_outbox(event_id TEXT PRIMARY KEY,event_type TEXT,record_id TEXT,payload TEXT,created_at TEXT);
+            CREATE TABLE sync_state(id INTEGER PRIMARY KEY,current_server_id TEXT,current_account_id TEXT);
+            INSERT INTO sync_state VALUES(1,'s','a');").unwrap();
+        let settings = serde_json::json!({"syncEnabled":true,"syncToken":"fixture","syncSharedSecret":"fixture",
+            "syncServerUrl":"http://local","syncDeviceName":"device-a"});
+        conn.execute(
+            "INSERT INTO user_config VALUES('app_settings',?1)",
+            [settings.to_string()],
+        )
+        .unwrap();
+        let insert =
+            |id| insert_history_record_with_stats_conn(&conn, &recording(id), false, true).unwrap();
+        insert("during-handshake");
+        insert("deleted-during-handshake");
+        crate::post_edit::records::create_schema(&conn).unwrap();
+        delete_history_record_conn(&conn, "deleted-during-handshake", true).unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        crate::sync_v2::store::upsert_sync_space_tx(
+            &tx,
+            "selfhost:s:a",
+            "selfhost",
+            "http://local",
+            "s",
+            "a",
+            "device-a",
+            true,
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        let handoff = crate::sync_v2::store::handoff_v1_outbox_to_v2_tx(
+            &tx,
+            "selfhost:s:a",
+            "device-a",
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            (handoff.creates_handed_off, handoff.deletes_handed_off),
+            (1, 1)
+        );
+        tx.commit().unwrap();
+        insert("after-activation");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sync_outbox_ops WHERE op_type='history.create'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
     }
 
     #[test]

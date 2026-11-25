@@ -2,12 +2,12 @@
 //! toggles, manual sync, existing-edits import, and edit conflict resolution).
 
 use crate::storage;
-use crate::sync_v2::credentials::DeviceIdentityStore;
+use crate::sync_v2::credentials::current_machine_fingerprint;
 use crate::sync_v2::crypto::decode_sync_invite;
 use crate::sync_v2::engine::{
-    create_device_invite, get_status_snapshot_in, import_existing_edits_in,
-    join_space_with_invite_options, pair_space_with_options, resolve_edit_conflict_with_parents_in,
-    sync_once, DeviceInviteResult, PairSuccessResult, SyncV2Service, SyncV2StatusSnapshot,
+    create_device_invite, get_status_snapshot_in, import_existing_edits_in, pair_space,
+    resolve_edit_conflict_with_parents_in, sync_once, DeviceInviteResult, PairSuccessResult,
+    SyncV2Service, SyncV2StatusSnapshot,
 };
 use crate::sync_v2::store::{
     ack_sync_scope_version_tx, active_space_in, list_edit_conflict_alternatives_in,
@@ -17,56 +17,14 @@ use crate::sync_v2::transport::{SelfHostTransport, SyncTransport};
 use tauri::{AppHandle, Emitter, State};
 use voicex_sync_protocol::DeviceUpdateRequest;
 
-/// Resolve this installation's external device identity (`device-identity.json`),
-/// rotating `user_config.sync_device_id` when the DB/data dir was cloned onto a
-/// different machine (S4), and determine whether this is a same-machine re-pair
-/// of a previously disconnected/revoked space (`allow_replace_active`).
-fn resolve_pairing_device_identity(
-    data_dir: &std::path::Path,
-) -> Result<(String, bool), String> {
-    let db_device_id = storage::get_or_create_device_id().map_err(|e| e.to_string())?;
-    let id_store = DeviceIdentityStore::in_data_dir(data_dir);
-    let resolved = id_store
-        .resolve(Some(&db_device_id))
-        .map_err(|e| e.to_string())?;
-
-    if resolved.rotated_for_new_install || resolved.device_id != db_device_id {
-        let new_id = resolved.device_id.clone();
-        storage::with_db(|conn| {
-            conn.execute(
-                "INSERT INTO user_config (key, value) VALUES ('sync_device_id', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                rusqlite::params![new_id],
-            )
-            .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
-            Ok(())
-        })
-        .map_err(|e| e.to_string())?;
-        return Ok((resolved.device_id, false));
-    }
-
-    // Same machine & same identity: allow replacing active token ONLY if `device-identity.json`
-    // ALREADY existed on disk for this machine fingerprint AND this local DB had a space for it.
-    // A DB-only clone onto a fresh machine has `existed_on_disk == false`, so it cannot silently
-    // hijack the original machine's active token (server returns 409 device_id_conflict).
-    let dev_id_check = resolved.device_id.clone();
-    let has_local_space_for_device = if resolved.existed_on_disk {
-        storage::with_db(|conn| {
-            let found: bool = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM sync_spaces WHERE device_id = ?1 LIMIT 1)",
-                    rusqlite::params![dev_id_check],
-                    |r| Ok(r.get::<_, i32>(0)? != 0),
-                )
-                .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
-            Ok(found)
-        })
-        .unwrap_or(false)
-    } else {
-        false
-    };
-
-    Ok((resolved.device_id, has_local_space_for_device))
+fn resolve_pairing_device_identity(data_dir: &std::path::Path) -> Result<String, String> {
+    let fingerprint = current_machine_fingerprint();
+    storage::with_db(|conn| {
+        crate::sync_v2::engine::reconcile_startup_device_identity_in(conn, data_dir, &fingerprint)
+            .map(|r| r.device_id)
+            .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -98,19 +56,18 @@ pub async fn sync_v2_pair(
     sync_v1: State<'_, crate::services::sync_service::SyncService>,
     sync_v2: State<'_, SyncV2Service>,
 ) -> Result<PairSuccessResult, String> {
+    let sync_lock = sync_v2.sync_lock();
+    let _guard = sync_lock.lock().await;
     let data_dir = sync_v2.data_dir()?;
     let creds = sync_v2.credential_store()?;
     let transport = SelfHostTransport::new(&server_url).map_err(|e| e.to_string())?;
-    let (device_id, allow_replace_active) =
+    let device_id =
         tauri::async_runtime::spawn_blocking(move || resolve_pairing_device_identity(&data_dir))
             .await
             .map_err(|e| e.to_string())??;
 
-    // Pause legacy v1 writers before v2 handoff so sync_outbox cannot race during pairing (M3/S10).
-    let prev_v1_settings = storage::get_settings().ok();
-    sync_v1.disable_immediately();
-
-    let result = match pair_space_with_options(
+    let _legacy_pause = sync_v1.pause_for_pairing().await;
+    let result = pair_space(
         |f| storage::with_db(f),
         &creds,
         &transport,
@@ -121,28 +78,15 @@ pub async fn sync_v2_pair(
         recovery_key.as_deref(),
         scope_history,
         scope_edits,
-        allow_replace_active,
     )
     .await
-    {
-        Ok(res) => res,
-        Err(err) => {
-            if let Some(prev) = prev_v1_settings {
-                sync_v1.apply_settings(&prev);
-            }
-            return Err(err.to_string());
-        }
-    };
+    .map_err(|e| e.to_string())?;
 
-    // Persist legacy v1 sync disabled so it never collides with v2 or suppresses local retention.
-    if let Ok(mut settings) = storage::get_settings() {
-        if settings.sync_enabled {
-            settings.sync_enabled = false;
-            let _ = storage::save_settings(&settings);
-        }
-        sync_v1.disable_immediately();
+    let mut settings = storage::get_settings().map_err(|e| e.to_string())?;
+    if settings.sync_enabled {
+        settings.sync_enabled = false;
+        storage::save_settings(&settings).map_err(|e| e.to_string())?;
     }
-
     sync_v2.restart_worker();
     sync_v2.emit_status();
     Ok(result)
@@ -152,6 +96,8 @@ pub async fn sync_v2_pair(
 pub async fn sync_v2_create_device_invite(
     sync_v2: State<'_, SyncV2Service>,
 ) -> Result<DeviceInviteResult, String> {
+    let sync_lock = sync_v2.sync_lock();
+    let _guard = sync_lock.lock().await;
     let creds = sync_v2.credential_store()?;
     let space = tauri::async_runtime::spawn_blocking(|| {
         storage::with_db(active_space_in).map_err(|e| e.to_string())
@@ -175,52 +121,18 @@ pub async fn sync_v2_join_with_invite(
     sync_v1: State<'_, crate::services::sync_service::SyncService>,
     sync_v2: State<'_, SyncV2Service>,
 ) -> Result<PairSuccessResult, String> {
-    let data_dir = sync_v2.data_dir()?;
-    let creds = sync_v2.credential_store()?;
     let parsed = decode_sync_invite(&invite_code).map_err(|e| e.to_string())?;
-    let transport = SelfHostTransport::new(&parsed.server_url).map_err(|e| e.to_string())?;
-    let (device_id, allow_replace_active) =
-        tauri::async_runtime::spawn_blocking(move || resolve_pairing_device_identity(&data_dir))
-            .await
-            .map_err(|e| e.to_string())??;
-
-    let prev_v1_settings = storage::get_settings().ok();
-    sync_v1.disable_immediately();
-
-    let result = match join_space_with_invite_options(
-        |f| storage::with_db(f),
-        &creds,
-        &transport,
-        &invite_code,
-        &device_id,
-        &device_name,
+    sync_v2_pair(
+        parsed.server_url,
+        parsed.pairing_code,
+        device_name,
+        Some(parsed.recovery_key),
         scope_history,
         scope_edits,
-        allow_replace_active,
+        sync_v1,
+        sync_v2,
     )
     .await
-    {
-        Ok(res) => res,
-        Err(err) => {
-            if let Some(prev) = prev_v1_settings {
-                sync_v1.apply_settings(&prev);
-            }
-            return Err(err.to_string());
-        }
-    };
-
-    // Persist legacy v1 sync disabled so it never collides with v2 or suppresses local retention.
-    if let Ok(mut settings) = storage::get_settings() {
-        if settings.sync_enabled {
-            settings.sync_enabled = false;
-            let _ = storage::save_settings(&settings);
-        }
-        sync_v1.disable_immediately();
-    }
-
-    sync_v2.restart_worker();
-    sync_v2.emit_status();
-    Ok(result)
 }
 
 #[tauri::command]
@@ -249,6 +161,8 @@ pub async fn sync_v2_update_scope(
     device_name: Option<String>,
     sync_v2: State<'_, SyncV2Service>,
 ) -> Result<SyncV2StatusSnapshot, String> {
+    let sync_lock = sync_v2.sync_lock();
+    let _guard = sync_lock.lock().await;
     let creds = sync_v2.credential_store()?;
     let space = tauri::async_runtime::spawn_blocking(|| {
         storage::with_db(active_space_in).map_err(|e| e.to_string())
@@ -284,8 +198,6 @@ pub async fn sync_v2_update_scope(
     // S5/S6: Serialize with active sync cycles; ack `scope_version` ONLY if server accepts.
     // If offline or failed, `scope_version > acked_scope_version` stays pending and is pushed
     // automatically on reconnect before any envelopes are sent.
-    let sync_lock = sync_v2.sync_lock();
-    let _guard = sync_lock.lock().await;
     if let Ok(Some(space_creds)) = creds.get(&space.space_id) {
         if let Ok(transport) = SelfHostTransport::new(&space.server_url) {
             let name = device_name
@@ -364,6 +276,8 @@ pub async fn sync_v2_sync_now(
     app: AppHandle,
     sync_v2: State<'_, SyncV2Service>,
 ) -> Result<SyncV2StatusSnapshot, String> {
+    let sync_lock = sync_v2.sync_lock();
+    let _guard = sync_lock.lock().await;
     let creds = sync_v2.credential_store()?;
     let space = tauri::async_runtime::spawn_blocking(|| {
         storage::with_db(active_space_in).map_err(|e| e.to_string())
@@ -376,8 +290,6 @@ pub async fn sync_v2_sync_now(
     let retention_days = storage::get_settings_cached()
         .map(|s| s.text_retention_days)
         .unwrap_or(0);
-    let sync_lock = sync_v2.sync_lock();
-    let _guard = sync_lock.lock().await;
     let summary = sync_once(|f| storage::with_db(f), &creds, &transport, retention_days)
         .await
         .map_err(|e| e.to_string())?;
@@ -398,6 +310,8 @@ pub async fn sync_v2_disconnect(
     clear_credentials: Option<bool>,
     sync_v2: State<'_, SyncV2Service>,
 ) -> Result<SyncV2StatusSnapshot, String> {
+    let sync_lock = sync_v2.sync_lock();
+    let _guard = sync_lock.lock().await;
     let creds = sync_v2.credential_store()?;
     let clear = clear_credentials.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
@@ -413,7 +327,7 @@ pub async fn sync_v2_disconnect(
             })
             .map_err(|e| e.to_string())?;
             if clear {
-                creds.remove(&space.space_id).map_err(|e| e.to_string())?;
+                creds.remove(&space.space_id, &space.server_url, &space.device_id).map_err(|e| e.to_string())?;
             }
         }
         Ok::<_, String>(())

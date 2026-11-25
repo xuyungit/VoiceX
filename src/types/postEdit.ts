@@ -33,6 +33,7 @@ export interface PostEditSettings {
 }
 
 export interface PostEditRecord {
+  activeEditId: string | null
   id: string
   recordId: string
   sessionId: string

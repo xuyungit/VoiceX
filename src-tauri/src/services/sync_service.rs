@@ -10,7 +10,6 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::commands::settings::AppSettings;
 use crate::services::history_service::{HISTORY_ERROR_NONE, HISTORY_MODE_TRANSLATE_READ};
@@ -19,12 +18,14 @@ use crate::storage::{self, HistoryRecord, TtsCounters, UsageStats};
 #[derive(Clone, Default)]
 pub struct SyncService {
     inner: Arc<Mutex<SyncServiceInner>>,
+    worker_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
 struct SyncServiceInner {
     app_handle: Option<AppHandle>,
     config: SyncConfig,
+    pairing: bool,
     cancel: Option<CancellationToken>,
     flush_tx: Option<mpsc::UnboundedSender<()>>,
 }
@@ -67,29 +68,46 @@ impl SyncConfig {
     }
 }
 
+pub struct LegacyPairingGuard<'a>(&'a SyncService);
+
+impl Drop for LegacyPairingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.inner.lock().expect("sync service lock").pairing = false;
+        if let Ok(settings) = storage::get_settings() {
+            self.0.apply_settings(&settings);
+        }
+    }
+}
+
 impl SyncService {
     pub fn init_with_handle(&self, handle: &AppHandle) {
         let mut inner = self.inner.lock().expect("sync service lock");
         inner.app_handle = Some(handle.clone());
     }
 
-    /// Immediately stop legacy v1 background sync and clear in-memory enabled
-    /// config so no further v1 outbox writes or TTS HTTP requests can occur.
-    pub fn disable_immediately(&self) {
-        let mut inner = self.inner.lock().expect("sync service lock");
-        inner.config = SyncConfig::default();
-        stop_sync(&mut inner);
-        drop(inner);
-        self.update_status("disabled", None);
+    pub async fn pause_for_pairing(&self) -> LegacyPairingGuard<'_> {
+        {
+            let mut inner = self.inner.lock().expect("sync service lock");
+            inner.pairing = true;
+            inner.config = SyncConfig::default();
+            stop_sync(&mut inner);
+        }
+        let guard = LegacyPairingGuard(self);
+        // Wait for any synchronous SQLite work from the old worker to exit.
+        drop(self.worker_lock.lock().await);
+        guard
     }
 
     pub fn apply_settings(&self, settings: &AppSettings) {
+        let mut inner = self.inner.lock().expect("sync service lock");
+        if inner.pairing {
+            return;
+        }
         let v2_active = storage::with_db(crate::sync_v2::store::active_space_in)
             .ok()
             .flatten()
             .is_some();
         if v2_active {
-            let mut inner = self.inner.lock().expect("sync service lock");
             inner.config = SyncConfig::default();
             stop_sync(&mut inner);
             drop(inner);
@@ -98,7 +116,6 @@ impl SyncService {
         }
 
         let new_config = SyncConfig::from_settings(settings);
-        let mut inner = self.inner.lock().expect("sync service lock");
         let config_changed = inner.config != new_config;
         inner.config = new_config.clone();
 
@@ -122,71 +139,8 @@ impl SyncService {
         }
 
         if config_changed || inner.cancel.is_none() {
-            start_sync(inner, new_config);
+            start_sync(inner, new_config, self.worker_lock.clone());
         } else if let Some(tx) = inner.flush_tx.as_ref() {
-            let _ = tx.send(());
-        }
-    }
-
-    pub fn enqueue_history_upsert(&self, record: &HistoryRecord) {
-        let inner = self.inner.lock().expect("sync service lock");
-        if !inner.config.is_valid() {
-            return;
-        }
-        if !record_leaves_this_machine(&record.mode, record.error_code) {
-            return;
-        }
-
-        let source_device_id = record
-            .source_device_id
-            .clone()
-            .unwrap_or_else(|| storage::get_or_create_device_id().unwrap_or_default());
-        if source_device_id.is_empty() {
-            return;
-        }
-
-        let payload = SyncHistoryRecord {
-            id: record.id.clone(),
-            source_device_id,
-            timestamp: record.timestamp.clone(),
-            text: record.text.clone(),
-            original_text: record.original_text.clone(),
-            ai_correction_applied: record.ai_correction_applied,
-            llm_invoked: record.llm_invoked,
-            mode: record.mode.clone(),
-            duration_ms: record.duration_ms,
-            is_final: record.is_final,
-            error_code: record.error_code,
-            error_message: record.error_message.clone(),
-            asr_model_name: record.asr_model_name.clone(),
-            llm_model_name: record.llm_model_name.clone(),
-        };
-
-        let event_id = format!("history:{}", record.id);
-        let payload_value = serde_json::to_value(payload).unwrap_or(Value::Null);
-        let _ = storage::enqueue_outbox_event(
-            &event_id,
-            "history.upsert",
-            Some(&record.id),
-            &payload_value,
-        );
-        if let Some(tx) = inner.flush_tx.as_ref() {
-            let _ = tx.send(());
-        }
-    }
-
-    pub fn enqueue_history_delete(&self, record_id: &str) {
-        let inner = self.inner.lock().expect("sync service lock");
-        if !inner.config.is_valid() {
-            return;
-        }
-
-        let _ = storage::delete_outbox_upsert_for_record(record_id);
-        let event_id = Uuid::new_v4().to_string();
-        let payload = json!({ "recordId": record_id });
-        let _ =
-            storage::enqueue_outbox_event(&event_id, "history.delete", Some(record_id), &payload);
-        if let Some(tx) = inner.flush_tx.as_ref() {
             let _ = tx.send(());
         }
     }
@@ -268,7 +222,11 @@ fn stop_sync(inner: &mut SyncServiceInner) {
     inner.flush_tx = None;
 }
 
-fn start_sync(mut inner: std::sync::MutexGuard<'_, SyncServiceInner>, config: SyncConfig) {
+fn start_sync(
+    mut inner: std::sync::MutexGuard<'_, SyncServiceInner>,
+    config: SyncConfig,
+    worker_lock: Arc<tokio::sync::Mutex<()>>,
+) {
     stop_sync(&mut inner);
     let app = match inner.app_handle.clone() {
         Some(handle) => handle,
@@ -284,7 +242,14 @@ fn start_sync(mut inner: std::sync::MutexGuard<'_, SyncServiceInner>, config: Sy
     inner.cancel = Some(cancel.clone());
     drop(inner);
 
-    tauri::async_runtime::spawn(sync_worker(config, app, cancel, rx));
+    tauri::async_runtime::spawn(async move {
+        let _guard = worker_lock.lock().await;
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {}
+            _ = sync_worker(config, app, cancel.clone(), rx) => {}
+        }
+    });
 }
 
 async fn sync_worker(
@@ -878,6 +843,53 @@ fn record_leaves_this_machine(mode: &str, error_code: i32) -> bool {
     error_code == HISTORY_ERROR_NONE && mode != HISTORY_MODE_TRANSLATE_READ
 }
 
+/// Persist the v1 wire payload inside the same transaction as the local record.
+pub(crate) fn queue_legacy_create_tx(
+    conn: &rusqlite::Connection,
+    record: &HistoryRecord,
+) -> Result<(), storage::StorageError> {
+    if !record_leaves_this_machine(&record.mode, record.error_code) {
+        return Ok(());
+    }
+    let source_device_id = record.source_device_id.clone().ok_or_else(|| {
+        storage::StorageError::InvalidInput("local recording has no device ID".into())
+    })?;
+    let payload = legacy_history_payload(record, source_device_id);
+    let json = serde_json::to_string(&payload)
+        .map_err(|e| storage::StorageError::SerializeFailed(e.to_string()))?;
+    conn.execute(
+        "INSERT OR IGNORE INTO sync_outbox(event_id,event_type,record_id,payload,created_at)
+                  VALUES (?1,'history.upsert',?2,?3,?4)",
+        rusqlite::params![
+            format!("history:{}", record.id),
+            record.id,
+            json,
+            Utc::now().to_rfc3339()
+        ],
+    )
+    .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
+    Ok(())
+}
+
+fn legacy_history_payload(record: &HistoryRecord, source_device_id: String) -> SyncHistoryRecord {
+    SyncHistoryRecord {
+        id: record.id.clone(),
+        source_device_id,
+        timestamp: record.timestamp.clone(),
+        text: record.text.clone(),
+        original_text: record.original_text.clone(),
+        ai_correction_applied: record.ai_correction_applied,
+        llm_invoked: record.llm_invoked,
+        mode: record.mode.clone(),
+        duration_ms: record.duration_ms,
+        is_final: record.is_final,
+        error_code: record.error_code,
+        error_message: record.error_message.clone(),
+        asr_model_name: record.asr_model_name.clone(),
+        llm_model_name: record.llm_model_name.clone(),
+    }
+}
+
 fn seed_outbox_from_history(
     device_id: &str,
     server_state: &storage::SyncServerState,
@@ -904,22 +916,7 @@ fn seed_outbox_from_history(
                 .clone()
                 .unwrap_or_else(|| device_id.to_string());
             let record_ts = record.timestamp.clone();
-            let payload = SyncHistoryRecord {
-                id: record.id.clone(),
-                source_device_id,
-                timestamp: record.timestamp,
-                text: record.text,
-                original_text: record.original_text,
-                ai_correction_applied: record.ai_correction_applied,
-                llm_invoked: record.llm_invoked,
-                mode: record.mode,
-                duration_ms: record.duration_ms,
-                is_final: record.is_final,
-                error_code: record.error_code,
-                error_message: record.error_message,
-                asr_model_name: record.asr_model_name,
-                llm_model_name: record.llm_model_name,
-            };
+            let payload = legacy_history_payload(&record, source_device_id);
             let event_id = format!("history:{}", record.id);
             let payload_value = serde_json::to_value(payload).unwrap_or(Value::Null);
             let _ = storage::enqueue_outbox_event(
