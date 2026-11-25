@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.20.0] - 2026-11-25
+
+### Added
+
+- End-to-end encrypted device sync for usage statistics, dictation history and edits. Pair additional devices with a single-use invitation and recover concurrent edits in History.
+- Separate per-device switches for dictionary words, replacement rules and custom prompts. On first enable, merge existing content. Conflicting rules pause until resolved, and alternate prompt versions remain available in Sync settings.
+- View usage across all devices or only this computer, including breakdowns by ASR and LLM model.
+- Self-hosted v2 HTTP/SSE relay, account and device administration, and offline v1 migration and repair commands. Upgrade the relay before enabling the new categories.
+
 ## [0.19.4] - 2026-11-22
 
 ### Added
