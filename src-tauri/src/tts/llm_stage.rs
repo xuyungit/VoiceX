@@ -438,16 +438,12 @@ mod tests {
 
     #[test]
     fn the_frontend_reset_button_restores_exactly_these_prompts() {
-        // `llmPrompts.ts` holds the copy the settings page resets to; if the
-        // two drift, "restore default" silently changes the prompt.
-        let ts = include_str!("../../../src/utils/llmPrompts.ts").replace("\r\n", "\n");
-        assert!(
-            ts.contains(DEFAULT_TRANSLATE_PROMPT_ZH),
-            "zh translate prompt differs from llmPrompts.ts"
-        );
-        assert!(
-            ts.contains(DEFAULT_PREPROCESS_PROMPT_ZH),
-            "zh preprocess prompt differs from llmPrompts.ts"
+        let defaults: serde_json::Value =
+            serde_json::from_str(include_str!("../../../src/shared/defaultPrompts.json")).unwrap();
+        assert_eq!(defaults["ttsTranslate"]["zh"], DEFAULT_TRANSLATE_PROMPT_ZH);
+        assert_eq!(
+            defaults["ttsPreprocess"]["zh"],
+            DEFAULT_PREPROCESS_PROMPT_ZH
         );
     }
 

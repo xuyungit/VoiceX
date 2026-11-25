@@ -58,6 +58,7 @@ impl DbApiError {
 
 #[derive(Debug, Clone)]
 pub struct AuthedDevice {
+    pub knowledge_scopes: u8,
     pub account_id: String,
     pub device_id: String,
     pub allow_stats: bool,
@@ -214,6 +215,17 @@ pub async fn init_db(db: &SqlitePool) -> Result<(), sqlx::Error> {
 
     sqlx::query(
         r#"
+        CREATE TABLE IF NOT EXISTS device_knowledge_scopes (
+            account_id TEXT NOT NULL, device_id TEXT NOT NULL, mask INTEGER NOT NULL,
+            PRIMARY KEY(account_id, device_id),
+            FOREIGN KEY(account_id, device_id) REFERENCES devices(account_id, device_id)
+        )"#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS envelopes (
             account_id TEXT NOT NULL REFERENCES accounts(account_id),
             seq INTEGER NOT NULL,
@@ -348,8 +360,9 @@ pub async fn create_pairing_code(
 pub async fn list_devices(db: &SqlitePool, account_id: &str) -> Result<Vec<DeviceInfo>, DbApiError> {
     let rows = sqlx::query(
         "SELECT device_id, device_name, platform, app_version,
-                allow_stats, allow_history, allow_edits, last_seen_at, revoked_at
-         FROM devices
+                allow_stats, allow_history, allow_edits, last_seen_at, revoked_at,
+                COALESCE((SELECT mask FROM device_knowledge_scopes k WHERE k.account_id=d.account_id AND k.device_id=d.device_id),0)
+         FROM devices d
          WHERE account_id = ?1
          ORDER BY last_seen_at DESC, device_name ASC",
     )
@@ -360,6 +373,7 @@ pub async fn list_devices(db: &SqlitePool, account_id: &str) -> Result<Vec<Devic
     Ok(rows
         .into_iter()
         .map(|r| DeviceInfo {
+            knowledge_scopes: r.get::<i64, _>(9) as u8,
             device_id: r.get(0),
             device_name: r.get(1),
             platform: r.get(2),
@@ -593,7 +607,8 @@ pub async fn authenticate_token(
     let token_hash = sha256_hex(trimmed);
     let row = sqlx::query(
         "SELECT d.account_id, d.device_id, d.allow_stats, d.allow_history, d.allow_edits,
-                d.revoked_at, a.disabled_at
+                d.revoked_at, a.disabled_at,
+                COALESCE((SELECT mask FROM device_knowledge_scopes k WHERE k.account_id=d.account_id AND k.device_id=d.device_id),0)
          FROM devices d
          JOIN accounts a ON a.account_id = d.account_id
          WHERE d.token_hash = ?1",
@@ -612,6 +627,7 @@ pub async fn authenticate_token(
     }
 
     Ok(AuthedDevice {
+        knowledge_scopes: row.get::<i64, _>(7) as u8,
         account_id: row.get(0),
         device_id: row.get(1),
         allow_stats: row.get::<i64, _>(2) != 0,
@@ -707,9 +723,24 @@ pub async fn update_device(
     .execute(&mut *tx)
     .await?;
 
+    if let Some(mask) = req.knowledge_scopes {
+        if mask & !7 != 0 {
+            return Err(DbApiError::BadRequest("unknown knowledge scope".into()));
+        }
+        sqlx::query(
+            "INSERT INTO device_knowledge_scopes(account_id,device_id,mask) VALUES(?1,?2,?3)
+            ON CONFLICT(account_id,device_id) DO UPDATE SET mask=excluded.mask",
+        )
+        .bind(&auth.account_id)
+        .bind(&auth.device_id)
+        .bind(i64::from(mask))
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
 
     Ok(DeviceInfo {
+        knowledge_scopes: req.knowledge_scopes.unwrap_or(auth.knowledge_scopes),
         device_id: auth.device_id.clone(),
         device_name: name.to_string(),
         platform: req.platform.trim().to_string(),
@@ -745,6 +776,14 @@ pub async fn push_envelopes(
             ));
         }
         match sub.domain {
+            SyncDomain::Dictionary | SyncDomain::Rules | SyncDomain::Prompts => {
+                if auth.knowledge_scopes & sub.domain.knowledge_bit() == 0 {
+                    return Err(DbApiError::ScopeForbidden(format!(
+                        "{} sync is disabled",
+                        sub.domain
+                    )));
+                }
+            }
             SyncDomain::Stats => {
                 if !auth.allow_stats {
                     return Err(DbApiError::ScopeForbidden(

@@ -303,7 +303,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin voicex-tts -- notes.md --tr
 
 ## 跨设备同步
 
-如果你在多台电脑上使用语音输入，可以部署一个轻量的自建同步服务器（`sync-server/`），让文本历史在各设备间保持一致；录音只保存在本机。服务器资源占用很低，部署方法见 [sync-server/README.md](./sync-server/README.md)。
+在「设置 → 同步」中配对设备，可端到端加密同步统计、听写历史与修改稿。词典、替换规则、自定义提示词各有独立开关，每台设备默认关闭。首次开启会合并已有内容。同一原词的规则发生冲突时会暂停生效，两版都可在同步设置中查看和选择。录音和 API 密钥保存在本机。[自建服务器说明](./sync-server/README.md)
 
 ## 已知限制
 

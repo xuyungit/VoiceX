@@ -4,6 +4,7 @@ import { NInput, NSwitch, NButton, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
 import { useSyncStore, type DeviceInviteResult } from '../stores/sync'
+import KnowledgeSync from '../components/settings/KnowledgeSync.vue'
 import SettingsSection from '../components/settings/SettingsSection.vue'
 import SettingRow from '../components/settings/SettingRow.vue'
 
@@ -405,6 +406,8 @@ onMounted(async () => {
           </NButton>
         </SettingRow>
       </SettingsSection>
+
+      <KnowledgeSync v-if="v2.spaceId" :space-id="v2.spaceId" />
 
       <SettingsSection :title="t('sync.recoveryKeySection')" :help="t('sync.recoveryKeySectionSub')">
         <SettingRow :label="t('sync.recoveryKey')">

@@ -5,6 +5,7 @@ pub mod credentials;
 pub mod crypto;
 pub mod engine;
 pub mod hlc;
+pub mod knowledge;
 pub mod merge;
 pub mod migrate;
 pub mod payloads;

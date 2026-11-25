@@ -43,6 +43,7 @@ fn find_remote_table(tables: &[BoostingTable], online_id: &str) -> Option<Boosti
 #[tauri::command]
 pub async fn sync_hotwords(_app_handle: tauri::AppHandle) -> Result<SyncResult, String> {
     let mut settings = crate::storage::get_settings().map_err(|e| e.to_string())?;
+    let knowledge_base = crate::sync_v2::knowledge::KnowledgeFields::from(&settings);
     let initial_local_updated_at = settings.local_hotword_updated_at.clone();
 
     if settings.volc_access_key.is_empty()
@@ -116,7 +117,8 @@ pub async fn sync_hotwords(_app_handle: tauri::AppHandle) -> Result<SyncResult, 
         settings.remote_hotword_updated_at = new_table.update_time;
         // Keep local_hotword_updated_at as-is to avoid marking a download/create as a local edit.
 
-        crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+        crate::storage::save_settings_from_base(&settings, Some(&knowledge_base))
+            .map_err(|e| e.to_string())?;
 
         let diagnostics = SyncDiagnostics {
             server_updated_at: settings.remote_hotword_updated_at.clone(),
@@ -219,7 +221,8 @@ pub async fn sync_hotwords(_app_handle: tauri::AppHandle) -> Result<SyncResult, 
             settings.online_hotword_id = remote.id;
 
             settings.dictionary_text = normalized_latest;
-            crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+            crate::storage::save_settings_from_base(&settings, Some(&knowledge_base))
+                .map_err(|e| e.to_string())?;
 
             let mut diagnostics = base_diagnostics.clone();
             diagnostics.server_updated_at = settings.remote_hotword_updated_at.clone();
@@ -277,7 +280,8 @@ pub async fn sync_hotwords(_app_handle: tauri::AppHandle) -> Result<SyncResult, 
             settings.remote_hotword_updated_at = remote.update_time;
             settings.online_hotword_id = remote.id;
 
-            crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+            crate::storage::save_settings_from_base(&settings, Some(&knowledge_base))
+                .map_err(|e| e.to_string())?;
 
             diagnostics.remote_synced_at = settings.remote_hotword_updated_at.clone();
             return Ok(SyncResult {
@@ -339,7 +343,8 @@ pub async fn sync_hotwords(_app_handle: tauri::AppHandle) -> Result<SyncResult, 
             settings.remote_hotword_updated_at = remote.update_time;
             settings.online_hotword_id = remote.id;
 
-            crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+            crate::storage::save_settings_from_base(&settings, Some(&knowledge_base))
+                .map_err(|e| e.to_string())?;
 
             diagnostics.remote_synced_at = settings.remote_hotword_updated_at.clone();
             return Ok(SyncResult {
@@ -384,7 +389,8 @@ pub async fn sync_hotwords(_app_handle: tauri::AppHandle) -> Result<SyncResult, 
         // Standardization: Use the normalized text locally too
         settings.dictionary_text = normalized_latest;
 
-        crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+        crate::storage::save_settings_from_base(&settings, Some(&knowledge_base))
+            .map_err(|e| e.to_string())?;
 
         let mut diagnostics = base_diagnostics.clone();
         diagnostics.server_updated_at = settings.remote_hotword_updated_at.clone();
@@ -424,7 +430,8 @@ pub async fn sync_hotwords(_app_handle: tauri::AppHandle) -> Result<SyncResult, 
             settings.online_hotword_id = remote.id;
             settings.dictionary_text = normalized_latest;
 
-            crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+            crate::storage::save_settings_from_base(&settings, Some(&knowledge_base))
+                .map_err(|e| e.to_string())?;
 
             let mut diagnostics = base_diagnostics.clone();
             diagnostics.server_updated_at = settings.remote_hotword_updated_at.clone();
@@ -480,7 +487,8 @@ pub async fn sync_hotwords(_app_handle: tauri::AppHandle) -> Result<SyncResult, 
             settings.remote_hotword_updated_at = remote.update_time;
             settings.online_hotword_id = remote.id;
 
-            crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+            crate::storage::save_settings_from_base(&settings, Some(&knowledge_base))
+                .map_err(|e| e.to_string())?;
 
             diagnostics.remote_synced_at = settings.remote_hotword_updated_at.clone();
             return Ok(SyncResult {
@@ -516,6 +524,7 @@ pub async fn sync_hotwords(_app_handle: tauri::AppHandle) -> Result<SyncResult, 
 #[tauri::command]
 pub async fn force_download_hotwords(_app_handle: tauri::AppHandle) -> Result<SyncResult, String> {
     let mut settings = crate::storage::get_settings().map_err(|e| e.to_string())?;
+    let knowledge_base = crate::sync_v2::knowledge::KnowledgeFields::from(&settings);
     if settings.volc_access_key.is_empty()
         || settings.volc_secret_key.is_empty()
         || settings.volc_app_id.is_empty()
@@ -557,7 +566,8 @@ pub async fn force_download_hotwords(_app_handle: tauri::AppHandle) -> Result<Sy
         settings.remote_hotword_updated_at = remote.update_time;
         settings.online_hotword_id = remote.id;
 
-        crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+        crate::storage::save_settings_from_base(&settings, Some(&knowledge_base))
+            .map_err(|e| e.to_string())?;
 
         diagnostics.remote_synced_at = settings.remote_hotword_updated_at.clone();
         return Ok(SyncResult {

@@ -416,3 +416,228 @@ async fn real_tcp_two_clients_sse_e2ee_conflict_delete_and_cli_revoke() {
     ));
     assert!(sync_once(|f| mac.with_db(f), &mac.creds, &transport, 0).await.is_ok());
 }
+
+#[tokio::test]
+async fn knowledge_merges_existing_devices_and_recovers_offline_versions() {
+    use voicex_lib::commands::settings::{AppSettings, ReplacementRule};
+    use voicex_lib::sync_v2::knowledge::{self, KnowledgeFields};
+    use voicex_sync_protocol::SyncDomain::{Dictionary, Prompts, Rules};
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("server.db");
+    let bin = server_bin_path();
+    let db_str = db.to_str().unwrap();
+    let account = run_admin(
+        &bin,
+        &[
+            "admin",
+            "create-account",
+            "--db",
+            db_str,
+            "--label",
+            "knowledge",
+        ],
+    );
+    let account = account["accountId"].as_str().unwrap();
+    let addr = format!("127.0.0.1:{}", free_port());
+    let _server = ChildGuard(
+        Command::new(&bin)
+            .args([
+                "serve",
+                "--addr",
+                &addr,
+                "--db",
+                db_str,
+                "--log-dir",
+                dir.path().to_str().unwrap(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let url = format!("http://{addr}");
+    for _ in 0..100 {
+        if reqwest::get(format!("{url}/healthz")).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let transport = SelfHostTransport::new(&url).unwrap();
+    let devices = [
+        RealClient::new("mac"),
+        RealClient::new("win-a"),
+        RealClient::new("win-b"),
+    ];
+    let mut recovery = None;
+    let mut sid = String::new();
+    for (n, dev) in devices.iter().enumerate() {
+        let code = run_admin(
+            &bin,
+            &[
+                "admin",
+                "create-pairing-code",
+                "--db",
+                db_str,
+                "--account",
+                account,
+            ],
+        );
+        let p = pair_space(
+            |f| dev.with_db(f),
+            &dev.creds,
+            &transport,
+            &url,
+            code["pairingCode"].as_str().unwrap(),
+            &dev.device_id,
+            &dev.device_id,
+            recovery.as_deref(),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        recovery = Some(p.recovery_key);
+        sid = p.space_id;
+        let mut settings = AppSettings::default();
+        settings.dictionary_text = format!("shared\nword-{n}");
+        if n < 2 {
+            settings.llm_prompt_template = format!("custom-{n}");
+            settings.replacement_rules = vec![ReplacementRule {
+                id: format!("rule-{n}"),
+                keyword: "same".into(),
+                replacement: format!("value-{n}"),
+                enabled: true,
+                match_mode: if n == 0 { "exact" } else { "contains" }.into(),
+            }];
+        }
+        let conn = dev.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO user_config(key,value) VALUES('app_settings',?)",
+            [serde_json::to_string(&settings).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(knowledge::mask(&conn, &sid).unwrap(), 0);
+        for d in [Dictionary, Rules, Prompts] {
+            knowledge::set_enabled(&conn, &sid, d, true).unwrap();
+        }
+    }
+    async fn sync(dev: &RealClient, t: &SelfHostTransport) {
+        sync_once(|f| dev.with_db(f), &dev.creds, t, 0)
+            .await
+            .unwrap();
+    }
+    fn read(dev: &RealClient) -> AppSettings {
+        let raw: String = dev
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM user_config WHERE key='app_settings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&raw).unwrap()
+    }
+    for _ in 0..2 {
+        for dev in &devices {
+            sync(dev, &transport).await;
+        }
+    }
+    for dev in &devices {
+        let settings = read(dev);
+        assert_eq!(settings.dictionary_text.lines().count(), 4);
+        assert!(settings.replacement_rules.is_empty());
+        let status = knowledge::status(&dev.conn.lock().unwrap()).unwrap();
+        assert_eq!(status.conflicts.len(), 2);
+        assert!(status.conflicts.iter().all(|c| c.versions.len() == 2));
+    }
+    let a = &devices[0];
+    {
+        let conn = a.conn.lock().unwrap();
+        for c in knowledge::status(&conn).unwrap().conflicts {
+            let parents = c.versions.iter().map(|v| v.id.clone()).collect();
+            knowledge::resolve(&conn, &sid, c.domain, c.key, &c.versions[0].id, parents).unwrap();
+        }
+    }
+    sync(a, &transport).await;
+    for dev in &devices {
+        sync(dev, &transport).await;
+    }
+    for dev in &devices {
+        assert_eq!(read(dev).replacement_rules.len(), 1);
+    }
+    let base = read(a);
+    for (n, dev) in devices[..2].iter().enumerate() {
+        let mut s = read(dev);
+        let before = KnowledgeFields::from(&s);
+        s.dictionary_text = s
+            .dictionary_text
+            .lines()
+            .filter(|w| *w != "shared")
+            .chain([if n == 0 { "offline A" } else { "offline B" }])
+            .collect::<Vec<_>>()
+            .join("\n");
+        s.llm_prompt_template = format!("offline version {n}");
+        let conn = dev.conn.lock().unwrap();
+        knowledge::capture(&conn, &before, &mut s).unwrap();
+        conn.execute(
+            "UPDATE user_config SET value=? WHERE key='app_settings'",
+            [serde_json::to_string(&s).unwrap()],
+        )
+        .unwrap();
+    }
+    for _ in 0..2 {
+        for dev in devices.iter().rev() {
+            sync(dev, &transport).await;
+        }
+    }
+    for dev in &devices {
+        let s = read(dev);
+        assert!(s.dictionary_text.contains("offline A") && s.dictionary_text.contains("offline B"));
+        assert!(!s.dictionary_text.lines().any(|w| w == "shared"));
+        assert_eq!(
+            knowledge::status(&dev.conn.lock().unwrap())
+                .unwrap()
+                .conflicts
+                .len(),
+            1
+        );
+    }
+    assert_ne!(base.llm_prompt_template, read(a).llm_prompt_template);
+    // An opted-out peer keeps its local changes until it explicitly joins again.
+    let paused = &devices[2];
+    {
+        let conn = paused.conn.lock().unwrap();
+        knowledge::set_enabled(&conn, &sid, Dictionary, false).unwrap();
+    }
+    for (dev, word) in [(paused, "paused-only"), (a, "published")] {
+        let mut settings = read(dev);
+        let before = KnowledgeFields::from(&settings);
+        settings.dictionary_text.push_str(&format!("\n{word}"));
+        let conn = dev.conn.lock().unwrap();
+        knowledge::capture(&conn, &before, &mut settings).unwrap();
+        conn.execute(
+            "UPDATE user_config SET value=? WHERE key='app_settings'",
+            [serde_json::to_string(&settings).unwrap()],
+        )
+        .unwrap();
+    }
+    sync(a, &transport).await;
+    sync(paused, &transport).await;
+    assert!(!read(paused).dictionary_text.contains("published"));
+    assert!(!read(a).dictionary_text.contains("paused-only"));
+    {
+        let conn = paused.conn.lock().unwrap();
+        knowledge::set_enabled(&conn, &sid, Dictionary, true).unwrap();
+    }
+    sync(paused, &transport).await;
+    sync(a, &transport).await;
+    for dev in [paused, a] {
+        let words = read(dev).dictionary_text;
+        assert!(words.contains("published") && words.contains("paused-only"));
+    }
+    let server = Connection::open(&db).unwrap();
+    let exposed:i64=server.query_row("SELECT count(*) FROM envelopes WHERE domain IN ('rules','prompts','dictionary') AND (object_id LIKE '%word%' OR instr(ciphertext,'offline version')>0)",[],|r|r.get(0)).unwrap();
+    assert_eq!(exposed, 0);
+}

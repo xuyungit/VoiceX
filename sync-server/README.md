@@ -1,107 +1,36 @@
-# VoiceX Sync Server (local dev)
+# VoiceX Sync v2 server
 
-This is a minimal sync server for VoiceX history synchronization (Phase 1).
+The relay stores encrypted envelopes in SQLite and notifies paired devices over SSE. Each device chooses its own sync categories. Upgrade the server before enabling dictionary, rule or custom prompt sync.
 
-## Run
+## First device
+
+From this directory, build and start the relay. Use a dedicated v2 database. Existing v1 installations need the offline migration before changing databases.
 
 ```bash
-cd sync-server
-export VOICEX_SYNC_SHARED_SECRET="dev-shared-secret"
-cargo run -- --addr 127.0.0.1:8787 --db ./dev.db
+cargo build --release --locked
+export VOICEX_SYNC_DB="$PWD/sync-v2.db"
+./target/release/voicex-sync-server serve --addr 127.0.0.1:8787
 ```
 
-Environment variables (optional):
-
-- `VOICEX_SYNC_ADDR` (same as `--addr`)
-- `VOICEX_SYNC_DB` (same as `--db`)
-- `VOICEX_SYNC_SHARED_SECRET` (required for auth)
-- `VOICEX_SYNC_LOG_DIR` (default `./logs`)
-
-Logs are written to `${VOICEX_SYNC_LOG_DIR}/voicex-sync.log`.
-
-## Production deployment (systemd)
-
-`deploy/voicex-sync.service` runs the release binary as a systemd unit with
-`Restart=always`, so it comes back after crashes and reboots. Configuration
-lives in `/etc/voicex-sync/env` (template: `deploy/env.example`; holds the
-shared secret, keep it mode 600).
+In another terminal, point the admin commands at the same database.
 
 ```bash
-cd sync-server
-cargo build --release
-cp deploy/voicex-sync.service /etc/systemd/system/
-mkdir -p /etc/voicex-sync && chmod 700 /etc/voicex-sync
-cp deploy/env.example /etc/voicex-sync/env && chmod 600 /etc/voicex-sync/env  # then edit
+export VOICEX_SYNC_DB="$PWD/sync-v2.db"
+./target/release/voicex-sync-server admin create-account --label personal
+./target/release/voicex-sync-server admin create-pairing-code --account <account-id>
+```
+
+Open **Settings → Sync → First setup** and enter the server URL and pairing code. Keep the recovery key private. From a paired device, generate a single-use sync code for the next device. This code contains a reusable recovery key. Share it privately. Use HTTPS for public deployments to protect device credentials in transit.
+
+## Operations
+
+Configure the executable and working directory in `deploy/voicex-sync.service` and install the unit. Copy `deploy/env.example` to `/etc/voicex-sync/env` and set the address, v2 database path and log directory. Set `VOICEX_SYNC_TRUST_PROXY=true` only when the service is accessible exclusively through a trusted reverse proxy.
+
+```bash
 systemctl daemon-reload
 systemctl enable --now voicex-sync
+curl --fail http://127.0.0.1:8787/healthz
+journalctl -u voicex-sync -f
 ```
 
-Day to day:
-
-```bash
-systemctl status voicex-sync           # running? since when? memory?
-journalctl -u voicex-sync -f           # live INFO log (stdout)
-journalctl -u voicex-sync --since -1h  # recent history
-git pull && cargo build --release && systemctl restart voicex-sync
-```
-
-Connections whose peer silently disappears are reclaimed by TCP keepalive
-(~2 min) and a 60 s idle timeout between requests; long-lived SSE streams
-are unaffected as long as the client keeps reading.
-
-## Quick smoke test (curl)
-
-```bash
-# Generate a token once and reuse it across devices.
-export TOKEN="dev-token"
-export SHARED_SECRET="dev-shared-secret"
-
-AUTH=$(python - <<'PY'
-import hashlib, hmac, os
-token = os.environ["TOKEN"].encode()
-secret = os.environ["SHARED_SECRET"].encode()
-payload = hashlib.sha256(token).hexdigest()
-sig = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
-print(f"vx1.{payload}.{sig}")
-PY
-)
-
-curl -sS -H "Authorization: Bearer $AUTH" http://127.0.0.1:8787/healthz
-
-# Register device name
-curl -sS -X PUT \
-  -H "Authorization: Bearer $AUTH" \
-  -H "Content-Type: application/json" \
-  -d '{"deviceId":"dev-device-a","deviceName":"MacBook"}' \
-  http://127.0.0.1:8787/v1/device
-
-# Post a history upsert event
-curl -sS -X POST \
-  -H "Authorization: Bearer $AUTH" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "deviceId":"dev-device-a",
-    "events":[
-      {
-        "eventId":"11111111-1111-1111-1111-111111111111",
-        "type":"history.upsert",
-        "record":{
-          "id":"22222222-2222-2222-2222-222222222222",
-          "sourceDeviceId":"dev-device-a",
-          "timestamp":"2026-01-24T12:00:00Z",
-          "text":"hello world",
-          "originalText":null,
-          "aiCorrectionApplied":false,
-          "mode":"push_to_talk",
-          "durationMs":1200,
-          "isFinal":true,
-          "errorCode":0
-        }
-      }
-    ]
-  }' \
-  http://127.0.0.1:8787/v1/events
-
-# Fetch events since seq=0
-curl -sS -H "Authorization: Bearer $AUTH" "http://127.0.0.1:8787/v1/events?since=0&limit=50"
-```
+Use `admin list-devices --account <account-id>` to inspect devices and `admin revoke-device --account <account-id> --device <device-id>` to revoke a device token.

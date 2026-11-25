@@ -396,6 +396,11 @@ async fn get_envelopes(
 ) -> Result<Json<voicex_sync_protocol::PullEnvelopesResponse>, DbApiError> {
     let domain = SyncDomain::from_str(query.domain.trim())
         .map_err(DbApiError::BadRequest)?;
+    if domain.knowledge_bit() != 0 && auth.knowledge_scopes & domain.knowledge_bit() == 0 {
+        return Err(DbApiError::ScopeForbidden(format!(
+            "{domain} sync is disabled"
+        )));
+    }
     db::pull_envelopes(&state.db, &auth.account_id, domain, query.since, query.limit)
         .await
         .map(Json)

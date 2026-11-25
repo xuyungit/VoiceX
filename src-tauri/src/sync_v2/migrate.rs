@@ -1869,6 +1869,11 @@ pub fn verify_server_v2_replay(
                     }
                 }
             }
+            SyncDomain::Dictionary | SyncDomain::Rules | SyncDomain::Prompts => {
+                let op = serde_json::from_slice(&plaintext)
+                    .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
+                super::knowledge::apply(&tx, &space_id, domain, &op_id, &op)?;
+            }
             SyncDomain::History | SyncDomain::Edits => {
                 let op: HistoryOpPayload = serde_json::from_slice(&plaintext)
                     .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;

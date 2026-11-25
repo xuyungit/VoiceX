@@ -25,16 +25,39 @@ pub enum SyncDomain {
     Stats,
     History,
     Edits,
+    Dictionary,
+    Rules,
+    Prompts,
 }
 
 impl SyncDomain {
-    pub const ALL: [SyncDomain; 3] = [SyncDomain::Stats, SyncDomain::History, SyncDomain::Edits];
+    pub const KNOWLEDGE: [Self; 3] = [Self::Dictionary, Self::Rules, Self::Prompts];
+    pub const ALL: [Self; 6] = [
+        Self::Stats,
+        Self::History,
+        Self::Edits,
+        Self::Dictionary,
+        Self::Rules,
+        Self::Prompts,
+    ];
+
+    pub const fn knowledge_bit(self) -> u8 {
+        match self {
+            Self::Dictionary => 1,
+            Self::Rules => 2,
+            Self::Prompts => 4,
+            _ => 0,
+        }
+    }
 
     pub const fn as_str(self) -> &'static str {
         match self {
             SyncDomain::Stats => "stats",
             SyncDomain::History => "history",
             SyncDomain::Edits => "edits",
+            Self::Dictionary => "dictionary",
+            Self::Rules => "rules",
+            Self::Prompts => "prompts",
         }
     }
 }
@@ -53,6 +76,9 @@ impl FromStr for SyncDomain {
             "stats" => Ok(SyncDomain::Stats),
             "history" => Ok(SyncDomain::History),
             "edits" => Ok(SyncDomain::Edits),
+            "dictionary" => Ok(Self::Dictionary),
+            "rules" => Ok(Self::Rules),
+            "prompts" => Ok(Self::Prompts),
             other => Err(format!("unknown sync domain: {other}")),
         }
     }
@@ -222,6 +248,8 @@ pub struct CreatePairingCodeResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceInfo {
+    #[serde(default)]
+    pub knowledge_scopes: u8,
     pub device_id: String,
     pub device_name: String,
     pub platform: String,
@@ -246,6 +274,9 @@ pub struct AccountInfoResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceUpdateRequest {
+    /// Omitted by older clients; preserve the current device grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_scopes: Option<u8>,
     pub device_name: String,
     pub platform: String,
     pub app_version: String,
@@ -394,7 +425,7 @@ pub fn build_envelope_aad(
 pub fn aad_rev_or_op_id(domain: SyncDomain, revision: i64, op_id: &str) -> String {
     match domain {
         SyncDomain::Stats => revision.to_string(),
-        SyncDomain::History | SyncDomain::Edits => op_id.to_string(),
+        _ => op_id.to_string(),
     }
 }
 

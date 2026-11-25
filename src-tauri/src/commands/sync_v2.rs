@@ -222,6 +222,12 @@ pub async fn sync_v2_update_scope(
                     &space_creds.device_token,
                     &space.device_id,
                     &DeviceUpdateRequest {
+                        knowledge_scopes: Some(
+                            storage::with_db(|c| {
+                                crate::sync_v2::knowledge::mask(c, &space.space_id)
+                            })
+                            .map_err(|e| e.to_string())?,
+                        ),
                         device_name: name,
                         platform: platform.to_string(),
                         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -290,11 +296,16 @@ pub async fn sync_v2_sync_now(
     let retention_days = storage::get_settings_cached()
         .map(|s| s.text_retention_days)
         .unwrap_or(0);
-    let summary = sync_once(|f| storage::with_db(f), &creds, &transport, retention_days)
-        .await
-        .map_err(|e| e.to_string())?;
+    use crate::sync_v2::engine::KNOWLEDGE_GENERATION;
+    use std::sync::atomic::Ordering;
+    let generation = KNOWLEDGE_GENERATION.load(Ordering::Relaxed);
+    let result = sync_once(|f| storage::with_db(f), &creds, &transport, retention_days).await;
     drop(_guard);
 
+    if generation != KNOWLEDGE_GENERATION.load(Ordering::Relaxed) {
+        crate::commands::settings::knowledge_changed(&app);
+    }
+    let summary = result.map_err(|e| e.to_string())?;
     if summary.stats_pulled > 0 || summary.history_pulled > 0 || summary.edits_pulled > 0 {
         let _ = app.emit(
             "history:updated",
@@ -381,4 +392,75 @@ pub async fn sync_v2_resolve_edit_conflict(
         serde_json::json!({ "id": record_id, "source": "conflict_resolved" }),
     );
     Ok(())
+}
+
+#[tauri::command]
+pub fn sync_v2_knowledge_status() -> Result<crate::sync_v2::knowledge::Status, String> {
+    storage::with_db(crate::sync_v2::knowledge::status).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sync_v2_set_knowledge_scope(
+    space_id: String,
+    domain: voicex_sync_protocol::SyncDomain,
+    enabled: bool,
+    app: AppHandle,
+    sync_v2: State<'_, SyncV2Service>,
+) -> Result<(), String> {
+    let lock = sync_v2.sync_lock();
+    let _guard = lock.lock().await;
+    mutate_knowledge(&space_id, domain, |c| {
+        crate::sync_v2::knowledge::set_enabled(c, &space_id, domain, enabled)
+    })?;
+    crate::commands::settings::knowledge_changed(&app);
+    sync_v2.notify_local_change();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sync_v2_resolve_knowledge(
+    space_id: String,
+    domain: voicex_sync_protocol::SyncDomain,
+    key: String,
+    selected: String,
+    expected: Vec<String>,
+    app: AppHandle,
+    sync_v2: State<'_, SyncV2Service>,
+) -> Result<(), String> {
+    let lock = sync_v2.sync_lock();
+    let _guard = lock.lock().await;
+    mutate_knowledge(&space_id, domain, |c| {
+        crate::sync_v2::knowledge::resolve(c, &space_id, domain, key, &selected, expected)
+    })?;
+    crate::commands::settings::knowledge_changed(&app);
+    sync_v2.notify_local_change();
+    Ok(())
+}
+
+fn mutate_knowledge(
+    space_id: &str,
+    domain: voicex_sync_protocol::SyncDomain,
+    mutate: impl FnOnce(&rusqlite::Connection) -> Result<(), storage::StorageError>,
+) -> Result<(), String> {
+    storage::with_db(|conn| {
+        let space = active_space_in(conn)?
+            .filter(|s| s.space_id == space_id && s.scope_config().enabled)
+            .ok_or_else(|| {
+                storage::StorageError::InvalidInput("Active sync space changed".into())
+            })?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
+        mutate(&tx)?;
+        if crate::sync_v2::knowledge::mask(&tx, space_id)? & domain.knowledge_bit() != 0 {
+            let mut settings = storage::read_settings_for_update(&tx)?;
+            crate::sync_v2::knowledge::project(&tx, &space.space_id, domain, &mut settings)?;
+            storage::write_settings_in(&tx, &settings)?;
+        }
+        tx.commit()
+            .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
+        storage::invalidate_settings_cache();
+        Ok(())
+    })
+    .map_err(|e| e.to_string())
 }

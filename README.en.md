@@ -303,7 +303,7 @@ Optionally have an LLM correct or translate the recognized text. Choose a provid
 
 ## Cross-device sync
 
-If you dictate on several computers, a lightweight self-hosted sync server (`sync-server/`) keeps your text history consistent across them; audio stays on each device. The server needs few resources; see [sync-server/README.md](./sync-server/README.md) for setup.
+Pair devices under **Settings → Sync** to share end-to-end encrypted statistics, dictation history and edits. Dictionary words, replacement rules and custom prompts each have a separate switch, off by default on every device. Enabling a category merges existing content. Conflicting rules for the same input pause until you choose a version in Sync settings. Recordings and API keys stay on the device. [Self-hosting guide](./sync-server/README.md)
 
 ## Known limitations
 

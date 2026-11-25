@@ -514,6 +514,13 @@ const enUS = {
     preprocessPrompt: 'Tidying prompt'
   },
   sync: {
+    knowledgeTitle: 'Dictionary, rules and prompts',
+    knowledgeHelp: 'Enabling a category merges existing content across your devices. Choose categories separately on each device.',
+    knowledgeLabels: { dictionary: 'Dictionary', rules: 'Replacement rules', prompts: 'Custom prompts' },
+    knowledgePrompt: { assistant: 'Dictation cleanup', translation: 'Translated dictation', ttsTranslate: 'Translate and read', ttsPreprocess: 'Reading preparation' },
+    knowledgeRemoved: 'Remove or restore the built-in default', knowledgeDisabled: 'disabled',
+    ruleConflictHelp: 'These rules share an input. Choose which version to apply. This group is paused until you decide.',
+    promptConflictHelp: 'This prompt has multiple versions. Choose the one to keep.',
     title: 'Sync',
     historySync: 'History sync',
     historySyncSub: 'Sync text history and usage stats across devices without audio files',

@@ -13,6 +13,7 @@ use voicex_sync_server::api::{build_app, AppState};
 use voicex_sync_server::db;
 
 struct TestServer {
+    app: axum::Router,
     base_url: String,
     pool: sqlx::SqlitePool,
     _dir: TempDir,
@@ -41,6 +42,7 @@ async fn spawn_server_with_options(
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let test_app = app.clone();
     tokio::spawn(async move {
         axum::serve(
             listener,
@@ -51,6 +53,7 @@ async fn spawn_server_with_options(
     });
 
     TestServer {
+        app: test_app,
         base_url: format!("http://{addr}"),
         pool,
         _dir: dir,
@@ -349,6 +352,7 @@ async fn scope_enforcement_pagination_and_sse_notify_work_end_to_end() {
         .put(format!("{}/v2/devices/mac-1", srv.base_url))
         .bearer_auth(&mac.device_token)
         .json(&DeviceUpdateRequest {
+            knowledge_scopes: None,
             device_name: "MBP_M5".into(),
             platform: "macos".into(),
             app_version: "0.20.0".into(),
@@ -367,6 +371,7 @@ async fn scope_enforcement_pagination_and_sse_notify_work_end_to_end() {
         .put(format!("{}/v2/devices/mac-1", srv.base_url))
         .bearer_auth(&win.device_token)
         .json(&DeviceUpdateRequest {
+            knowledge_scopes: None,
             device_name: "Hijack".into(),
             platform: "windows".into(),
             app_version: "0.20.0".into(),
@@ -385,6 +390,7 @@ async fn scope_enforcement_pagination_and_sse_notify_work_end_to_end() {
         .put(format!("{}/v2/devices/win-1", srv.base_url))
         .bearer_auth(&win.device_token)
         .json(&DeviceUpdateRequest {
+            knowledge_scopes: None,
             device_name: "Yoga".into(),
             platform: "windows".into(),
             app_version: "0.20.0".into(),
@@ -527,17 +533,23 @@ async fn payload_size_limit_and_account_quota_are_enforced() {
     let mac = pair_device(&srv, &client, &acc.account_id, "mac-1", "MBP", "macos").await;
 
     // 1. Oversized HTTP body (> 2 MiB) -> 413 payload_too_large
-    let huge = "A".repeat(MAX_PUSH_BODY_BYTES + 1024);
-    let r_big = client
-        .post(format!("{}/v2/envelopes", srv.base_url))
-        .bearer_auth(&mac.device_token)
-        .body(huge)
+    // Exercise the HTTP limit before a network client starts uploading a rejected body.
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+    };
+    use tower::ServiceExt;
+    let size = MAX_PUSH_BODY_BYTES + 1024;
+    let request = Request::post("/v2/envelopes")
+        .header("content-length", size)
         .header("content-type", "application/json")
-        .send()
-        .await
+        .header("authorization", format!("Bearer {}", mac.device_token))
+        .body(Body::from(vec![b'A'; size]))
         .unwrap();
-    assert_eq!(r_big.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    let err_big: ApiErrorBody = r_big.json().await.unwrap();
+    let response = srv.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let err_big: ApiErrorBody = serde_json::from_slice(&body).unwrap();
     assert_eq!(err_big.code, error_codes::PAYLOAD_TOO_LARGE);
 
     // 2. Exceeding 2 KiB account quota -> 507 quota_exceeded

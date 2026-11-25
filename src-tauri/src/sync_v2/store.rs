@@ -153,6 +153,7 @@ fn ensure_column_in(
 
 /// Create Sync v2 tables/columns and run one-time idempotent local backfills.
 pub fn init_schema(conn: &Connection) -> Result<(), StorageError> {
+    super::knowledge::init(conn)?;
     ensure_column_in(
         conn,
         "device_usage_stats",
@@ -660,7 +661,10 @@ pub fn update_sync_scope_tx(
                 )
                 .map_err(sql_err)?;
             }
-            SyncDomain::Stats => {}
+            SyncDomain::Stats
+            | SyncDomain::Dictionary
+            | SyncDomain::Rules
+            | SyncDomain::Prompts => {}
         }
     }
 

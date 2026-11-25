@@ -43,6 +43,8 @@ use crate::sync_v2::store::{
 };
 use crate::sync_v2::transport::{SelfHostTransport, SyncTransport, TransportError};
 
+pub(crate) static KNOWLEDGE_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 const PUSH_BATCH_SIZE: usize = MAX_PUSH_BATCH_LEN;
 /// Safe request payload ceiling leaving headroom for `{"envelopes":[...]}` JSON framing.
 const MAX_SAFE_PUSH_BODY_BYTES: usize = MAX_PUSH_BODY_BYTES - 8192;
@@ -108,6 +110,7 @@ pub struct SyncCycleSummary {
     pub stats_pulled: usize,
     pub history_pulled: usize,
     pub edits_pulled: usize,
+    pub knowledge_pulled: usize,
 }
 
 fn current_platform_name() -> &'static str {
@@ -227,11 +230,18 @@ where
     )?;
 
     let effective_edits = scope_history && scope_edits;
+    let grants = std::cell::Cell::new(0);
+    with_conn(&|conn| {
+        grants.set(super::knowledge::mask(conn, &space_id)?);
+        Ok(())
+    })?;
+    let grants = grants.get();
     transport
         .update_device(
             &redeem.device_token,
             &redeem.device_id,
             &DeviceUpdateRequest {
+                knowledge_scopes: Some(grants),
                 device_name: device_name.trim().to_string(),
                 platform: current_platform_name().to_string(),
                 app_version: app_version().to_string(),
@@ -567,6 +577,12 @@ where
     let mut summary = SyncCycleSummary::default();
     let mut non_fatal_oversized_errors: Vec<String> = Vec::new();
     let cycle_scope_version = space.scope_version;
+    let knowledge_scopes = std::cell::Cell::new(0u8);
+    with_conn(&|c| {
+        knowledge_scopes.set(super::knowledge::mask(c, &space.space_id)?);
+        Ok(())
+    })?;
+    let knowledge_scopes = knowledge_scopes.get();
 
     // 1. Refresh account & devices metadata + verify key_check_tag
     let account = transport.get_account(device_token).await?;
@@ -623,7 +639,12 @@ where
 
     // 1.5 (S6): If local scope was updated while offline (`scope_version > acked_scope_version`),
     // push the latest device scope to the server BEFORE pushing any domain envelopes.
-    if space.scope_version > space.acked_scope_version {
+    if space.scope_version > space.acked_scope_version
+        || account
+            .devices
+            .iter()
+            .any(|d| d.device_id == space.device_id && d.knowledge_scopes != knowledge_scopes)
+    {
         let dev_name_slot: Mutex<String> = Mutex::new(space.device_id.clone());
         with_conn(&|conn| {
             let name: Option<String> = conn
@@ -641,11 +662,12 @@ where
         })?;
         let device_name = dev_name_slot.into_inner().unwrap();
         let effective_edits = space.scope_history && space.scope_edits;
-        transport
+        let accepted = transport
             .update_device(
                 device_token,
                 &space.device_id,
                 &DeviceUpdateRequest {
+                    knowledge_scopes: Some(knowledge_scopes),
                     device_name,
                     platform: current_platform_name().to_string(),
                     app_version: app_version().to_string(),
@@ -656,6 +678,11 @@ where
                 },
             )
             .await?;
+        if accepted.knowledge_scopes != knowledge_scopes {
+            return Err(SyncEngineError::InvalidState(
+                "Upgrade the sync server to enable dictionary, rule and prompt sync.".into(),
+            ));
+        }
         let sid = space.space_id.clone();
         let ver = space.scope_version;
         with_conn(&|conn| {
@@ -892,6 +919,7 @@ where
                      FROM sync_outbox_ops o
                      LEFT JOIN history_record h ON h.id = o.record_id
                      WHERE o.space_id = ?1
+                       AND (o.op_type != 'knowledge.change' OR EXISTS (SELECT 1 FROM knowledge_scope k WHERE k.space=o.space_id AND k.domain=o.domain AND k.enabled=1))
                        AND (o.last_error IS NULL OR o.last_error NOT LIKE 'oversized:%')
                      ORDER BY o.created_at ASC, o.op_id ASC
                      LIMIT ?2",
@@ -924,13 +952,17 @@ where
         let mut prepared_ops: Vec<(EnvelopeSubmission, usize)> = Vec::new();
         for (op_id, domain_str, op_type, record_id, payload_json, sync_eligible) in &batch {
             let record_was_shared = *sync_eligible || op_type == "history.delete";
-            if !can_send_outbox_op(&scope, op_type, record_was_shared) {
+            let domain: SyncDomain = domain_str.parse().map_err(SyncEngineError::InvalidState)?;
+            let permitted = if domain.knowledge_bit() != 0 {
+                op_type == "knowledge.change" && knowledge_scopes & domain.knowledge_bit() != 0
+            } else {
+                can_send_outbox_op(&scope, op_type, record_was_shared)
+            };
+            if !permitted {
                 disallowed_ids.push(op_id.clone());
                 continue;
             }
-            let domain: SyncDomain = domain_str
-                .parse()
-                .map_err(|e: String| SyncEngineError::InvalidState(e))?;
+
             let sealed = encrypt_envelope(
                 master_key,
                 EnvelopeContext {
@@ -1163,16 +1195,38 @@ where
     }
 
     // 4. Pull every authorized domain page-by-page, committing each page + cursor atomically
-    for domain in scope.pull_domains() {
+    let mut domains = scope.pull_domains();
+    domains.extend(
+        SyncDomain::KNOWLEDGE
+            .into_iter()
+            .filter(|d| knowledge_scopes & d.knowledge_bit() != 0),
+    );
+    for domain in domains {
         let mut cursor = match domain {
             SyncDomain::Stats => space.stats_cursor,
             SyncDomain::History => space.history_cursor,
             SyncDomain::Edits => space.edits_cursor,
+            _ => {
+                let cursor = std::cell::Cell::new(0);
+                with_conn(&|c| {
+                    cursor.set(
+                        c.query_row(
+                            "SELECT cursor FROM knowledge_scope WHERE space=? AND domain=?",
+                            params![space.space_id, domain.as_str()],
+                            |r| r.get(0),
+                        )
+                        .map_err(sql_err)?,
+                    );
+                    Ok(())
+                })?;
+                cursor.get()
+            }
         };
         let cursor_col = match domain {
             SyncDomain::Stats => "stats_cursor",
             SyncDomain::History => "history_cursor",
             SyncDomain::Edits => "edits_cursor",
+            _ => "",
         };
 
         loop {
@@ -1183,6 +1237,7 @@ where
             // Decrypt the entire page before opening the SQLite write transaction.
             let mut decrypted_stats = Vec::new();
             let mut decrypted_ops = Vec::new();
+            let mut knowledge_ops = Vec::new();
             for item in &page.items {
                 let plaintext = decrypt_envelope(
                     master_key,
@@ -1213,6 +1268,11 @@ where
                         if shard_owner != &space.device_id {
                             decrypted_stats.push(shard);
                         }
+                    }
+                    SyncDomain::Dictionary | SyncDomain::Rules | SyncDomain::Prompts => {
+                        let op = serde_json::from_slice(&plaintext)
+                            .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
+                        knowledge_ops.push((&item.op_id, op));
                     }
                     SyncDomain::History | SyncDomain::Edits => {
                         let op: HistoryOpPayload =
@@ -1248,6 +1308,23 @@ where
                         text_retention_days,
                     )?;
                 }
+                if domain.knowledge_bit() != 0 {
+                    for (id, op) in &knowledge_ops {
+                        super::knowledge::apply(&tx, &space.space_id, domain, id, op)?;
+                    }
+                    if !knowledge_ops.is_empty() {
+                        let mut settings = storage::read_settings_for_update(&tx)?;
+                        super::knowledge::project(&tx, &space.space_id, domain, &mut settings)?;
+                        storage::write_settings_in(&tx, &settings)?;
+                    }
+                    tx.execute("UPDATE knowledge_scope SET cursor=MAX(cursor,?) WHERE space=? AND domain=?",params![next_cursor,space.space_id,domain.as_str()]).map_err(sql_err)?;
+                    tx.commit().map_err(sql_err)?;
+                    if !knowledge_ops.is_empty() {
+                        storage::invalidate_settings_cache();
+                        KNOWLEDGE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    return Ok(());
+                }
                 tx.execute(
                     &format!(
                         "UPDATE sync_spaces SET {cursor_col} = MAX({cursor_col}, ?2), updated_at = ?3 WHERE space_id = ?1"
@@ -1268,6 +1345,7 @@ where
                 SyncDomain::Stats => summary.stats_pulled += page.items.len(),
                 SyncDomain::History => summary.history_pulled += page.items.len(),
                 SyncDomain::Edits => summary.edits_pulled += page.items.len(),
+                _ => summary.knowledge_pulled += page.items.len(),
             }
 
             cursor = next_cursor;
@@ -1403,7 +1481,9 @@ pub fn get_status_snapshot_in(
 
     let pending_ops_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sync_outbox_ops WHERE space_id = ?1",
+            "SELECT COUNT(*) FROM sync_outbox_ops o WHERE o.space_id = ?1 AND
+               (o.op_type != 'knowledge.change' OR EXISTS (SELECT 1 FROM knowledge_scope k
+                WHERE k.space=o.space_id AND k.domain=o.domain AND k.enabled=1))",
             params![space.space_id],
             |r| r.get(0),
         )
@@ -1570,6 +1650,15 @@ pub fn reconcile_startup_device_identity_in(
 
             let creds = CredentialStore::in_data_dir(data_dir);
             for (space_id, url, device) in mismatched_spaces {
+                tx.execute(
+                    "DELETE FROM sync_outbox_ops WHERE space_id=? AND op_type='knowledge.change'",
+                    [&space_id],
+                )
+                .map_err(sql_err)?;
+                for table in ["knowledge_scope", "knowledge_versions", "knowledge_parents"] {
+                    tx.execute(&format!("DELETE FROM {table} WHERE space=?"), [&space_id])
+                        .map_err(sql_err)?;
+                }
                 creds.remove(&space_id, &url, &device)?;
             }
         }
@@ -1788,13 +1877,11 @@ async fn run_background_loop(
             let retention_days = storage::get_settings_cached()
                 .map(|s| s.text_retention_days)
                 .unwrap_or(0);
-            let res = sync_once(
-                |f| storage::with_db(f),
-                &creds,
-                &transport,
-                retention_days,
-            )
-            .await;
+            let generation = KNOWLEDGE_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+            let res = sync_once(|f| storage::with_db(f), &creds, &transport, retention_days).await;
+            if generation != KNOWLEDGE_GENERATION.load(std::sync::atomic::Ordering::Relaxed) {
+                crate::commands::settings::knowledge_changed(&app);
+            }
             emit_v2_status(&app, &data_dir);
             match res {
                 Ok(summary) => {
@@ -1936,6 +2023,7 @@ mod tests {
                 g.devices.insert(
                     req.device_id.clone(),
                     DeviceInfo {
+                        knowledge_scopes: 0,
                         device_id: req.device_id.clone(),
                         device_name: req.device_name.clone(),
                         platform: req.platform.clone(),
@@ -2012,6 +2100,9 @@ mod tests {
                     }
                 }
                 let info = DeviceInfo {
+                    knowledge_scopes: req
+                        .knowledge_scopes
+                        .unwrap_or(g.devices[device_id].knowledge_scopes),
                     device_id: device_id.to_string(),
                     device_name: req.device_name.clone(),
                     platform: req.platform.clone(),

@@ -2061,7 +2061,20 @@ fn decode_settings(mut raw: serde_json::Value) -> serde_json::Result<AppSettings
     Ok(settings)
 }
 
-fn read_settings_from_connection(conn: &Connection) -> Result<AppSettings, StorageError> {
+pub(crate) fn read_settings_from_connection(
+    conn: &Connection,
+) -> Result<AppSettings, StorageError> {
+    match read_settings_for_update(conn) {
+        Err(StorageError::SerializeFailed(e)) => {
+            log::warn!("Failed to parse settings, falling back to defaults: {}", e);
+            Ok(AppSettings::default())
+        }
+        other => other,
+    }
+}
+
+/// A sync write must never replace unreadable settings (including local credentials) with defaults.
+pub(crate) fn read_settings_for_update(conn: &Connection) -> Result<AppSettings, StorageError> {
     let value: Option<String> = conn
         .query_row(
             "SELECT value FROM user_config WHERE key = 'app_settings' LIMIT 1",
@@ -2074,34 +2087,59 @@ fn read_settings_from_connection(conn: &Connection) -> Result<AppSettings, Stora
     let Some(json) = value else {
         return Ok(AppSettings::default());
     };
-    match serde_json::from_str(&json).and_then(decode_settings) {
-        Ok(settings) => Ok(settings),
-        Err(e) => {
-            log::warn!("Failed to parse settings, falling back to defaults: {}", e);
-            Ok(AppSettings::default())
-        }
-    }
+    serde_json::from_str(&json)
+        .and_then(decode_settings)
+        .map_err(|e| StorageError::SerializeFailed(e.to_string()))
 }
 
 /// Save settings
 pub fn save_settings(settings: &AppSettings) -> Result<(), StorageError> {
-    let canonical = serde_json::to_value(settings)
+    save_settings_from_base(settings, None).map(|_| ())
+}
+
+pub(crate) fn save_settings_from_base(
+    settings: &AppSettings,
+    base: Option<&crate::sync_v2::knowledge::KnowledgeFields>,
+) -> Result<AppSettings, StorageError> {
+    let mut canonical = serde_json::to_value(settings)
         .and_then(decode_settings)
         .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
-    let payload = serde_json::to_string(&canonical)
-        .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
-
     with_db(|conn| {
-        SETTINGS_CACHE.write_through(canonical, || {
-            conn.execute(
-                "INSERT INTO user_config (key, value) VALUES ('app_settings', ?1)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                params![payload],
-            )
+        let tx = conn
+            .unchecked_transaction()
             .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
-            Ok(())
-        })
+        let old;
+        let base = match base {
+            Some(base) => base,
+            None => {
+                old = crate::sync_v2::knowledge::KnowledgeFields::from(&read_settings_for_update(
+                    &tx,
+                )?);
+                &old
+            }
+        };
+        crate::sync_v2::knowledge::capture(&tx, base, &mut canonical)?;
+        write_settings_in(&tx, &canonical)?;
+        SETTINGS_CACHE.write_through(canonical.clone(), || {
+            tx.commit()
+                .map_err(|e| StorageError::QueryFailed(e.to_string()))
+        })?;
+        Ok(canonical)
     })
+}
+
+pub(crate) fn write_settings_in(
+    conn: &Connection,
+    settings: &AppSettings,
+) -> Result<(), StorageError> {
+    let payload = serde_json::to_string(settings)
+        .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
+    conn.execute("INSERT INTO user_config(key,value) VALUES('app_settings',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[payload]).map_err(|e|StorageError::QueryFailed(e.to_string()))?;
+    Ok(())
+}
+
+pub(crate) fn invalidate_settings_cache() {
+    SETTINGS_CACHE.set(None);
 }
 
 pub fn get_recent_target_apps() -> Result<Vec<RecentTargetApp>, StorageError> {

@@ -596,6 +596,13 @@ const defaultSettings: AppSettings = {
     autoCheckUpdates: true
 }
 
+const knowledgeKeys = ['dictionaryText', 'replacementRules', 'llmPromptTemplate', 'translationPromptTemplate',
+    'ttsTranslatePromptTemplate', 'ttsPreprocessPromptTemplate'] as const
+export type KnowledgeFields = Pick<AppSettings, typeof knowledgeKeys[number]>
+function knowledgeFields(s: AppSettings): KnowledgeFields {
+    return Object.fromEntries(knowledgeKeys.map(key => [key, JSON.parse(JSON.stringify(s[key]))])) as KnowledgeFields
+}
+
 export const useSettingsStore = defineStore('settings', () => {
     const settings = ref<AppSettings>({ ...defaultSettings })
     const isLoading = ref(true)
@@ -605,6 +612,24 @@ export const useSettingsStore = defineStore('settings', () => {
     const HOTWORD_SYNC_INTERVAL_MS = 5 * 60 * 1000
     const lastHotwordSyncResult = ref<HotwordSyncResult | null>(null)
 
+    let base = knowledgeFields(defaultSettings)
+    let applyingRemote = false
+    let saves = Promise.resolve()
+
+    function applyKnowledge(remote: KnowledgeFields, seen = base, fromSave = false) {
+        applyingRemote = true
+        try {
+            // A draft still being typed keeps the parent values it was based on.
+            for (const key of knowledgeKeys) {
+                if (JSON.stringify(settings.value[key]) === JSON.stringify(seen[key])) {
+                    Object.assign(settings.value, { [key]: remote[key] })
+                    Object.assign(base, { [key]: JSON.parse(JSON.stringify(remote[key])) })
+                } else if (fromSave) {
+                    Object.assign(base, { [key]: JSON.parse(JSON.stringify(seen[key])) })
+                }
+            }
+        } finally { applyingRemote = false }
+    }
     // Load settings from backend
     async function loadSettings() {
         try {
@@ -612,6 +637,7 @@ export const useSettingsStore = defineStore('settings', () => {
             const result = await invoke<AppSettings>('get_settings')
             // The backend applies the saved dictation hotkey at startup, and InputSettings
             // applies it when the user changes it, so loading settings does not touch it.
+            base = knowledgeFields(result)
             Object.assign(settings.value, result)
         } catch (error) {
             console.error('Failed to load settings:', error)
@@ -621,12 +647,14 @@ export const useSettingsStore = defineStore('settings', () => {
     }
 
     // Save settings to backend (debounced)
-    async function saveSettings() {
-        try {
-            await invoke('save_settings', { settings: settings.value })
-        } catch (error) {
-            console.error('Failed to save settings:', error)
-        }
+    function saveSettings(reportFailure = false) {
+        const current = saves.then(async () => {
+            const seen = knowledgeFields(settings.value)
+            const updated = await invoke<KnowledgeFields>('save_settings', { settings: settings.value, knowledgeBase: base })
+            applyKnowledge(updated, seen, true)
+        })
+        saves = current.catch(error => { console.error('Failed to save settings:', error) })
+        return reportFailure ? current : saves
     }
 
     // Force save settings immediately (cancel debounce if any)
@@ -635,7 +663,7 @@ export const useSettingsStore = defineStore('settings', () => {
             clearTimeout(saveTimeout.value)
             saveTimeout.value = null
         }
-        await saveSettings()
+        await saveSettings(true)
     }
 
     // Debounced save - auto-save after 500ms of no changes
@@ -651,10 +679,10 @@ export const useSettingsStore = defineStore('settings', () => {
 
     // Watch for changes and auto-save
     watch(settings, () => {
-        if (!isLoading.value) {
+        if (!isLoading.value && !applyingRemote) {
             debouncedSave()
         }
-    }, { deep: true })
+    }, { deep: true, flush: 'sync' })
 
     watch(
         () => settings.value.enableDiagnostics,
@@ -752,6 +780,7 @@ export const useSettingsStore = defineStore('settings', () => {
         loadSettings,
         saveSettings,
         forceSaveSettings,
+        applyKnowledge,
         updateSetting,
         syncHotwords,
         forceDownloadHotwords,

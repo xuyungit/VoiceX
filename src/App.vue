@@ -66,6 +66,7 @@ const appIconStore = useAppIconStore()
 const postEditStore = usePostEditStore()
 let unlistenHistory: (() => void) | null = null
 let unlistenSync: (() => void) | null = null
+let unlistenKnowledge: (() => void) | null = null
 let unlistenSyncV2: (() => void) | null = null
 let unlistenLocale: (() => void) | null = null
 let unlistenPermissions: (() => void) | null = null
@@ -164,6 +165,7 @@ onMounted(async () => {
     onSyncStatusChanged(nextStatus)
   })
 
+  unlistenKnowledge = await listen<import('./stores/settings').KnowledgeFields>('sync_v2:knowledge', event => settingsStore.applyKnowledge(event.payload))
   unlistenSyncV2 = await listen('sync_v2:state', (event) => {
     const payload = event.payload as SyncV2StatusSnapshot
     syncStore.updateV2FromEvent(payload)
@@ -220,6 +222,7 @@ onBeforeUnmount(() => {
     unlistenSync()
     unlistenSync = null
   }
+  unlistenKnowledge?.()
   if (unlistenSyncV2) {
     unlistenSyncV2()
     unlistenSyncV2 = null

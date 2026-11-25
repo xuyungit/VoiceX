@@ -417,7 +417,7 @@ pub struct CustomLlmEndpoint {
     pub extra_body: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplacementRule {
     pub id: String,
@@ -1525,11 +1525,13 @@ pub fn get_resolved_ui_locale(preferred: Option<String>) -> Result<String, Strin
 #[tauri::command]
 pub fn save_settings(
     mut settings: AppSettings,
+    knowledge_base: Option<crate::sync_v2::knowledge::KnowledgeFields>,
+    sync_v2: State<'_, crate::sync_v2::engine::SyncV2Service>,
     app: AppHandle,
     session: State<'_, SessionController>,
     sync: State<'_, SyncService>,
     debug: State<'_, AsrDebugService>,
-) -> Result<(), String> {
+) -> Result<crate::sync_v2::knowledge::KnowledgeFields, String> {
     let current_settings = crate::storage::get_settings().map_err(|e| e.to_string())?;
     let limits = llm_stage::reading_limits();
     if (settings.tts_read_max_chars != 0
@@ -1561,7 +1563,9 @@ pub fn save_settings(
         settings.local_hotword_updated_at = current_settings.local_hotword_updated_at;
     }
 
-    crate::storage::save_settings(&settings).map_err(|e| e.to_string())?;
+    settings = crate::storage::save_settings_from_base(&settings, knowledge_base.as_ref())
+        .map_err(|e| e.to_string())?;
+    sync_v2.notify_local_change();
 
     if settings.hud_transparent != current_settings.hud_transparent {
         crate::hud::apply_hud_appearance(&app, settings.hud_transparent);
@@ -1592,7 +1596,15 @@ pub fn save_settings(
         }
     }
 
-    session.inner().apply_settings(
+    apply_session_settings(&session, &settings);
+
+    sync.apply_settings(&settings);
+
+    Ok(crate::sync_v2::knowledge::KnowledgeFields::from(&settings))
+}
+
+fn apply_session_settings(session: &SessionController, settings: &AppSettings) {
+    session.apply_settings(
         settings.hold_threshold_ms,
         settings.max_recording_minutes,
         &settings.text_injection_mode,
@@ -1606,10 +1618,19 @@ pub fn save_settings(
         &settings.translation_trigger_mode,
         settings.double_tap_window_ms,
     );
+}
 
-    sync.apply_settings(&settings);
-
-    Ok(())
+pub(crate) fn knowledge_changed(app: &AppHandle) {
+    use tauri::Manager;
+    if let Ok(settings) = crate::storage::get_settings_cached() {
+        if let Some(session) = app.try_state::<SessionController>() {
+            apply_session_settings(&session, &settings);
+        }
+        let _ = app.emit(
+            "sync_v2:knowledge",
+            crate::sync_v2::knowledge::KnowledgeFields::from(settings.as_ref()),
+        );
+    }
 }
 
 /// The Models API lists IDs without endpoint capability metadata. Prefer

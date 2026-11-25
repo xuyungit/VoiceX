@@ -514,6 +514,13 @@ const zhCN = {
     preprocessPrompt: '整理提示词'
   },
   sync: {
+    knowledgeTitle: '词典、替换规则与提示词',
+    knowledgeHelp: '首次开启会合并本机和其他设备的已有内容。每台设备可独立选择。',
+    knowledgeLabels: { dictionary: '词典', rules: '替换规则', prompts: '自定义提示词' },
+    knowledgePrompt: { assistant: '听写整理', translation: '翻译听写', ttsTranslate: '翻译朗读', ttsPreprocess: '朗读预处理' },
+    knowledgeRemoved: '删除此项或恢复内置默认值', knowledgeDisabled: '已停用',
+    ruleConflictHelp: '同一原词有不同规则。选择要生效的版本，选择前暂停应用这组规则。',
+    promptConflictHelp: '这段提示词有多个版本。选择要保留的版本。',
     title: '同步',
     historySync: '历史同步',
     historySyncSub: '在多端同步文本历史与统计数据（不包含录音文件）',
