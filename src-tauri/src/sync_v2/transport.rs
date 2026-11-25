@@ -27,6 +27,8 @@ pub enum TransportError {
     ScopeForbidden(String),
     #[error("pairing code invalid or expired: {0}")]
     PairingInvalidOrExpired(String),
+    #[error("device id conflict: {0}")]
+    DeviceIdConflict(String),
     #[error("payload too large: {0}")]
     PayloadTooLarge(String),
     #[error("rate limited: {0}")]
@@ -151,6 +153,7 @@ async fn parse_error_response(resp: reqwest::Response) -> TransportError {
             error_codes::PAIRING_INVALID_OR_EXPIRED => {
                 TransportError::PairingInvalidOrExpired(parsed.message)
             }
+            error_codes::DEVICE_ID_CONFLICT => TransportError::DeviceIdConflict(parsed.message),
             error_codes::PAYLOAD_TOO_LARGE => TransportError::PayloadTooLarge(parsed.message),
             error_codes::RATE_LIMITED => TransportError::RateLimited(parsed.message),
             error_codes::QUOTA_EXCEEDED => TransportError::QuotaExceeded(parsed.message),

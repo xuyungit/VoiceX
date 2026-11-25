@@ -2,19 +2,66 @@
 //! toggles, manual sync, existing-edits import, and edit conflict resolution).
 
 use crate::storage;
+use crate::sync_v2::credentials::DeviceIdentityStore;
 use crate::sync_v2::crypto::decode_sync_invite;
 use crate::sync_v2::engine::{
-    create_device_invite, get_status_snapshot_in, import_existing_edits_in, join_space_with_invite,
-    pair_space, resolve_edit_conflict_in, sync_once, DeviceInviteResult, PairSuccessResult,
-    SyncV2Service, SyncV2StatusSnapshot,
+    create_device_invite, get_status_snapshot_in, import_existing_edits_in,
+    join_space_with_invite_options, pair_space_with_options, resolve_edit_conflict_with_parents_in,
+    sync_once, DeviceInviteResult, PairSuccessResult, SyncV2Service, SyncV2StatusSnapshot,
 };
 use crate::sync_v2::store::{
-    active_space_in, list_edit_conflict_alternatives_in, update_sync_scope_tx,
-    EditConflictAlternative,
+    ack_sync_scope_version_tx, active_space_in, list_edit_conflict_alternatives_in,
+    update_sync_scope_tx, EditConflictAlternative,
 };
 use crate::sync_v2::transport::{SelfHostTransport, SyncTransport};
 use tauri::{AppHandle, Emitter, State};
 use voicex_sync_protocol::DeviceUpdateRequest;
+
+/// Resolve this installation's external device identity (`device-identity.json`),
+/// rotating `user_config.sync_device_id` when the DB/data dir was cloned onto a
+/// different machine (S4), and determine whether this is a same-machine re-pair
+/// of a previously disconnected/revoked space (`allow_replace_active`).
+fn resolve_pairing_device_identity(
+    data_dir: &std::path::Path,
+) -> Result<(String, bool), String> {
+    let db_device_id = storage::get_or_create_device_id().map_err(|e| e.to_string())?;
+    let id_store = DeviceIdentityStore::in_data_dir(data_dir);
+    let resolved = id_store
+        .resolve(Some(&db_device_id))
+        .map_err(|e| e.to_string())?;
+
+    if resolved.rotated_for_new_install || resolved.device_id != db_device_id {
+        let new_id = resolved.device_id.clone();
+        storage::with_db(|conn| {
+            conn.execute(
+                "INSERT INTO user_config (key, value) VALUES ('sync_device_id', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![new_id],
+            )
+            .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+        return Ok((resolved.device_id, false));
+    }
+
+    // Same machine & same identity: allow replacing active token ONLY if this device
+    // already had a local sync space configured with this exact device_id (re-pair after disconnect).
+    let dev_id_check = resolved.device_id.clone();
+    let has_local_space_for_device = storage::with_db(|conn| {
+        let found: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sync_spaces WHERE device_id = ?1 LIMIT 1)",
+                rusqlite::params![dev_id_check],
+                |r| Ok(r.get::<_, i32>(0)? != 0),
+            )
+            .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
+        Ok(found)
+    })
+    .unwrap_or(false);
+
+    Ok((resolved.device_id, has_local_space_for_device))
+}
 
 #[tauri::command]
 pub async fn sync_v2_get_status(
@@ -45,18 +92,19 @@ pub async fn sync_v2_pair(
     sync_v1: State<'_, crate::services::sync_service::SyncService>,
     sync_v2: State<'_, SyncV2Service>,
 ) -> Result<PairSuccessResult, String> {
+    let data_dir = sync_v2.data_dir()?;
     let creds = sync_v2.credential_store()?;
     let transport = SelfHostTransport::new(&server_url).map_err(|e| e.to_string())?;
-    let device_id = tauri::async_runtime::spawn_blocking(storage::get_or_create_device_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let (device_id, allow_replace_active) =
+        tauri::async_runtime::spawn_blocking(move || resolve_pairing_device_identity(&data_dir))
+            .await
+            .map_err(|e| e.to_string())??;
 
     // Pause legacy v1 writers before v2 handoff so sync_outbox cannot race during pairing (M3/S10).
     let prev_v1_settings = storage::get_settings().ok();
     sync_v1.disable_immediately();
 
-    let result = match pair_space(
+    let result = match pair_space_with_options(
         |f| storage::with_db(f),
         &creds,
         &transport,
@@ -67,6 +115,7 @@ pub async fn sync_v2_pair(
         recovery_key.as_deref(),
         scope_history,
         scope_edits,
+        allow_replace_active,
     )
     .await
     {
@@ -120,18 +169,19 @@ pub async fn sync_v2_join_with_invite(
     sync_v1: State<'_, crate::services::sync_service::SyncService>,
     sync_v2: State<'_, SyncV2Service>,
 ) -> Result<PairSuccessResult, String> {
+    let data_dir = sync_v2.data_dir()?;
     let creds = sync_v2.credential_store()?;
     let parsed = decode_sync_invite(&invite_code).map_err(|e| e.to_string())?;
     let transport = SelfHostTransport::new(&parsed.server_url).map_err(|e| e.to_string())?;
-    let device_id = tauri::async_runtime::spawn_blocking(storage::get_or_create_device_id)
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let (device_id, allow_replace_active) =
+        tauri::async_runtime::spawn_blocking(move || resolve_pairing_device_identity(&data_dir))
+            .await
+            .map_err(|e| e.to_string())??;
 
     let prev_v1_settings = storage::get_settings().ok();
     sync_v1.disable_immediately();
 
-    let result = match join_space_with_invite(
+    let result = match join_space_with_invite_options(
         |f| storage::with_db(f),
         &creds,
         &transport,
@@ -140,6 +190,7 @@ pub async fn sync_v2_join_with_invite(
         &device_name,
         scope_history,
         scope_edits,
+        allow_replace_active,
     )
     .await
     {
@@ -202,21 +253,33 @@ pub async fn sync_v2_update_scope(
 
     let effective_edits = sync_history && sync_edits;
     let space_id = space.space_id.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let new_scope_version = tauri::async_runtime::spawn_blocking(move || {
         storage::with_db(|conn| {
             let tx = conn
                 .unchecked_transaction()
                 .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
             update_sync_scope_tx(&tx, &space_id, sync_history, effective_edits)?;
+            let ver: i64 = tx
+                .query_row(
+                    "SELECT scope_version FROM sync_spaces WHERE space_id = ?1",
+                    rusqlite::params![space_id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
             tx.commit()
-                .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))
+                .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
+            Ok(ver)
         })
         .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())??;
 
-    // Best-effort push of updated device scope & name to server.
+    // S5/S6: Serialize with active sync cycles; ack `scope_version` ONLY if server accepts.
+    // If offline or failed, `scope_version > acked_scope_version` stays pending and is pushed
+    // automatically on reconnect before any envelopes are sent.
+    let sync_lock = sync_v2.sync_lock();
+    let _guard = sync_lock.lock().await;
     if let Ok(Some(space_creds)) = creds.get(&space.space_id) {
         if let Ok(transport) = SelfHostTransport::new(&space.server_url) {
             let name = device_name
@@ -236,7 +299,7 @@ pub async fn sync_v2_update_scope(
             } else {
                 "linux"
             };
-            let _ = transport
+            if transport
                 .update_device(
                     &space_creds.device_token,
                     &space.device_id,
@@ -250,9 +313,25 @@ pub async fn sync_v2_update_scope(
                         key_check_tag: space.key_check_tag.clone(),
                     },
                 )
+                .await
+                .is_ok()
+            {
+                let ack_space_id = space.space_id.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    storage::with_db(|conn| {
+                        let tx = conn
+                            .unchecked_transaction()
+                            .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
+                        ack_sync_scope_version_tx(&tx, &ack_space_id, new_scope_version)?;
+                        tx.commit()
+                            .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))
+                    })
+                })
                 .await;
+            }
         }
     }
+    drop(_guard);
 
     sync_v2.notify_local_change();
     sync_v2.emit_status();
@@ -291,9 +370,12 @@ pub async fn sync_v2_sync_now(
     let retention_days = storage::get_settings_cached()
         .map(|s| s.text_retention_days)
         .unwrap_or(0);
+    let sync_lock = sync_v2.sync_lock();
+    let _guard = sync_lock.lock().await;
     let summary = sync_once(|f| storage::with_db(f), &creds, &transport, retention_days)
         .await
         .map_err(|e| e.to_string())?;
+    drop(_guard);
 
     if summary.stats_pulled > 0 || summary.history_pulled > 0 || summary.edits_pulled > 0 {
         let _ = app.emit(
@@ -354,13 +436,21 @@ pub async fn sync_v2_list_edit_conflicts(
 pub async fn sync_v2_resolve_edit_conflict(
     record_id: String,
     chosen_text: Option<String>,
+    expected_parent_edit_ids: Option<Vec<String>>,
     app: AppHandle,
     sync_v2: State<'_, SyncV2Service>,
 ) -> Result<(), String> {
     let rid = record_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        storage::with_db(|conn| resolve_edit_conflict_in(conn, &rid, chosen_text.as_deref()))
-            .map_err(|e| e.to_string())
+        storage::with_db(|conn| {
+            resolve_edit_conflict_with_parents_in(
+                conn,
+                &rid,
+                chosen_text.as_deref(),
+                expected_parent_edit_ids,
+            )
+        })
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())??;

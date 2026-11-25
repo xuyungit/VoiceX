@@ -570,6 +570,7 @@ const enUS = {
     newRecoveryKeyWarning: 'Sync is enabled. Back up this emergency recovery key in case all your devices are ever lost (for adding devices normally, just use "Generate sync code"):',
     scopeSectionTitle: 'This device sync scope',
     scopeSectionSub: 'Stats-only mode shares dates, app names, model names, and aggregate usage only — never dictation text or edits. Cross-device deletes propagate once peers come online.',
+    scopeSyncPending: 'Applied locally · pending server confirmation',
     scopeHistoryLabel: 'Also sync dictation history',
     scopeHistoryNote: 'Sync successful dictation text and metadata; when off, only stats sync while local history stays usable',
     scopeEditsLabel: 'Sync edited versions',

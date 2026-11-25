@@ -165,6 +165,7 @@ pub mod error_codes {
     pub const DEVICE_REVOKED: &str = "device_revoked";
     pub const SCOPE_FORBIDDEN: &str = "scope_forbidden";
     pub const PAIRING_INVALID_OR_EXPIRED: &str = "pairing_invalid_or_expired";
+    pub const DEVICE_ID_CONFLICT: &str = "device_id_conflict";
     pub const PAYLOAD_TOO_LARGE: &str = "payload_too_large";
     pub const RATE_LIMITED: &str = "rate_limited";
     pub const QUOTA_EXCEEDED: &str = "quota_exceeded";
@@ -186,6 +187,11 @@ pub struct PairRedeemRequest {
     pub device_name: String,
     pub platform: String,
     pub app_version: String,
+    /// Must be explicitly `true` to replace an already-active v2 device's token on
+    /// the same `device_id` (e.g. same-machine re-pair after local disconnect).
+    /// Prevents cloned DBs from silently kicking a live peer offline (S4).
+    #[serde(default)]
+    pub allow_replace_active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

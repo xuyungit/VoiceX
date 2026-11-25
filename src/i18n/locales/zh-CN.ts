@@ -570,6 +570,7 @@ const zhCN = {
     newRecoveryKeyWarning: '同步已开启。如需防范“所有设备同时丢失”，建议顺手备份一次应急恢复密钥（平时添加设备直接用「生成同步码」即可）：',
     scopeSectionTitle: '本机同步范围',
     scopeSectionSub: '仅统计模式只收发日期、应用名、模型名和用量汇总，不含听写正文或修改稿；从所有设备删除会在其他设备上线后传播',
+    scopeSyncPending: '本机已生效 · 待服务端确认',
     scopeHistoryLabel: '同时同步听写历史',
     scopeHistoryNote: '开启后收发成功听写文本与元数据；关闭后仅同步统计（本机历史页仍可正常使用）',
     scopeEditsLabel: '同步修改稿',

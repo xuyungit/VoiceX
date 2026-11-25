@@ -35,6 +35,11 @@ pub fn delete_post_edit_record(id: String, record_id: Option<String>) -> Result<
 
 /// Sets a dictation's final text; used by both history views.
 #[tauri::command]
-pub fn set_history_final_text(record_id: String, text: String) -> Result<FinalText, String> {
-    records::set_final_text(&record_id, &text).map_err(|e| e.to_string())
+pub fn set_history_final_text(
+    record_id: String,
+    text: String,
+    expected_parent_edit_ids: Option<Vec<String>>,
+) -> Result<FinalText, String> {
+    records::set_final_text_with_parents(&record_id, &text, expected_parent_edit_ids)
+        .map_err(|e| e.to_string())
 }

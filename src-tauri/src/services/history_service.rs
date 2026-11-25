@@ -134,6 +134,7 @@ impl HistoryService {
             target_app_key: target_app.as_ref().map(|app| app.app_key.clone()),
             target_app_name: target_app.map(|app| app.app_name),
             has_edit_conflict: false,
+            active_edit_id: None,
         };
 
         let behavior = Self::behavior_for_mode(&record.mode, &settings);
@@ -187,6 +188,7 @@ impl HistoryService {
             target_app_key: None,
             target_app_name: None,
             has_edit_conflict: false,
+            active_edit_id: None,
         };
 
         if let Err(err) = self.persist_record(record, Self::local_failure_behavior(&settings), app_handle)

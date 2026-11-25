@@ -758,6 +758,7 @@ fn apply_server_event(
                 target_app_key: None,
                 target_app_name: None,
                 has_edit_conflict: false,
+                active_edit_id: None,
             };
 
             let inserted = storage::insert_history_record_with_stats(&local_record, false)

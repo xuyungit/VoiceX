@@ -61,6 +61,7 @@ async fn pair_device(
             device_name: device_name.into(),
             platform: platform.into(),
             app_version: "0.20.0".into(),
+            allow_replace_active: false,
         })
         .send()
         .await
@@ -87,6 +88,7 @@ async fn pairing_is_single_use_and_revocation_only_blocks_revoked_device() {
         device_name: "MBP".into(),
         platform: "macos".into(),
         app_version: "0.20.0".into(),
+        allow_replace_active: false,
     };
     let r1 = client
         .post(format!("{}/v2/pair/redeem", srv.base_url))
@@ -119,6 +121,7 @@ async fn pairing_is_single_use_and_revocation_only_blocks_revoked_device() {
             device_name: "Win".into(),
             platform: "windows".into(),
             app_version: "0.20.0".into(),
+            allow_replace_active: false,
         })
         .send()
         .await
@@ -554,6 +557,7 @@ async fn authed_device_can_issue_one_time_pairing_code_for_peer() {
             device_name: "Windows PC".into(),
             platform: "windows".into(),
             app_version: "0.20.0".into(),
+            allow_replace_active: false,
         })
         .send()
         .await
@@ -572,11 +576,58 @@ async fn authed_device_can_issue_one_time_pairing_code_for_peer() {
             device_name: "Other".into(),
             platform: "windows".into(),
             app_version: "0.20.0".into(),
+            allow_replace_active: false,
         })
         .send()
         .await
         .unwrap();
     assert_eq!(reuse_resp.status(), StatusCode::CONFLICT);
+
+    // S4: Trying to silently hijack an actively paired device_id fails with 409 device_id_conflict
+    // without consuming the pairing code, while explicit allow_replace_active=true succeeds.
+    let hijack_code = db::create_pairing_code(&srv.pool, &acc.account_id, 15)
+        .await
+        .unwrap();
+    let hijack_resp = client
+        .post(format!("{}/v2/pair/redeem", srv.base_url))
+        .json(&PairRedeemRequest {
+            pairing_code: hijack_code.pairing_code.clone(),
+            device_id: "mac-1".into(),
+            device_name: "Cloned Mac".into(),
+            platform: "macos".into(),
+            app_version: "0.20.0".into(),
+            allow_replace_active: false,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hijack_resp.status(), StatusCode::CONFLICT);
+    let hijack_err: ApiErrorBody = hijack_resp.json().await.unwrap();
+    assert_eq!(hijack_err.code, error_codes::DEVICE_ID_CONFLICT);
+
+    // Original mac-1 token still works, and the unconsumed pairing code can be used with a fresh device_id
+    let mac_still_ok = client
+        .get(format!("{}/v2/account", srv.base_url))
+        .bearer_auth(&mac.device_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mac_still_ok.status(), StatusCode::OK);
+
+    let cloned_with_fresh_id = client
+        .post(format!("{}/v2/pair/redeem", srv.base_url))
+        .json(&PairRedeemRequest {
+            pairing_code: hijack_code.pairing_code,
+            device_id: "mac-clone-new-id".into(),
+            device_name: "Cloned Mac".into(),
+            platform: "macos".into(),
+            app_version: "0.20.0".into(),
+            allow_replace_active: false,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cloned_with_fresh_id.status(), StatusCode::OK);
 
     // Revoked device cannot issue pairing codes
     db::revoke_device(&srv.pool, &acc.account_id, "mac-1")

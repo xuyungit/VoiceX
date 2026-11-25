@@ -380,6 +380,9 @@ onMounted(async () => {
       </SettingsSection>
 
       <SettingsSection :title="t('sync.scopeSectionTitle')" :help="t('sync.scopeSectionSub')">
+        <template v-if="v2.scopeSyncPending" #extra>
+          <span class="pill accent">{{ t('sync.scopeSyncPending') }}</span>
+        </template>
         <SettingRow :label="t('sync.scopeHistoryLabel')" :help="t('sync.scopeHistoryNote')">
           <NSwitch :value="v2.scopeHistory" @update:value="handleScopeHistoryChange" />
         </SettingRow>

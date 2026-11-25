@@ -176,6 +176,7 @@ impl RealClient {
             target_app_key: Some(app_key.to_string()),
             target_app_name: Some(app_name.to_string()),
             has_edit_conflict: false,
+            active_edit_id: None,
         };
         let g = self.conn.lock().unwrap();
         let tx = g.unchecked_transaction().unwrap();

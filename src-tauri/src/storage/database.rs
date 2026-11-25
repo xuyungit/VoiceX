@@ -468,9 +468,12 @@ pub struct HistoryRecord {
     /// True when concurrent manual edits created a recoverable alternative branch.
     #[serde(default)]
     pub has_edit_conflict: bool,
+    /// Active edit version ID currently displayed for this record (S3 parent snapshot).
+    #[serde(default)]
+    pub active_edit_id: Option<String>,
 }
 
-const HISTORY_RECORD_SELECT_COLUMNS: &str = "h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text, h.target_app_platform, h.target_app_key, h.target_app_name, COALESCE(h.has_edit_conflict, 0)";
+const HISTORY_RECORD_SELECT_COLUMNS: &str = "h.id, h.timestamp, h.text, h.original_text, h.ai_correction_applied, h.llm_invoked, h.mode, h.duration_ms, h.audio_path, h.is_final, h.error_code, h.error_message, h.source_device_id, d.device_name, h.asr_model_name, h.llm_model_name, h.edited_text, h.target_app_platform, h.target_app_key, h.target_app_name, COALESCE(h.has_edit_conflict, 0), h.active_edit_id";
 
 fn map_history_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRecord> {
     Ok(HistoryRecord {
@@ -495,6 +498,7 @@ fn map_history_record_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRe
         target_app_key: row.get(18)?,
         target_app_name: row.get(19)?,
         has_edit_conflict: row.get::<_, i32>(20)? != 0,
+        active_edit_id: row.get(21)?,
     })
 }
 
@@ -2648,7 +2652,8 @@ mod tests {
                  error_code INTEGER DEFAULT 0, error_message TEXT, source_device_id TEXT,
                  asr_model_name TEXT, llm_model_name TEXT,
                  target_app_platform TEXT, target_app_key TEXT, target_app_name TEXT,
-                 has_edit_conflict INTEGER NOT NULL DEFAULT 0
+                 has_edit_conflict INTEGER NOT NULL DEFAULT 0,
+                 active_edit_id TEXT
              );
              CREATE TABLE usage_stats (
                  id INTEGER PRIMARY KEY, total_recording_count INTEGER DEFAULT 0,
@@ -2688,6 +2693,7 @@ mod tests {
             target_app_key: None,
             target_app_name: None,
             has_edit_conflict: false,
+            active_edit_id: None,
         }
     }
 

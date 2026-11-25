@@ -55,6 +55,7 @@ export interface HistoryRecord {
     targetAppKey: string | null
     targetAppName: string | null
     hasEditConflict?: boolean
+    activeEditId?: string | null
 }
 
 export interface AppUsageStat {
@@ -466,8 +467,12 @@ export const useHistoryStore = defineStore('history', () => {
     }
 
     /** Saves a dictation's final text; returns once the change is stored. */
-    async function setFinalText(id: string, text: string) {
-        const result = await invoke<{ editedText: string | null }>('set_history_final_text', { recordId: id, text })
+    async function setFinalText(id: string, text: string, expectedParentEditIds?: string[]) {
+        const result = await invoke<{ editedText: string | null }>('set_history_final_text', {
+            recordId: id,
+            text,
+            ...(expectedParentEditIds !== undefined ? { expectedParentEditIds } : {}),
+        })
         const record = records.value.find(r => r.id === id)
         if (record) record.editedText = result.editedText
         // The save triggers a history refresh (history:updated), which re-runs

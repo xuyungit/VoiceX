@@ -58,6 +58,8 @@ pub struct SyncSpaceRecord {
     pub status: String,
     pub last_error: Option<String>,
     pub last_sync_at: Option<String>,
+    pub scope_version: i64,
+    pub acked_scope_version: i64,
 }
 
 impl SyncSpaceRecord {
@@ -291,9 +293,27 @@ pub fn init_schema(conn: &Connection) -> Result<(), StorageError> {
         );
         CREATE INDEX IF NOT EXISTS sync_outbox_space_domain_idx
             ON sync_outbox_ops(space_id, domain, created_at ASC);
+
+        CREATE TABLE IF NOT EXISTS sync_pending_audio_deletes (
+            path TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL
+        );
         "#,
     )
     .map_err(sql_err)?;
+
+    ensure_column_in(
+        conn,
+        "sync_spaces",
+        "scope_version",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
+    ensure_column_in(
+        conn,
+        "sync_spaces",
+        "acked_scope_version",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
 
     backfill_daily_model_usage_and_corrections(conn)
 }
@@ -488,7 +508,8 @@ pub fn active_space_in(conn: &Connection) -> Result<Option<SyncSpaceRecord>, Sto
     conn.query_row(
         "SELECT space_id, backend_kind, server_url, server_id, account_id, device_id,
                 is_active, scope_history, scope_edits, key_check_tag, last_hlc,
-                stats_cursor, history_cursor, edits_cursor, status, last_error, last_sync_at
+                stats_cursor, history_cursor, edits_cursor, status, last_error, last_sync_at,
+                scope_version, acked_scope_version
          FROM sync_spaces
          WHERE is_active = 1
          LIMIT 1",
@@ -512,6 +533,8 @@ pub fn active_space_in(conn: &Connection) -> Result<Option<SyncSpaceRecord>, Sto
                 status: row.get(14)?,
                 last_error: row.get(15)?,
                 last_sync_at: row.get(16)?,
+                scope_version: row.get(17)?,
+                acked_scope_version: row.get(18)?,
             })
         },
     )
@@ -520,7 +543,8 @@ pub fn active_space_in(conn: &Connection) -> Result<Option<SyncSpaceRecord>, Sto
 }
 
 /// Register or activate a sync space without deleting pending outbox entries of
-/// any previously used space (Section 3.1.3).
+/// any previously used space (Section 3.1.3). Re-pairing a disabled/revoked space
+/// with `make_active = true` restores `status = 'idle'` and clears `last_error` (S2).
 #[allow(clippy::too_many_arguments)]
 pub fn upsert_sync_space_tx(
     conn: &Connection,
@@ -546,8 +570,9 @@ pub fn upsert_sync_space_tx(
     conn.execute(
         "INSERT INTO sync_spaces (
             space_id, backend_kind, server_url, server_id, account_id, device_id,
-            is_active, scope_history, scope_edits, key_check_tag, status, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'idle', ?11, ?11)
+            is_active, scope_history, scope_edits, key_check_tag, status, last_error,
+            scope_version, acked_scope_version, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'idle', NULL, 1, 1, ?11, ?11)
          ON CONFLICT(space_id) DO UPDATE SET
             backend_kind = excluded.backend_kind,
             server_url = excluded.server_url,
@@ -556,6 +581,9 @@ pub fn upsert_sync_space_tx(
             scope_history = excluded.scope_history,
             scope_edits = excluded.scope_edits,
             key_check_tag = COALESCE(excluded.key_check_tag, sync_spaces.key_check_tag),
+            status = CASE WHEN excluded.is_active = 1 THEN 'idle' ELSE sync_spaces.status END,
+            last_error = CASE WHEN excluded.is_active = 1 THEN NULL ELSE sync_spaces.last_error END,
+            acked_scope_version = sync_spaces.scope_version,
             updated_at = excluded.updated_at",
         params![
             space_id,
@@ -631,7 +659,10 @@ pub fn update_sync_scope_tx(
 
     conn.execute(
         "UPDATE sync_spaces
-         SET scope_history = ?2, scope_edits = ?3, updated_at = ?4
+         SET scope_history = ?2,
+             scope_edits = ?3,
+             scope_version = scope_version + 1,
+             updated_at = ?4
          WHERE space_id = ?1",
         params![
             space_id,
@@ -639,6 +670,23 @@ pub fn update_sync_scope_tx(
             i32::from(effective_edits),
             Utc::now().to_rfc3339()
         ],
+    )
+    .map_err(sql_err)?;
+    Ok(())
+}
+
+/// Mark `acked_scope_version` up to `acked_version` once the server confirms
+/// `PUT /v2/devices/{device_id}` (S6).
+pub fn ack_sync_scope_version_tx(
+    conn: &Connection,
+    space_id: &str,
+    acked_version: i64,
+) -> Result<(), StorageError> {
+    conn.execute(
+        "UPDATE sync_spaces
+         SET acked_scope_version = MAX(acked_scope_version, ?2), updated_at = ?3
+         WHERE space_id = ?1",
+        params![space_id, acked_version, Utc::now().to_rfc3339()],
     )
     .map_err(sql_err)?;
     Ok(())
@@ -1477,6 +1525,32 @@ pub fn on_local_edit_applied_tx(
     edited_at: &str,
     metadata: Option<EditMetadataPayload>,
 ) -> Result<(), StorageError> {
+    on_local_edit_applied_with_parents_tx(
+        conn,
+        record_id,
+        edit_id,
+        edit_kind,
+        final_text,
+        edited_at,
+        metadata,
+        None,
+    )
+}
+
+/// Transactional hook accepting an optional explicit parent snapshot captured
+/// when the user opened the editor or conflict resolver (S3), plus enforcing
+/// record space ownership so edits to an old space never enter the active space (S1).
+#[allow(clippy::too_many_arguments)]
+pub fn on_local_edit_applied_with_parents_tx(
+    conn: &Connection,
+    record_id: &str,
+    edit_id: &str,
+    edit_kind: EditKind,
+    final_text: Option<&str>,
+    edited_at: &str,
+    metadata: Option<EditMetadataPayload>,
+    explicit_parent_edit_ids: Option<Vec<String>>,
+) -> Result<(), StorageError> {
     let row: Option<(String, i32, bool, bool, Option<String>)> = conn
         .query_row(
             "SELECT mode, error_code, is_final, sync_eligible, sync_space_id
@@ -1494,16 +1568,20 @@ pub fn on_local_edit_applied_tx(
         )
         .optional()
         .map_err(sql_err)?;
-    let Some((mode, error_code, is_final, sync_eligible, _record_space)) = row else {
+    let Some((mode, error_code, is_final, sync_eligible, record_space)) = row else {
         return Ok(());
     };
 
     let device_id = local_device_id_in(conn)?;
     let space = active_space_in(conn)?;
-    let existing = load_edit_nodes_in(conn, record_id)?;
-    let current_resolved = resolve_edits(&existing);
     let parent_edit_ids = if edit_kind.is_manual() {
-        current_resolved.next_parent_ids
+        match explicit_parent_edit_ids {
+            Some(parents) => parents,
+            None => {
+                let existing = load_edit_nodes_in(conn, record_id)?;
+                resolve_edits(&existing).next_parent_ids
+            }
+        }
     } else {
         Vec::new()
     };
@@ -1518,16 +1596,18 @@ pub fn on_local_edit_applied_tx(
         .transpose()
         .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
 
+    // S1: Only share into the active space if the record belongs to that exact space.
     let should_share = space.as_ref().is_some_and(|s| {
-        can_share_history_edit(
-            &s.scope_config(),
-            RecordEligibility {
-                mode: &mode,
-                error_code,
-                is_final,
-            },
-            sync_eligible,
-        )
+        record_space.as_deref() == Some(s.space_id.as_str())
+            && can_share_history_edit(
+                &s.scope_config(),
+                RecordEligibility {
+                    mode: &mode,
+                    error_code,
+                    is_final,
+                },
+                sync_eligible,
+            )
     });
     let space_id_opt = if should_share {
         space.as_ref().map(|s| s.space_id.as_str())
@@ -1601,15 +1681,15 @@ pub fn on_local_history_deleted_tx(
     record_id: &str,
     is_user_delete: bool,
 ) -> Result<(), StorageError> {
-    let sync_eligible: bool = conn
+    let rec_meta: Option<(bool, Option<String>)> = conn
         .query_row(
-            "SELECT sync_eligible FROM history_record WHERE id = ?1",
+            "SELECT sync_eligible, sync_space_id FROM history_record WHERE id = ?1",
             params![record_id],
-            |r| Ok(r.get::<_, i32>(0)? != 0),
+            |r| Ok((r.get::<_, i32>(0)? != 0, r.get(1)?)),
         )
         .optional()
-        .map_err(sql_err)?
-        .unwrap_or(false);
+        .map_err(sql_err)?;
+    let (sync_eligible, record_space) = rec_meta.unwrap_or((false, None));
 
     conn.execute(
         "DELETE FROM history_edit_versions WHERE record_id = ?1",
@@ -1624,6 +1704,10 @@ pub fn on_local_history_deleted_tx(
     let Some(space) = active_space_in(conn)? else {
         return Ok(());
     };
+    // S1: Only propagate delete tombstones into the space that actually owns this record.
+    if record_space.as_deref() != Some(space.space_id.as_str()) {
+        return Ok(());
+    }
     if !can_send_history_delete(&space.scope_config(), sync_eligible) {
         return Ok(());
     }
@@ -1890,10 +1974,16 @@ pub fn apply_remote_stats_totals_tx(
     )
     .map_err(sql_err)?;
 
+    // N1: Use remote shard `updated_at` (never receiver's local clock) and advance monotonically.
     conn.execute(
-        "UPDATE sync_devices SET last_synced_at = ?3, updated_at = ?3
+        "UPDATE sync_devices
+         SET last_synced_at = CASE
+                WHEN last_synced_at IS NULL OR ?3 > last_synced_at THEN ?3
+                ELSE last_synced_at
+             END,
+             updated_at = ?4
          WHERE space_id = ?1 AND device_id = ?2",
-        params![space_id, payload.device_id, now],
+        params![space_id, payload.device_id, payload.updated_at, now],
     )
     .map_err(sql_err)?;
     Ok(true)
@@ -2006,6 +2096,26 @@ pub fn apply_remote_history_op_tx(
     match op {
         HistoryOpPayload::Delete(del) => {
             observe_hlc_tx(conn, space_id, local_device_id, &del.hlc)?;
+            // S8: Record local audio_path in the same transaction before deleting the row
+            // so post-commit cleanup removes the audio file on disk (and retries on failure).
+            if let Some(audio_path) = conn
+                .query_row(
+                    "SELECT audio_path FROM history_record WHERE id = ?1",
+                    params![del.record_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(sql_err)?
+                .flatten()
+                .filter(|p| !p.trim().is_empty())
+            {
+                conn.execute(
+                    "INSERT OR IGNORE INTO sync_pending_audio_deletes (path, created_at)
+                     VALUES (?1, ?2)",
+                    params![audio_path, Utc::now().to_rfc3339()],
+                )
+                .map_err(sql_err)?;
+            }
             conn.execute(
                 "INSERT INTO history_tombstones (space_id, record_id, deleted_by_device_id, hlc, deleted_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)
@@ -2188,6 +2298,51 @@ pub fn apply_remote_history_op_tx(
             Ok(RemoteApplyOutcome::Applied)
         }
     }
+}
+
+/// Remove local audio files queued by remote delete tombstones (S8).
+/// Files that cannot be removed right now remain queued for retry on later cycles.
+pub fn flush_pending_audio_deletes_in(conn: &Connection) -> Result<usize, StorageError> {
+    let paths: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT path FROM sync_pending_audio_deletes ORDER BY created_at ASC")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        rows
+    };
+
+    let mut deleted = 0usize;
+    for path in paths {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                conn.execute(
+                    "DELETE FROM sync_pending_audio_deletes WHERE path = ?1",
+                    params![path],
+                )
+                .map_err(sql_err)?;
+                deleted += 1;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                conn.execute(
+                    "DELETE FROM sync_pending_audio_deletes WHERE path = ?1",
+                    params![path],
+                )
+                .map_err(sql_err)?;
+            }
+            Err(err) => {
+                log::warn!(
+                    "Deferred audio cleanup failed for {} (will retry): {}",
+                    path,
+                    err
+                );
+            }
+        }
+    }
+    Ok(deleted)
 }
 
 /// Return recoverable concurrent manual edit alternatives for a history record.
@@ -2890,6 +3045,7 @@ mod tests {
             target_app_key: Some("com.apple.Notes".to_string()),
             target_app_name: Some("Notes".to_string()),
             has_edit_conflict: false,
+            active_edit_id: None,
         }
     }
 
@@ -3385,5 +3541,183 @@ mod tests {
             )
             .unwrap();
         assert_eq!((ver_cnt_after, shared_cnt_after), (1, 1));
+    }
+
+    #[test]
+    fn s1_s2_s3_s8_n1_cross_space_repair_editor_parents_audio_cleanup_and_device_times() {
+        let conn = open_test_db();
+        // Create space A with record r-space-a
+        upsert_sync_space_tx(
+            &conn,
+            "space-a",
+            "selfhost",
+            "http://srv-a",
+            "srv-a",
+            "acc-a",
+            "mac-dev",
+            true,
+            true,
+            None,
+            true,
+        )
+        .unwrap();
+        let rec_a = sample_record("r-space-a");
+        conn.execute(
+            "INSERT INTO history_record (id, timestamp, text, mode, duration_ms, source_device_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'mac-dev')",
+            params![rec_a.id, rec_a.timestamp, rec_a.text, rec_a.mode, rec_a.duration_ms],
+        )
+        .unwrap();
+        on_local_history_inserted_tx(&conn, &rec_a, "2026-11-24").unwrap();
+
+        // S2: Disconnect space A -> status='disabled', last_error='err'; re-pairing must reset both!
+        conn.execute(
+            "UPDATE sync_spaces SET status = 'revoked', last_error = 'revoked' WHERE space_id = 'space-a'",
+            [],
+        )
+        .unwrap();
+        upsert_sync_space_tx(
+            &conn,
+            "space-a",
+            "selfhost",
+            "http://srv-a",
+            "srv-a",
+            "acc-a",
+            "mac-dev",
+            true,
+            true,
+            None,
+            true,
+        )
+        .unwrap();
+        let repaired = active_space_in(&conn).unwrap().unwrap();
+        assert_eq!(repaired.status, "idle");
+        assert_eq!(repaired.last_error, None);
+
+        // S1: Switch active space to space B; editing/deleting/importing r-space-a must NOT enter space B outbox!
+        upsert_sync_space_tx(
+            &conn,
+            "space-b",
+            "selfhost",
+            "http://srv-b",
+            "srv-b",
+            "acc-b",
+            "mac-dev",
+            true,
+            true,
+            None,
+            true,
+        )
+        .unwrap();
+        on_local_edit_applied_tx(
+            &conn,
+            "r-space-a",
+            "ed-old-space",
+            EditKind::Manual,
+            Some("edited in space b"),
+            "2026-11-24T13:00:00Z",
+            None,
+        )
+        .unwrap();
+        let space_b = active_space_in(&conn).unwrap().unwrap();
+        assert_eq!(import_existing_edits_tx(&conn, &space_b).unwrap(), 0);
+        on_local_history_deleted_tx(&conn, "r-space-a", true).unwrap();
+        let b_ops: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_outbox_ops WHERE space_id = 'space-b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(b_ops, 0);
+
+        // S3: Explicit editor parent snapshot detects remote edit arriving while user is typing!
+        let rec_b = sample_record("r-space-b");
+        conn.execute(
+            "INSERT INTO history_record (id, timestamp, text, mode, duration_ms, source_device_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'mac-dev')",
+            params![rec_b.id, rec_b.timestamp, rec_b.text, rec_b.mode, rec_b.duration_ms],
+        )
+        .unwrap();
+        on_local_history_inserted_tx(&conn, &rec_b, "2026-11-24").unwrap();
+        // User opens editor on unedited record (parent snapshot = [])
+        // Remote edit from Windows arrives before user hits Save:
+        let remote_ed = HistoryOpPayload::Edit(HistoryEditPayload {
+            schema: PAYLOAD_SCHEMA_V1,
+            edit_id: "ed-win-mid-draft".into(),
+            record_id: "r-space-b".into(),
+            source_device_id: "win-dev".into(),
+            edit_kind: EditKind::Manual,
+            parent_edit_ids: vec![],
+            hlc: "2026-11-24T13:05:00.000Z#0000#win-dev".into(),
+            edited_at: "2026-11-24T13:05:00Z".into(),
+            final_text: Some("windows mid-draft text".into()),
+            metadata: None,
+        });
+        apply_remote_history_op_tx(&conn, "space-b", "mac-dev", &remote_ed, 0).unwrap();
+        // Now Mac saves with its captured empty parent snapshot -> MUST detect conflict (both recoverable)!
+        on_local_edit_applied_with_parents_tx(
+            &conn,
+            "r-space-b",
+            "ed-mac-save",
+            EditKind::Manual,
+            Some("mac draft text"),
+            "2026-11-24T13:06:00Z",
+            None,
+            Some(vec![]),
+        )
+        .unwrap();
+        let alts = list_edit_conflict_alternatives_in(&conn, "r-space-b").unwrap();
+        assert_eq!(alts.len(), 1);
+
+        // S8: Remote delete tombstone queues & deletes real local audio file on disk
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let audio_file = tmp_dir.path().join("rec-b.wav");
+        std::fs::write(&audio_file, b"RIFFfake").unwrap();
+        conn.execute(
+            "UPDATE history_record SET audio_path = ?1 WHERE id = 'r-space-b'",
+            params![audio_file.to_str().unwrap()],
+        )
+        .unwrap();
+        let remote_del = HistoryOpPayload::Delete(HistoryDeletePayload {
+            schema: PAYLOAD_SCHEMA_V1,
+            record_id: "r-space-b".into(),
+            source_device_id: "win-dev".into(),
+            hlc: "2026-11-24T13:10:00.000Z#0000#win-dev".into(),
+            deleted_at: "2026-11-24T13:10:00Z".into(),
+        });
+        apply_remote_history_op_tx(&conn, "space-b", "mac-dev", &remote_del, 0).unwrap();
+        assert!(audio_file.exists()); // Not deleted before post-commit flush
+        assert_eq!(flush_pending_audio_deletes_in(&conn).unwrap(), 1);
+        assert!(!audio_file.exists());
+
+        // N1: apply_remote_stats_totals_tx uses payload.updated_at (not receiver clock)
+        conn.execute(
+            "INSERT INTO sync_devices (space_id, device_id, device_name, platform, app_version, last_synced_at, updated_at)
+             VALUES ('space-b', 'win-dev', 'Win', 'windows', '0.20.0', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        apply_remote_stats_totals_tx(
+            &conn,
+            "space-b",
+            &StatsTotalsPayload {
+                schema: PAYLOAD_SCHEMA_V1,
+                device_id: "win-dev".into(),
+                revision: 1,
+                updated_at: "2026-11-22T05:00:00Z".into(),
+                dictation: DictationTotalsPayload::default(),
+                tts: TtsTotalsPayload::default(),
+            },
+        )
+        .unwrap();
+        let synced_at: String = conn
+            .query_row(
+                "SELECT last_synced_at FROM sync_devices WHERE space_id = 'space-b' AND device_id = 'win-dev'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(synced_at, "2026-11-22T05:00:00Z");
     }
 }

@@ -33,6 +33,8 @@ pub enum DbApiError {
     ScopeForbidden(String),
     #[error("{0}")]
     PairingInvalidOrExpired(String),
+    #[error("{0}")]
+    DeviceIdConflict(String),
     #[error("account storage quota exceeded")]
     QuotaExceeded,
     #[error("database error: {0}")]
@@ -47,6 +49,7 @@ impl DbApiError {
             DbApiError::DeviceRevoked => error_codes::DEVICE_REVOKED,
             DbApiError::ScopeForbidden(_) => error_codes::SCOPE_FORBIDDEN,
             DbApiError::PairingInvalidOrExpired(_) => error_codes::PAIRING_INVALID_OR_EXPIRED,
+            DbApiError::DeviceIdConflict(_) => error_codes::DEVICE_ID_CONFLICT,
             DbApiError::QuotaExceeded => error_codes::QUOTA_EXCEEDED,
             DbApiError::Sqlx(_) => error_codes::INTERNAL_ERROR,
         }
@@ -443,6 +446,28 @@ pub async fn redeem_pairing_code(
         return Err(DbApiError::PairingInvalidOrExpired(
             "pairing code has expired".into(),
         ));
+    }
+
+    // S4: Reject silent takeover of an actively paired v2 device unless explicitly allowed.
+    // Migrated unpaired v1 devices (`token_hash LIKE 'migrated-unpaired:%'`) and revoked devices
+    // may always be claimed cleanly on first v2 pairing.
+    let existing_device = sqlx::query(
+        "SELECT token_hash, revoked_at FROM devices WHERE account_id = ?1 AND device_id = ?2",
+    )
+    .bind(&account_id)
+    .bind(device_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(dev_row) = existing_device {
+        let existing_hash: String = dev_row.get(0);
+        let existing_revoked: Option<String> = dev_row.get(1);
+        let is_active_v2 =
+            existing_revoked.is_none() && !existing_hash.starts_with("migrated-unpaired:");
+        if is_active_v2 && !req.allow_replace_active {
+            return Err(DbApiError::DeviceIdConflict(format!(
+                "device '{device_id}' is already actively paired; use a new device identity or explicitly re-authorize"
+            )));
+        }
     }
 
     let updated = sqlx::query(

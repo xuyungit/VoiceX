@@ -29,6 +29,7 @@ export interface SyncV2StatusSnapshot {
     lastSyncAt: string | null
     scopeHistory: boolean
     scopeEdits: boolean
+    scopeSyncPending: boolean
     pendingOpsCount: number
     pendingStatsCount: number
     hasCredentials: boolean
@@ -61,6 +62,7 @@ const emptyV2Status = (): SyncV2StatusSnapshot => ({
     lastSyncAt: null,
     scopeHistory: false,
     scopeEdits: false,
+    scopeSyncPending: false,
     pendingOpsCount: 0,
     pendingStatsCount: 0,
     hasCredentials: false,

@@ -27,6 +27,7 @@ const dialog = useDialog()
 const message = useMessage()
 const { t, locale } = useI18n()
 const editingId = ref<string | null>(null)
+const editingParentEditIds = ref<string[]>([])
 const savingEdit = ref(false)
 const searchInput = ref(historyStore.searchQuery)
 const searchType = ref<HistoryRecordType>(historyStore.recordType)
@@ -250,11 +251,19 @@ function canEdit(record: HistoryRecord) {
   return !isFailedRecord(record) && hasRecordText(record)
 }
 
+function startEditing(record: HistoryRecord) {
+  editingId.value = record.id
+  // S3: Capture the active edit version visible when the editor opens so a remote
+  // edit arriving mid-draft triggers a recoverable conflict instead of being overwritten.
+  editingParentEditIds.value = record.activeEditId ? [record.activeEditId] : []
+}
+
 async function saveEdit(record: HistoryRecord, text: string) {
   savingEdit.value = true
   try {
-    await historyStore.setFinalText(record.id, text)
+    await historyStore.setFinalText(record.id, text, editingParentEditIds.value)
     editingId.value = null
+    editingParentEditIds.value = []
   } catch (error) {
     message.error(t('postEdit.saveFailed', { reason: String(error) }))
   } finally {
@@ -340,9 +349,16 @@ async function resolveEditConflict(chosenText: string | null) {
   if (!current || resolvingConflict.value) return
   resolvingConflict.value = true
   try {
+    const visibleParents = Array.from(
+      new Set([
+        ...(current.activeEditId ? [current.activeEditId] : []),
+        ...detailConflicts.value.map(c => c.editId),
+      ]),
+    )
     await invoke('sync_v2_resolve_edit_conflict', {
       recordId: current.id,
       chosenText,
+      expectedParentEditIds: visibleParents,
     })
     detailConflicts.value = []
     current.hasEditConflict = false
@@ -767,7 +783,7 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                     :aria-label="t('postEdit.edit')"
                     :title="t('postEdit.edit')"
                     :disabled="!canEdit(record) || editingId === record.id"
-                    @click="editingId = record.id"
+                    @click="startEditing(record)"
                   >
                     <template #icon>
                       <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">

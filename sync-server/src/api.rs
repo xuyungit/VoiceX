@@ -125,7 +125,9 @@ impl IntoResponse for DbApiError {
             DbApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             DbApiError::Unauthorized | DbApiError::DeviceRevoked => StatusCode::UNAUTHORIZED,
             DbApiError::ScopeForbidden(_) => StatusCode::FORBIDDEN,
-            DbApiError::PairingInvalidOrExpired(_) => StatusCode::CONFLICT,
+            DbApiError::PairingInvalidOrExpired(_) | DbApiError::DeviceIdConflict(_) => {
+                StatusCode::CONFLICT
+            }
             DbApiError::QuotaExceeded => StatusCode::INSUFFICIENT_STORAGE,
             DbApiError::Sqlx(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

@@ -352,6 +352,14 @@ pub(super) fn insert(conn: &Connection, record: &Record) -> Result<bool, Storage
 /// final version and its edit-history pair. New pairs are only created for
 /// ordinary dictation while edit records are enabled.
 pub fn set_final_text(source_id: &str, text: &str) -> Result<FinalText, StorageError> {
+    set_final_text_with_parents(source_id, text, None)
+}
+
+pub fn set_final_text_with_parents(
+    source_id: &str,
+    text: &str,
+    expected_parent_edit_ids: Option<Vec<String>>,
+) -> Result<FinalText, StorageError> {
     if text.trim().is_empty() {
         return Err(StorageError::InvalidInput("text is empty".into()));
     }
@@ -365,7 +373,7 @@ pub fn set_final_text(source_id: &str, text: &str) -> Result<FinalText, StorageE
         let edited_at = timestamp(now);
         match result.edited_text.as_deref() {
             Some(final_text) => {
-                crate::sync_v2::store::on_local_edit_applied_tx(
+                crate::sync_v2::store::on_local_edit_applied_with_parents_tx(
                     &tx,
                     source_id,
                     &edit_id,
@@ -373,10 +381,11 @@ pub fn set_final_text(source_id: &str, text: &str) -> Result<FinalText, StorageE
                     Some(final_text),
                     &edited_at,
                     None,
+                    expected_parent_edit_ids,
                 )?;
             }
             None => {
-                crate::sync_v2::store::on_local_edit_applied_tx(
+                crate::sync_v2::store::on_local_edit_applied_with_parents_tx(
                     &tx,
                     source_id,
                     &edit_id,
@@ -384,6 +393,7 @@ pub fn set_final_text(source_id: &str, text: &str) -> Result<FinalText, StorageE
                     None,
                     &edited_at,
                     None,
+                    expected_parent_edit_ids,
                 )?;
             }
         }
