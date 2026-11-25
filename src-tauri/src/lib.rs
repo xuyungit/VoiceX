@@ -100,32 +100,6 @@ pub(crate) fn debug_data_dir_override() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Resolve the OS credential store service namespace.
-///
-/// Release builds always use `"com.voicex.app"`. Debug builds isolate
-/// credentials whenever `VOICEX_KEYRING_NAMESPACE` or `VOICEX_DATA_DIR` is set
-/// so local multi-instance testing never touches production credentials.
-pub(crate) fn resolve_keyring_namespace() -> String {
-    const PROD_NAMESPACE: &str = "com.voicex.app";
-    #[cfg(debug_assertions)]
-    {
-        if let Ok(ns) = std::env::var("VOICEX_KEYRING_NAMESPACE") {
-            let trimmed = ns.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-        if let Some(dir) = debug_data_dir_override() {
-            use sha2::{Digest, Sha256};
-            let canonical = dir.to_string_lossy();
-            let digest = Sha256::digest(canonical.as_bytes());
-            let short_hex = hex::encode(&digest[..6]);
-            return format!("{PROD_NAMESPACE}.dev.{short_hex}");
-        }
-    }
-    PROD_NAMESPACE.to_string()
-}
-
 /// Initialize the application state and services
 pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     logging::init(&app.path().app_log_dir()?)?;
@@ -133,11 +107,7 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize database
     let app_data_dir = if let Some(override_dir) = debug_data_dir_override() {
-        log::info!(
-            "Using debug VOICEX_DATA_DIR override: {:?} (keyring namespace: {})",
-            override_dir,
-            resolve_keyring_namespace()
-        );
+        log::info!("Using debug VOICEX_DATA_DIR override: {:?}", override_dir);
         override_dir
     } else {
         app.path().app_data_dir()?
@@ -177,6 +147,9 @@ pub fn init_app(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let sync_service: tauri::State<'_, SyncService> = app.state();
     sync_service.init_with_handle(app.handle());
+    let sync_v2_service: tauri::State<'_, sync_v2::engine::SyncV2Service> = app.state();
+    sync_v2_service.init(app.handle(), app_data_dir.clone());
+    sync_v2_service.start_if_active();
     let asr_debug_service: tauri::State<'_, AsrDebugService> = app.state();
     asr_debug_service.install_global();
     if !persisted_settings.enable_diagnostics {
@@ -320,6 +293,7 @@ pub fn run() {
         .manage(HotkeyManager::default())
         .manage(SessionController::with_work_gate(work_gate.clone()))
         .manage(SyncService::default())
+        .manage(sync_v2::engine::SyncV2Service::default())
         .manage(TtsController::with_work_gate(work_gate))
         .manage(updates)
         .manage(commands::history_translation::HistoryTranslationState::default())
@@ -470,6 +444,15 @@ pub fn run() {
             commands::history::count_history,
             commands::sync::get_sync_state,
             commands::sync::sync_now,
+            commands::sync_v2::sync_v2_get_status,
+            commands::sync_v2::sync_v2_pair,
+            commands::sync_v2::sync_v2_get_recovery_key,
+            commands::sync_v2::sync_v2_update_scope,
+            commands::sync_v2::sync_v2_import_existing_edits,
+            commands::sync_v2::sync_v2_sync_now,
+            commands::sync_v2::sync_v2_disconnect,
+            commands::sync_v2::sync_v2_list_edit_conflicts,
+            commands::sync_v2::sync_v2_resolve_edit_conflict,
             commands::hotword::sync_hotwords,
             commands::hotword::force_download_hotwords,
             commands::hotword::list_online_vocabularies,

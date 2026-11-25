@@ -678,6 +678,10 @@ fn delete_comparison(
 }
 fn history_changed(id: &str) {
     if let Some(app) = APP.get() {
+        use tauri::Manager;
+        if let Some(sync_v2) = app.try_state::<crate::sync_v2::engine::SyncV2Service>() {
+            sync_v2.notify_local_change();
+        }
         if let Err(error) = app.emit("history:updated", serde_json::json!({ "id": id })) {
             log::warn!("Could not notify dictation history: {error}");
         }

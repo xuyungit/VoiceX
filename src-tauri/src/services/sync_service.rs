@@ -74,6 +74,18 @@ impl SyncService {
     }
 
     pub fn apply_settings(&self, settings: &AppSettings) {
+        let v2_active = storage::with_db(crate::sync_v2::store::active_space_in)
+            .ok()
+            .flatten()
+            .is_some();
+        if v2_active {
+            let mut inner = self.inner.lock().expect("sync service lock");
+            stop_sync(&mut inner);
+            drop(inner);
+            self.update_status("disabled", None);
+            return;
+        }
+
         let new_config = SyncConfig::from_settings(settings);
         let mut inner = self.inner.lock().expect("sync service lock");
         let config_changed = inner.config != new_config;
@@ -734,6 +746,7 @@ fn apply_server_event(
                 target_app_platform: None,
                 target_app_key: None,
                 target_app_name: None,
+                has_edit_conflict: false,
             };
 
             let inserted = storage::insert_history_record_with_stats(&local_record, false)

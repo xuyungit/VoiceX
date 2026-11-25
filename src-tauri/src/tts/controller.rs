@@ -1444,7 +1444,11 @@ fn record_read(
     match crate::storage::increment_device_tts_stats(&device_id, &delta) {
         // The upload carries this device's absolute totals, so a send that
         // fails costs nothing: the next read sends the same numbers again.
-        Ok(totals) => app.state::<SyncService>().upload_tts_usage(totals),
+        Ok(totals) => {
+            app.state::<SyncService>().upload_tts_usage(totals);
+            app.state::<crate::sync_v2::engine::SyncV2Service>()
+                .notify_local_change();
+        }
         Err(err) => log::warn!("Failed to update device reading stats: {err}"),
     }
 }

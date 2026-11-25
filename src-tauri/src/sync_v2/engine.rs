@@ -1,0 +1,1848 @@
+//! Sync v2 orchestration engine and Tauri background service.
+//!
+//! Core functions (`pair_space`, `sync_once_in`, `import_existing_edits_in`,
+//! `resolve_edit_conflict_in`) operate on an abstract `SyncTransport` +
+//! `CredentialStore` + SQLite `Connection` closure so multi-client end-to-end
+//! tests can exercise every acceptance scenario deterministically without GUI.
+
+use chrono::Utc;
+use futures_util::StreamExt;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tauri::{AppHandle, Emitter};
+use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use voicex_sync_protocol::{
+    selfhost_space_id, stats_object_id, DeviceUpdateRequest, EditKind, EnvelopeStatus,
+    EnvelopeSubmission, PairRedeemRequest, PushEnvelopesRequest, SyncDomain, DEFAULT_PULL_LIMIT,
+};
+
+use crate::storage::{self, StorageError};
+use crate::sync_v2::credentials::{CredentialError, CredentialStore, SpaceCredentials};
+use crate::sync_v2::crypto::{
+    decrypt_envelope, encrypt_envelope, CryptoError, EnvelopeContext, MasterKey,
+};
+use crate::sync_v2::payloads::{HistoryOpPayload, StatsShardPayload};
+use crate::sync_v2::scope::can_send_outbox_op;
+use crate::sync_v2::store::{
+    active_space_in, apply_remote_history_op_tx, apply_remote_stats_daily_month_tx,
+    apply_remote_stats_totals_tx, build_local_daily_month_shard_in, build_local_totals_shard_in,
+    bump_local_stats_shard_tx, get_overview_devices_in, on_local_edit_applied_tx,
+    upsert_sync_space_tx, OverviewDeviceSyncInfo, SyncSpaceRecord,
+};
+use crate::sync_v2::transport::{SelfHostTransport, SyncTransport, TransportError};
+
+const PUSH_BATCH_SIZE: usize = 50;
+
+#[derive(Debug, Error)]
+pub enum SyncEngineError {
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
+    #[error("credential error: {0}")]
+    Credential(#[from] CredentialError),
+    #[error("crypto error: {0}")]
+    Crypto(#[from] CryptoError),
+    #[error("transport error: {0}")]
+    Transport(#[from] TransportError),
+    #[error("{0}")]
+    InvalidState(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncV2StatusSnapshot {
+    pub configured: bool,
+    pub space_id: Option<String>,
+    pub server_url: Option<String>,
+    pub account_id: Option<String>,
+    pub device_id: String,
+    pub device_name: String,
+    pub status: String,
+    pub last_error: Option<String>,
+    pub last_sync_at: Option<String>,
+    pub scope_history: bool,
+    pub scope_edits: bool,
+    pub pending_ops_count: i64,
+    pub pending_stats_count: i64,
+    pub has_credentials: bool,
+    pub devices: Vec<OverviewDeviceSyncInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairSuccessResult {
+    pub space_id: String,
+    pub account_id: String,
+    pub server_id: String,
+    pub device_id: String,
+    pub recovery_key: String,
+    pub generated_new_recovery_key: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncCycleSummary {
+    pub stats_pushed: usize,
+    pub ops_pushed: usize,
+    pub stats_pulled: usize,
+    pub history_pulled: usize,
+    pub edits_pulled: usize,
+}
+
+fn current_platform_name() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "macos"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "windows"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "linux"
+    }
+}
+
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+fn sql_err(e: rusqlite::Error) -> StorageError {
+    StorageError::QueryFailed(e.to_string())
+}
+
+/// Pair this installation with a v2 server using a one-time pairing code and
+/// either an existing recovery key (to join an existing space) or a freshly
+/// generated one (for the first device in a new space).
+#[allow(clippy::too_many_arguments)]
+pub async fn pair_space<F, T>(
+    with_conn: F,
+    creds: &CredentialStore,
+    transport: &T,
+    server_url: &str,
+    pairing_code: &str,
+    device_id: &str,
+    device_name: &str,
+    recovery_key_input: Option<&str>,
+    scope_history: bool,
+    scope_edits: bool,
+) -> Result<PairSuccessResult, SyncEngineError>
+where
+    F: Fn(&dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError>,
+    T: SyncTransport,
+{
+    let redeem = transport
+        .pair_redeem(&PairRedeemRequest {
+            pairing_code: pairing_code.trim().to_string(),
+            device_id: device_id.trim().to_string(),
+            device_name: device_name.trim().to_string(),
+            platform: current_platform_name().to_string(),
+            app_version: app_version().to_string(),
+        })
+        .await?;
+
+    let space_id = selfhost_space_id(&redeem.server_id, &redeem.account_id);
+    let trimmed_rk = recovery_key_input
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let (master_key, generated_new) = match trimmed_rk {
+        Some(rk) => (MasterKey::from_recovery_key(rk)?, false),
+        None => {
+            if redeem.key_check_tag.is_some() {
+                return Err(SyncEngineError::InvalidState(
+                    "This sync account already has encrypted data; enter the existing recovery key to join."
+                        .into(),
+                ));
+            }
+            (MasterKey::generate(), true)
+        }
+    };
+
+    let key_check_tag = master_key.derive_key_check_tag(&redeem.account_id, &space_id)?;
+    if let Some(expected) = redeem.key_check_tag.as_deref() {
+        if expected != key_check_tag {
+            return Err(SyncEngineError::InvalidState(
+                "Recovery key does not match this sync account's existing encryption key.".into(),
+            ));
+        }
+    }
+
+    let effective_edits = scope_history && scope_edits;
+    transport
+        .update_device(
+            &redeem.device_token,
+            &redeem.device_id,
+            &DeviceUpdateRequest {
+                device_name: device_name.trim().to_string(),
+                platform: current_platform_name().to_string(),
+                app_version: app_version().to_string(),
+                allow_stats: true,
+                allow_history: scope_history,
+                allow_edits: effective_edits,
+                key_check_tag: Some(key_check_tag.clone()),
+            },
+        )
+        .await?;
+
+    let recovery_key = master_key.to_recovery_key();
+    creds.save(
+        &space_id,
+        &SpaceCredentials {
+            device_token: redeem.device_token,
+            recovery_key: recovery_key.clone(),
+        },
+    )?;
+
+    let server_url_clean = server_url.trim().trim_end_matches('/').to_string();
+    let device_name_clean = device_name.trim().to_string();
+    let dev_id_owned = redeem.device_id.clone();
+    let server_id_owned = redeem.server_id.clone();
+    let account_id_owned = redeem.account_id.clone();
+    let space_id_owned = space_id.clone();
+    let tag_owned = key_check_tag.clone();
+
+    with_conn(&|conn| {
+        let tx = conn.unchecked_transaction().map_err(sql_err)?;
+        upsert_sync_space_tx(
+            &tx,
+            &space_id_owned,
+            "selfhost",
+            &server_url_clean,
+            &server_id_owned,
+            &account_id_owned,
+            &dev_id_owned,
+            scope_history,
+            effective_edits,
+            Some(&tag_owned),
+            true,
+        )?;
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO sync_devices (space_id, device_id, device_name, platform, app_version, last_synced_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)
+             ON CONFLICT(space_id, device_id) DO UPDATE SET
+                device_name = excluded.device_name,
+                platform = excluded.platform,
+                app_version = excluded.app_version,
+                revoked_at = NULL,
+                updated_at = excluded.updated_at",
+            params![
+                space_id_owned,
+                dev_id_owned,
+                device_name_clean,
+                current_platform_name(),
+                app_version(),
+                now
+            ],
+        )
+        .map_err(sql_err)?;
+
+        // Ensure local totals shard & any existing local months are marked dirty to publish on first sync.
+        let has_totals_shard: bool = tx
+            .query_row(
+                "SELECT 1 FROM sync_stats_shards WHERE space_id = ?1 AND device_id = ?2 AND shard_key = 'totals'",
+                params![space_id_owned, dev_id_owned],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(sql_err)?
+            .unwrap_or(false);
+        if !has_totals_shard {
+            bump_local_stats_shard_tx(&tx, &space_id_owned, &dev_id_owned, "totals")?;
+        }
+
+        let months: Vec<String> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT DISTINCT substr(local_date, 1, 7) FROM daily_usage_stats
+                     WHERE device_id = ?1 AND length(local_date) >= 7
+                     UNION
+                     SELECT DISTINCT substr(local_date, 1, 7) FROM daily_model_usage_stats
+                     WHERE device_id = ?1 AND length(local_date) >= 7",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(params![dev_id_owned], |r| r.get::<_, String>(0))
+                .map_err(sql_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_err)?;
+            rows
+        };
+        for month in months {
+            let shard_key = format!("daily:{month}");
+            let exists: bool = tx
+                .query_row(
+                    "SELECT 1 FROM sync_stats_shards WHERE space_id = ?1 AND device_id = ?2 AND shard_key = ?3",
+                    params![space_id_owned, dev_id_owned, shard_key],
+                    |_| Ok(true),
+                )
+                .optional()
+                .map_err(sql_err)?
+                .unwrap_or(false);
+            if !exists {
+                bump_local_stats_shard_tx(&tx, &space_id_owned, &dev_id_owned, &shard_key)?;
+            }
+        }
+
+        tx.commit().map_err(sql_err)
+    })?;
+
+    Ok(PairSuccessResult {
+        space_id,
+        account_id: redeem.account_id,
+        server_id: redeem.server_id,
+        device_id: redeem.device_id,
+        recovery_key,
+        generated_new_recovery_key: generated_new,
+    })
+}
+
+/// Run one complete push + pull synchronization cycle for the active sync space.
+pub async fn sync_once<F, T>(
+    with_conn: F,
+    creds: &CredentialStore,
+    transport: &T,
+    text_retention_days: u32,
+) -> Result<SyncCycleSummary, SyncEngineError>
+where
+    F: Fn(&dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError>,
+    T: SyncTransport,
+{
+    let space_slot: Mutex<Option<SyncSpaceRecord>> = Mutex::new(None);
+    with_conn(&|conn| {
+        *space_slot.lock().unwrap() = active_space_in(conn)?;
+        Ok(())
+    })?;
+    let Some(space) = space_slot.into_inner().unwrap() else {
+        return Ok(SyncCycleSummary::default());
+    };
+    if space.status == "disabled" || space.status == "revoked" {
+        return Ok(SyncCycleSummary::default());
+    }
+
+    let Some(space_creds) = creds.get(&space.space_id)? else {
+        let msg = "Missing local sync credentials; please pair this device again.".to_string();
+        mark_space_status(&with_conn, &space.space_id, "error", Some(&msg), false)?;
+        return Err(SyncEngineError::InvalidState(msg));
+    };
+    let master_key = MasterKey::from_recovery_key(&space_creds.recovery_key)?;
+    let expected_tag = master_key.derive_key_check_tag(&space.account_id, &space.space_id)?;
+
+    mark_space_status(&with_conn, &space.space_id, "syncing", None, false)?;
+
+    let cycle_res = run_sync_cycle_inner(
+        &with_conn,
+        &space,
+        &space_creds.device_token,
+        &master_key,
+        &expected_tag,
+        transport,
+        text_retention_days,
+    )
+    .await;
+
+    match cycle_res {
+        Ok(summary) => {
+            mark_space_status(&with_conn, &space.space_id, "live", None, true)?;
+            Ok(summary)
+        }
+        Err(err) => {
+            let new_status = match &err {
+                SyncEngineError::Transport(TransportError::DeviceRevoked(_)) => "revoked",
+                _ => "error",
+            };
+            let msg = err.to_string();
+            let _ = mark_space_status(&with_conn, &space.space_id, new_status, Some(&msg), false);
+            Err(err)
+        }
+    }
+}
+
+fn mark_space_status<F>(
+    with_conn: &F,
+    space_id: &str,
+    status: &str,
+    last_error: Option<&str>,
+    touch_last_sync: bool,
+) -> Result<(), StorageError>
+where
+    F: Fn(&dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError>,
+{
+    let now = Utc::now().to_rfc3339();
+    with_conn(&|conn| {
+        if touch_last_sync {
+            conn.execute(
+                "UPDATE sync_spaces SET status = ?2, last_error = ?3, last_sync_at = ?4, updated_at = ?4 WHERE space_id = ?1",
+                params![space_id, status, last_error, now],
+            )
+            .map_err(sql_err)?;
+        } else {
+            conn.execute(
+                "UPDATE sync_spaces SET status = ?2, last_error = ?3, updated_at = ?4 WHERE space_id = ?1",
+                params![space_id, status, last_error, now],
+            )
+            .map_err(sql_err)?;
+        }
+        Ok(())
+    })
+}
+
+async fn run_sync_cycle_inner<F, T>(
+    with_conn: &F,
+    space: &SyncSpaceRecord,
+    device_token: &str,
+    master_key: &MasterKey,
+    expected_tag: &str,
+    transport: &T,
+    text_retention_days: u32,
+) -> Result<SyncCycleSummary, SyncEngineError>
+where
+    F: Fn(&dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError>,
+    T: SyncTransport,
+{
+    let mut summary = SyncCycleSummary::default();
+
+    // 1. Refresh account & devices metadata + verify key_check_tag
+    let account = transport.get_account(device_token).await?;
+    if let Some(remote_tag) = account.key_check_tag.as_deref() {
+        if remote_tag != expected_tag {
+            return Err(SyncEngineError::InvalidState(
+                "Recovery key mismatch with server sync space.".into(),
+            ));
+        }
+    }
+    let devices_clone = account.devices.clone();
+    let space_id = space.space_id.clone();
+    with_conn(&|conn| {
+        let tx = conn.unchecked_transaction().map_err(sql_err)?;
+        let now = Utc::now().to_rfc3339();
+        for d in &devices_clone {
+            tx.execute(
+                "INSERT INTO sync_devices (space_id, device_id, device_name, platform, app_version, last_synced_at, revoked_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(space_id, device_id) DO UPDATE SET
+                    device_name = excluded.device_name,
+                    platform = excluded.platform,
+                    app_version = excluded.app_version,
+                    last_synced_at = COALESCE(sync_devices.last_synced_at, excluded.last_synced_at),
+                    revoked_at = excluded.revoked_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    space_id,
+                    d.device_id,
+                    d.device_name,
+                    d.platform,
+                    d.app_version,
+                    d.last_seen_at,
+                    d.revoked_at,
+                    now
+                ],
+            )
+            .map_err(sql_err)?;
+            tx.execute(
+                "INSERT INTO device_registry (device_id, device_name, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(device_id) DO UPDATE SET device_name = excluded.device_name, updated_at = excluded.updated_at",
+                params![d.device_id, d.device_name, now],
+            )
+            .map_err(sql_err)?;
+        }
+        tx.commit().map_err(sql_err)
+    })?;
+
+    // 2. Push dirty local stats shards (`local_revision > acked_revision`)
+    let dirty_shards: Mutex<Vec<(String, i64, StatsShardPayload)>> = Mutex::new(Vec::new());
+    with_conn(&|conn| {
+        let mut stmt = conn
+            .prepare(
+                "SELECT shard_key, local_revision
+                 FROM sync_stats_shards
+                 WHERE space_id = ?1 AND device_id = ?2 AND local_revision > acked_revision
+                 ORDER BY shard_key ASC",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![space.space_id, space.device_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(sql_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+
+        let mut list = dirty_shards.lock().unwrap();
+        for (shard_key, rev) in rows {
+            if shard_key == "totals" {
+                let payload = build_local_totals_shard_in(conn, &space.device_id, rev)?;
+                list.push((shard_key, rev, StatsShardPayload::Totals(payload)));
+            } else if let Some(month) = shard_key.strip_prefix("daily:") {
+                let payload = build_local_daily_month_shard_in(conn, &space.device_id, month, rev)?;
+                list.push((shard_key, rev, StatsShardPayload::DailyMonth(payload)));
+            }
+        }
+        Ok(())
+    })?;
+
+    let dirty_shards = dirty_shards.into_inner().unwrap();
+    if !dirty_shards.is_empty() {
+        let mut submissions = Vec::with_capacity(dirty_shards.len());
+        let mut meta_map = Vec::with_capacity(dirty_shards.len());
+        for (shard_key, rev, payload) in &dirty_shards {
+            let plaintext = serde_json::to_vec(payload)
+                .map_err(|e| SyncEngineError::Storage(StorageError::SerializeFailed(e.to_string())))?;
+            let object_id = stats_object_id(&space.device_id, shard_key);
+            let op_id = format!("stats:{}:{}:{}", space.device_id, shard_key, rev);
+            let sealed = encrypt_envelope(
+                master_key,
+                EnvelopeContext {
+                    account_id: &space.account_id,
+                    space_id: &space.space_id,
+                    domain: SyncDomain::Stats,
+                    object_id: &object_id,
+                    revision: *rev,
+                    op_id: &op_id,
+                },
+                &plaintext,
+            )?;
+            submissions.push(EnvelopeSubmission {
+                op_id: op_id.clone(),
+                domain: SyncDomain::Stats,
+                object_id,
+                revision: *rev,
+                nonce: sealed.nonce_b64,
+                ciphertext: sealed.ciphertext_b64,
+            });
+            meta_map.push((op_id, shard_key.clone(), *rev));
+        }
+
+        let resp = transport
+            .push_envelopes(
+                device_token,
+                &PushEnvelopesRequest {
+                    envelopes: submissions,
+                },
+            )
+            .await?;
+
+        with_conn(&|conn| {
+            let tx = conn.unchecked_transaction().map_err(sql_err)?;
+            let now = Utc::now().to_rfc3339();
+            for res in &resp.results {
+                if matches!(
+                    res.status,
+                    EnvelopeStatus::Accepted
+                        | EnvelopeStatus::Duplicate
+                        | EnvelopeStatus::StaleIgnored
+                ) {
+                    if let Some((_, shard_key, rev)) =
+                        meta_map.iter().find(|(oid, _, _)| oid == &res.op_id)
+                    {
+                        tx.execute(
+                            "UPDATE sync_stats_shards
+                             SET acked_revision = MAX(acked_revision, ?4), last_synced_at = ?5, updated_at = ?5
+                             WHERE space_id = ?1 AND device_id = ?2 AND shard_key = ?3",
+                            params![space.space_id, space.device_id, shard_key, rev, now],
+                        )
+                        .map_err(sql_err)?;
+                    }
+                }
+            }
+            tx.commit().map_err(sql_err)
+        })?;
+        summary.stats_pushed = resp.results.len();
+    }
+
+    // 3. Push pending outbox history/edit ops in batches (consulting scope gate before send)
+    let scope = space.scope_config();
+    loop {
+        let batch_slot: Mutex<Vec<(String, String, String, String, String, bool)>> =
+            Mutex::new(Vec::new());
+        with_conn(&|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT o.op_id, o.domain, o.op_type, o.record_id, o.payload_json,
+                            COALESCE(h.sync_eligible, 1)
+                     FROM sync_outbox_ops o
+                     LEFT JOIN history_record h ON h.id = o.record_id
+                     WHERE o.space_id = ?1
+                     ORDER BY o.created_at ASC, o.op_id ASC
+                     LIMIT ?2",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(params![space.space_id, PUSH_BATCH_SIZE as i64], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, i32>(5)? != 0,
+                    ))
+                })
+                .map_err(sql_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_err)?;
+            *batch_slot.lock().unwrap() = rows;
+            Ok(())
+        })?;
+        let batch = batch_slot.into_inner().unwrap();
+        if batch.is_empty() {
+            break;
+        }
+
+        let mut disallowed_ids = Vec::new();
+        let mut submissions = Vec::new();
+        for (op_id, domain_str, op_type, record_id, payload_json, sync_eligible) in &batch {
+            let record_was_shared = *sync_eligible || op_type == "history.delete";
+            if !can_send_outbox_op(&scope, op_type, record_was_shared) {
+                disallowed_ids.push(op_id.clone());
+                continue;
+            }
+            let domain: SyncDomain = domain_str
+                .parse()
+                .map_err(|e: String| SyncEngineError::InvalidState(e))?;
+            let sealed = encrypt_envelope(
+                master_key,
+                EnvelopeContext {
+                    account_id: &space.account_id,
+                    space_id: &space.space_id,
+                    domain,
+                    object_id: record_id,
+                    revision: 0,
+                    op_id,
+                },
+                payload_json.as_bytes(),
+            )?;
+            submissions.push(EnvelopeSubmission {
+                op_id: op_id.clone(),
+                domain,
+                object_id: record_id.clone(),
+                revision: 0,
+                nonce: sealed.nonce_b64,
+                ciphertext: sealed.ciphertext_b64,
+            });
+        }
+
+        if !disallowed_ids.is_empty() {
+            with_conn(&|conn| {
+                let tx = conn.unchecked_transaction().map_err(sql_err)?;
+                for op_id in &disallowed_ids {
+                    tx.execute("DELETE FROM sync_outbox_ops WHERE op_id = ?1", params![op_id])
+                        .map_err(sql_err)?;
+                }
+                tx.commit().map_err(sql_err)
+            })?;
+        }
+
+        if submissions.is_empty() {
+            if batch.len() < PUSH_BATCH_SIZE {
+                break;
+            }
+            continue;
+        }
+
+        let sent_ids: Vec<String> = submissions.iter().map(|s| s.op_id.clone()).collect();
+        let push_res = transport
+            .push_envelopes(
+                device_token,
+                &PushEnvelopesRequest {
+                    envelopes: submissions,
+                },
+            )
+            .await;
+
+        match push_res {
+            Ok(resp) => {
+                with_conn(&|conn| {
+                    let tx = conn.unchecked_transaction().map_err(sql_err)?;
+                    for r in &resp.results {
+                        if matches!(r.status, EnvelopeStatus::Accepted | EnvelopeStatus::Duplicate)
+                        {
+                            tx.execute(
+                                "DELETE FROM sync_outbox_ops WHERE op_id = ?1",
+                                params![r.op_id],
+                            )
+                            .map_err(sql_err)?;
+                        }
+                    }
+                    tx.commit().map_err(sql_err)
+                })?;
+                summary.ops_pushed += resp.results.len();
+            }
+            Err(err) => {
+                let err_text = err.to_string();
+                let _ = with_conn(&|conn| {
+                    let tx = conn.unchecked_transaction().map_err(sql_err)?;
+                    for op_id in &sent_ids {
+                        tx.execute(
+                            "UPDATE sync_outbox_ops SET attempt_count = attempt_count + 1, last_error = ?2 WHERE op_id = ?1",
+                            params![op_id, err_text],
+                        )
+                        .map_err(sql_err)?;
+                    }
+                    tx.commit().map_err(sql_err)
+                });
+                return Err(SyncEngineError::Transport(err));
+            }
+        }
+
+        if batch.len() < PUSH_BATCH_SIZE {
+            break;
+        }
+    }
+
+    // 4. Pull every authorized domain page-by-page, committing each page + cursor atomically
+    for domain in scope.pull_domains() {
+        let mut cursor = match domain {
+            SyncDomain::Stats => space.stats_cursor,
+            SyncDomain::History => space.history_cursor,
+            SyncDomain::Edits => space.edits_cursor,
+        };
+        let cursor_col = match domain {
+            SyncDomain::Stats => "stats_cursor",
+            SyncDomain::History => "history_cursor",
+            SyncDomain::Edits => "edits_cursor",
+        };
+
+        loop {
+            let page = transport
+                .pull_envelopes(device_token, domain, cursor, DEFAULT_PULL_LIMIT)
+                .await?;
+
+            // Decrypt the entire page before opening the SQLite write transaction.
+            let mut decrypted_stats = Vec::new();
+            let mut decrypted_ops = Vec::new();
+            for item in &page.items {
+                let plaintext = decrypt_envelope(
+                    master_key,
+                    EnvelopeContext {
+                        account_id: &space.account_id,
+                        space_id: &space.space_id,
+                        domain: item.domain,
+                        object_id: &item.object_id,
+                        revision: item.revision,
+                        op_id: &item.op_id,
+                    },
+                    &item.nonce,
+                    &item.ciphertext,
+                )?;
+                match item.domain {
+                    SyncDomain::Stats => {
+                        let shard: StatsShardPayload =
+                            serde_json::from_slice(&plaintext).map_err(|e| {
+                                SyncEngineError::Storage(StorageError::SerializeFailed(
+                                    e.to_string(),
+                                ))
+                            })?;
+                        // Never let an older/echoed remote copy overwrite our own live local totals.
+                        let shard_owner = match &shard {
+                            StatsShardPayload::Totals(t) => &t.device_id,
+                            StatsShardPayload::DailyMonth(d) => &d.device_id,
+                        };
+                        if shard_owner != &space.device_id {
+                            decrypted_stats.push(shard);
+                        }
+                    }
+                    SyncDomain::History | SyncDomain::Edits => {
+                        let op: HistoryOpPayload =
+                            serde_json::from_slice(&plaintext).map_err(|e| {
+                                SyncEngineError::Storage(StorageError::SerializeFailed(
+                                    e.to_string(),
+                                ))
+                            })?;
+                        decrypted_ops.push(op);
+                    }
+                }
+            }
+
+            let next_cursor = page.next_cursor;
+            with_conn(&|conn| {
+                let tx = conn.unchecked_transaction().map_err(sql_err)?;
+                for shard in &decrypted_stats {
+                    match shard {
+                        StatsShardPayload::Totals(t) => {
+                            apply_remote_stats_totals_tx(&tx, &space.space_id, t)?;
+                        }
+                        StatsShardPayload::DailyMonth(d) => {
+                            apply_remote_stats_daily_month_tx(&tx, &space.space_id, d)?;
+                        }
+                    }
+                }
+                for op in &decrypted_ops {
+                    apply_remote_history_op_tx(
+                        &tx,
+                        &space.space_id,
+                        &space.device_id,
+                        op,
+                        text_retention_days,
+                    )?;
+                }
+                tx.execute(
+                    &format!(
+                        "UPDATE sync_spaces SET {cursor_col} = ?2, updated_at = ?3 WHERE space_id = ?1"
+                    ),
+                    params![space.space_id, next_cursor, Utc::now().to_rfc3339()],
+                )
+                .map_err(sql_err)?;
+                tx.commit().map_err(sql_err)
+            })?;
+
+            match domain {
+                SyncDomain::Stats => summary.stats_pulled += page.items.len(),
+                SyncDomain::History => summary.history_pulled += page.items.len(),
+                SyncDomain::Edits => summary.edits_pulled += page.items.len(),
+            }
+
+            cursor = next_cursor;
+            if !page.has_more {
+                break;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Explicitly import surviving local edits on already-shared dictations into
+/// the v2 `edits` outbox (Section 2.1: separate opt-in from enabling edits sync).
+pub fn import_existing_edits_in(conn: &Connection) -> Result<usize, StorageError> {
+    let Some(space) = active_space_in(conn)? else {
+        return Err(StorageError::InvalidInput(
+            "No active Sync v2 space configured".into(),
+        ));
+    };
+    if !space.scope_config().effective_edits() {
+        return Err(StorageError::InvalidInput(
+            "Enable history and edits sync before importing existing edits".into(),
+        ));
+    }
+
+    let tx = conn.unchecked_transaction().map_err(sql_err)?;
+    let rows: Vec<(String, String, Option<String>, Option<String>)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, edited_text, edit_source, edited_at
+                 FROM history_record
+                 WHERE sync_eligible = 1
+                   AND edited_text IS NOT NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM history_edit_versions v
+                       WHERE v.record_id = history_record.id AND v.is_shared = 1
+                   )",
+            )
+            .map_err(sql_err)?;
+        let collected = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })
+            .map_err(sql_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        collected
+    };
+
+    let mut imported = 0usize;
+    let now = Utc::now().to_rfc3339();
+    for (record_id, edited_text, edit_source, edited_at) in rows {
+        let edit_kind = match edit_source.as_deref() {
+            Some("manual") => EditKind::Manual,
+            _ => EditKind::Observed,
+        };
+        let edit_id = uuid::Uuid::new_v4().to_string();
+        on_local_edit_applied_tx(
+            &tx,
+            &record_id,
+            &edit_id,
+            edit_kind,
+            Some(&edited_text),
+            edited_at.as_deref().unwrap_or(&now),
+            None,
+        )?;
+        imported += 1;
+    }
+    tx.commit().map_err(sql_err)?;
+    Ok(imported)
+}
+
+/// Resolve a concurrent manual edit conflict by writing a new manual version
+/// (or `ManualRestore` when `chosen_text` is `None` or equals original output)
+/// whose `parent_edit_ids` covers every active head.
+pub fn resolve_edit_conflict_in(
+    conn: &Connection,
+    record_id: &str,
+    chosen_text: Option<&str>,
+) -> Result<(), StorageError> {
+    let output: String = conn
+        .query_row(
+            "SELECT text FROM history_record WHERE id = ?1",
+            params![record_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_err)?
+        .ok_or_else(|| StorageError::NotFound(record_id.to_string()))?;
+
+    let tx = conn.unchecked_transaction().map_err(sql_err)?;
+    let edit_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    match chosen_text.filter(|t| *t != output) {
+        Some(text) => {
+            on_local_edit_applied_tx(
+                &tx,
+                record_id,
+                &edit_id,
+                EditKind::Manual,
+                Some(text),
+                &now,
+                None,
+            )?;
+        }
+        None => {
+            on_local_edit_applied_tx(
+                &tx,
+                record_id,
+                &edit_id,
+                EditKind::ManualRestore,
+                None,
+                &now,
+                None,
+            )?;
+        }
+    }
+    tx.commit().map_err(sql_err)
+}
+
+pub fn get_status_snapshot_in(
+    conn: &Connection,
+    creds: &CredentialStore,
+    device_id: &str,
+    default_device_name: &str,
+) -> Result<SyncV2StatusSnapshot, StorageError> {
+    let space = active_space_in(conn)?;
+    let devices = get_overview_devices_in(conn, device_id)?;
+    let Some(space) = space else {
+        return Ok(SyncV2StatusSnapshot {
+            configured: false,
+            space_id: None,
+            server_url: None,
+            account_id: None,
+            device_id: device_id.to_string(),
+            device_name: default_device_name.to_string(),
+            status: "disabled".to_string(),
+            last_error: None,
+            last_sync_at: None,
+            scope_history: false,
+            scope_edits: false,
+            pending_ops_count: 0,
+            pending_stats_count: 0,
+            has_credentials: false,
+            devices,
+        });
+    };
+
+    let pending_ops_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sync_outbox_ops WHERE space_id = ?1",
+            params![space.space_id],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    let pending_stats_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sync_stats_shards
+             WHERE space_id = ?1 AND device_id = ?2 AND local_revision > acked_revision",
+            params![space.space_id, space.device_id],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+
+    let device_name = devices
+        .iter()
+        .find(|d| d.is_local)
+        .map(|d| d.device_name.clone())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| default_device_name.to_string());
+
+    let has_credentials = creds
+        .get(&space.space_id)
+        .map(|opt| opt.is_some())
+        .unwrap_or(false);
+
+    Ok(SyncV2StatusSnapshot {
+        configured: true,
+        space_id: Some(space.space_id),
+        server_url: Some(space.server_url),
+        account_id: Some(space.account_id),
+        device_id: space.device_id,
+        device_name,
+        status: space.status,
+        last_error: space.last_error,
+        last_sync_at: space.last_sync_at,
+        scope_history: space.scope_history,
+        scope_edits: space.scope_edits,
+        pending_ops_count,
+        pending_stats_count,
+        has_credentials,
+        devices,
+    })
+}
+
+/// Tauri-managed background Sync v2 service.
+#[derive(Clone, Default)]
+pub struct SyncV2Service {
+    inner: Arc<Mutex<SyncV2ServiceInner>>,
+}
+
+#[derive(Default)]
+struct SyncV2ServiceInner {
+    app_handle: Option<AppHandle>,
+    data_dir: Option<PathBuf>,
+    cancel: Option<CancellationToken>,
+    flush_tx: Option<mpsc::UnboundedSender<()>>,
+}
+
+impl SyncV2Service {
+    pub fn init(&self, app_handle: &AppHandle, app_data_dir: PathBuf) {
+        let mut inner = self.inner.lock().expect("sync_v2 lock");
+        inner.app_handle = Some(app_handle.clone());
+        inner.data_dir = Some(app_data_dir);
+    }
+
+    pub fn credential_store(&self) -> Result<CredentialStore, String> {
+        let inner = self.inner.lock().expect("sync_v2 lock");
+        let dir = inner
+            .data_dir
+            .clone()
+            .ok_or_else(|| "SyncV2Service not initialized".to_string())?;
+        Ok(CredentialStore::in_data_dir(&dir))
+    }
+
+    pub fn start_if_active(&self) {
+        let active = storage::with_db(active_space_in).ok().flatten();
+        if active.is_some_and(|s| s.status != "disabled" && s.status != "revoked") {
+            self.restart_worker();
+        } else {
+            self.stop();
+        }
+    }
+
+    pub fn restart_worker(&self) {
+        let mut inner = self.inner.lock().expect("sync_v2 lock");
+        if let Some(cancel) = inner.cancel.take() {
+            cancel.cancel();
+        }
+        let Some(app) = inner.app_handle.clone() else {
+            return;
+        };
+        let Some(data_dir) = inner.data_dir.clone() else {
+            return;
+        };
+        let cancel = CancellationToken::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        inner.cancel = Some(cancel.clone());
+        inner.flush_tx = Some(tx);
+        drop(inner);
+
+        tauri::async_runtime::spawn(run_background_loop(app, data_dir, cancel, rx));
+    }
+
+    pub fn stop(&self) {
+        let mut inner = self.inner.lock().expect("sync_v2 lock");
+        if let Some(cancel) = inner.cancel.take() {
+            cancel.cancel();
+        }
+        inner.flush_tx = None;
+    }
+
+    pub fn notify_local_change(&self) {
+        let inner = self.inner.lock().expect("sync_v2 lock");
+        if let Some(tx) = inner.flush_tx.as_ref() {
+            let _ = tx.send(());
+        }
+    }
+
+    pub fn emit_status(&self) {
+        let (app, data_dir) = {
+            let inner = self.inner.lock().expect("sync_v2 lock");
+            (inner.app_handle.clone(), inner.data_dir.clone())
+        };
+        if let (Some(app), Some(data_dir)) = (app, data_dir) {
+            emit_v2_status(&app, &data_dir);
+        }
+    }
+}
+
+fn emit_v2_status(app: &AppHandle, data_dir: &PathBuf) {
+    let creds = CredentialStore::in_data_dir(data_dir);
+    let device_id = storage::get_or_create_device_id().unwrap_or_default();
+    let default_name = storage::get_settings_cached()
+        .map(|s| s.sync_device_name.clone())
+        .unwrap_or_default();
+    if let Ok(snapshot) = storage::with_db(|conn| {
+        get_status_snapshot_in(conn, &creds, &device_id, &default_name)
+    }) {
+        let _ = app.emit("sync_v2:state", snapshot);
+    }
+}
+
+async fn run_background_loop(
+    app: AppHandle,
+    data_dir: PathBuf,
+    cancel: CancellationToken,
+    mut flush_rx: mpsc::UnboundedReceiver<()>,
+) {
+    let creds = CredentialStore::in_data_dir(&data_dir);
+
+    // Spawn SSE watcher that pokes `sse_notify_tx` whenever the server broadcasts a change.
+    let (sse_tx, mut sse_rx) = mpsc::unbounded_channel::<()>();
+    let sse_cancel = cancel.clone();
+    let sse_creds = creds.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut backoff_secs = 2u64;
+        while !sse_cancel.is_cancelled() {
+            let space = storage::with_db(active_space_in).ok().flatten();
+            let Some(space) = space else {
+                break;
+            };
+            if space.status == "disabled" || space.status == "revoked" {
+                break;
+            }
+            let token = match sse_creds.get(&space.space_id) {
+                Ok(Some(c)) => c.device_token,
+                _ => {
+                    tokio::select! {
+                        _ = sse_cancel.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
+                    }
+                }
+            };
+            let transport = match SelfHostTransport::new(&space.server_url) {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+
+            match transport.subscribe_sse(&token).await {
+                Ok(resp) => {
+                    backoff_secs = 2;
+                    let _ = sse_tx.send(()); // Catch up on reconnect
+                    let mut stream = resp.bytes_stream();
+                    loop {
+                        tokio::select! {
+                            _ = sse_cancel.cancelled() => return,
+                            item = stream.next() => match item {
+                                Some(Ok(bytes)) => {
+                                    if bytes.windows(6).any(|w| w == b"notify") {
+                                        let _ = sse_tx.send(());
+                                    }
+                                }
+                                Some(Err(_)) | None => break,
+                            }
+                        }
+                    }
+                }
+                Err(TransportError::DeviceRevoked(_)) => break,
+                Err(_) => {}
+            }
+
+            tokio::select! {
+                _ = sse_cancel.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {
+                    backoff_secs = (backoff_secs * 2).min(60);
+                }
+            }
+        }
+    });
+
+    // Trigger immediate initial cycle + react to local changes / SSE notify / periodic poll.
+    let mut periodic = tokio::time::interval(Duration::from_secs(60));
+    periodic.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        let space = storage::with_db(active_space_in).ok().flatten();
+        if let Some(space) = space {
+            if space.status != "disabled" && space.status != "revoked" {
+                if let Ok(transport) = SelfHostTransport::new(&space.server_url) {
+                    let retention_days = storage::get_settings_cached()
+                        .map(|s| s.text_retention_days)
+                        .unwrap_or(0);
+                    let res = sync_once(
+                        |f| storage::with_db(f),
+                        &creds,
+                        &transport,
+                        retention_days,
+                    )
+                    .await;
+                    emit_v2_status(&app, &data_dir);
+                    if let Ok(summary) = res {
+                        if summary.stats_pulled > 0
+                            || summary.history_pulled > 0
+                            || summary.edits_pulled > 0
+                        {
+                            let _ = app.emit(
+                                "history:updated",
+                                serde_json::json!({ "source": "sync_v2" }),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = flush_rx.recv() => {
+                while flush_rx.try_recv().is_ok() {}
+            }
+            _ = sse_rx.recv() => {
+                while sse_rx.try_recv().is_ok() {}
+            }
+            _ = periodic.tick() => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::HistoryRecord;
+    use crate::sync_v2::store::{
+        init_schema, list_edit_conflict_alternatives_in, on_local_history_deleted_tx,
+        on_local_history_inserted_tx, update_sync_scope_tx,
+    };
+    use crate::sync_v2::transport::BoxFuture;
+    use std::collections::{HashMap, HashSet};
+    use voicex_sync_protocol::{
+        AccountInfoResponse, DeviceInfo, EnvelopeItem, EnvelopeResult, PairRedeemResponse,
+        PullEnvelopesResponse, PushEnvelopesResponse,
+    };
+
+    /// Deterministic in-memory v2 server transport implementing exact server
+    /// semantics (single-use pairing, revocation, idempotent op_id, monotonic
+    /// stats_shards, superseded skipping, and per-domain cursor pagination).
+    #[derive(Default)]
+    struct MockV2Server {
+        state: Mutex<MockServerState>,
+    }
+
+    #[derive(Default)]
+    struct MockServerState {
+        server_id: String,
+        account_id: String,
+        key_check_tag: Option<String>,
+        next_seq: i64,
+        pairing_codes: HashSet<String>,
+        tokens: HashMap<String, (String, bool)>, // token -> (device_id, revoked)
+        devices: HashMap<String, DeviceInfo>,
+        envelopes: Vec<(EnvelopeItem, bool)>, // (item, superseded)
+        op_id_to_seq: HashMap<String, i64>,
+        stats_revs: HashMap<(String, String), (i64, i64)>, // (dev, shard) -> (rev, seq)
+    }
+
+    impl MockV2Server {
+        fn new() -> Self {
+            let s = Self::default();
+            {
+                let mut g = s.state.lock().unwrap();
+                g.server_id = "srv-test".into();
+                g.account_id = "acc-test".into();
+            }
+            s
+        }
+
+        fn issue_code(&self, code: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .pairing_codes
+                .insert(code.to_string());
+        }
+
+        fn revoke(&self, device_id: &str) {
+            let mut g = self.state.lock().unwrap();
+            for (_, (did, revoked)) in g.tokens.iter_mut() {
+                if did == device_id {
+                    *revoked = true;
+                }
+            }
+            if let Some(d) = g.devices.get_mut(device_id) {
+                d.revoked_at = Some(Utc::now().to_rfc3339());
+            }
+        }
+
+        fn auth_device(&self, token: &str) -> Result<String, TransportError> {
+            let g = self.state.lock().unwrap();
+            match g.tokens.get(token) {
+                Some((did, false)) => Ok(did.clone()),
+                Some((_, true)) => Err(TransportError::DeviceRevoked("revoked".into())),
+                None => Err(TransportError::Unauthorized("bad token".into())),
+            }
+        }
+    }
+
+    impl SyncTransport for MockV2Server {
+        fn pair_redeem<'a>(
+            &'a self,
+            req: &'a PairRedeemRequest,
+        ) -> BoxFuture<'a, Result<PairRedeemResponse, TransportError>> {
+            Box::pin(async move {
+                let mut g = self.state.lock().unwrap();
+                if !g.pairing_codes.remove(&req.pairing_code) {
+                    return Err(TransportError::PairingInvalidOrExpired("used".into()));
+                }
+                let token = format!("tok-{}", req.device_id);
+                g.tokens.insert(token.clone(), (req.device_id.clone(), false));
+                g.devices.insert(
+                    req.device_id.clone(),
+                    DeviceInfo {
+                        device_id: req.device_id.clone(),
+                        device_name: req.device_name.clone(),
+                        platform: req.platform.clone(),
+                        app_version: req.app_version.clone(),
+                        allow_stats: true,
+                        allow_history: true,
+                        allow_edits: true,
+                        last_seen_at: Utc::now().to_rfc3339(),
+                        revoked_at: None,
+                    },
+                );
+                Ok(PairRedeemResponse {
+                    account_id: g.account_id.clone(),
+                    server_id: g.server_id.clone(),
+                    device_id: req.device_id.clone(),
+                    device_token: token,
+                    key_check_tag: g.key_check_tag.clone(),
+                })
+            })
+        }
+
+        fn get_account<'a>(
+            &'a self,
+            device_token: &'a str,
+        ) -> BoxFuture<'a, Result<AccountInfoResponse, TransportError>> {
+            Box::pin(async move {
+                let _ = self.auth_device(device_token)?;
+                let g = self.state.lock().unwrap();
+                Ok(AccountInfoResponse {
+                    account_id: g.account_id.clone(),
+                    server_id: g.server_id.clone(),
+                    latest_seq: g.next_seq,
+                    key_check_tag: g.key_check_tag.clone(),
+                    devices: g.devices.values().cloned().collect(),
+                })
+            })
+        }
+
+        fn update_device<'a>(
+            &'a self,
+            device_token: &'a str,
+            device_id: &'a str,
+            req: &'a DeviceUpdateRequest,
+        ) -> BoxFuture<'a, Result<DeviceInfo, TransportError>> {
+            Box::pin(async move {
+                let authed = self.auth_device(device_token)?;
+                if authed != device_id {
+                    return Err(TransportError::ScopeForbidden("wrong device".into()));
+                }
+                let mut g = self.state.lock().unwrap();
+                if let Some(tag) = &req.key_check_tag {
+                    if g.key_check_tag.is_none() {
+                        g.key_check_tag = Some(tag.clone());
+                    }
+                }
+                let info = DeviceInfo {
+                    device_id: device_id.to_string(),
+                    device_name: req.device_name.clone(),
+                    platform: req.platform.clone(),
+                    app_version: req.app_version.clone(),
+                    allow_stats: req.allow_stats,
+                    allow_history: req.allow_history,
+                    allow_edits: req.allow_edits,
+                    last_seen_at: Utc::now().to_rfc3339(),
+                    revoked_at: None,
+                };
+                g.devices.insert(device_id.to_string(), info.clone());
+                Ok(info)
+            })
+        }
+
+        fn push_envelopes<'a>(
+            &'a self,
+            device_token: &'a str,
+            req: &'a PushEnvelopesRequest,
+        ) -> BoxFuture<'a, Result<PushEnvelopesResponse, TransportError>> {
+            Box::pin(async move {
+                let device_id = self.auth_device(device_token)?;
+                let mut g = self.state.lock().unwrap();
+                let mut results = Vec::new();
+                for sub in &req.envelopes {
+                    if let Some(&seq) = g.op_id_to_seq.get(&sub.op_id) {
+                        results.push(EnvelopeResult {
+                            op_id: sub.op_id.clone(),
+                            status: EnvelopeStatus::Duplicate,
+                            seq,
+                        });
+                        continue;
+                    }
+                    if sub.domain == SyncDomain::Stats {
+                        let (_, shard_key) =
+                            voicex_sync_protocol::parse_stats_object_id(&sub.object_id).unwrap();
+                        let key = (device_id.clone(), shard_key.to_string());
+                        if let Some(&(cur_rev, cur_seq)) = g.stats_revs.get(&key) {
+                            if sub.revision <= cur_rev {
+                                results.push(EnvelopeResult {
+                                    op_id: sub.op_id.clone(),
+                                    status: EnvelopeStatus::StaleIgnored,
+                                    seq: cur_seq,
+                                });
+                                continue;
+                            }
+                            for (it, sup) in g.envelopes.iter_mut() {
+                                if it.seq == cur_seq {
+                                    *sup = true;
+                                }
+                            }
+                        }
+                        g.next_seq += 1;
+                        let seq = g.next_seq;
+                        g.stats_revs.insert(key, (sub.revision, seq));
+                        g.op_id_to_seq.insert(sub.op_id.clone(), seq);
+                        g.envelopes.push((
+                            EnvelopeItem {
+                                seq,
+                                op_id: sub.op_id.clone(),
+                                domain: sub.domain,
+                                device_id: device_id.clone(),
+                                object_id: sub.object_id.clone(),
+                                revision: sub.revision,
+                                nonce: sub.nonce.clone(),
+                                ciphertext: sub.ciphertext.clone(),
+                                created_at: Utc::now().to_rfc3339(),
+                            },
+                            false,
+                        ));
+                        results.push(EnvelopeResult {
+                            op_id: sub.op_id.clone(),
+                            status: EnvelopeStatus::Accepted,
+                            seq,
+                        });
+                        continue;
+                    }
+
+                    g.next_seq += 1;
+                    let seq = g.next_seq;
+                    g.op_id_to_seq.insert(sub.op_id.clone(), seq);
+                    g.envelopes.push((
+                        EnvelopeItem {
+                            seq,
+                            op_id: sub.op_id.clone(),
+                            domain: sub.domain,
+                            device_id: device_id.clone(),
+                            object_id: sub.object_id.clone(),
+                            revision: 0,
+                            nonce: sub.nonce.clone(),
+                            ciphertext: sub.ciphertext.clone(),
+                            created_at: Utc::now().to_rfc3339(),
+                        },
+                        false,
+                    ));
+                    results.push(EnvelopeResult {
+                        op_id: sub.op_id.clone(),
+                        status: EnvelopeStatus::Accepted,
+                        seq,
+                    });
+                }
+                Ok(PushEnvelopesResponse {
+                    results,
+                    latest_seq: g.next_seq,
+                })
+            })
+        }
+
+        fn pull_envelopes<'a>(
+            &'a self,
+            device_token: &'a str,
+            domain: SyncDomain,
+            since: i64,
+            limit: usize,
+        ) -> BoxFuture<'a, Result<PullEnvelopesResponse, TransportError>> {
+            Box::pin(async move {
+                let _ = self.auth_device(device_token)?;
+                let g = self.state.lock().unwrap();
+                let matching: Vec<EnvelopeItem> = g
+                    .envelopes
+                    .iter()
+                    .filter(|(it, sup)| !sup && it.domain == domain && it.seq > since)
+                    .map(|(it, _)| it.clone())
+                    .collect();
+                let has_more = matching.len() > limit;
+                let items: Vec<EnvelopeItem> = matching.into_iter().take(limit).collect();
+                let next_cursor = if has_more {
+                    items.last().map(|i| i.seq).unwrap_or(since)
+                } else {
+                    items
+                        .last()
+                        .map(|i| i.seq)
+                        .unwrap_or(since)
+                        .max(g.next_seq)
+                };
+                Ok(PullEnvelopesResponse {
+                    items,
+                    next_cursor,
+                    has_more,
+                })
+            })
+        }
+    }
+
+    struct TestClient {
+        device_id: String,
+        conn: Mutex<Connection>,
+        creds: CredentialStore,
+        _dir: tempfile::TempDir,
+    }
+
+    impl TestClient {
+        fn new(device_id: &str) -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE history_record (
+                    id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, text TEXT NOT NULL,
+                    original_text TEXT, ai_correction_applied INTEGER DEFAULT 0, llm_invoked INTEGER DEFAULT 0,
+                    mode TEXT NOT NULL, duration_ms INTEGER NOT NULL, audio_path TEXT,
+                    is_final INTEGER DEFAULT 1, error_code INTEGER DEFAULT 0, error_message TEXT,
+                    source_device_id TEXT, asr_model_name TEXT, llm_model_name TEXT,
+                    edited_text TEXT, edit_source TEXT, edited_at TEXT,
+                    target_app_platform TEXT, target_app_key TEXT, target_app_name TEXT
+                );
+                CREATE TABLE usage_stats (
+                    id INTEGER PRIMARY KEY CHECK (id = 1), total_duration_ms INTEGER DEFAULT 0,
+                    total_characters INTEGER DEFAULT 0, llm_correction_count INTEGER DEFAULT 0,
+                    last_updated TEXT, total_recording_count INTEGER DEFAULT 0,
+                    tts_read_count INTEGER DEFAULT 0, tts_translate_count INTEGER DEFAULT 0,
+                    tts_characters INTEGER DEFAULT 0, tts_duration_ms INTEGER DEFAULT 0, tts_llm_count INTEGER DEFAULT 0
+                );
+                INSERT INTO usage_stats (id) VALUES (1);
+                CREATE TABLE device_usage_stats (
+                    device_id TEXT PRIMARY KEY, total_duration_ms INTEGER DEFAULT 0,
+                    total_characters INTEGER DEFAULT 0, llm_correction_count INTEGER DEFAULT 0,
+                    last_updated TEXT, total_recording_count INTEGER DEFAULT 0,
+                    tts_read_count INTEGER DEFAULT 0, tts_translate_count INTEGER DEFAULT 0,
+                    tts_characters INTEGER DEFAULT 0, tts_duration_ms INTEGER DEFAULT 0, tts_llm_count INTEGER DEFAULT 0
+                );
+                CREATE TABLE daily_usage_stats (
+                    device_id TEXT NOT NULL, local_date TEXT NOT NULL, feature_kind TEXT NOT NULL,
+                    platform TEXT NOT NULL, app_key TEXT NOT NULL, app_name TEXT NOT NULL,
+                    usage_count INTEGER NOT NULL DEFAULT 0, total_characters INTEGER NOT NULL DEFAULT 0,
+                    total_duration_ms INTEGER NOT NULL DEFAULT 0, llm_count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at TEXT NOT NULL,
+                    PRIMARY KEY (device_id, local_date, feature_kind, platform, app_key)
+                );
+                CREATE TABLE user_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE device_registry (device_id TEXT PRIMARY KEY, device_name TEXT NOT NULL, updated_at TEXT NOT NULL);
+                "#,
+            )
+            .unwrap();
+            crate::post_edit::records::create_schema(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO user_config (key, value) VALUES ('sync_device_id', ?1)",
+                params![device_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO device_usage_stats (device_id) VALUES (?1)",
+                params![device_id],
+            )
+            .unwrap();
+            init_schema(&conn).unwrap();
+            let creds = CredentialStore::in_data_dir(dir.path());
+            Self {
+                device_id: device_id.to_string(),
+                conn: Mutex::new(conn),
+                creds,
+                _dir: dir,
+            }
+        }
+
+        fn with_db(&self, f: &dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError> {
+            let g = self.conn.lock().unwrap();
+            f(&g)
+        }
+
+        fn dictate(&self, id: &str, text: &str, timestamp: &str, local_date: &str) {
+            let rec = HistoryRecord {
+                id: id.to_string(),
+                timestamp: timestamp.to_string(),
+                text: text.to_string(),
+                original_text: None,
+                ai_correction_applied: true,
+                llm_invoked: true,
+                mode: "assistant_hands_free".to_string(),
+                duration_ms: 1500,
+                audio_path: None,
+                is_final: true,
+                error_code: 0,
+                error_message: None,
+                source_device_id: Some(self.device_id.clone()),
+                source_device_name: None,
+                asr_model_name: Some("Qwen / flash".to_string()),
+                llm_model_name: Some("DeepSeek / flash".to_string()),
+                edited_text: None,
+                target_app_platform: Some("macos".to_string()),
+                target_app_key: Some("com.apple.Notes".to_string()),
+                target_app_name: Some("Notes".to_string()),
+                has_edit_conflict: false,
+            };
+            let g = self.conn.lock().unwrap();
+            let tx = g.unchecked_transaction().unwrap();
+            tx.execute(
+                "INSERT INTO history_record (id, timestamp, text, ai_correction_applied, llm_invoked, mode, duration_ms, source_device_id, asr_model_name, llm_model_name, target_app_platform, target_app_key, target_app_name)
+                 VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    rec.id, rec.timestamp, rec.text, rec.mode, rec.duration_ms, rec.source_device_id,
+                    rec.asr_model_name, rec.llm_model_name, rec.target_app_platform, rec.target_app_key, rec.target_app_name
+                ],
+            )
+            .unwrap();
+            tx.execute(
+                "UPDATE device_usage_stats SET total_recording_count = total_recording_count + 1, total_characters = total_characters + ?2, total_duration_ms = total_duration_ms + ?3, llm_correction_count = llm_correction_count + 1 WHERE device_id = ?1",
+                params![self.device_id, text.chars().count() as i64, rec.duration_ms],
+            )
+            .unwrap();
+            on_local_history_inserted_tx(&tx, &rec, local_date).unwrap();
+            tx.commit().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_two_devices_stats_only_vs_history_edits_conflicts_delete_and_revocation() {
+        let srv = MockV2Server::new();
+        let mac = TestClient::new("mac-1");
+        let win = TestClient::new("win-1");
+        let stats_dev = TestClient::new("win-stats-only");
+
+        // 1. Pair Mac (generates new recovery key) + Win (joins with same recovery key) + StatsOnly
+        srv.issue_code("CODE-MAC");
+        let mac_pair = pair_space(
+            |f| mac.with_db(f),
+            &mac.creds,
+            &srv,
+            "http://mock",
+            "CODE-MAC",
+            "mac-1",
+            "MBP",
+            None,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(mac_pair.generated_new_recovery_key);
+
+        // Wrong recovery key is rejected before pairing succeeds
+        srv.issue_code("CODE-BAD");
+        let bad_rk = MasterKey::generate().to_recovery_key();
+        assert!(pair_space(
+            |f| win.with_db(f),
+            &win.creds,
+            &srv,
+            "http://mock",
+            "CODE-BAD",
+            "win-1",
+            "Yoga",
+            Some(&bad_rk),
+            true,
+            true,
+        )
+        .await
+        .is_err());
+
+        srv.issue_code("CODE-WIN");
+        pair_space(
+            |f| win.with_db(f),
+            &win.creds,
+            &srv,
+            "http://mock",
+            "CODE-WIN",
+            "win-1",
+            "Yoga",
+            Some(&mac_pair.recovery_key),
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        srv.issue_code("CODE-STATS");
+        pair_space(
+            |f| stats_dev.with_db(f),
+            &stats_dev.creds,
+            &srv,
+            "http://mock",
+            "CODE-STATS",
+            "win-stats-only",
+            "WorkPC",
+            Some(&mac_pair.recovery_key),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+
+        // 2. Mac creates a dictation; stats_dev creates a private dictation
+        let now_ts = Utc::now().to_rfc3339();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        mac.dictate("r-shared", "hello world", &now_ts, &today);
+        stats_dev.dictate("r-private", "secret work note", &now_ts, &today);
+
+        sync_once(|f| mac.with_db(f), &mac.creds, &srv, 0).await.unwrap();
+        sync_once(|f| stats_dev.with_db(f), &stats_dev.creds, &srv, 0).await.unwrap();
+        sync_once(|f| win.with_db(f), &win.creds, &srv, 0).await.unwrap();
+        sync_once(|f| mac.with_db(f), &mac.creds, &srv, 0).await.unwrap();
+
+        // Verify stats converged across all 3 devices (2 total dictations), while
+        // stats_dev never pulled r-shared and never pushed r-private!
+        {
+            let sg = stats_dev.conn.lock().unwrap();
+            let hist_cnt: i64 = sg
+                .query_row("SELECT COUNT(*) FROM history_record", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(hist_cnt, 1); // Only its own r-private
+            let all = crate::sync_v2::store::get_overview_usage_stats_in(
+                &sg,
+                "win-stats-only",
+                crate::sync_v2::store::OverviewScope::All,
+            )
+            .unwrap();
+            assert_eq!(all.total_recording_count, 2);
+        }
+        {
+            let wg = win.conn.lock().unwrap();
+            let private_leaked: i64 = wg
+                .query_row(
+                    "SELECT COUNT(*) FROM history_record WHERE id = 'r-private'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(private_leaked, 0);
+        }
+
+        // 3. Concurrent offline manual edits on r-shared from Mac & Win -> both converge with recoverable alternative
+        {
+            let mg = mac.conn.lock().unwrap();
+            on_local_edit_applied_tx(
+                &mg,
+                "r-shared",
+                "ed-mac",
+                EditKind::Manual,
+                Some("mac version"),
+                &now_ts,
+                None,
+            )
+            .unwrap();
+        }
+        {
+            let wg = win.conn.lock().unwrap();
+            on_local_edit_applied_tx(
+                &wg,
+                "r-shared",
+                "ed-win",
+                EditKind::Manual,
+                Some("win version"),
+                &now_ts,
+                None,
+            )
+            .unwrap();
+        }
+        sync_once(|f| mac.with_db(f), &mac.creds, &srv, 0).await.unwrap();
+        sync_once(|f| win.with_db(f), &win.creds, &srv, 0).await.unwrap();
+        sync_once(|f| mac.with_db(f), &mac.creds, &srv, 0).await.unwrap();
+
+        let (mac_disp, win_disp) = {
+            let mg = mac.conn.lock().unwrap();
+            let wg = win.conn.lock().unwrap();
+            let m_text: Option<String> = mg
+                .query_row("SELECT edited_text FROM history_record WHERE id = 'r-shared'", [], |r| r.get(0))
+                .unwrap();
+            let w_text: Option<String> = wg
+                .query_row("SELECT edited_text FROM history_record WHERE id = 'r-shared'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(list_edit_conflict_alternatives_in(&mg, "r-shared").unwrap().len(), 1);
+            assert_eq!(list_edit_conflict_alternatives_in(&wg, "r-shared").unwrap().len(), 1);
+            (m_text, w_text)
+        };
+        assert_eq!(mac_disp, win_disp);
+
+        // Resolve conflict on Mac -> Win converges with 0 conflicts
+        {
+            let mg = mac.conn.lock().unwrap();
+            resolve_edit_conflict_in(&mg, "r-shared", Some("mac version")).unwrap();
+        }
+        sync_once(|f| mac.with_db(f), &mac.creds, &srv, 0).await.unwrap();
+        sync_once(|f| win.with_db(f), &win.creds, &srv, 0).await.unwrap();
+        {
+            let wg = win.conn.lock().unwrap();
+            assert!(list_edit_conflict_alternatives_in(&wg, "r-shared").unwrap().is_empty());
+            let w_text: Option<String> = wg
+                .query_row("SELECT edited_text FROM history_record WHERE id = 'r-shared'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(w_text.as_deref(), Some("mac version"));
+        }
+
+        // 4. User deletes r-shared on Mac -> removed on Win while dictation totals stay 2
+        {
+            let mg = mac.conn.lock().unwrap();
+            let tx = mg.unchecked_transaction().unwrap();
+            on_local_history_deleted_tx(&tx, "r-shared", true).unwrap();
+            tx.execute("DELETE FROM history_record WHERE id = 'r-shared'", []).unwrap();
+            tx.commit().unwrap();
+        }
+        sync_once(|f| mac.with_db(f), &mac.creds, &srv, 0).await.unwrap();
+        sync_once(|f| win.with_db(f), &win.creds, &srv, 0).await.unwrap();
+        {
+            let wg = win.conn.lock().unwrap();
+            let cnt: i64 = wg
+                .query_row("SELECT COUNT(*) FROM history_record WHERE id = 'r-shared'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(cnt, 0);
+            let all = crate::sync_v2::store::get_overview_usage_stats_in(
+                &wg,
+                "win-1",
+                crate::sync_v2::store::OverviewScope::All,
+            )
+            .unwrap();
+            assert_eq!(all.total_recording_count, 2);
+        }
+
+        // 5. Revoke Win -> Win gets DeviceRevoked & status='revoked', while Mac keeps syncing cleanly!
+        srv.revoke("win-1");
+        let win_err = sync_once(|f| win.with_db(f), &win.creds, &srv, 0).await;
+        assert!(matches!(
+            win_err,
+            Err(SyncEngineError::Transport(TransportError::DeviceRevoked(_)))
+        ));
+        assert!(sync_once(|f| mac.with_db(f), &mac.creds, &srv, 0).await.is_ok());
+
+        // 6. Verify widening stats_dev from stats-only to history pulls existing history/tombstones cleanly
+        {
+            let sg = stats_dev.conn.lock().unwrap();
+            update_sync_scope_tx(&sg, &mac_pair.space_id, true, false).unwrap();
+        }
+        let widened = sync_once(|f| stats_dev.with_db(f), &stats_dev.creds, &srv, 0)
+            .await
+            .unwrap();
+        assert!(widened.history_pulled >= 1);
+    }
+}

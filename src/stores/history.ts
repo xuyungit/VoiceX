@@ -54,6 +54,7 @@ export interface HistoryRecord {
     targetAppPlatform: string | null
     targetAppKey: string | null
     targetAppName: string | null
+    hasEditConflict?: boolean
 }
 
 export interface AppUsageStat {

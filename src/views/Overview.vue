@@ -2,14 +2,9 @@
 import { onMounted, computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NEmpty } from 'naive-ui'
-import {
-  useHistoryStore,
-  type AppUsageRange,
-  type AppUsageStat,
-  type ModelUsageItem,
-  type OverviewScope,
-} from '../stores/history'
+import { useHistoryStore, type AppUsageRange, type AppUsageStat, type ModelUsageItem, type OverviewScope } from '../stores/history'
 import { useSettingsStore } from '../stores/settings'
+import { useSyncStore } from '../stores/sync'
 import { formatDictationHotkey } from '../utils/hotkey'
 import {
   buildActivityGrid,
@@ -26,6 +21,7 @@ type ModelKindTab = 'asr' | 'llm'
 
 const historyStore = useHistoryStore()
 const settingsStore = useSettingsStore()
+const syncStore = useSyncStore()
 const { t, locale } = useI18n()
 
 const activeTab = ref<OverviewTab>('core')
@@ -73,8 +69,14 @@ const llmDisplay = computed(() => {
   return LLM_DISPLAY_NAMES[settingsStore.settings.llmProviderType] || settingsStore.settings.llmProviderType
 })
 
+const syncActive = computed(() => {
+  const v2 = syncStore.v2Status
+  if (v2.configured && v2.status !== 'disabled') return true
+  return settingsStore.settings.syncEnabled
+})
+
 const syncDisplay = computed(() => {
-  return settingsStore.settings.syncEnabled ? t('overview.on') : t('overview.off')
+  return syncActive.value ? t('overview.on') : t('overview.off')
 })
 
 const formatDuration = (durationMs: number) => {
@@ -542,7 +544,7 @@ onMounted(async () => {
         </div>
         <div class="info-pill">
           <span class="info-pill-label">{{ t('overview.syncStatus') }}</span>
-          <span class="info-pill-value" :class="{ off: !settingsStore.settings.syncEnabled }">{{ syncDisplay }}</span>
+          <span class="info-pill-value" :class="{ off: !syncActive }">{{ syncDisplay }}</span>
         </div>
       </div>
 

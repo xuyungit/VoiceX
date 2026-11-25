@@ -77,8 +77,13 @@ pub async fn count_history(
 
 /// Delete a history record
 #[tauri::command]
-pub async fn delete_history_record(id: String, sync: State<'_, SyncService>) -> Result<(), String> {
+pub async fn delete_history_record(
+    id: String,
+    sync: State<'_, SyncService>,
+    sync_v2: State<'_, crate::sync_v2::engine::SyncV2Service>,
+) -> Result<(), String> {
     let sync = sync.inner().clone();
+    let sync_v2 = sync_v2.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         // Translate-and-read rows are never uploaded (history_service), so there
         // is nothing on the server to delete and no event to send.
@@ -87,6 +92,7 @@ pub async fn delete_history_record(id: String, sync: State<'_, SyncService>) -> 
         if mode.as_deref() != Some(HISTORY_MODE_TRANSLATE_READ) {
             sync.enqueue_history_delete(&id);
         }
+        sync_v2.notify_local_change();
         Ok(())
     })
     .await

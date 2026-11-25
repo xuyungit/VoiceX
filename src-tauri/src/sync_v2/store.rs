@@ -2328,6 +2328,7 @@ mod tests {
             target_app_platform: Some("macos".to_string()),
             target_app_key: Some("com.apple.Notes".to_string()),
             target_app_name: Some("Notes".to_string()),
+            has_edit_conflict: false,
         }
     }
 

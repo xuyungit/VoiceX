@@ -186,6 +186,16 @@ const groupedRecords = computed(() => {
 
 const detailVisible = ref(false)
 const detailRecord = ref<HistoryRecord | null>(null)
+interface EditConflictAlternative {
+  editId: string
+  sourceDeviceId: string
+  editKind: string
+  hlc: string
+  editedAt: string
+  finalText: string | null
+}
+const detailConflicts = ref<EditConflictAlternative[]>([])
+const resolvingConflict = ref(false)
 const reTranscribeVisible = ref(false)
 const reTranscribeRecord = ref<HistoryRecord | null>(null)
 const translationVisible = ref(false)
@@ -285,7 +295,7 @@ function formatDevice(record: HistoryRecord): string {
   if (record.sourceDeviceName && record.sourceDeviceName.trim()) {
     return record.sourceDeviceName
   }
-  if (!settingsStore.settings.syncEnabled) {
+  if (!syncStore.v2Status.configured && !settingsStore.settings.syncEnabled) {
     return t('common.thisDevice')
   }
   if (record.sourceDeviceId && record.sourceDeviceId === syncStore.deviceId) {
@@ -312,7 +322,38 @@ function togglePlayback(record: HistoryRecord) {
 
 function openDetails(record: HistoryRecord) {
   detailRecord.value = record
+  detailConflicts.value = []
   detailVisible.value = true
+  if (record.hasEditConflict) {
+    void invoke<EditConflictAlternative[]>('sync_v2_list_edit_conflicts', { recordId: record.id })
+      .then(list => {
+        if (detailRecord.value?.id === record.id) {
+          detailConflicts.value = list
+        }
+      })
+      .catch(err => console.error('Failed to load edit conflicts:', err))
+  }
+}
+
+async function resolveEditConflict(chosenText: string | null) {
+  const current = detailRecord.value
+  if (!current || resolvingConflict.value) return
+  resolvingConflict.value = true
+  try {
+    await invoke('sync_v2_resolve_edit_conflict', {
+      recordId: current.id,
+      chosenText,
+    })
+    detailConflicts.value = []
+    current.hasEditConflict = false
+    current.editedText = chosenText === current.text ? null : chosenText
+    message.success(t('history.editConflictResolved'))
+    await historyStore.loadHistory(true)
+  } catch (err) {
+    message.error(String(err))
+  } finally {
+    resolvingConflict.value = false
+  }
 }
 
 // A click anywhere on the row opens its details, except on the row's own
@@ -681,6 +722,9 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
                 <span v-if="record.editedText !== null" class="tag row-tag">
                   {{ t('postEdit.editedTag') }}
                 </span>
+                <span v-if="record.hasEditConflict" class="tag row-tag conflict-tag">
+                  {{ t('history.editConflictTag') }}
+                </span>
                 <span
                   v-if="isFailedRecord(record)"
                   class="tag row-tag failed-tag"
@@ -878,6 +922,37 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
           </div>
           <div class="detail-body" :class="{ failed: isFailedRecord(detailRecord) }">
             {{ displayText(detailRecord) }}
+          </div>
+        </div>
+
+        <div v-if="detailConflicts.length > 0" class="detail-section conflict-section">
+          <div class="detail-header">
+            <div class="detail-title">{{ t('history.editConflictSection') }}</div>
+            <NButton
+              quaternary
+              size="tiny"
+              :loading="resolvingConflict"
+              @click="resolveEditConflict(detailRecord.editedText ?? detailRecord.text)"
+            >
+              {{ t('history.editConflictKeepCurrent') }}
+            </NButton>
+          </div>
+          <div v-for="alt in detailConflicts" :key="alt.editId" class="conflict-card">
+            <div class="detail-body muted">
+              {{ alt.finalText ?? t('history.editConflictRestoredOriginal') }}
+            </div>
+            <div class="conflict-card-footer">
+              <span class="conflict-meta">{{ formatDateTime(alt.editedAt) }}</span>
+              <NButton
+                size="tiny"
+                type="primary"
+                secondary
+                :loading="resolvingConflict"
+                @click="resolveEditConflict(alt.finalText)"
+              >
+                {{ t('history.editConflictUseVersion') }}
+              </NButton>
+            </div>
           </div>
         </div>
 
@@ -1325,6 +1400,33 @@ function handleMoreAction(key: string | number, record: HistoryRecord) {
 
 .failed-detail {
   color: var(--color-error);
+}
+
+.conflict-tag {
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border));
+}
+
+.conflict-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 35%, var(--color-border));
+  background: var(--color-bg-secondary);
+}
+
+.conflict-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.conflict-meta {
+  font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
 }
 
 @media (max-width: 640px) {

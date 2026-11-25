@@ -14,6 +14,7 @@ pub mod permissions;
 pub mod retranscribe;
 pub mod settings;
 pub mod sync;
+pub mod sync_v2;
 pub mod tts;
 pub mod updates;
 pub mod local_models;

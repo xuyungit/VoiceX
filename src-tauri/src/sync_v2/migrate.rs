@@ -1320,6 +1320,30 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
             params![space_id, stats_end_seq, hist_cursor, edit_cursor, now],
         )
         .map_err(sql_err)?;
+        // Disable legacy v1 sync flag in app_settings on the upgraded DB copy so
+        // the client runs exclusively on Sync v2 after cutover.
+        if let Some(raw_settings) = dtx
+            .query_row(
+                "SELECT value FROM user_config WHERE key = 'app_settings' LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sql_err)?
+        {
+            if let Ok(mut val) = serde_json::from_str::<Value>(&raw_settings) {
+                if let Some(obj) = val.as_object_mut() {
+                    obj.insert("syncEnabled".to_string(), Value::Bool(false));
+                    if let Ok(updated) = serde_json::to_string(&val) {
+                        dtx.execute(
+                            "UPDATE user_config SET value = ?1 WHERE key = 'app_settings'",
+                            params![updated],
+                        )
+                        .map_err(sql_err)?;
+                    }
+                }
+            }
+        }
         dtx.commit().map_err(sql_err)?;
     }
 

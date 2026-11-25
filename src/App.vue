@@ -11,7 +11,7 @@ import { applyUiTheme, isDark } from './theme'
 import { resolveLocale, setLocale } from './i18n'
 import { useSettingsStore } from './stores/settings'
 import { useHistoryStore } from './stores/history'
-import { useSyncStore, type SyncStateResponse } from './stores/sync'
+import { useSyncStore, type SyncStateResponse, type SyncV2StatusSnapshot } from './stores/sync'
 import { usePermissionsStore } from './stores/permissions'
 import { useUpdatesStore } from './stores/updates'
 import { useAppIconStore } from './stores/appIcons'
@@ -66,6 +66,7 @@ const appIconStore = useAppIconStore()
 const postEditStore = usePostEditStore()
 let unlistenHistory: (() => void) | null = null
 let unlistenSync: (() => void) | null = null
+let unlistenSyncV2: (() => void) | null = null
 let unlistenLocale: (() => void) | null = null
 let unlistenPermissions: (() => void) | null = null
 let unlistenFocus: (() => void) | null = null
@@ -97,10 +98,12 @@ function scheduleHistoryRefresh(delayMs = 300) {
 }
 
 function onHistoryUpdated() {
-  const status = syncStore.state.status || ''
-  if (SYNC_GATED_STATUSES.has(status)) {
-    historyRefreshQueued = true
-    return
+  if (!syncStore.v2Status.configured) {
+    const status = syncStore.state.status || ''
+    if (SYNC_GATED_STATUSES.has(status)) {
+      historyRefreshQueued = true
+      return
+    }
   }
   scheduleHistoryRefresh()
 }
@@ -141,6 +144,7 @@ onMounted(async () => {
     settingsStore.loadSettings(),
     historyStore.loadStats(),
     syncStore.loadState(),
+    syncStore.loadV2Status(),
     postEditStore.load()
   ])
   await Promise.all([
@@ -158,6 +162,11 @@ onMounted(async () => {
     const nextStatus = payload?.state?.status ?? null
     syncStore.updateFromEvent(payload)
     onSyncStatusChanged(nextStatus)
+  })
+
+  unlistenSyncV2 = await listen('sync_v2:state', (event) => {
+    const payload = event.payload as SyncV2StatusSnapshot
+    syncStore.updateV2FromEvent(payload)
   })
 
   unlistenLocale = await listen<{ locale?: ResolvedLocale }>('ui:locale-changed', (event) => {
@@ -210,6 +219,10 @@ onBeforeUnmount(() => {
   if (unlistenSync) {
     unlistenSync()
     unlistenSync = null
+  }
+  if (unlistenSyncV2) {
+    unlistenSyncV2()
+    unlistenSyncV2 = null
   }
   if (unlistenLocale) {
     unlistenLocale()

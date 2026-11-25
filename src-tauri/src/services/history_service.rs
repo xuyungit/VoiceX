@@ -133,6 +133,7 @@ impl HistoryService {
             target_app_platform: target_app.as_ref().map(|app| app.platform.clone()),
             target_app_key: target_app.as_ref().map(|app| app.app_key.clone()),
             target_app_name: target_app.map(|app| app.app_name),
+            has_edit_conflict: false,
         };
 
         let behavior = Self::behavior_for_mode(&record.mode, &settings);
@@ -185,6 +186,7 @@ impl HistoryService {
             target_app_platform: None,
             target_app_key: None,
             target_app_name: None,
+            has_edit_conflict: false,
         };
 
         if let Err(err) = self.persist_record(record, Self::local_failure_behavior(&settings), app_handle)
@@ -281,6 +283,10 @@ impl HistoryService {
                     let sync = app.state::<SyncService>();
                     sync.enqueue_history_upsert(&record);
                 }
+            }
+            if let Some(app) = handle_for_emit.as_ref() {
+                app.state::<crate::sync_v2::engine::SyncV2Service>()
+                    .notify_local_change();
             }
 
             if let Err(err) = storage::cleanup_history_retention(
