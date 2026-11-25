@@ -23,7 +23,10 @@ use voicex_sync_protocol::{
 };
 
 use crate::storage::{self, StorageError};
-use crate::sync_v2::credentials::{CredentialError, CredentialStore, SpaceCredentials};
+use crate::sync_v2::credentials::{
+    current_machine_fingerprint, CredentialError, CredentialStore, DeviceIdentityStore,
+    ResolvedDeviceIdentity, SpaceCredentials,
+};
 use crate::sync_v2::crypto::{
     decode_sync_invite, decrypt_envelope, encode_sync_invite, encrypt_envelope, CryptoError,
     EnvelopeContext, MasterKey, SyncInvite,
@@ -1426,11 +1429,103 @@ struct SyncV2ServiceInner {
     flush_tx: Option<mpsc::UnboundedSender<()>>,
 }
 
+/// Reconcile this installation's external device identity (`device-identity.json`)
+/// on startup (S4).
+///
+/// - On an existing machine's first boot after upgrading to S4, binds the current
+///   `sync_device_id` to this machine's fingerprint on disk.
+/// - On a cloned data directory (different machine fingerprint) or a pasted DB from
+///   another device, rotates `user_config.sync_device_id` to a fresh local UUID,
+///   disables any cloned `sync_spaces` rows belonging to the old device ID, and
+///   removes their copied credentials so the clone can never silently hijack the
+///   original device's token or overwrite its stats shards.
+pub fn reconcile_startup_device_identity_in(
+    conn: &Connection,
+    data_dir: &std::path::Path,
+    machine_fingerprint: &str,
+) -> Result<ResolvedDeviceIdentity, SyncEngineError> {
+    let db_device_id: Option<String> = conn
+        .query_row(
+            "SELECT value FROM user_config WHERE key = 'sync_device_id' LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| active_space_in(conn).ok().flatten().map(|s| s.device_id));
+
+    let id_store = DeviceIdentityStore::in_data_dir(data_dir);
+    let resolved = id_store.resolve_for_machine(db_device_id.as_deref(), machine_fingerprint)?;
+
+    if resolved.rotated_for_new_install
+        || db_device_id.as_deref() != Some(resolved.device_id.as_str())
+    {
+        conn.execute(
+            "INSERT INTO user_config (key, value) VALUES ('sync_device_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![resolved.device_id],
+        )
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    }
+
+    if resolved.rotated_for_new_install {
+        let mut stmt = conn
+            .prepare("SELECT space_id FROM sync_spaces WHERE device_id != ?1")
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+        let mismatched_spaces: Vec<String> = stmt
+            .query_map(params![resolved.device_id], |r| r.get::<_, String>(0))
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+        if !mismatched_spaces.is_empty() {
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE sync_spaces
+                 SET is_active = 0,
+                     status = 'disabled',
+                     last_error = 'Cloned installation detected; please pair this device again.',
+                     updated_at = ?2
+                 WHERE device_id != ?1",
+                params![resolved.device_id, now],
+            )
+            .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+
+            let creds = CredentialStore::in_data_dir(data_dir);
+            for space_id in mismatched_spaces {
+                let _ = creds.remove(&space_id);
+            }
+        }
+    }
+
+    Ok(resolved)
+}
+
 impl SyncV2Service {
     pub fn init(&self, app_handle: &AppHandle, app_data_dir: PathBuf) {
-        let mut inner = self.inner.lock().expect("sync_v2 lock");
-        inner.app_handle = Some(app_handle.clone());
-        inner.data_dir = Some(app_data_dir);
+        {
+            let mut inner = self.inner.lock().expect("sync_v2 lock");
+            inner.app_handle = Some(app_handle.clone());
+            inner.data_dir = Some(app_data_dir.clone());
+        }
+
+        let fp = current_machine_fingerprint();
+        match storage::with_db(|conn| {
+            reconcile_startup_device_identity_in(conn, &app_data_dir, &fp)
+                .map_err(|e| StorageError::QueryFailed(e.to_string()))
+        }) {
+            Ok(resolved) if resolved.rotated_for_new_install => {
+                log::warn!(
+                    "[sync-v2] S4 detected cloned database/data directory on startup; rotated device_id to {} and disabled cloned sync spaces",
+                    resolved.device_id
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                log::warn!("[sync-v2] failed to reconcile startup device identity: {err}");
+            }
+        }
     }
 
     pub fn data_dir(&self) -> Result<PathBuf, String> {
@@ -2427,5 +2522,85 @@ mod tests {
                 .unwrap();
             assert_eq!(got_small, 1);
         }
+    }
+
+    #[test]
+    fn s4_startup_reconciliation_binds_existing_and_neutralizes_full_dir_clone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE user_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE history_record (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, text TEXT NOT NULL, mode TEXT NOT NULL, duration_ms INTEGER NOT NULL);
+             CREATE TABLE device_usage_stats (device_id TEXT PRIMARY KEY);",
+        )
+        .unwrap();
+        crate::sync_v2::store::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO user_config (key, value) VALUES ('sync_device_id', 'dev-orig')",
+            [],
+        )
+        .unwrap();
+        upsert_sync_space_tx(
+            &conn,
+            "selfhost:srv1:acc1",
+            "selfhost",
+            "http://127.0.0.1:8787",
+            "srv1",
+            "acc1",
+            "dev-orig",
+            true,
+            true,
+            Some("tag"),
+            true,
+        )
+        .unwrap();
+        let creds = CredentialStore::in_data_dir(dir.path());
+        creds
+            .save(
+                "selfhost:srv1:acc1",
+                &SpaceCredentials {
+                    device_token: "vxd2_orig_token".into(),
+                    recovery_key: "VXK2-TEST".into(),
+                },
+            )
+            .unwrap();
+
+        // First boot on original machine A: binds `device-identity.json` without disabling sync
+        let r1 = reconcile_startup_device_identity_in(&conn, dir.path(), "fp-machine-a").unwrap();
+        assert_eq!(r1.device_id, "dev-orig");
+        assert!(!r1.rotated_for_new_install);
+        assert!(!r1.existed_on_disk);
+        assert!(active_space_in(&conn).unwrap().is_some());
+        assert!(creds.get("selfhost:srv1:acc1").unwrap().is_some());
+
+        // Second boot on same machine A: `existed_on_disk == true`, stays active
+        let r2 = reconcile_startup_device_identity_in(&conn, dir.path(), "fp-machine-a").unwrap();
+        assert_eq!(r2.device_id, "dev-orig");
+        assert!(!r2.rotated_for_new_install);
+        assert!(r2.existed_on_disk);
+
+        // Simulated full directory copy to machine B (different fingerprint):
+        // must mint fresh device_id, update user_config, disable cloned space, and purge cloned creds!
+        let r3 = reconcile_startup_device_identity_in(&conn, dir.path(), "fp-machine-b").unwrap();
+        assert_ne!(r3.device_id, "dev-orig");
+        assert!(r3.rotated_for_new_install);
+        assert!(active_space_in(&conn).unwrap().is_none());
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM sync_spaces WHERE space_id = 'selfhost:srv1:acc1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "disabled");
+        let persisted_id: String = conn
+            .query_row(
+                "SELECT value FROM user_config WHERE key = 'sync_device_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted_id, r3.device_id);
+        assert_eq!(creds.get("selfhost:srv1:acc1").unwrap(), None);
     }
 }

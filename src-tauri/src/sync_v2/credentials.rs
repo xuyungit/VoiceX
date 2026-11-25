@@ -145,6 +145,10 @@ pub struct ResolvedDeviceIdentity {
     /// True when a new `device_id` was allocated because the DB or data dir was
     /// cloned onto a different machine/installation.
     pub rotated_for_new_install: bool,
+    /// True when `device-identity.json` already existed on disk for this same
+    /// machine fingerprint prior to this call (distinguishes genuine same-machine
+    /// re-pairs from a DB-only clone onto a fresh machine).
+    pub existed_on_disk: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +178,7 @@ impl DeviceIdentityStore {
                         return Ok(ResolvedDeviceIdentity {
                             device_id: existing.device_id,
                             rotated_for_new_install: rotated,
+                            existed_on_disk: true,
                         });
                     }
                     // Whole data directory was copied to a different machine -> mint a fresh device_id.
@@ -186,6 +191,7 @@ impl DeviceIdentityStore {
                     return Ok(ResolvedDeviceIdentity {
                         device_id: fresh_id,
                         rotated_for_new_install: true,
+                        existed_on_disk: false,
                     });
                 }
             }
@@ -204,6 +210,7 @@ impl DeviceIdentityStore {
         Ok(ResolvedDeviceIdentity {
             device_id,
             rotated_for_new_install: false,
+            existed_on_disk: false,
         })
     }
 
@@ -349,11 +356,13 @@ mod tests {
         let r1 = store.resolve_for_machine(Some("v1-dev-a"), "fp-machine-a").unwrap();
         assert_eq!(r1.device_id, "v1-dev-a");
         assert!(!r1.rotated_for_new_install);
+        assert!(!r1.existed_on_disk);
 
-        // Same machine, same DB -> stable
+        // Same machine, same DB -> stable and already bound on disk
         let r2 = store.resolve_for_machine(Some("v1-dev-a"), "fp-machine-a").unwrap();
         assert_eq!(r2.device_id, "v1-dev-a");
         assert!(!r2.rotated_for_new_install);
+        assert!(r2.existed_on_disk);
 
         // Cloned DB from another device dropped into machine A -> keeps machine A's own ID
         let r3 = store
@@ -361,10 +370,12 @@ mod tests {
             .unwrap();
         assert_eq!(r3.device_id, "v1-dev-a");
         assert!(r3.rotated_for_new_install);
+        assert!(r3.existed_on_disk);
 
         // Whole data directory copied to machine B (different fingerprint) -> mints fresh ID!
         let r4 = store.resolve_for_machine(Some("v1-dev-a"), "fp-machine-b").unwrap();
         assert_ne!(r4.device_id, "v1-dev-a");
         assert!(r4.rotated_for_new_install);
+        assert!(!r4.existed_on_disk);
     }
 }

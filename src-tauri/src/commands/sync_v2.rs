@@ -45,20 +45,26 @@ fn resolve_pairing_device_identity(
         return Ok((resolved.device_id, false));
     }
 
-    // Same machine & same identity: allow replacing active token ONLY if this device
-    // already had a local sync space configured with this exact device_id (re-pair after disconnect).
+    // Same machine & same identity: allow replacing active token ONLY if `device-identity.json`
+    // ALREADY existed on disk for this machine fingerprint AND this local DB had a space for it.
+    // A DB-only clone onto a fresh machine has `existed_on_disk == false`, so it cannot silently
+    // hijack the original machine's active token (server returns 409 device_id_conflict).
     let dev_id_check = resolved.device_id.clone();
-    let has_local_space_for_device = storage::with_db(|conn| {
-        let found: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sync_spaces WHERE device_id = ?1 LIMIT 1)",
-                rusqlite::params![dev_id_check],
-                |r| Ok(r.get::<_, i32>(0)? != 0),
-            )
-            .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
-        Ok(found)
-    })
-    .unwrap_or(false);
+    let has_local_space_for_device = if resolved.existed_on_disk {
+        storage::with_db(|conn| {
+            let found: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sync_spaces WHERE device_id = ?1 LIMIT 1)",
+                    rusqlite::params![dev_id_check],
+                    |r| Ok(r.get::<_, i32>(0)? != 0),
+                )
+                .map_err(|e| storage::StorageError::QueryFailed(e.to_string()))?;
+            Ok(found)
+        })
+        .unwrap_or(false)
+    } else {
+        false
+    };
 
     Ok((resolved.device_id, has_local_space_for_device))
 }
