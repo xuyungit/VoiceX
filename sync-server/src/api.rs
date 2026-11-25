@@ -15,6 +15,7 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -33,6 +34,8 @@ pub struct AppState {
     pub server_id: String,
     pub buses: Arc<DashMap<String, broadcast::Sender<NotifyEvent>>>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// Only trust `X-Forwarded-For` / `X-Real-IP` when deployed behind a trusted reverse proxy (C4).
+    pub trust_proxy_headers: bool,
 }
 
 impl AppState {
@@ -42,7 +45,13 @@ impl AppState {
             server_id,
             buses: Arc::new(DashMap::new()),
             rate_limiter: Arc::new(RateLimiter::new(120, Duration::from_secs(60))),
+            trust_proxy_headers: false,
         }
+    }
+
+    pub fn with_trust_proxy(mut self, trust_proxy_headers: bool) -> Self {
+        self.trust_proxy_headers = trust_proxy_headers;
+        self
     }
 
     pub fn with_rate_limit(
@@ -56,6 +65,7 @@ impl AppState {
             server_id,
             buses: Arc::new(DashMap::new()),
             rate_limiter: Arc::new(RateLimiter::new(max_requests, window)),
+            trust_proxy_headers: false,
         }
     }
 
@@ -71,11 +81,13 @@ impl AppState {
     }
 }
 
-/// Simple sliding-window in-memory rate limiter keyed by device or IP.
+/// Sliding-window in-memory rate limiter keyed by device or client IP with
+/// periodic stale-bucket eviction to keep memory bounded (C4).
 pub struct RateLimiter {
     max_requests: usize,
     window: Duration,
     buckets: DashMap<String, VecDeque<Instant>>,
+    ops_since_prune: AtomicUsize,
 }
 
 impl RateLimiter {
@@ -84,11 +96,16 @@ impl RateLimiter {
             max_requests,
             window,
             buckets: DashMap::new(),
+            ops_since_prune: AtomicUsize::new(0),
         }
     }
 
     pub fn check(&self, key: &str) -> bool {
         let now = Instant::now();
+        let ops = self.ops_since_prune.fetch_add(1, Ordering::Relaxed) + 1;
+        if ops % 256 == 0 || self.buckets.len() > 2048 {
+            self.prune_expired(now);
+        }
         let mut entry = self.buckets.entry(key.to_string()).or_default();
         while let Some(&front) = entry.front() {
             if now.duration_since(front) >= self.window {
@@ -102,6 +119,23 @@ impl RateLimiter {
         }
         entry.push_back(now);
         true
+    }
+
+    pub fn prune_expired(&self, now: Instant) {
+        self.buckets.retain(|_, q| {
+            while let Some(&front) = q.front() {
+                if now.duration_since(front) >= self.window {
+                    q.pop_front();
+                } else {
+                    break;
+                }
+            }
+            !q.is_empty()
+        });
+    }
+
+    pub fn bucket_count(&self) -> usize {
+        self.buckets.len()
     }
 }
 
@@ -242,18 +276,46 @@ async fn auth_and_rate_limit_middleware(
     next.run(req).await
 }
 
+fn resolve_peer_ip(
+    headers: &HeaderMap,
+    connect_info: Option<&ConnectInfo<SocketAddr>>,
+    trust_proxy_headers: bool,
+) -> String {
+    if trust_proxy_headers {
+        if let Some(forwarded) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return forwarded.to_string();
+        }
+        if let Some(real_ip) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return real_ip.to_string();
+        }
+    }
+    connect_info
+        .map(|ci| ci.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 async fn post_pair_redeem(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     req_headers: HeaderMap,
     Json(payload): Json<PairRedeemRequest>,
 ) -> Result<Json<voicex_sync_protocol::PairRedeemResponse>, Response> {
-    let ip_key = req_headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("direct");
+    let ip_key = resolve_peer_ip(
+        &req_headers,
+        connect_info.as_ref(),
+        state.trust_proxy_headers,
+    );
     if !state.rate_limiter.check(&format!("pair:{ip_key}")) {
         return Err(json_error(
             StatusCode::TOO_MANY_REQUESTS,

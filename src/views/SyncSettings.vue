@@ -373,7 +373,7 @@ onMounted(async () => {
 
         <div v-if="activeInvite" class="invite-box">
           <code class="monospace invite-code-text">{{ activeInvite.inviteCode }}</code>
-          <div class="invite-meta">
+          <div class="invite-meta invite-warning">
             {{ t('sync.syncCodeExpiresNote', { time: formatClock(activeInvite.expiresAt) }) }}
           </div>
         </div>
@@ -545,6 +545,11 @@ onMounted(async () => {
 .invite-meta {
   font-size: var(--font-xs);
   color: var(--color-text-tertiary);
+}
+
+.invite-warning {
+  color: color-mix(in srgb, var(--color-warning, #d97706) 82%, var(--color-text-secondary));
+  line-height: 1.45;
 }
 
 .field-value {

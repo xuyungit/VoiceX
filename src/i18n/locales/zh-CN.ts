@@ -557,7 +557,7 @@ const zhCN = {
     generateSyncCode: '生成同步码',
     regenerateSyncCode: '重新生成',
     copySyncCode: '复制同步码',
-    syncCodeExpiresNote: '单次有效，有效期至 {time}',
+    syncCodeExpiresNote: '加入资格单次有效（有效期至 {time}）；整串包含长期加密恢复密钥，请按恢复密钥级别妥善保管，勿发给他人或留在公共记录中。',
     advancedRecoveryToggle: '所有旧设备都已丢失？使用应急恢复密钥找回',
     hideAdvancedRecovery: '收起应急恢复选项',
     pairingCode: '开通配对码',

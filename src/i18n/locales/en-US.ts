@@ -557,7 +557,7 @@ const enUS = {
     generateSyncCode: 'Generate sync code',
     regenerateSyncCode: 'Regenerate',
     copySyncCode: 'Copy sync code',
-    syncCodeExpiresNote: 'One-time use, expires at {time}',
+    syncCodeExpiresNote: 'The pairing ticket is single-use (expires at {time}), but the full string contains your long-term encryption recovery key. Treat and protect it like a recovery key.',
     advancedRecoveryToggle: 'Lost all previous devices? Recover with emergency key',
     hideAdvancedRecovery: 'Hide emergency recovery',
     pairingCode: 'Initial pairing code',

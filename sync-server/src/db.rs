@@ -803,8 +803,13 @@ pub async fn push_envelopes(
             }
 
             if let Some(old_seq) = prev_seq {
+                // C5: Clear superseded stats ciphertext/nonce in the same transaction so
+                // SQLite reclaims storage and `SUM(byte_size)` matches `accounts.used_bytes`,
+                // while keeping `op_id` + `seq` intact for idempotent duplicate checks.
                 sqlx::query(
-                    "UPDATE envelopes SET superseded = 1 WHERE account_id = ?1 AND seq = ?2",
+                    "UPDATE envelopes
+                     SET superseded = 1, nonce = '', ciphertext = '', byte_size = 0
+                     WHERE account_id = ?1 AND seq = ?2",
                 )
                 .bind(&auth.account_id)
                 .bind(old_seq)

@@ -1,5 +1,6 @@
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode};
+use std::net::SocketAddr;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -22,17 +23,31 @@ async fn spawn_server() -> TestServer {
 }
 
 async fn spawn_server_with_limits(max_req: usize, window: Duration) -> TestServer {
+    spawn_server_with_options(max_req, window, false).await
+}
+
+async fn spawn_server_with_options(
+    max_req: usize,
+    window: Duration,
+    trust_proxy: bool,
+) -> TestServer {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test-v2.db");
     let pool = db::open_pool(db_path.to_str().unwrap()).await.unwrap();
     let server_id = db::ensure_server_id(&pool).await.unwrap();
-    let state = AppState::with_rate_limit(pool.clone(), server_id, max_req, window);
+    let state = AppState::with_rate_limit(pool.clone(), server_id, max_req, window)
+        .with_trust_proxy(trust_proxy);
     let app = build_app(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     TestServer {
@@ -265,6 +280,55 @@ async fn stats_revision_101_then_100_keeps_101_and_new_device_only_sees_latest()
     assert_eq!(pulled.items.len(), 1);
     assert_eq!(pulled.items[0].revision, 102);
     assert!(!pulled.has_more);
+
+    // C5: Superseded stats row 101 must have its ciphertext/nonce cleared and byte_size=0,
+    // matching `accounts.used_bytes == SUM(envelopes.byte_size)` while preserving op_id dedup!
+    let (old_sup, old_ct, old_bytes): (i64, String, i64) = sqlx::query_as(
+        "SELECT superseded, ciphertext, byte_size FROM envelopes WHERE account_id = ?1 AND op_id = 'stats:mac-1:totals:101'",
+    )
+    .bind(&acc.account_id)
+    .fetch_one(&srv.pool)
+    .await
+    .unwrap();
+    assert_eq!(old_sup, 1);
+    assert!(old_ct.is_empty());
+    assert_eq!(old_bytes, 0);
+
+    let acc_used: i64 = sqlx::query_scalar("SELECT used_bytes FROM accounts WHERE account_id = ?1")
+        .bind(&acc.account_id)
+        .fetch_one(&srv.pool)
+        .await
+        .unwrap();
+    let sum_env_bytes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(byte_size), 0) FROM envelopes WHERE account_id = ?1",
+    )
+    .bind(&acc.account_id)
+    .fetch_one(&srv.pool)
+    .await
+    .unwrap();
+    assert_eq!(acc_used, sum_env_bytes);
+
+    // Duplicate retry of superseded 101 still returns Duplicate, and stale 100 returns StaleIgnored
+    let dup_101 = client
+        .post(format!("{}/v2/envelopes", srv.base_url))
+        .bearer_auth(&mac.device_token)
+        .json(&PushEnvelopesRequest {
+            envelopes: vec![EnvelopeSubmission {
+                op_id: "stats:mac-1:totals:101".into(),
+                domain: SyncDomain::Stats,
+                object_id: "mac-1:totals".into(),
+                revision: 101,
+                nonce: "bm9uY2UxMDE=".into(),
+                ciphertext: "Y2lwaGVyMTAx".into(),
+            }],
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<PushEnvelopesResponse>()
+        .await
+        .unwrap();
+    assert_eq!(dup_101.results[0].status, EnvelopeStatus::Duplicate);
 }
 
 #[tokio::test]
@@ -641,4 +705,64 @@ async fn authed_device_can_issue_one_time_pairing_code_for_peer() {
         .await
         .unwrap();
     assert_eq!(revoked_resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn c4_pairing_rate_limit_ignores_spoofed_xff_when_direct_and_respects_trusted_proxy() {
+    let client = Client::new();
+
+    // 1. Direct mode (`trust_proxy = false`): spoofing different X-Forwarded-For values
+    //    must NOT bypass the peer-IP rate limit (limit = 2).
+    let direct_srv = spawn_server_with_options(2, Duration::from_secs(60), false).await;
+    for (idx, spoof_ip) in ["10.0.0.1", "10.0.0.2", "10.0.0.3"].iter().enumerate() {
+        let resp = client
+            .post(format!("{}/v2/pair/redeem", direct_srv.base_url))
+            .header("x-forwarded-for", *spoof_ip)
+            .json(&PairRedeemRequest {
+                pairing_code: "VXP2-FAKE-0000-0000-0000".into(),
+                device_id: "d1".into(),
+                device_name: "D1".into(),
+                platform: "macos".into(),
+                app_version: "0.20.0".into(),
+                allow_replace_active: false,
+            })
+            .send()
+            .await
+            .unwrap();
+        if idx < 2 {
+            assert_eq!(resp.status(), StatusCode::CONFLICT);
+        } else {
+            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+    }
+
+    // 2. Trusted proxy mode (`trust_proxy = true`): distinct client IPs in X-Forwarded-For
+    //    get independent buckets.
+    let proxy_srv = spawn_server_with_options(2, Duration::from_secs(60), true).await;
+    for spoof_ip in ["203.0.113.1", "203.0.113.2", "203.0.113.3"] {
+        let resp = client
+            .post(format!("{}/v2/pair/redeem", proxy_srv.base_url))
+            .header("x-forwarded-for", spoof_ip)
+            .json(&PairRedeemRequest {
+                pairing_code: "VXP2-FAKE-0000-0000-0000".into(),
+                device_id: "d1".into(),
+                device_name: "D1".into(),
+                platform: "macos".into(),
+                app_version: "0.20.0".into(),
+                allow_replace_active: false,
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    // 3. Expired buckets are pruned cleanly
+    let rl = voicex_sync_server::api::RateLimiter::new(2, Duration::from_millis(10));
+    assert!(rl.check("k1"));
+    assert!(rl.check("k2"));
+    assert_eq!(rl.bucket_count(), 2);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    rl.prune_expired(std::time::Instant::now());
+    assert_eq!(rl.bucket_count(), 0);
 }

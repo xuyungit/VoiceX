@@ -29,6 +29,10 @@ struct Cli {
     /// Log directory when invoked without a subcommand
     #[arg(long, env = "VOICEX_SYNC_LOG_DIR", default_value = "./logs")]
     log_dir: String,
+
+    /// Trust X-Forwarded-For / X-Real-IP headers (enable ONLY behind a trusted reverse proxy)
+    #[arg(long, env = "VOICEX_SYNC_TRUST_PROXY", default_value_t = false)]
+    trust_proxy_headers: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -50,6 +54,8 @@ struct ServeArgs {
     db: String,
     #[arg(long, env = "VOICEX_SYNC_LOG_DIR", default_value = "./logs")]
     log_dir: String,
+    #[arg(long, env = "VOICEX_SYNC_TRUST_PROXY", default_value_t = false)]
+    trust_proxy_headers: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -101,8 +107,10 @@ const TCP_KEEPALIVE: socket2::TcpKeepalive = socket2::TcpKeepalive::new()
 async fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Serve(args)) => run_server(&args.addr, &args.db, &args.log_dir).await,
-        None => run_server(&cli.addr, &cli.db, &cli.log_dir).await,
+        Some(Command::Serve(args)) => {
+            run_server(&args.addr, &args.db, &args.log_dir, args.trust_proxy_headers).await
+        }
+        None => run_server(&cli.addr, &cli.db, &cli.log_dir, cli.trust_proxy_headers).await,
         Some(Command::Admin { action }) => run_admin(action).await,
     }
 }
@@ -160,7 +168,12 @@ async fn run_admin(action: AdminCommand) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn run_server(addr_str: &str, db_path: &str, log_dir: &str) -> Result<(), anyhow::Error> {
+async fn run_server(
+    addr_str: &str,
+    db_path: &str,
+    log_dir: &str,
+    trust_proxy_headers: bool,
+) -> Result<(), anyhow::Error> {
     let addr: SocketAddr = addr_str.parse()?;
 
     fs::create_dir_all(log_dir)?;
@@ -183,7 +196,7 @@ async fn run_server(addr_str: &str, db_path: &str, log_dir: &str) -> Result<(), 
 
     let pool = db::open_pool(db_path).await?;
     let server_id = db::ensure_server_id(&pool).await?;
-    let state = AppState::new(pool, server_id);
+    let state = AppState::new(pool, server_id).with_trust_proxy(trust_proxy_headers);
     let app = build_app(state);
 
     info!("voicex-sync-server v2 listening on http://{addr}");
