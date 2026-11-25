@@ -108,8 +108,6 @@ const zhCN = {
     emptyApps: '该时间段内暂无应用注入记录',
     scopeAllDevices: '全部设备',
     scopeLocalOnly: '仅本机',
-    otherDevicesSynced: '其他设备最近同步',
-    syncTimeUnknown: '未同步',
     modelUsageSection: '模型用量',
     modelKindAsr: 'ASR 模型',
     modelKindLlm: 'LLM 模型',

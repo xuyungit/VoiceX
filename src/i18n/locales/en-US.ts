@@ -108,8 +108,6 @@ const enUS = {
     emptyApps: 'No app injection records in this period yet',
     scopeAllDevices: 'All devices',
     scopeLocalOnly: 'This device',
-    otherDevicesSynced: 'Other devices last synced',
-    syncTimeUnknown: 'Not synced',
     modelUsageSection: 'Model usage',
     modelKindAsr: 'ASR models',
     modelKindLlm: 'LLM models',

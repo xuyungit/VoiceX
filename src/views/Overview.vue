@@ -386,22 +386,6 @@ function selectOverviewScope(scope: OverviewScope) {
   void historyStore.setOverviewScope(scope)
 }
 
-const otherSyncedDevices = computed(() =>
-  historyStore.overviewDevices.filter(device => !device.isLocal),
-)
-
-function formatDeviceSyncTime(iso: string | null): string {
-  if (!iso) return t('overview.syncTimeUnknown')
-  const dt = new Date(iso)
-  if (Number.isNaN(dt.getTime())) return t('overview.syncTimeUnknown')
-  return new Intl.DateTimeFormat(locale.value, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(dt)
-}
-
 function formatPlatformLabel(platform: string): string {
   const lower = platform.trim().toLowerCase()
   if (lower === 'macos') return 'macOS'
@@ -460,7 +444,6 @@ async function refreshInsights() {
     historyStore.loadAppStats(historyStore.appUsageRange),
     historyStore.loadModelStats(historyStore.appUsageRange),
     historyStore.loadDailyActivity(),
-    historyStore.loadOverviewDevices(),
   ]
   if (historyStore.appUsageRange !== 'week') {
     tasks.push(historyStore.loadWeeklyTopApps())
@@ -546,20 +529,6 @@ onMounted(async () => {
           <span class="info-pill-label">{{ t('overview.syncStatus') }}</span>
           <span class="info-pill-value" :class="{ off: !syncActive }">{{ syncDisplay }}</span>
         </div>
-      </div>
-
-      <div
-        v-if="historyStore.overviewScope === 'all' && otherSyncedDevices.length > 0"
-        class="device-sync-strip"
-      >
-        <span class="device-sync-label">{{ t('overview.otherDevicesSynced') }}:</span>
-        <span
-          v-for="dev in otherSyncedDevices"
-          :key="dev.deviceId"
-          class="device-sync-item"
-        >
-          {{ dev.deviceName }} ({{ formatDeviceSyncTime(dev.lastSyncedAt) }})
-        </span>
       </div>
     </div>
 
@@ -1390,23 +1359,6 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-}
-
-.device-sync-strip {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px 10px;
-  font-size: var(--font-xs);
-  color: var(--color-text-tertiary);
-}
-
-.device-sync-label {
-  color: var(--color-text-secondary);
-}
-
-.device-sync-item {
-  font-variant-numeric: tabular-nums;
 }
 
 .platform-tag {
