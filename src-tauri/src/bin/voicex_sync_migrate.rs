@@ -9,20 +9,29 @@
 
 use std::path::PathBuf;
 use voicex_lib::sync_v2::migrate::{
-    run_migration, verify_server_v2_replay, DeviceMigrationInput, MigrationConfig,
+    run_forward_repair, run_migration, verify_server_v2_replay, DeviceMigrationInput,
+    ForwardRepairConfig, MigrationConfig,
 };
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: voicex-sync-migrate \\
-  --server-v1 <path> \\
-  --out-server-v2 <path> \\
-  [--device \"<in_db>|<out_db>[|<flags>]\"] (repeatable; flags: stats_only,history,edits,import_edits) \\
-  [--server-url <url>] \\
-  [--label <account_label>] \\
-  [--recovery-key <VXK2-...>] \\
-  [--out-recovery-key <path>] (required when generating a new recovery key; written mode 0600) \\
-  [--verify-replay]"
+        "Usage:
+  1) Full v1 -> v2 migration:
+     voicex-sync-migrate \\
+       --server-v1 <path> \\
+       --out-server-v2 <path> \\
+       [--device \"<in_db>|<out_db>[|<flags>]\"] (flags: stats_only,history,edits,import_edits) \\
+       [--server-url <url>] [--label <account_label>] \\
+       [--recovery-key <VXK2-...>] [--out-recovery-key <path>] [--verify-replay]
+
+  2) Forward-repair an already-cutover v2 device DB:
+     voicex-sync-migrate --repair-device \\
+       --server-v2 <path> \\
+       --in-device-db <path> \\
+       --out-device-db <path> \\
+       --recovery-key-file <path> \\
+       [--v1-device-db <path> --v1-server-db <path> --initial-v2-device-db <path>] \\
+       [--replay-history]"
     );
     std::process::exit(2);
 }
@@ -72,10 +81,89 @@ fn parse_device_arg(raw: &str) -> Result<DeviceMigrationInput, String> {
     })
 }
 
+fn run_repair_cli(args: &[String]) {
+    let mut server_v2_db: Option<PathBuf> = None;
+    let mut in_device_db: Option<PathBuf> = None;
+    let mut out_device_db: Option<PathBuf> = None;
+    let mut recovery_key_file: Option<PathBuf> = None;
+    let mut v1_device_db: Option<PathBuf> = None;
+    let mut v1_server_db: Option<PathBuf> = None;
+    let mut initial_v2_device_db: Option<PathBuf> = None;
+    let mut replay_history = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--repair-device" => {}
+            "--server-v2" => {
+                i += 1;
+                server_v2_db = args.get(i).map(PathBuf::from);
+            }
+            "--in-device-db" => {
+                i += 1;
+                in_device_db = args.get(i).map(PathBuf::from);
+            }
+            "--out-device-db" => {
+                i += 1;
+                out_device_db = args.get(i).map(PathBuf::from);
+            }
+            "--recovery-key-file" => {
+                i += 1;
+                recovery_key_file = args.get(i).map(PathBuf::from);
+            }
+            "--v1-device-db" => {
+                i += 1;
+                v1_device_db = args.get(i).map(PathBuf::from);
+            }
+            "--v1-server-db" => {
+                i += 1;
+                v1_server_db = args.get(i).map(PathBuf::from);
+            }
+            "--initial-v2-device-db" => {
+                i += 1;
+                initial_v2_device_db = args.get(i).map(PathBuf::from);
+            }
+            "--replay-history" => {
+                replay_history = true;
+            }
+            other => {
+                eprintln!("unknown argument: {other}");
+                usage();
+            }
+        }
+        i += 1;
+    }
+
+    let cfg = ForwardRepairConfig {
+        server_v2_db: server_v2_db.unwrap_or_else(|| usage()),
+        in_device_db: in_device_db.unwrap_or_else(|| usage()),
+        out_device_db: out_device_db.unwrap_or_else(|| usage()),
+        recovery_key_file: recovery_key_file.unwrap_or_else(|| usage()),
+        v1_device_db,
+        v1_server_db,
+        initial_v2_device_db,
+        replay_history_within_retention: replay_history,
+    };
+
+    match run_forward_repair(&cfg) {
+        Ok(report) => {
+            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+        }
+        Err(err) => {
+            eprintln!("Forward repair failed: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         usage();
+    }
+    if args.iter().any(|a| a == "--repair-device") {
+        run_repair_cli(&args);
+        return;
     }
 
     let mut server_v1_db: Option<PathBuf> = None;

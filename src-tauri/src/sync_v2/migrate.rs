@@ -29,9 +29,10 @@ use crate::sync_v2::payloads::{
     PAYLOAD_SCHEMA_V1,
 };
 use crate::sync_v2::store::{
-    apply_remote_history_op_tx, apply_remote_stats_daily_month_tx, apply_remote_stats_totals_tx,
-    get_overview_usage_stats_in, init_schema, seed_all_legacy_local_edits_tx, upsert_sync_space_tx,
-    OverviewScope,
+    active_space_in, apply_remote_history_op_tx, apply_remote_stats_daily_month_tx,
+    apply_remote_stats_totals_tx, bump_local_stats_shard_tx, get_overview_usage_stats_in,
+    init_schema, seed_all_legacy_local_edits_tx, upsert_sync_space_tx, OverviewScope,
+    RemoteApplyOutcome,
 };
 
 #[derive(Debug, Clone)]
@@ -1915,6 +1916,521 @@ pub fn verify_server_v2_replay(
     })
 }
 
+/// Configuration for idempotent forward-repair of an already-cutover live v2 device DB
+/// (M1 net lifetime baseline delta + M4/M5 migrated edit versions + N3 180-day history backfill).
+#[derive(Debug, Clone)]
+pub struct ForwardRepairConfig {
+    pub server_v2_db: PathBuf,
+    pub in_device_db: PathBuf,
+    pub out_device_db: PathBuf,
+    pub recovery_key_file: PathBuf,
+    pub v1_device_db: Option<PathBuf>,
+    pub v1_server_db: Option<PathBuf>,
+    pub initial_v2_device_db: Option<PathBuf>,
+    pub replay_history_within_retention: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRepairSnapshot {
+    pub local_recording_count: i64,
+    pub local_characters: i64,
+    pub local_duration_ms: i64,
+    pub local_llm_invoked: i64,
+    pub history_record_count: i64,
+    pub oldest_history_timestamp: Option<String>,
+    pub newest_history_timestamp: Option<String>,
+    pub edited_text_count: i64,
+    pub edit_versions_count: i64,
+    pub edit_conflict_count: i64,
+    pub tombstone_count: i64,
+    pub totals_local_revision: i64,
+    pub totals_acked_revision: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardRepairReport {
+    pub space_id: String,
+    pub device_id: String,
+    pub text_retention_days: u32,
+    pub baseline_repair_already_done: bool,
+    pub baseline_delta_recordings: i64,
+    pub baseline_delta_characters: i64,
+    pub baseline_delta_duration_ms: i64,
+    pub baseline_delta_llm_invoked: i64,
+    pub edits_envelopes_replayed: usize,
+    pub history_envelopes_replayed: usize,
+    pub history_records_backfilled: usize,
+    pub legacy_private_edits_seeded: usize,
+    pub deleted_ids_resurrected: i64,
+    pub translate_read_leaked: i64,
+    pub before: DeviceRepairSnapshot,
+    pub after: DeviceRepairSnapshot,
+}
+
+fn snapshot_device_db(conn: &Connection, space_id: &str, device_id: &str) -> Result<DeviceRepairSnapshot, StorageError> {
+    let (local_recording_count, local_characters, local_duration_ms, local_llm_invoked): (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT total_recording_count, total_characters, total_duration_ms, llm_correction_count
+             FROM device_usage_stats WHERE device_id = ?1",
+            params![device_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(sql_err)?
+        .unwrap_or((0, 0, 0, 0));
+    let history_record_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM history_record", [], |r| r.get(0))
+        .map_err(sql_err)?;
+    let (oldest_history_timestamp, newest_history_timestamp): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT MIN(timestamp), MAX(timestamp) FROM history_record",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(sql_err)?;
+    let edited_text_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM history_record WHERE edited_text IS NOT NULL AND edited_text != ''",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    let edit_versions_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM history_edit_versions", [], |r| r.get(0))
+        .map_err(sql_err)?;
+    let edit_conflict_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM history_record WHERE COALESCE(has_edit_conflict, 0) != 0",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    let tombstone_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM history_tombstones", [], |r| r.get(0))
+        .map_err(sql_err)?;
+    let (totals_local_revision, totals_acked_revision): (i64, i64) = conn
+        .query_row(
+            "SELECT local_revision, acked_revision FROM sync_stats_shards
+             WHERE space_id = ?1 AND device_id = ?2 AND shard_key = 'totals'",
+            params![space_id, device_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(sql_err)?
+        .unwrap_or((0, 0));
+
+    Ok(DeviceRepairSnapshot {
+        local_recording_count,
+        local_characters,
+        local_duration_ms,
+        local_llm_invoked,
+        history_record_count,
+        oldest_history_timestamp,
+        newest_history_timestamp,
+        edited_text_count,
+        edit_versions_count,
+        edit_conflict_count,
+        tombstone_count,
+        totals_local_revision,
+        totals_acked_revision,
+    })
+}
+
+/// Idempotently forward-repair an already-cutover v2 device DB copy without losing
+/// post-cutover dictations, edits, or outbox ops.
+pub fn run_forward_repair(cfg: &ForwardRepairConfig) -> Result<ForwardRepairReport, StorageError> {
+    let recovery_key = std::fs::read_to_string(&cfg.recovery_key_file)
+        .map_err(|e| StorageError::FileOpFailed(format!("{}: {e}", cfg.recovery_key_file.display())))?;
+    let master_key = MasterKey::from_recovery_key(recovery_key.trim())
+        .map_err(|e| StorageError::InvalidInput(e.to_string()))?;
+
+    let srv = open_ro(&cfg.server_v2_db)?;
+    let server_id: String = srv
+        .query_row("SELECT server_id FROM server_info WHERE id = 1", [], |r| r.get(0))
+        .map_err(sql_err)?;
+
+    // Copy input DB via SQLite online backup if out != in
+    if cfg.out_device_db != cfg.in_device_db {
+        if cfg.out_device_db.exists() {
+            std::fs::remove_file(&cfg.out_device_db)
+                .map_err(|e| StorageError::FileOpFailed(e.to_string()))?;
+        }
+        if let Some(parent) = cfg.out_device_db.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| StorageError::FileOpFailed(e.to_string()))?;
+            }
+        }
+        let src = open_ro(&cfg.in_device_db)?;
+        let mut dst = Connection::open(&cfg.out_device_db)
+            .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
+        let backup = rusqlite::backup::Backup::new(&src, &mut dst).map_err(sql_err)?;
+        backup
+            .run_to_completion(200, std::time::Duration::from_millis(5), None)
+            .map_err(sql_err)?;
+    }
+
+    let dev = Connection::open(&cfg.out_device_db)
+        .map_err(|e| StorageError::ConnectionFailed(e.to_string()))?;
+    init_schema(&dev)?;
+
+    let space = active_space_in(&dev)?
+        .ok_or_else(|| StorageError::InvalidInput("device DB has no active v2 sync space".into()))?;
+    let expected_space_id = selfhost_space_id(&server_id, &space.account_id);
+    if space.space_id != expected_space_id {
+        return Err(StorageError::InvalidInput(format!(
+            "space_id mismatch: device has {}, server has {}",
+            space.space_id, expected_space_id
+        )));
+    }
+    let expected_tag = master_key
+        .derive_key_check_tag(&space.account_id, &space.space_id)
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?;
+    let stored_tag: Option<String> = srv
+        .query_row(
+            "SELECT key_check_tag FROM accounts WHERE account_id = ?1",
+            params![space.account_id],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    if stored_tag.as_deref() != Some(expected_tag.as_str()) {
+        return Err(StorageError::InvalidInput(
+            "recovery key does not match server key_check_tag".into(),
+        ));
+    }
+
+    let before = snapshot_device_db(&dev, &space.space_id, &space.device_id)?;
+
+    let text_retention_days: u32 = dev
+        .query_row(
+            "SELECT value FROM user_config WHERE key = 'app_settings' LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sql_err)?
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v.get("textRetentionDays").and_then(Value::as_u64))
+        .map(|n| n as u32)
+        .unwrap_or(0);
+
+    // Compute exact net same-metric baseline delta if v1 backups + initial v2 DB were supplied
+    let mut delta_rec = 0i64;
+    let mut delta_chars = 0i64;
+    let mut delta_dur = 0i64;
+    let mut delta_llm = 0i64;
+
+    if let (Some(v1_dev_p), Some(v1_srv_p), Some(init_v2_p)) = (
+        cfg.v1_device_db.as_deref(),
+        cfg.v1_server_db.as_deref(),
+        cfg.initial_v2_device_db.as_deref(),
+    ) {
+        let v1_dev = open_ro(v1_dev_p)?;
+        let v1_srv = open_ro(v1_srv_p)?;
+        let init_v2 = open_ro(init_v2_p)?;
+
+        let (raw_rec, raw_chars, raw_dur, raw_llm): (i64, i64, i64, i64) = v1_dev
+            .query_row(
+                "SELECT total_recording_count, total_characters, total_duration_ms, llm_correction_count
+                 FROM device_usage_stats WHERE device_id = ?1",
+                params![space.device_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .map_err(sql_err)?;
+        let (init_rec, init_chars, init_dur, init_llm): (i64, i64, i64, i64) = init_v2
+            .query_row(
+                "SELECT total_recording_count, total_characters, total_duration_ms, llm_correction_count
+                 FROM device_usage_stats WHERE device_id = ?1",
+                params![space.device_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .map_err(sql_err)?;
+
+        // Deduct legacy `translate_read` rows attributed to this device from v1_local_raw
+        let mut tr_ids = BTreeSet::new();
+        let (mut tr_rec, mut tr_chars, mut tr_dur, mut tr_llm) = (0i64, 0i64, 0i64, 0i64);
+        {
+            let mut stmt = v1_srv
+                .prepare(
+                    "SELECT device_id, record_id, payload FROM events
+                     WHERE account_id = ?1 AND type = 'history.upsert'",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(params![space.account_id], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(sql_err)?;
+            for row in rows {
+                let (ev_dev, rid_opt, payload_str) = row.map_err(sql_err)?;
+                let Ok(v) = serde_json::from_str::<Value>(&payload_str) else {
+                    continue;
+                };
+                let rec = v.get("record").unwrap_or(&v);
+                if rec.get("mode").and_then(Value::as_str) != Some(HISTORY_MODE_TRANSLATE_READ) {
+                    continue;
+                }
+                let src_dev = rec
+                    .get("sourceDeviceId")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or(&ev_dev);
+                if src_dev != space.device_id {
+                    continue;
+                }
+                let rid = rid_opt
+                    .or_else(|| rec.get("id").and_then(Value::as_str).map(String::from))
+                    .unwrap_or_default();
+                if rid.is_empty() || !tr_ids.insert(rid) {
+                    continue;
+                }
+                let text = rec.get("text").and_then(Value::as_str).unwrap_or("");
+                let dur = rec.get("durationMs").and_then(Value::as_i64).unwrap_or(0).max(0);
+                let ai_corr = rec.get("aiCorrectionApplied").and_then(Value::as_bool).unwrap_or(false);
+                let llm = rec.get("llmInvoked").and_then(Value::as_bool).unwrap_or(ai_corr);
+                tr_rec += 1;
+                tr_chars += text.chars().count() as i64;
+                tr_dur += dur;
+                tr_llm += i64::from(llm);
+            }
+        }
+
+        delta_rec = ((raw_rec - tr_rec).max(0) - init_rec).max(0);
+        delta_chars = ((raw_chars - tr_chars).max(0) - init_chars).max(0);
+        delta_dur = ((raw_dur - tr_dur).max(0) - init_dur).max(0);
+        delta_llm = ((raw_llm - tr_llm).max(0) - init_llm).max(0);
+    }
+
+    let tx = dev.unchecked_transaction().map_err(sql_err)?;
+    let now = Utc::now().to_rfc3339();
+
+    // 1. Apply one-time idempotent baseline delta + bump `totals` shard so next sync publishes to server
+    let baseline_flag_key = format!("v2_forward_repair_baseline_v1:{}", space.space_id);
+    let baseline_already_done = tx
+        .query_row(
+            "SELECT value FROM user_config WHERE key = ?1 LIMIT 1",
+            params![baseline_flag_key],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sql_err)?
+        .as_deref()
+        == Some("1");
+
+    if !baseline_already_done && (delta_rec > 0 || delta_chars > 0 || delta_dur > 0 || delta_llm > 0)
+    {
+        tx.execute(
+            "UPDATE device_usage_stats
+             SET total_recording_count = total_recording_count + ?2,
+                 total_characters = total_characters + ?3,
+                 total_duration_ms = total_duration_ms + ?4,
+                 llm_correction_count = llm_correction_count + ?5,
+                 last_updated = ?6
+             WHERE device_id = ?1",
+            params![
+                space.device_id,
+                delta_rec,
+                delta_chars,
+                delta_dur,
+                delta_llm,
+                now
+            ],
+        )
+        .map_err(sql_err)?;
+        bump_local_stats_shard_tx(&tx, &space.space_id, &space.device_id, "totals")?;
+        tx.execute(
+            "INSERT INTO user_config (key, value) VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = '1'",
+            params![baseline_flag_key],
+        )
+        .map_err(sql_err)?;
+    }
+
+    // 2. Replay all active `edits` envelopes FIRST so the 69 migrated edits land with their
+    //    exact authoritative server edit_ids (`is_shared = 1`) and merge with post-cutover edits.
+    let mut edits_envelopes_replayed = 0usize;
+    let mut max_edits_seq = space.edits_cursor;
+    if space.scope_history && space.scope_edits {
+        let mut stmt = srv
+            .prepare(
+                "SELECT seq, op_id, object_id, revision, nonce, ciphertext
+                 FROM envelopes
+                 WHERE account_id = ?1 AND domain = 'edits' AND superseded = 0
+                 ORDER BY seq ASC",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![space.account_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(sql_err)?;
+        for row in rows {
+            let (env_seq, op_id, object_id, revision, nonce, ciphertext) = row.map_err(sql_err)?;
+            let plaintext = decrypt_envelope(
+                &master_key,
+                EnvelopeContext {
+                    account_id: &space.account_id,
+                    space_id: &space.space_id,
+                    domain: SyncDomain::Edits,
+                    object_id: &object_id,
+                    revision,
+                    op_id: &op_id,
+                },
+                &nonce,
+                &ciphertext,
+            )
+            .map_err(|e| StorageError::QueryFailed(format!("decrypt failed for {op_id}: {e}")))?;
+            let op: HistoryOpPayload = serde_json::from_slice(&plaintext)
+                .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
+            apply_remote_history_op_tx(&tx, &space.space_id, &space.device_id, &op, text_retention_days)?;
+            edits_envelopes_replayed += 1;
+            max_edits_seq = max_edits_seq.max(env_seq);
+        }
+    }
+
+    // 3. Optionally replay all active `history` envelopes within `textRetentionDays` (N3)
+    let mut history_envelopes_replayed = 0usize;
+    let mut history_records_backfilled = 0usize;
+    let mut max_history_seq = space.history_cursor;
+    if cfg.replay_history_within_retention && space.scope_history {
+        let mut stmt = srv
+            .prepare(
+                "SELECT seq, op_id, object_id, revision, nonce, ciphertext
+                 FROM envelopes
+                 WHERE account_id = ?1 AND domain = 'history' AND superseded = 0
+                 ORDER BY seq ASC",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![space.account_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
+            })
+            .map_err(sql_err)?;
+        for row in rows {
+            let (env_seq, op_id, object_id, revision, nonce, ciphertext) = row.map_err(sql_err)?;
+            let plaintext = decrypt_envelope(
+                &master_key,
+                EnvelopeContext {
+                    account_id: &space.account_id,
+                    space_id: &space.space_id,
+                    domain: SyncDomain::History,
+                    object_id: &object_id,
+                    revision,
+                    op_id: &op_id,
+                },
+                &nonce,
+                &ciphertext,
+            )
+            .map_err(|e| StorageError::QueryFailed(format!("decrypt failed for {op_id}: {e}")))?;
+            let op: HistoryOpPayload = serde_json::from_slice(&plaintext)
+                .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
+            let outcome = apply_remote_history_op_tx(
+                &tx,
+                &space.space_id,
+                &space.device_id,
+                &op,
+                text_retention_days,
+            )?;
+            history_envelopes_replayed += 1;
+            if matches!(op, HistoryOpPayload::Create(_)) && outcome == RemoteApplyOutcome::Applied {
+                history_records_backfilled += 1;
+            }
+            max_history_seq = max_history_seq.max(env_seq);
+        }
+    }
+
+    // 4. Seed any remaining unimported local legacy edits as private (`is_shared = 0`)
+    let legacy_private_edits_seeded = seed_all_legacy_local_edits_tx(&tx)?;
+
+    // 5. Align `sync_devices.last_synced_at` with server `devices.last_seen_at` (N1)
+    {
+        let mut stmt = srv
+            .prepare("SELECT device_id, last_seen_at FROM devices WHERE account_id = ?1")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![space.account_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .map_err(sql_err)?;
+        for row in rows {
+            let (d_id, last_seen) = row.map_err(sql_err)?;
+            tx.execute(
+                "UPDATE sync_devices SET last_synced_at = ?3, updated_at = ?4
+                 WHERE space_id = ?1 AND device_id = ?2",
+                params![space.space_id, d_id, last_seen, now],
+            )
+            .map_err(sql_err)?;
+        }
+    }
+
+    tx.execute(
+        "UPDATE sync_spaces
+         SET history_cursor = MAX(history_cursor, ?2),
+             edits_cursor = MAX(edits_cursor, ?3),
+             updated_at = ?4
+         WHERE space_id = ?1",
+        params![space.space_id, max_history_seq, max_edits_seq, now],
+    )
+    .map_err(sql_err)?;
+    tx.commit().map_err(sql_err)?;
+
+    let deleted_ids_resurrected: i64 = dev
+        .query_row(
+            "SELECT COUNT(*) FROM history_record h
+             JOIN history_tombstones t ON t.record_id = h.id AND t.space_id = ?1",
+            params![space.space_id],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    let translate_read_leaked: i64 = dev
+        .query_row(
+            "SELECT COUNT(*) FROM history_record WHERE mode = ?1 AND sync_eligible = 1",
+            params![HISTORY_MODE_TRANSLATE_READ],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+    let after = snapshot_device_db(&dev, &space.space_id, &space.device_id)?;
+
+    Ok(ForwardRepairReport {
+        space_id: space.space_id,
+        device_id: space.device_id,
+        text_retention_days,
+        baseline_repair_already_done: baseline_already_done,
+        baseline_delta_recordings: if baseline_already_done { 0 } else { delta_rec },
+        baseline_delta_characters: if baseline_already_done { 0 } else { delta_chars },
+        baseline_delta_duration_ms: if baseline_already_done { 0 } else { delta_dur },
+        baseline_delta_llm_invoked: if baseline_already_done { 0 } else { delta_llm },
+        edits_envelopes_replayed,
+        history_envelopes_replayed,
+        history_records_backfilled,
+        legacy_private_edits_seeded,
+        deleted_ids_resurrected,
+        translate_read_leaked,
+        before,
+        after,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2244,5 +2760,215 @@ mod tests {
             )
             .unwrap();
         assert_eq!(b_edit, ("win-edit".to_string(), 0));
+    }
+
+    #[test]
+    fn forward_repair_is_idempotent_and_restores_baseline_edits_and_retention_history() {
+        let dir = TempDir::new().unwrap();
+        let srv_v1 = dir.path().join("srv-v1.db");
+        let srv_v2 = dir.path().join("srv-v2.db");
+        let dev_a_v1 = dir.path().join("dev-a-v1.db");
+        let dev_a_init_v2 = dir.path().join("dev-a-init-v2.db");
+        let dev_a_live = dir.path().join("dev-a-live.db");
+        let dev_a_run1 = dir.path().join("dev-a-run1.db");
+        let dev_a_run2 = dir.path().join("dev-a-run2.db");
+        let key_file = dir.path().join("recovery-key.secret");
+
+        create_v1_server_fixture(&srv_v1);
+        let recent_ts = (Utc::now() - chrono::Duration::days(10)).to_rfc3339();
+        {
+            // Refresh timestamps of r-shared-1 and r-server-only so they fall inside 180d retention,
+            // and add an ancient >180d record that MUST NOT be backfilled.
+            let s1 = Connection::open(&srv_v1).unwrap();
+            let recent_shared = format!(
+                r#"{{"id":"r-shared-1","sourceDeviceId":"dev-a","timestamp":"{recent_ts}","text":"1234567890","durationMs":1000,"aiCorrectionApplied":true,"llmInvoked":true,"mode":"assistant_hands_free","isFinal":true,"errorCode":0}}"#
+            );
+            let recent_srv_only = format!(
+                r#"{{"id":"r-server-only","sourceDeviceId":"dev-a","timestamp":"{recent_ts}","text":"abcdefghij","durationMs":2000,"aiCorrectionApplied":false,"llmInvoked":true,"mode":"assistant_hands_free","isFinal":true,"errorCode":0}}"#
+            );
+            s1.execute(
+                "UPDATE events SET payload = ?1 WHERE event_id = 'ev-1'",
+                params![recent_shared],
+            )
+            .unwrap();
+            s1.execute(
+                "UPDATE events SET payload = ?1 WHERE event_id = 'ev-2'",
+                params![recent_srv_only],
+            )
+            .unwrap();
+            s1.execute(
+                "INSERT INTO events (account_id, event_id, device_id, type, record_id, payload, created_at)
+                 VALUES ('acc-1', 'ev-ancient', 'dev-a', 'history.upsert', 'r-ancient',
+                 '{\"id\":\"r-ancient\",\"sourceDeviceId\":\"dev-a\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"text\":\"old\",\"durationMs\":300,\"aiCorrectionApplied\":false,\"llmInvoked\":false,\"mode\":\"assistant_hands_free\",\"isFinal\":true,\"errorCode\":0}',
+                 '2020-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+        {
+            let ca = create_v1_device_fixture(&dev_a_v1, "dev-a");
+            // Local v1 raw = 10 recs, 60 chars, 9000 ms, 4 llm (includes 1 translate_read: 1 rec, 10 chars, 0 ms, 1 llm)
+            // => same-metric net v1 target = 9 recs, 50 chars, 9000 ms, 3 llm.
+            ca.execute(
+                "INSERT INTO device_usage_stats (device_id, total_recording_count, total_characters, total_duration_ms, llm_correction_count)
+                 VALUES ('dev-a', 10, 60, 9000, 4)",
+                [],
+            )
+            .unwrap();
+            ca.execute(
+                "INSERT INTO user_config (key, value) VALUES ('app_settings', '{\"textRetentionDays\":180}')",
+                [],
+            )
+            .unwrap();
+            ca.execute(
+                "INSERT INTO history_record (id, timestamp, text, mode, duration_ms, source_device_id, edited_text, edit_source, edited_at)
+                 VALUES ('r-shared-1', ?1, '1234567890', 'assistant_hands_free', 1000, 'dev-a', 'edited-shared', 'manual', ?1)",
+                params![recent_ts],
+            )
+            .unwrap();
+            ca.execute(
+                "INSERT INTO history_record (id, timestamp, text, mode, duration_ms, source_device_id, edited_text, edit_source, edited_at)
+                 VALUES ('r-local-private', ?1, 'secret', 'assistant_hands_free', 500, 'dev-a', 'private-edit', 'manual', ?1)",
+                params![recent_ts],
+            )
+            .unwrap();
+        }
+
+        let outcome = run_migration(&MigrationConfig {
+            server_v1_db: srv_v1.clone(),
+            out_server_v2_db: srv_v2.clone(),
+            device_inputs: vec![DeviceMigrationInput {
+                db_path: dev_a_v1.clone(),
+                out_db_path: dev_a_init_v2.clone(),
+                scope_history: true,
+                scope_edits: true,
+                import_existing_edits: true,
+            }],
+            server_url: "http://127.0.0.1:8787".into(),
+            account_label: "test".into(),
+            recovery_key: None,
+        })
+        .unwrap();
+        std::fs::write(&key_file, &outcome.recovery_key).unwrap();
+
+        // Simulate pre-fix cutover state on initial_v2 (dropped baseline by 3 recs / 20 chars / 4000 ms / 1 llm)
+        // and simulate live device having +2 post-cutover dictations, missing edit versions, missing r-server-only,
+        // and stale sync_devices.last_synced_at.
+        {
+            let init_conn = Connection::open(&dev_a_init_v2).unwrap();
+            init_conn
+                .execute(
+                    "UPDATE device_usage_stats
+                     SET total_recording_count = 6, total_characters = 30, total_duration_ms = 5000, llm_correction_count = 2
+                     WHERE device_id = 'dev-a'",
+                    [],
+                )
+                .unwrap();
+        }
+        std::fs::copy(&dev_a_init_v2, &dev_a_live).unwrap();
+        {
+            let live = Connection::open(&dev_a_live).unwrap();
+            live.execute(
+                "UPDATE device_usage_stats
+                 SET total_recording_count = 8, total_characters = 42, total_duration_ms = 6200, llm_correction_count = 3
+                 WHERE device_id = 'dev-a'",
+                [],
+            )
+            .unwrap();
+            live.execute(
+                "UPDATE sync_stats_shards SET local_revision = 5, acked_revision = 5
+                 WHERE device_id = 'dev-a' AND shard_key = 'totals'",
+                [],
+            )
+            .unwrap();
+            live.execute("DELETE FROM history_edit_versions", []).unwrap();
+            live.execute(
+                "UPDATE history_record SET active_edit_id = NULL WHERE id IN ('r-shared-1', 'r-local-private')",
+                [],
+            )
+            .unwrap();
+            live.execute("DELETE FROM history_record WHERE id = 'r-server-only'", [])
+                .unwrap();
+            live.execute(
+                "UPDATE sync_devices SET last_synced_at = '2099-01-01T00:00:00Z' WHERE device_id = 'dev-b'",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Run 1: must apply exact net baseline delta (+3 recs, +20 chars, +4000 ms, +1 llm),
+        // preserve post-cutover dictations (8+3=11, 42+20=62, 6200+4000=10200, 3+1=4),
+        // bump totals revision (5 -> 6), restore r-shared-1 edit version (is_shared=1),
+        // seed r-local-private edit (is_shared=0), backfill r-server-only, and skip r-ancient.
+        let r1 = run_forward_repair(&ForwardRepairConfig {
+            server_v2_db: srv_v2.clone(),
+            in_device_db: dev_a_live.clone(),
+            out_device_db: dev_a_run1.clone(),
+            recovery_key_file: key_file.clone(),
+            v1_device_db: Some(dev_a_v1.clone()),
+            v1_server_db: Some(srv_v1.clone()),
+            initial_v2_device_db: Some(dev_a_init_v2.clone()),
+            replay_history_within_retention: true,
+        })
+        .unwrap();
+
+        assert!(!r1.baseline_repair_already_done);
+        assert_eq!(r1.baseline_delta_recordings, 3);
+        assert_eq!(r1.baseline_delta_characters, 20);
+        assert_eq!(r1.baseline_delta_duration_ms, 4000);
+        assert_eq!(r1.baseline_delta_llm_invoked, 1);
+        assert_eq!(r1.after.local_recording_count, 11);
+        assert_eq!(r1.after.local_characters, 62);
+        assert_eq!(r1.after.local_duration_ms, 10200);
+        assert_eq!(r1.after.local_llm_invoked, 4);
+        assert_eq!(r1.after.totals_local_revision, 6);
+        assert_eq!(r1.after.totals_acked_revision, 5);
+        assert_eq!(r1.history_records_backfilled, 1);
+        assert_eq!(r1.legacy_private_edits_seeded, 1);
+        assert_eq!(r1.after.edit_versions_count, 2);
+        assert_eq!(r1.after.edit_conflict_count, 0);
+        assert_eq!(r1.deleted_ids_resurrected, 0);
+        assert_eq!(r1.translate_read_leaked, 0);
+
+        let c1 = open_ro(&dev_a_run1).unwrap();
+        let has_srv_only: bool = c1
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM history_record WHERE id = 'r-server-only')",
+                [],
+                |r| Ok(r.get::<_, i32>(0)? != 0),
+            )
+            .unwrap();
+        let has_ancient: bool = c1
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM history_record WHERE id = 'r-ancient')",
+                [],
+                |r| Ok(r.get::<_, i32>(0)? != 0),
+            )
+            .unwrap();
+        assert!(has_srv_only);
+        assert!(!has_ancient);
+
+        // Run 2 (idempotency): zero baseline delta, zero backfill, identical before == after.
+        let r2 = run_forward_repair(&ForwardRepairConfig {
+            server_v2_db: srv_v2,
+            in_device_db: dev_a_run1,
+            out_device_db: dev_a_run2,
+            recovery_key_file: key_file,
+            v1_device_db: Some(dev_a_v1),
+            v1_server_db: Some(srv_v1),
+            initial_v2_device_db: Some(dev_a_init_v2),
+            replay_history_within_retention: true,
+        })
+        .unwrap();
+
+        assert!(r2.baseline_repair_already_done);
+        assert_eq!(r2.baseline_delta_recordings, 0);
+        assert_eq!(r2.baseline_delta_characters, 0);
+        assert_eq!(r2.baseline_delta_duration_ms, 0);
+        assert_eq!(r2.baseline_delta_llm_invoked, 0);
+        assert_eq!(r2.history_records_backfilled, 0);
+        assert_eq!(r2.legacy_private_edits_seeded, 0);
+        assert_eq!(r2.before, r2.after);
+        assert_eq!(r2.after, r1.after);
     }
 }
