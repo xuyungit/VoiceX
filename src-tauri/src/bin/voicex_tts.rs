@@ -392,7 +392,16 @@ fn write_output(
     let mut temporary = tempfile::Builder::new()
         .prefix(".voicex-tts-")
         .suffix(".part")
-        .tempfile_in(parent)
+        .make_in(parent, |path| {
+            let mut options = File::options();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(path)
+        })
         .map_err(|err| {
             format!(
                 "failed to create temporary MP3 in {}: {err}",
@@ -407,9 +416,11 @@ fn write_output(
             .map_err(|err| format!("failed to flush output MP3: {err}"))?;
         bytes
     };
-    temporary
-        .persist(output)
+    // Use std's rename, which supports replacing a concurrently opened target on Windows.
+    let mut path = temporary.into_temp_path();
+    fs::rename(&path, output)
         .map_err(|err| format!("failed to publish output MP3 {}: {err}", output.display()))?;
+    path.disable_cleanup(true);
     Ok(total_bytes)
 }
 

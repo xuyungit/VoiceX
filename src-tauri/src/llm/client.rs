@@ -340,7 +340,7 @@ impl LLMClient {
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
-            .and_then(parse_retry_after);
+            .and_then(|value| parse_retry_after(value, chrono::Utc::now()));
         let bytes = response.bytes().await.map_err(|e| {
             log::info!(
                 "LLM body read failed after {}ms (headers={}ms): {}",
@@ -458,17 +458,16 @@ impl LLMError {
     }
 }
 
-fn parse_retry_after(value: &str) -> Option<std::time::Duration> {
+fn parse_retry_after(
+    value: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<std::time::Duration> {
     let value = value.trim();
     if let Ok(seconds) = value.parse::<u64>() {
         return Some(std::time::Duration::from_secs(seconds));
     }
     let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
-    Some(
-        (date.with_timezone(&chrono::Utc) - chrono::Utc::now())
-            .to_std()
-            .unwrap_or_default(),
-    )
+    Some((date.with_timezone(&chrono::Utc) - now).to_std().unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1061,18 +1060,21 @@ mod tests {
 
     #[test]
     fn retry_after_accepts_seconds_and_http_dates() {
+        use chrono::{TimeZone, Utc};
         use std::time::Duration;
+        let now = Utc.with_ymd_and_hms(2015, 10, 21, 7, 28, 0).unwrap();
         assert_eq!(
-            super::parse_retry_after(" 12 "),
+            super::parse_retry_after(" 12 ", now),
             Some(Duration::from_secs(12))
         );
-        assert_eq!(super::parse_retry_after("-1"), None);
-        assert_eq!(super::parse_retry_after("invalid"), None);
-        let future = chrono::Utc::now() + chrono::Duration::seconds(30);
-        let delay = super::parse_retry_after(&future.to_rfc2822()).unwrap();
-        assert!(delay > Duration::from_secs(27) && delay <= Duration::from_secs(30));
+        assert_eq!(super::parse_retry_after("-1", now), None);
+        assert_eq!(super::parse_retry_after("invalid", now), None);
         assert_eq!(
-            super::parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"),
+            super::parse_retry_after("Wed, 21 Oct 2015 07:28:30 GMT", now),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            super::parse_retry_after("Wed, 21 Oct 2015 07:27:59 GMT", now),
             Some(Duration::ZERO)
         );
     }

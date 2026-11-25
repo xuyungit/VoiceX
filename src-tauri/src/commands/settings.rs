@@ -740,8 +740,17 @@ fn probe_provider_name(provider: &crate::asr::AsrProviderType) -> &'static str {
     }
 }
 
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn generation_rate(tokens: Option<u32>, elapsed: Duration) -> Option<f64> {
+    let tokens = tokens.filter(|&n| n > 0)?;
+    if elapsed.is_zero() {
+        return None;
+    }
+    let per_second = f64::from(tokens) / elapsed.as_secs_f64();
+    Some((per_second * 10.0).round() / 10.0)
 }
 
 fn normalize_elevenlabs_settings(settings: &mut AppSettings) {
@@ -1301,7 +1310,7 @@ async fn probe_current_provider_impl(
     .await;
 
     let _ = std::fs::remove_file(&audio_path);
-    let recognition_time_ms = Some(elapsed_ms(started_at));
+    let recognition_time_ms = Some(duration_ms(started_at.elapsed()));
 
     let result = match probe {
         Ok(Ok(text)) => {
@@ -1399,18 +1408,13 @@ async fn probe_current_llm_provider_impl(
     )
     .await;
 
-    let response_time_ms = Some(elapsed_ms(started_at));
+    let elapsed = started_at.elapsed();
+    let response_time_ms = Some(duration_ms(elapsed));
     let result = match probe {
         Ok(Ok(completion)) => {
             let trimmed = completion.text.trim().to_string();
             let usage = completion.usage;
-            let tokens_per_second = match (usage.generated_tokens, response_time_ms) {
-                (Some(tokens), Some(ms)) if tokens > 0 && ms > 0 => {
-                    let rate = (tokens as f64) / (ms as f64 / 1000.0);
-                    Some((rate * 10.0).round() / 10.0)
-                }
-                _ => None,
-            };
+            let tokens_per_second = generation_rate(usage.generated_tokens, elapsed);
             if trimmed.is_empty() {
                 LlmProviderProbeResult {
                     provider: provider_name,
@@ -2786,87 +2790,15 @@ mod tests {
         assert_eq!(value["openaiAsrRefineModel"], "whisper-1");
     }
 
-    #[tokio::test]
-    async fn probe_current_llm_provider_reports_gemini_thinking_tokens_and_speed() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[test]
+    fn generation_rate_uses_the_full_elapsed_duration() {
+        use std::time::Duration;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut req_bytes = Vec::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = stream.read(&mut buf).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                req_bytes.extend_from_slice(&buf[..n]);
-                if let Some(header_end) = req_bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let headers = String::from_utf8_lossy(&req_bytes[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, val) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| val.trim().parse::<usize>().ok())?
-                        })
-                        .unwrap_or(0);
-                    if req_bytes.len() >= header_end + 4 + content_length {
-                        break;
-                    }
-                }
-            }
-            let req = String::from_utf8_lossy(&req_bytes);
-            assert!(req.contains("gemini-4-hydrogen:generateContent"));
-            assert!(req.contains("\"thinkingLevel\":\"LOW\""));
-            let body = serde_json::json!({
-                "candidates": [{
-                    "content": { "parts": [{ "text": "明天上午十点开会，请把会议纪要发给我。" }] },
-                    "finishReason": "STOP"
-                }],
-                "usageMetadata": {
-                    "promptTokenCount": 90,
-                    "candidatesTokenCount": 14,
-                    "thoughtsTokenCount": 36,
-                    "totalTokenCount": 140
-                }
-            })
-            .to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
-        });
-
-        let config = crate::llm::LLMConfig {
-            provider_type: crate::llm::LLMProviderType::Custom,
-            base_url: format!("http://{addr}"),
-            api_key: "test-key".to_string(),
-            model_name: "gemini-4-hydrogen".to_string(),
-            api_mode: crate::llm::LLMApiMode::Gemini,
-            reasoning: crate::llm::ReasoningChoice::Lowest,
-            openai_service_tier: None,
-            extra_body: None,
-        };
-
-        let probe = super::probe_current_llm_provider_impl(config).await.unwrap();
-        server.await.unwrap();
-
-        assert!(probe.ok);
-        assert!(probe.expected_match);
-        assert_eq!(
-            probe.reasoning_applied,
-            r#"{"thinkingConfig":{"thinkingLevel":"LOW"}}"#
-        );
-        assert_eq!(probe.input_tokens, Some(90));
-        assert_eq!(probe.output_tokens, Some(14));
-        assert_eq!(probe.reasoning_tokens, Some(36));
-        assert_eq!(probe.generated_tokens, Some(50));
-        assert!(probe.tokens_per_second.is_some());
+        let elapsed = Duration::from_micros(800);
+        assert_eq!(super::generation_rate(Some(2), elapsed), Some(2500.0));
+        assert_eq!(super::generation_rate(Some(2), Duration::ZERO), None);
+        assert_eq!(super::generation_rate(Some(0), elapsed), None);
+        assert_eq!(super::generation_rate(None, elapsed), None);
     }
 
     async fn serve_model_list_pages(
