@@ -3,27 +3,35 @@ import { computed, onMounted, ref } from 'vue'
 import { NInput, NSwitch, NButton, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '../stores/settings'
-import { useSyncStore } from '../stores/sync'
+import { useSyncStore, type DeviceInviteResult } from '../stores/sync'
 import SettingsSection from '../components/settings/SettingsSection.vue'
 import SettingRow from '../components/settings/SettingRow.vue'
+
+type SetupMode = 'join' | 'setup'
 
 const settingsStore = useSettingsStore()
 const syncStore = useSyncStore()
 const message = useMessage()
 const { t, locale } = useI18n()
 
+const setupMode = ref<SetupMode>('join')
+const inviteCodeInput = ref('')
 const serverUrlInput = ref('')
 const pairingCodeInput = ref('')
 const recoveryKeyInput = ref('')
+const showEmergencyRecoveryInput = ref(false)
 const deviceNameInput = ref('')
 const initialScopeHistory = ref(true)
 const initialScopeEdits = ref(false)
+
 const pairingBusy = ref(false)
+const inviteBusy = ref(false)
 const syncBusy = ref(false)
 const importBusy = ref(false)
 const pairError = ref<string | null>(null)
 const generatedRecoveryKeyBanner = ref<string | null>(null)
 const revealedRecoveryKey = ref<string | null>(null)
+const activeInvite = ref<DeviceInviteResult | null>(null)
 
 const v2 = computed(() => syncStore.v2Status)
 const pendingTotal = computed(() => (v2.value.pendingOpsCount || 0) + (v2.value.pendingStatsCount || 0))
@@ -57,6 +65,16 @@ function formatTime(value: string | null) {
   })
 }
 
+function formatClock(value: string | null) {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return date.toLocaleTimeString(locale.value, {
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
 async function copyString(text: string) {
   try {
     await navigator.clipboard.writeText(text)
@@ -66,7 +84,31 @@ async function copyString(text: string) {
   }
 }
 
-async function handlePair() {
+async function handleJoinWithInvite() {
+  pairError.value = null
+  generatedRecoveryKeyBanner.value = null
+  if (!inviteCodeInput.value.trim() || !deviceNameInput.value.trim()) {
+    pairError.value = t('sync.statusBlocked')
+    return
+  }
+  pairingBusy.value = true
+  try {
+    await syncStore.joinV2WithInvite({
+      inviteCode: inviteCodeInput.value.trim(),
+      deviceName: deviceNameInput.value.trim(),
+      scopeHistory: initialScopeHistory.value,
+      scopeEdits: initialScopeHistory.value && initialScopeEdits.value,
+    })
+    inviteCodeInput.value = ''
+    message.success(t('sync.statusSynced'))
+  } catch (err) {
+    pairError.value = String(err)
+  } finally {
+    pairingBusy.value = false
+  }
+}
+
+async function handleFirstSetupPair() {
   pairError.value = null
   generatedRecoveryKeyBanner.value = null
   if (!serverUrlInput.value.trim() || !pairingCodeInput.value.trim() || !deviceNameInput.value.trim()) {
@@ -79,12 +121,15 @@ async function handlePair() {
       serverUrl: serverUrlInput.value.trim(),
       pairingCode: pairingCodeInput.value.trim(),
       deviceName: deviceNameInput.value.trim(),
-      recoveryKey: recoveryKeyInput.value.trim() || undefined,
+      recoveryKey: showEmergencyRecoveryInput.value && recoveryKeyInput.value.trim()
+        ? recoveryKeyInput.value.trim()
+        : undefined,
       scopeHistory: initialScopeHistory.value,
       scopeEdits: initialScopeHistory.value && initialScopeEdits.value,
     })
     pairingCodeInput.value = ''
     recoveryKeyInput.value = ''
+    showEmergencyRecoveryInput.value = false
     if (res.generatedNewRecoveryKey) {
       generatedRecoveryKeyBanner.value = res.recoveryKey
     }
@@ -93,6 +138,17 @@ async function handlePair() {
     pairError.value = String(err)
   } finally {
     pairingBusy.value = false
+  }
+}
+
+async function handleGenerateInvite() {
+  inviteBusy.value = true
+  try {
+    activeInvite.value = await syncStore.createV2DeviceInvite()
+  } catch (err) {
+    message.error(String(err))
+  } finally {
+    inviteBusy.value = false
   }
 }
 
@@ -160,6 +216,7 @@ async function handleDisconnect() {
     await syncStore.disconnectV2(false)
     revealedRecoveryKey.value = null
     generatedRecoveryKeyBanner.value = null
+    activeInvite.value = null
   } catch (err) {
     message.error(String(err))
   }
@@ -191,44 +248,137 @@ onMounted(async () => {
     <SettingsSection
       v-if="!v2.configured || v2.status === 'disabled' || v2.status === 'revoked'"
       :title="t('sync.v2SectionTitle')"
-      :help="t('sync.v2SectionSub')"
+      :help="setupMode === 'join' ? t('sync.modeJoinHint') : t('sync.modeSetupHint')"
     >
-      <SettingRow :label="t('sync.serverUrl')" :help="t('sync.serverUrlExample')">
-        <NInput v-model:value="serverUrlInput" placeholder="https://sync.example.com" />
-      </SettingRow>
+      <template #extra>
+        <div class="mode-switch" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            class="mode-switch-item"
+            :class="{ active: setupMode === 'join' }"
+            :aria-selected="setupMode === 'join'"
+            @click="setupMode = 'join'; pairError = null"
+          >
+            {{ t('sync.modeJoinExisting') }}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            class="mode-switch-item"
+            :class="{ active: setupMode === 'setup' }"
+            :aria-selected="setupMode === 'setup'"
+            @click="setupMode = 'setup'; pairError = null"
+          >
+            {{ t('sync.modeFirstSetup') }}
+          </button>
+        </div>
+      </template>
 
-      <SettingRow :label="t('sync.pairingCode')" :help="t('sync.pairingCodeNote')">
-        <NInput v-model:value="pairingCodeInput" :placeholder="t('sync.pairingCodePlaceholder')" />
-      </SettingRow>
+      <template v-if="setupMode === 'join'">
+        <SettingRow :label="t('sync.syncCode')" stacked>
+          <NInput
+            v-model:value="inviteCodeInput"
+            type="textarea"
+            :autosize="{ minRows: 2, maxRows: 4 }"
+            :placeholder="t('sync.syncCodePlaceholder')"
+          />
+        </SettingRow>
 
-      <SettingRow :label="t('sync.deviceName')" :help="t('sync.deviceNameNote')">
-        <NInput v-model:value="deviceNameInput" :placeholder="t('sync.deviceNamePlaceholder')" />
-      </SettingRow>
+        <SettingRow :label="t('sync.deviceName')" :help="t('sync.deviceNameNote')">
+          <NInput v-model:value="deviceNameInput" :placeholder="t('sync.deviceNamePlaceholder')" />
+        </SettingRow>
 
-      <SettingRow :label="t('sync.recoveryKey')" :help="t('sync.recoveryKeyPairNote')">
-        <NInput v-model:value="recoveryKeyInput" :placeholder="t('sync.recoveryKeyPlaceholder')" />
-      </SettingRow>
+        <SettingRow :label="t('sync.scopeHistoryLabel')" :help="t('sync.scopeHistoryNote')">
+          <NSwitch v-model:value="initialScopeHistory" />
+        </SettingRow>
 
-      <SettingRow :label="t('sync.scopeHistoryLabel')" :help="t('sync.scopeHistoryNote')">
-        <NSwitch v-model:value="initialScopeHistory" />
-      </SettingRow>
+        <SettingRow :label="t('sync.scopeEditsLabel')" :help="t('sync.scopeEditsNote')">
+          <NSwitch v-model:value="initialScopeEdits" :disabled="!initialScopeHistory" />
+        </SettingRow>
 
-      <SettingRow :label="t('sync.scopeEditsLabel')" :help="t('sync.scopeEditsNote')">
-        <NSwitch v-model:value="initialScopeEdits" :disabled="!initialScopeHistory" />
-      </SettingRow>
+        <SettingRow v-if="pairError" :label="t('sync.errorMessage')">
+          <div class="field-value error-text">{{ pairError }}</div>
+        </SettingRow>
 
-      <SettingRow v-if="pairError" :label="t('sync.errorMessage')">
-        <div class="field-value error-text">{{ pairError }}</div>
-      </SettingRow>
+        <SettingRow label="">
+          <NButton type="primary" :loading="pairingBusy" @click="handleJoinWithInvite">
+            {{ t('sync.joinSyncGroup') }}
+          </NButton>
+        </SettingRow>
+      </template>
 
-      <SettingRow label="">
-        <NButton type="primary" :loading="pairingBusy" @click="handlePair">
-          {{ t('sync.pairAndConnect') }}
-        </NButton>
-      </SettingRow>
+      <template v-else>
+        <SettingRow :label="t('sync.serverUrl')" :help="t('sync.serverUrlExample')">
+          <NInput v-model:value="serverUrlInput" placeholder="https://sync.example.com" />
+        </SettingRow>
+
+        <SettingRow :label="t('sync.pairingCode')" :help="t('sync.pairingCodeNote')">
+          <NInput v-model:value="pairingCodeInput" :placeholder="t('sync.pairingCodePlaceholder')" />
+        </SettingRow>
+
+        <SettingRow :label="t('sync.deviceName')" :help="t('sync.deviceNameNote')">
+          <NInput v-model:value="deviceNameInput" :placeholder="t('sync.deviceNamePlaceholder')" />
+        </SettingRow>
+
+        <SettingRow :label="t('sync.scopeHistoryLabel')" :help="t('sync.scopeHistoryNote')">
+          <NSwitch v-model:value="initialScopeHistory" />
+        </SettingRow>
+
+        <SettingRow :label="t('sync.scopeEditsLabel')" :help="t('sync.scopeEditsNote')">
+          <NSwitch v-model:value="initialScopeEdits" :disabled="!initialScopeHistory" />
+        </SettingRow>
+
+        <SettingRow v-if="showEmergencyRecoveryInput" :label="t('sync.recoveryKey')" :help="t('sync.recoveryKeyPairNote')">
+          <NInput v-model:value="recoveryKeyInput" :placeholder="t('sync.recoveryKeyPlaceholder')" />
+        </SettingRow>
+
+        <SettingRow v-if="pairError" :label="t('sync.errorMessage')">
+          <div class="field-value error-text">{{ pairError }}</div>
+        </SettingRow>
+
+        <SettingRow label="">
+          <div class="setup-footer-actions">
+            <button
+              type="button"
+              class="text-link-btn"
+              @click="showEmergencyRecoveryInput = !showEmergencyRecoveryInput"
+            >
+              {{ showEmergencyRecoveryInput ? t('sync.hideAdvancedRecovery') : t('sync.advancedRecoveryToggle') }}
+            </button>
+            <NButton type="primary" :loading="pairingBusy" @click="handleFirstSetupPair">
+              {{ t('sync.startSync') }}
+            </NButton>
+          </div>
+        </SettingRow>
+      </template>
     </SettingsSection>
 
     <template v-else>
+      <SettingsSection :title="t('sync.addDeviceSection')" :help="t('sync.addDeviceSectionSub')">
+        <SettingRow :label="t('sync.syncCode')">
+          <div class="recovery-actions">
+            <NButton type="primary" size="small" :loading="inviteBusy" @click="handleGenerateInvite">
+              {{ activeInvite ? t('sync.regenerateSyncCode') : t('sync.generateSyncCode') }}
+            </NButton>
+            <NButton
+              v-if="activeInvite"
+              size="small"
+              @click="copyString(activeInvite.inviteCode)"
+            >
+              {{ t('sync.copySyncCode') }}
+            </NButton>
+          </div>
+        </SettingRow>
+
+        <div v-if="activeInvite" class="invite-box">
+          <code class="monospace invite-code-text">{{ activeInvite.inviteCode }}</code>
+          <div class="invite-meta">
+            {{ t('sync.syncCodeExpiresNote', { time: formatClock(activeInvite.expiresAt) }) }}
+          </div>
+        </div>
+      </SettingsSection>
+
       <SettingsSection :title="t('sync.scopeSectionTitle')" :help="t('sync.scopeSectionSub')">
         <SettingRow :label="t('sync.scopeHistoryLabel')" :help="t('sync.scopeHistoryNote')">
           <NSwitch :value="v2.scopeHistory" @update:value="handleScopeHistoryChange" />
@@ -253,7 +403,7 @@ onMounted(async () => {
         </SettingRow>
       </SettingsSection>
 
-      <SettingsSection :title="t('sync.recoveryKeySection')">
+      <SettingsSection :title="t('sync.recoveryKeySection')" :help="t('sync.recoveryKeySectionSub')">
         <SettingRow :label="t('sync.recoveryKey')">
           <div class="recovery-actions">
             <code v-if="revealedRecoveryKey" class="monospace recovery-key-code">
@@ -321,6 +471,79 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.mode-switch {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  gap: 2px;
+}
+
+.mode-switch-item {
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-xs);
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.mode-switch-item.active {
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.setup-footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.text-link-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.text-link-btn:hover {
+  color: var(--color-text-secondary);
+}
+
+.invite-box {
+  padding: 12px 14px;
+  margin: 0 16px 14px;
+  border-radius: 8px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.invite-code-text {
+  word-break: break-all;
+  user-select: all;
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+
+.invite-meta {
+  font-size: var(--font-xs);
+  color: var(--color-text-tertiary);
+}
+
 .field-value {
   color: var(--color-text-secondary);
   font-size: var(--font-sm);

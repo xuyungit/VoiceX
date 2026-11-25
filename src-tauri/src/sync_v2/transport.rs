@@ -9,9 +9,10 @@ use std::pin::Pin;
 use std::time::Duration;
 use thiserror::Error;
 use voicex_sync_protocol::{
-    error_codes, AccountInfoResponse, ApiErrorBody, DeviceInfo, DeviceUpdateRequest,
-    PairRedeemRequest, PairRedeemResponse, PullEnvelopesResponse, PushEnvelopesRequest,
-    PushEnvelopesResponse, SyncDomain,
+    error_codes, AccountInfoResponse, ApiErrorBody, CreatePairingCodeRequest,
+    CreatePairingCodeResponse, DeviceInfo, DeviceUpdateRequest, PairRedeemRequest,
+    PairRedeemResponse, PullEnvelopesResponse, PushEnvelopesRequest, PushEnvelopesResponse,
+    SyncDomain,
 };
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -45,6 +46,12 @@ pub trait SyncTransport: Send + Sync {
         &'a self,
         req: &'a PairRedeemRequest,
     ) -> BoxFuture<'a, Result<PairRedeemResponse, TransportError>>;
+
+    fn create_pairing_code<'a>(
+        &'a self,
+        device_token: &'a str,
+        ttl_minutes: Option<i64>,
+    ) -> BoxFuture<'a, Result<CreatePairingCodeResponse, TransportError>>;
 
     fn get_account<'a>(
         &'a self,
@@ -186,6 +193,25 @@ impl SyncTransport for SelfHostTransport {
                 .client
                 .post(&url)
                 .json(req)
+                .send()
+                .await
+                .map_err(|e| TransportError::Network(e.to_string()))?;
+            parse_json_or_error(resp).await
+        })
+    }
+
+    fn create_pairing_code<'a>(
+        &'a self,
+        device_token: &'a str,
+        ttl_minutes: Option<i64>,
+    ) -> BoxFuture<'a, Result<CreatePairingCodeResponse, TransportError>> {
+        Box::pin(async move {
+            let url = format!("{}/v2/devices/pairing-code", self.base_url);
+            let resp = self
+                .client
+                .post(&url)
+                .bearer_auth(device_token)
+                .json(&CreatePairingCodeRequest { ttl_minutes })
                 .send()
                 .await
                 .map_err(|e| TransportError::Network(e.to_string()))?;

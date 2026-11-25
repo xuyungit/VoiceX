@@ -22,8 +22,9 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing::warn;
 use voicex_sync_protocol::{
-    error_codes, ApiErrorBody, DeviceUpdateRequest, NotifyEvent, PairRedeemRequest,
-    PushEnvelopesRequest, SyncDomain, MAX_PUSH_BODY_BYTES,
+    error_codes, ApiErrorBody, CreatePairingCodeRequest, CreatePairingCodeResponse,
+    DeviceUpdateRequest, NotifyEvent, PairRedeemRequest, PushEnvelopesRequest, SyncDomain,
+    MAX_PUSH_BODY_BYTES,
 };
 
 #[derive(Clone)]
@@ -143,6 +144,7 @@ impl IntoResponse for DbApiError {
 pub fn build_app(state: AppState) -> Router {
     let authed_v2 = Router::new()
         .route("/account", get(get_account))
+        .route("/devices/pairing-code", post(post_device_pairing_code))
         .route("/devices/:device_id", put(put_device))
         .route("/envelopes", post(post_envelopes).get(get_envelopes))
         .route("/subscribe", get(subscribe))
@@ -271,6 +273,22 @@ async fn get_account(
     db::get_account_info(&state.db, &state.server_id, &auth.account_id)
         .await
         .map(Json)
+}
+
+async fn post_device_pairing_code(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthedDevice>,
+    payload: Option<Json<CreatePairingCodeRequest>>,
+) -> Result<Json<CreatePairingCodeResponse>, DbApiError> {
+    let ttl_minutes = payload
+        .and_then(|Json(req)| req.ttl_minutes)
+        .unwrap_or(15)
+        .clamp(1, 60);
+    let created = db::create_pairing_code(&state.db, &auth.account_id, ttl_minutes).await?;
+    Ok(Json(CreatePairingCodeResponse {
+        pairing_code: created.pairing_code,
+        expires_at: created.expires_at,
+    }))
 }
 
 async fn put_device(

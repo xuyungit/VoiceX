@@ -44,6 +44,11 @@ export interface PairSuccessResult {
     generatedNewRecoveryKey: boolean
 }
 
+export interface DeviceInviteResult {
+    inviteCode: string
+    expiresAt: string
+}
+
 const emptyV2Status = (): SyncV2StatusSnapshot => ({
     configured: false,
     spaceId: null,
@@ -137,6 +142,26 @@ export const useSyncStore = defineStore('sync', () => {
         return res
     }
 
+    async function createV2DeviceInvite(): Promise<DeviceInviteResult> {
+        return await invoke<DeviceInviteResult>('sync_v2_create_device_invite')
+    }
+
+    async function joinV2WithInvite(params: {
+        inviteCode: string
+        deviceName: string
+        scopeHistory: boolean
+        scopeEdits: boolean
+    }): Promise<PairSuccessResult> {
+        const res = await invoke<PairSuccessResult>('sync_v2_join_with_invite', {
+            inviteCode: params.inviteCode,
+            deviceName: params.deviceName,
+            scopeHistory: params.scopeHistory,
+            scopeEdits: params.scopeEdits,
+        })
+        await loadV2Status()
+        return res
+    }
+
     async function updateV2Scope(params: {
         syncHistory: boolean
         syncEdits: boolean
@@ -180,6 +205,8 @@ export const useSyncStore = defineStore('sync', () => {
         updateV2FromEvent,
         syncNow,
         pairV2,
+        createV2DeviceInvite,
+        joinV2WithInvite,
         updateV2Scope,
         getV2RecoveryKey,
         importV2ExistingEdits,

@@ -2,9 +2,11 @@
 //! toggles, manual sync, existing-edits import, and edit conflict resolution).
 
 use crate::storage;
+use crate::sync_v2::crypto::decode_sync_invite;
 use crate::sync_v2::engine::{
-    get_status_snapshot_in, import_existing_edits_in, pair_space, resolve_edit_conflict_in,
-    sync_once, PairSuccessResult, SyncV2Service, SyncV2StatusSnapshot,
+    create_device_invite, get_status_snapshot_in, import_existing_edits_in, join_space_with_invite,
+    pair_space, resolve_edit_conflict_in, sync_once, DeviceInviteResult, PairSuccessResult,
+    SyncV2Service, SyncV2StatusSnapshot,
 };
 use crate::sync_v2::store::{
     active_space_in, list_edit_conflict_alternatives_in, update_sync_scope_tx,
@@ -59,6 +61,68 @@ pub async fn sync_v2_pair(
         &device_id,
         &device_name,
         recovery_key.as_deref(),
+        scope_history,
+        scope_edits,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Turn off legacy v1 sync so it never collides with v2 or suppresses local retention.
+    if let Ok(mut settings) = storage::get_settings() {
+        if settings.sync_enabled {
+            settings.sync_enabled = false;
+            let _ = storage::save_settings(&settings);
+            sync_v1.apply_settings(&settings);
+        }
+    }
+
+    sync_v2.restart_worker();
+    sync_v2.emit_status();
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn sync_v2_create_device_invite(
+    sync_v2: State<'_, SyncV2Service>,
+) -> Result<DeviceInviteResult, String> {
+    let creds = sync_v2.credential_store()?;
+    let space = tauri::async_runtime::spawn_blocking(|| {
+        storage::with_db(active_space_in).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??
+    .ok_or_else(|| "No active Sync v2 space configured".to_string())?;
+
+    let transport = SelfHostTransport::new(&space.server_url).map_err(|e| e.to_string())?;
+    create_device_invite(|f| storage::with_db(f), &creds, &transport, Some(15))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sync_v2_join_with_invite(
+    invite_code: String,
+    device_name: String,
+    scope_history: bool,
+    scope_edits: bool,
+    sync_v1: State<'_, crate::services::sync_service::SyncService>,
+    sync_v2: State<'_, SyncV2Service>,
+) -> Result<PairSuccessResult, String> {
+    let creds = sync_v2.credential_store()?;
+    let parsed = decode_sync_invite(&invite_code).map_err(|e| e.to_string())?;
+    let transport = SelfHostTransport::new(&parsed.server_url).map_err(|e| e.to_string())?;
+    let device_id = tauri::async_runtime::spawn_blocking(storage::get_or_create_device_id)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+    let result = join_space_with_invite(
+        |f| storage::with_db(f),
+        &creds,
+        &transport,
+        &invite_code,
+        &device_id,
+        &device_name,
         scope_history,
         scope_edits,
     )

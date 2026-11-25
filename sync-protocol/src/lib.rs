@@ -198,6 +198,20 @@ pub struct PairRedeemResponse {
     pub key_check_tag: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePairingCodeRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_minutes: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePairingCodeResponse {
+    pub pairing_code: String,
+    pub expires_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceInfo {

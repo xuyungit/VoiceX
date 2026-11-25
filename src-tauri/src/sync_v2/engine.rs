@@ -24,7 +24,8 @@ use voicex_sync_protocol::{
 use crate::storage::{self, StorageError};
 use crate::sync_v2::credentials::{CredentialError, CredentialStore, SpaceCredentials};
 use crate::sync_v2::crypto::{
-    decrypt_envelope, encrypt_envelope, CryptoError, EnvelopeContext, MasterKey,
+    decode_sync_invite, decrypt_envelope, encode_sync_invite, encrypt_envelope, CryptoError,
+    EnvelopeContext, MasterKey, SyncInvite,
 };
 use crate::sync_v2::payloads::{HistoryOpPayload, StatsShardPayload};
 use crate::sync_v2::scope::can_send_outbox_op;
@@ -81,6 +82,13 @@ pub struct PairSuccessResult {
     pub device_id: String,
     pub recovery_key: String,
     pub generated_new_recovery_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInviteResult {
+    pub invite_code: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -300,6 +308,87 @@ where
         recovery_key,
         generated_new_recovery_key: generated_new,
     })
+}
+
+/// Request a one-time pairing code from the server using this device's active
+/// credentials and pack it locally with `server_url` + E2EE `recovery_key` into
+/// a single pasteable `VXSYNC2-...` invite code for another device.
+pub async fn create_device_invite<F, T>(
+    with_conn: F,
+    creds: &CredentialStore,
+    transport: &T,
+    ttl_minutes: Option<i64>,
+) -> Result<DeviceInviteResult, SyncEngineError>
+where
+    F: Fn(&dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError>,
+    T: SyncTransport,
+{
+    let space_slot: Mutex<Option<SyncSpaceRecord>> = Mutex::new(None);
+    with_conn(&|conn| {
+        *space_slot.lock().unwrap() = active_space_in(conn)?;
+        Ok(())
+    })?;
+    let Some(space) = space_slot.into_inner().unwrap() else {
+        return Err(SyncEngineError::InvalidState(
+            "No active Sync v2 space configured".into(),
+        ));
+    };
+    if space.status == "disabled" || space.status == "revoked" {
+        return Err(SyncEngineError::InvalidState(
+            "Sync space is not active; reconnect this device first.".into(),
+        ));
+    }
+    let Some(space_creds) = creds.get(&space.space_id)? else {
+        return Err(SyncEngineError::InvalidState(
+            "Missing local sync credentials; please pair this device again.".into(),
+        ));
+    };
+
+    let issued = transport
+        .create_pairing_code(&space_creds.device_token, ttl_minutes)
+        .await?;
+    let invite_code = encode_sync_invite(&SyncInvite {
+        server_url: space.server_url,
+        pairing_code: issued.pairing_code,
+        recovery_key: space_creds.recovery_key,
+    })?;
+    Ok(DeviceInviteResult {
+        invite_code,
+        expires_at: issued.expires_at,
+    })
+}
+
+/// Join an existing sync space by decoding a one-time `VXSYNC2-...` invite code
+/// generated on another already-synced device.
+#[allow(clippy::too_many_arguments)]
+pub async fn join_space_with_invite<F, T>(
+    with_conn: F,
+    creds: &CredentialStore,
+    transport: &T,
+    invite_code: &str,
+    device_id: &str,
+    device_name: &str,
+    scope_history: bool,
+    scope_edits: bool,
+) -> Result<PairSuccessResult, SyncEngineError>
+where
+    F: Fn(&dyn Fn(&Connection) -> Result<(), StorageError>) -> Result<(), StorageError>,
+    T: SyncTransport,
+{
+    let invite = decode_sync_invite(invite_code)?;
+    pair_space(
+        with_conn,
+        creds,
+        transport,
+        &invite.server_url,
+        &invite.pairing_code,
+        device_id,
+        device_name,
+        Some(&invite.recovery_key),
+        scope_history,
+        scope_edits,
+    )
+    .await
 }
 
 /// Run one complete push + pull synchronization cycle for the active sync space.
@@ -1321,6 +1410,26 @@ mod tests {
                     device_id: req.device_id.clone(),
                     device_token: token,
                     key_check_tag: g.key_check_tag.clone(),
+                })
+            })
+        }
+
+        fn create_pairing_code<'a>(
+            &'a self,
+            device_token: &'a str,
+            ttl_minutes: Option<i64>,
+        ) -> BoxFuture<'a, Result<voicex_sync_protocol::CreatePairingCodeResponse, TransportError>>
+        {
+            Box::pin(async move {
+                let _ = self.auth_device(device_token)?;
+                let mut g = self.state.lock().unwrap();
+                let code = format!("VXP2-MOCK-{}", uuid::Uuid::new_v4().simple());
+                g.pairing_codes.insert(code.clone());
+                let expires_at =
+                    (Utc::now() + chrono::Duration::minutes(ttl_minutes.unwrap_or(15))).to_rfc3339();
+                Ok(voicex_sync_protocol::CreatePairingCodeResponse {
+                    pairing_code: code,
+                    expires_at,
                 })
             })
         }

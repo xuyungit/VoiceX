@@ -14,7 +14,8 @@ use tempfile::TempDir;
 use voicex_lib::storage::{HistoryRecord, StorageError};
 use voicex_lib::sync_v2::credentials::CredentialStore;
 use voicex_lib::sync_v2::engine::{
-    pair_space, resolve_edit_conflict_in, sync_once, SyncEngineError,
+    create_device_invite, join_space_with_invite, pair_space, resolve_edit_conflict_in, sync_once,
+    SyncEngineError,
 };
 use voicex_lib::sync_v2::store::{
     get_overview_usage_stats_in, init_schema, list_edit_conflict_alternatives_in,
@@ -219,14 +220,10 @@ async fn real_tcp_two_clients_sse_e2ee_conflict_delete_and_cli_revoke() {
     let srv_logs = srv_dir.path().join("logs");
     let db_str = srv_db.to_str().unwrap();
 
-    // 1. Admin CLI: create account + two one-time pairing codes
+    // 1. Admin CLI: create account + initial one-time pairing code for first device
     let acc = run_admin(&bin, &["admin", "create-account", "--db", db_str, "--label", "e2e"]);
     let account_id = acc["accountId"].as_str().unwrap().to_string();
     let code_mac = run_admin(&bin, &["admin", "create-pairing-code", "--db", db_str, "--account", &account_id])["pairingCode"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let code_win = run_admin(&bin, &["admin", "create-pairing-code", "--db", db_str, "--account", &account_id])["pairingCode"]
         .as_str()
         .unwrap()
         .to_string();
@@ -279,21 +276,26 @@ async fn real_tcp_two_clients_sse_e2ee_conflict_delete_and_cli_revoke() {
     .unwrap();
     assert!(mac_pair.generated_new_recovery_key);
 
-    let win_pair = pair_space(
+    // Mac generates a single pasteable VXSYNC2-... invite code for Windows (no admin CLI needed)
+    let invite = create_device_invite(|f| mac.with_db(f), &mac.creds, &transport, Some(15))
+        .await
+        .unwrap();
+    assert!(invite.invite_code.starts_with("VXSYNC2-"));
+
+    let win_pair = join_space_with_invite(
         |f| win.with_db(f),
         &win.creds,
         &transport,
-        &server_url,
-        &code_win,
+        &invite.invite_code,
         "win-real-1",
         "xymi01",
-        Some(&mac_pair.recovery_key),
         true,
         true,
     )
     .await
     .unwrap();
     assert!(!win_pair.generated_new_recovery_key);
+    assert_eq!(win_pair.space_id, mac_pair.space_id);
 
     // 4. Open real SSE stream on Windows BEFORE Mac dictates & pushes
     let win_token = win.creds.get(&win_pair.space_id).unwrap().unwrap().device_token;

@@ -3,12 +3,13 @@
 //! - HKDF-SHA256 domain-separated DEK & key-verification tag derivation
 //! - XChaCha20-Poly1305 AEAD envelope encryption with canonical length-prefixed AAD
 
-use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL};
 use base64::Engine as _;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use voicex_sync_protocol::{aad_rev_or_op_id, build_envelope_aad, SyncDomain};
@@ -17,6 +18,7 @@ const MASTER_KEY_LEN: usize = 32;
 const CHECKSUM_LEN: usize = 2;
 const RECOVERY_RAW_LEN: usize = MASTER_KEY_LEN + CHECKSUM_LEN;
 const RECOVERY_PREFIX: &str = "VXK2";
+const INVITE_PREFIX: &str = "VXSYNC2-";
 const XNONCE_LEN: usize = 24;
 const BASE32_ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -28,6 +30,8 @@ pub enum CryptoError {
     InvalidEncoding(String),
     #[error("recovery key checksum mismatch")]
     ChecksumMismatch,
+    #[error("invalid sync code: {0}")]
+    InvalidInvite(String),
     #[error("invalid nonce length: expected {XNONCE_LEN} bytes, got {0}")]
     InvalidNonceLength(usize),
     #[error("invalid base64 payload: {0}")]
@@ -247,6 +251,84 @@ fn recovery_checksum(key: &[u8; MASTER_KEY_LEN]) -> [u8; CHECKSUM_LEN] {
     [digest[0], digest[1]]
 }
 
+/// Client-only one-time device invite bundling server URL, one-time pairing code,
+/// and E2EE recovery key. Never sent to or decoded by the sync server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncInvite {
+    pub server_url: String,
+    pub pairing_code: String,
+    pub recovery_key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SyncInviteWire {
+    v: u8,
+    s: String,
+    p: String,
+    k: String,
+}
+
+pub fn encode_sync_invite(invite: &SyncInvite) -> Result<String, CryptoError> {
+    let server_url = invite.server_url.trim().trim_end_matches('/').to_string();
+    let pairing_code = invite.pairing_code.trim().to_string();
+    let recovery_key = invite.recovery_key.trim().to_string();
+    if !(server_url.starts_with("http://") || server_url.starts_with("https://")) {
+        return Err(CryptoError::InvalidInvite(
+            "server URL must start with http:// or https://".into(),
+        ));
+    }
+    if pairing_code.is_empty() {
+        return Err(CryptoError::InvalidInvite("pairing code is empty".into()));
+    }
+    // Validate key checksum before encoding.
+    let _ = MasterKey::from_recovery_key(&recovery_key)?;
+    let wire = SyncInviteWire {
+        v: 2,
+        s: server_url,
+        p: pairing_code,
+        k: recovery_key,
+    };
+    let json = serde_json::to_vec(&wire)
+        .map_err(|e| CryptoError::InvalidInvite(format!("serialize failed: {e}")))?;
+    Ok(format!("{INVITE_PREFIX}{}", BASE64_URL.encode(json)))
+}
+
+pub fn decode_sync_invite(input: &str) -> Result<SyncInvite, CryptoError> {
+    let compact: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    let body = compact.strip_prefix(INVITE_PREFIX).ok_or_else(|| {
+        CryptoError::InvalidInvite(format!("expected prefix {INVITE_PREFIX}..."))
+    })?;
+    let bytes = BASE64_URL
+        .decode(body)
+        .map_err(|e| CryptoError::InvalidInvite(format!("invalid base64: {e}")))?;
+    let wire: SyncInviteWire = serde_json::from_slice(&bytes)
+        .map_err(|e| CryptoError::InvalidInvite(format!("invalid payload: {e}")))?;
+    if wire.v != 2 {
+        return Err(CryptoError::InvalidInvite(format!(
+            "unsupported sync code version: {}",
+            wire.v
+        )));
+    }
+    let server_url = wire.s.trim().trim_end_matches('/').to_string();
+    if !(server_url.starts_with("http://") || server_url.starts_with("https://")) {
+        return Err(CryptoError::InvalidInvite(
+            "invalid server URL in sync code".into(),
+        ));
+    }
+    let pairing_code = wire.p.trim().to_string();
+    if pairing_code.is_empty() {
+        return Err(CryptoError::InvalidInvite(
+            "missing pairing code in sync code".into(),
+        ));
+    }
+    let master = MasterKey::from_recovery_key(&wire.k)?;
+    Ok(SyncInvite {
+        server_url,
+        pairing_code,
+        recovery_key: master.to_recovery_key(),
+    })
+}
+
 fn base32_encode(input: &[u8]) -> String {
     let mut out = String::with_capacity((input.len() * 8).div_ceil(5));
     let mut buffer: u32 = 0;
@@ -433,5 +515,29 @@ mod tests {
         assert_eq!(t1, t2);
         assert_eq!(t1.len(), 32); // 16 bytes hex
         assert_ne!(t1, t_other);
+    }
+
+    #[test]
+    fn sync_invite_round_trip_and_validation() {
+        let key = MasterKey::generate();
+        let invite = SyncInvite {
+            server_url: "http://123.57.137.111:8787/".into(),
+            pairing_code: "VXP2-ABCD-EFGH-IJKL-MNOP".into(),
+            recovery_key: key.to_recovery_key(),
+        };
+        let encoded = encode_sync_invite(&invite).unwrap();
+        assert!(encoded.starts_with("VXSYNC2-"));
+
+        // Tolerates pasted newlines and spaces
+        let with_ws = format!("  {}\n  {} ", &encoded[..20], &encoded[20..]);
+        let decoded = decode_sync_invite(&with_ws).unwrap();
+        assert_eq!(decoded.server_url, "http://123.57.137.111:8787");
+        assert_eq!(decoded.pairing_code, invite.pairing_code);
+        assert_eq!(decoded.recovery_key, invite.recovery_key);
+
+        assert!(matches!(
+            decode_sync_invite("VXP2-NOT-AN-INVITE"),
+            Err(CryptoError::InvalidInvite(_))
+        ));
     }
 }

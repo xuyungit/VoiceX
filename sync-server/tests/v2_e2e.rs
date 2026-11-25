@@ -521,3 +521,73 @@ async fn rate_limiting_returns_429_json_error() {
     let err: ApiErrorBody = r3.json().await.unwrap();
     assert_eq!(err.code, error_codes::RATE_LIMITED);
 }
+
+#[tokio::test]
+async fn authed_device_can_issue_one_time_pairing_code_for_peer() {
+    let srv = spawn_server().await;
+    let client = Client::new();
+    let acc = db::create_account(&srv.pool, "invite", db::DEFAULT_STORAGE_QUOTA_BYTES)
+        .await
+        .unwrap();
+    let mac = pair_device(&srv, &client, &acc.account_id, "mac-1", "MBP", "macos").await;
+
+    // Authenticated device requests a one-time pairing code for a new peer
+    let issue_resp = client
+        .post(format!("{}/v2/devices/pairing-code", srv.base_url))
+        .bearer_auth(&mac.device_token)
+        .json(&voicex_sync_protocol::CreatePairingCodeRequest {
+            ttl_minutes: Some(15),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(issue_resp.status(), StatusCode::OK);
+    let issued: voicex_sync_protocol::CreatePairingCodeResponse = issue_resp.json().await.unwrap();
+    assert!(issued.pairing_code.starts_with("VXP2-"));
+
+    // Peer redeems that code and joins the same account
+    let redeem_resp = client
+        .post(format!("{}/v2/pair/redeem", srv.base_url))
+        .json(&PairRedeemRequest {
+            pairing_code: issued.pairing_code.clone(),
+            device_id: "win-2".into(),
+            device_name: "Windows PC".into(),
+            platform: "windows".into(),
+            app_version: "0.20.0".into(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(redeem_resp.status(), StatusCode::OK);
+    let peer: PairRedeemResponse = redeem_resp.json().await.unwrap();
+    assert_eq!(peer.account_id, acc.account_id);
+    assert_eq!(peer.device_id, "win-2");
+
+    // Reusing the same code fails with 409
+    let reuse_resp = client
+        .post(format!("{}/v2/pair/redeem", srv.base_url))
+        .json(&PairRedeemRequest {
+            pairing_code: issued.pairing_code,
+            device_id: "win-3".into(),
+            device_name: "Other".into(),
+            platform: "windows".into(),
+            app_version: "0.20.0".into(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reuse_resp.status(), StatusCode::CONFLICT);
+
+    // Revoked device cannot issue pairing codes
+    db::revoke_device(&srv.pool, &acc.account_id, "mac-1")
+        .await
+        .unwrap();
+    let revoked_resp = client
+        .post(format!("{}/v2/devices/pairing-code", srv.base_url))
+        .bearer_auth(&mac.device_token)
+        .json(&voicex_sync_protocol::CreatePairingCodeRequest::default())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked_resp.status(), StatusCode::UNAUTHORIZED);
+}

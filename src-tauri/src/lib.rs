@@ -446,6 +446,8 @@ pub fn run() {
             commands::sync::sync_now,
             commands::sync_v2::sync_v2_get_status,
             commands::sync_v2::sync_v2_pair,
+            commands::sync_v2::sync_v2_create_device_invite,
+            commands::sync_v2::sync_v2_join_with_invite,
             commands::sync_v2::sync_v2_get_recovery_key,
             commands::sync_v2::sync_v2_update_scope,
             commands::sync_v2::sync_v2_import_existing_edits,
