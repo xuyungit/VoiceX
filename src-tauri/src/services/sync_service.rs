@@ -73,6 +73,16 @@ impl SyncService {
         inner.app_handle = Some(handle.clone());
     }
 
+    /// Immediately stop legacy v1 background sync and clear in-memory enabled
+    /// config so no further v1 outbox writes or TTS HTTP requests can occur.
+    pub fn disable_immediately(&self) {
+        let mut inner = self.inner.lock().expect("sync service lock");
+        inner.config = SyncConfig::default();
+        stop_sync(&mut inner);
+        drop(inner);
+        self.update_status("disabled", None);
+    }
+
     pub fn apply_settings(&self, settings: &AppSettings) {
         let v2_active = storage::with_db(crate::sync_v2::store::active_space_in)
             .ok()
@@ -80,6 +90,7 @@ impl SyncService {
             .is_some();
         if v2_active {
             let mut inner = self.inner.lock().expect("sync service lock");
+            inner.config = SyncConfig::default();
             stop_sync(&mut inner);
             drop(inner);
             self.update_status("disabled", None);

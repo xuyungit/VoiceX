@@ -32,7 +32,8 @@ use crate::sync_v2::scope::can_send_outbox_op;
 use crate::sync_v2::store::{
     active_space_in, apply_remote_history_op_tx, apply_remote_stats_daily_month_tx,
     apply_remote_stats_totals_tx, build_local_daily_month_shard_in, build_local_totals_shard_in,
-    bump_local_stats_shard_tx, get_overview_devices_in, on_local_edit_applied_tx,
+    bump_local_stats_shard_tx, get_overview_devices_in, handoff_v1_outbox_to_v2_tx,
+    import_existing_edits_tx, on_local_edit_applied_tx, seed_all_legacy_local_edits_tx,
     upsert_sync_space_tx, OverviewDeviceSyncInfo, SyncSpaceRecord,
 };
 use crate::sync_v2::transport::{SelfHostTransport, SyncTransport, TransportError};
@@ -296,6 +297,11 @@ where
                 bump_local_stats_shard_tx(&tx, &space_id_owned, &dev_id_owned, &shard_key)?;
             }
         }
+
+        // Preserve any legacy v1 local edited_text as private versions before the first pull (M5),
+        // and atomically hand off any pending v1 sync_outbox creates/deletes (M3).
+        seed_all_legacy_local_edits_tx(&tx)?;
+        handoff_v1_outbox_to_v2_tx(&tx, &space_id_owned, &dev_id_owned, scope_history)?;
 
         tx.commit().map_err(sql_err)
     })?;
@@ -912,53 +918,7 @@ pub fn import_existing_edits_in(conn: &Connection) -> Result<usize, StorageError
     }
 
     let tx = conn.unchecked_transaction().map_err(sql_err)?;
-    let rows: Vec<(String, String, Option<String>, Option<String>)> = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT id, edited_text, edit_source, edited_at
-                 FROM history_record
-                 WHERE sync_eligible = 1
-                   AND edited_text IS NOT NULL
-                   AND NOT EXISTS (
-                       SELECT 1 FROM history_edit_versions v
-                       WHERE v.record_id = history_record.id AND v.is_shared = 1
-                   )",
-            )
-            .map_err(sql_err)?;
-        let collected = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                ))
-            })
-            .map_err(sql_err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(sql_err)?;
-        collected
-    };
-
-    let mut imported = 0usize;
-    let now = Utc::now().to_rfc3339();
-    for (record_id, edited_text, edit_source, edited_at) in rows {
-        let edit_kind = match edit_source.as_deref() {
-            Some("manual") => EditKind::Manual,
-            _ => EditKind::Observed,
-        };
-        let edit_id = uuid::Uuid::new_v4().to_string();
-        on_local_edit_applied_tx(
-            &tx,
-            &record_id,
-            &edit_id,
-            edit_kind,
-            Some(&edited_text),
-            edited_at.as_deref().unwrap_or(&now),
-            None,
-        )?;
-        imported += 1;
-    }
+    let imported = import_existing_edits_tx(&tx, &space)?;
     tx.commit().map_err(sql_err)?;
     Ok(imported)
 }

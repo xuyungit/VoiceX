@@ -52,7 +52,11 @@ pub async fn sync_v2_pair(
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
 
-    let result = pair_space(
+    // Pause legacy v1 writers before v2 handoff so sync_outbox cannot race during pairing (M3/S10).
+    let prev_v1_settings = storage::get_settings().ok();
+    sync_v1.disable_immediately();
+
+    let result = match pair_space(
         |f| storage::with_db(f),
         &creds,
         &transport,
@@ -65,15 +69,23 @@ pub async fn sync_v2_pair(
         scope_edits,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    {
+        Ok(res) => res,
+        Err(err) => {
+            if let Some(prev) = prev_v1_settings {
+                sync_v1.apply_settings(&prev);
+            }
+            return Err(err.to_string());
+        }
+    };
 
-    // Turn off legacy v1 sync so it never collides with v2 or suppresses local retention.
+    // Persist legacy v1 sync disabled so it never collides with v2 or suppresses local retention.
     if let Ok(mut settings) = storage::get_settings() {
         if settings.sync_enabled {
             settings.sync_enabled = false;
             let _ = storage::save_settings(&settings);
-            sync_v1.apply_settings(&settings);
         }
+        sync_v1.disable_immediately();
     }
 
     sync_v2.restart_worker();
@@ -116,7 +128,10 @@ pub async fn sync_v2_join_with_invite(
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
 
-    let result = join_space_with_invite(
+    let prev_v1_settings = storage::get_settings().ok();
+    sync_v1.disable_immediately();
+
+    let result = match join_space_with_invite(
         |f| storage::with_db(f),
         &creds,
         &transport,
@@ -127,15 +142,23 @@ pub async fn sync_v2_join_with_invite(
         scope_edits,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    {
+        Ok(res) => res,
+        Err(err) => {
+            if let Some(prev) = prev_v1_settings {
+                sync_v1.apply_settings(&prev);
+            }
+            return Err(err.to_string());
+        }
+    };
 
-    // Turn off legacy v1 sync so it never collides with v2 or suppresses local retention.
+    // Persist legacy v1 sync disabled so it never collides with v2 or suppresses local retention.
     if let Ok(mut settings) = storage::get_settings() {
         if settings.sync_enabled {
             settings.sync_enabled = false;
             let _ = storage::save_settings(&settings);
-            sync_v1.apply_settings(&settings);
         }
+        sync_v1.disable_immediately();
     }
 
     sync_v2.restart_worker();

@@ -889,6 +889,545 @@ fn load_edit_nodes_in(conn: &Connection, record_id: &str) -> Result<Vec<EditVers
     Ok(nodes)
 }
 
+fn epoch_ms_from_rfc3339_or_zero(ts: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(ts)
+        .map(|dt| dt.timestamp_millis().max(0))
+        .unwrap_or(0)
+}
+
+/// Seed a private (`is_shared = 0`) version row in `history_edit_versions` for a
+/// legacy v1 `history_record.edited_text` if the record has no version rows yet.
+/// Prevents `project_resolved_edits_to_history_tx` from wiping v1 edits on pull.
+pub fn ensure_legacy_edit_seeded_tx(
+    conn: &Connection,
+    record_id: &str,
+) -> Result<bool, StorageError> {
+    let has_versions: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM history_edit_versions WHERE record_id = ?1 LIMIT 1)",
+            params![record_id],
+            |r| Ok(r.get::<_, i32>(0)? != 0),
+        )
+        .map_err(sql_err)?;
+    if has_versions {
+        return Ok(false);
+    }
+
+    let row: Option<(String, Option<String>, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT timestamp, edited_text, edit_source, edited_at
+             FROM history_record
+             WHERE id = ?1",
+            params![record_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(sql_err)?;
+    let Some((timestamp, Some(edited_text), edit_source, edited_at_opt)) = row else {
+        return Ok(false);
+    };
+    if edited_text.is_empty() {
+        return Ok(false);
+    }
+
+    let device_id = local_device_id_in(conn)?;
+    let edit_kind = match edit_source.as_deref() {
+        Some("manual") => EditKind::Manual,
+        _ => EditKind::Observed,
+    };
+    let edited_at = edited_at_opt
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(timestamp);
+
+    let post_edit_row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT id, payload FROM post_edit_record WHERE source_id = ?1 LIMIT 1",
+            params![record_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .ok()
+        .flatten();
+
+    let (edit_id, metadata_json) = if edit_kind == EditKind::Observed {
+        match post_edit_row {
+            Some((pe_id, payload)) => {
+                let meta_json = serde_json::from_str::<serde_json::Value>(&payload)
+                    .ok()
+                    .and_then(|v| {
+                        serde_json::to_string(&EditMetadataPayload {
+                            complete: v.get("complete").and_then(|x| x.as_bool()).unwrap_or(false),
+                            end_reason: v
+                                .get("endReason")
+                                .and_then(|x| x.as_str())
+                                .map(String::from),
+                            insertions: v
+                                .get("insertions")
+                                .and_then(|x| x.as_u64())
+                                .map(|n| n as usize),
+                            deletions: v
+                                .get("deletions")
+                                .and_then(|x| x.as_u64())
+                                .map(|n| n as usize),
+                            substitutions: v
+                                .get("substitutions")
+                                .and_then(|x| x.as_u64())
+                                .map(|n| n as usize),
+                        })
+                        .ok()
+                    });
+                (pe_id, meta_json)
+            }
+            None => (format!("legacy-edit:{device_id}:{record_id}"), None),
+        }
+    } else {
+        (format!("legacy-edit:{device_id}:{record_id}"), None)
+    };
+
+    let hlc = Hlc::new(epoch_ms_from_rfc3339_or_zero(&edited_at), 0, &device_id)
+        .map_err(|e| StorageError::QueryFailed(e.to_string()))?
+        .to_wire_string();
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR IGNORE INTO history_edit_versions (
+            edit_id, record_id, space_id, source_device_id, edit_kind,
+            parent_edit_ids_json, hlc, edited_at, final_text, metadata_json,
+            is_shared, created_at
+         ) VALUES (?1, ?2, NULL, ?3, ?4, '[]', ?5, ?6, ?7, ?8, 0, ?9)",
+        params![
+            edit_id,
+            record_id,
+            device_id,
+            edit_kind.as_str(),
+            hlc,
+            edited_at,
+            edited_text,
+            metadata_json,
+            now,
+        ],
+    )
+    .map_err(sql_err)?;
+    conn.execute(
+        "UPDATE history_record SET active_edit_id = COALESCE(active_edit_id, ?2) WHERE id = ?1",
+        params![record_id, edit_id],
+    )
+    .map_err(sql_err)?;
+    Ok(true)
+}
+
+/// Seed private (`is_shared = 0`) version rows for every local legacy `edited_text`
+/// that does not yet have any `history_edit_versions` entry. Idempotent.
+pub fn seed_all_legacy_local_edits_tx(conn: &Connection) -> Result<usize, StorageError> {
+    let ids: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT h.id
+                 FROM history_record h
+                 WHERE h.edited_text IS NOT NULL
+                   AND h.edited_text != ''
+                   AND NOT EXISTS (
+                       SELECT 1 FROM history_edit_versions v WHERE v.record_id = h.id
+                   )",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        rows
+    };
+
+    let mut seeded = 0usize;
+    for id in ids {
+        if ensure_legacy_edit_seeded_tx(conn, &id)? {
+            seeded += 1;
+        }
+    }
+    Ok(seeded)
+}
+
+/// Summary of an atomic, idempotent v1 `sync_outbox` -> v2 handoff.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct V1OutboxHandoffSummary {
+    pub already_completed: bool,
+    pub deletes_handed_off: usize,
+    pub creates_handed_off: usize,
+    pub creates_skipped_unauthorized: usize,
+}
+
+/// Atomically and idempotently convert pending v1 `sync_outbox` creates/deletes
+/// into v2 tombstones & `sync_outbox_ops` before the first v2 network cycle.
+/// Preserves the original v1 `sync_outbox` rows for reconciliation/audit.
+pub fn handoff_v1_outbox_to_v2_tx(
+    conn: &Connection,
+    space_id: &str,
+    device_id: &str,
+    scope_history: bool,
+) -> Result<V1OutboxHandoffSummary, StorageError> {
+    let flag_key = format!("v1_outbox_handoff_done:{space_id}");
+    let done: Option<String> = conn
+        .query_row(
+            "SELECT value FROM user_config WHERE key = ?1 LIMIT 1",
+            params![flag_key],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_err)?;
+    if done.as_deref() == Some("1") {
+        return Ok(V1OutboxHandoffSummary {
+            already_completed: true,
+            ..Default::default()
+        });
+    }
+
+    let has_v1_outbox: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_outbox')",
+            [],
+            |r| Ok(r.get::<_, i32>(0)? != 0),
+        )
+        .map_err(sql_err)?;
+
+    let mut summary = V1OutboxHandoffSummary::default();
+    if has_v1_outbox {
+        let outbox_rows: Vec<(String, Option<String>, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT event_type, record_id, payload, created_at
+                     FROM sync_outbox
+                     ORDER BY created_at ASC, event_id ASC",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(sql_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_err)?;
+            rows
+        };
+
+        let mut pending_deletes: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        let mut pending_upserts: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+
+        for (ev_type, rid_opt, payload_str, created_at) in outbox_rows {
+            let rid = rid_opt
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    serde_json::from_str::<serde_json::Value>(&payload_str)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("recordId")
+                                .or_else(|| v.get("id"))
+                                .or_else(|| v.get("record").and_then(|r| r.get("id")))
+                                .and_then(|x| x.as_str())
+                                .map(String::from)
+                        })
+                });
+            let Some(record_id) = rid.filter(|s| !s.trim().is_empty()) else {
+                continue;
+            };
+            match ev_type.as_str() {
+                "history.delete" => {
+                    pending_upserts.remove(&record_id);
+                    pending_deletes.insert(record_id, created_at);
+                }
+                "history.upsert" => {
+                    if !pending_deletes.contains_key(&record_id) {
+                        pending_upserts.insert(record_id, payload_str);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 1. Apply pending deletes first (tombstone + v2 delete op) so first pull cannot resurrect them.
+        let space_opt = active_space_in(conn)?;
+        for (record_id, deleted_at) in pending_deletes {
+            let hlc = tick_hlc_tx(conn, space_opt.as_ref(), device_id)?;
+            conn.execute(
+                "INSERT INTO history_tombstones (space_id, record_id, deleted_by_device_id, hlc, deleted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(space_id, record_id) DO UPDATE SET
+                    hlc = CASE WHEN excluded.hlc > history_tombstones.hlc THEN excluded.hlc ELSE history_tombstones.hlc END",
+                params![space_id, record_id, device_id, hlc, deleted_at],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM history_edit_versions WHERE record_id = ?1",
+                params![record_id],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM history_record WHERE id = ?1",
+                params![record_id],
+            )
+            .map_err(sql_err)?;
+            conn.execute(
+                "DELETE FROM sync_outbox_ops WHERE space_id = ?1 AND record_id = ?2 AND op_type != 'history.delete'",
+                params![space_id, record_id],
+            )
+            .map_err(sql_err)?;
+            let op = HistoryOpPayload::Delete(HistoryDeletePayload {
+                schema: PAYLOAD_SCHEMA_V1,
+                record_id: record_id.clone(),
+                source_device_id: device_id.to_string(),
+                hlc,
+                deleted_at,
+            });
+            enqueue_outbox_op_tx(
+                conn,
+                space_id,
+                &format!("delete:{record_id}"),
+                SyncDomain::History,
+                "history.delete",
+                &record_id,
+                &op,
+            )?;
+            summary.deletes_handed_off += 1;
+        }
+
+        // 2. Convert authorized pending creates when history sync is enabled.
+        for (record_id, _payload_str) in pending_upserts {
+            if !scope_history {
+                summary.creates_skipped_unauthorized += 1;
+                continue;
+            }
+            let row = conn
+                .query_row(
+                    "SELECT timestamp, text, original_text, ai_correction_applied, llm_invoked,
+                            mode, duration_ms, is_final, error_code, source_device_id,
+                            asr_model_name, llm_model_name,
+                            target_app_platform, target_app_key, target_app_name
+                     FROM history_record
+                     WHERE id = ?1",
+                    params![record_id],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                            r.get::<_, i32>(3)? != 0,
+                            r.get::<_, i32>(4)? != 0,
+                            r.get::<_, String>(5)?,
+                            r.get::<_, i64>(6)?,
+                            r.get::<_, i32>(7)? != 0,
+                            r.get::<_, i32>(8)?,
+                            r.get::<_, Option<String>>(9)?,
+                            r.get::<_, Option<String>>(10)?,
+                            r.get::<_, Option<String>>(11)?,
+                            r.get::<_, Option<String>>(12)?,
+                            r.get::<_, Option<String>>(13)?,
+                            r.get::<_, Option<String>>(14)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(sql_err)?;
+            let Some((
+                timestamp,
+                text,
+                original_text,
+                ai_correction_applied,
+                llm_invoked,
+                mode,
+                duration_ms,
+                is_final,
+                error_code,
+                source_device_id,
+                asr_model_name,
+                llm_model_name,
+                target_app_platform,
+                target_app_key,
+                target_app_name,
+            )) = row
+            else {
+                continue;
+            };
+            if error_code != HISTORY_ERROR_NONE || !is_final || mode == HISTORY_MODE_TRANSLATE_READ
+            {
+                summary.creates_skipped_unauthorized += 1;
+                continue;
+            }
+            conn.execute(
+                "UPDATE history_record SET sync_eligible = 1, sync_space_id = ?2 WHERE id = ?1",
+                params![record_id, space_id],
+            )
+            .map_err(sql_err)?;
+            let src_dev = source_device_id
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| device_id.to_string());
+            let op = HistoryOpPayload::Create(HistoryCreatePayload {
+                schema: PAYLOAD_SCHEMA_V1,
+                record_id: record_id.clone(),
+                source_device_id: src_dev,
+                timestamp,
+                text,
+                original_text,
+                ai_correction_applied,
+                llm_invoked,
+                mode,
+                duration_ms: duration_ms.max(0),
+                asr_model_name,
+                llm_model_name,
+                target_app_platform,
+                target_app_key,
+                target_app_name,
+            });
+            enqueue_outbox_op_tx(
+                conn,
+                space_id,
+                &format!("create:{record_id}"),
+                SyncDomain::History,
+                "history.create",
+                &record_id,
+                &op,
+            )?;
+            summary.creates_handed_off += 1;
+        }
+    }
+
+    conn.execute(
+        "INSERT INTO user_config (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = '1'",
+        params![flag_key],
+    )
+    .map_err(sql_err)?;
+    Ok(summary)
+}
+
+/// Explicitly promote existing unshared local edits on already-shared records
+/// belonging to `space` into shared `history_edit_versions` and `sync_outbox_ops`.
+pub fn import_existing_edits_tx(
+    conn: &Connection,
+    space: &SyncSpaceRecord,
+) -> Result<usize, StorageError> {
+    let record_ids: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT h.id
+                 FROM history_record h
+                 WHERE h.sync_eligible = 1
+                   AND h.sync_space_id = ?1
+                   AND h.edited_text IS NOT NULL
+                   AND h.edited_text != ''
+                   AND NOT EXISTS (
+                       SELECT 1 FROM history_edit_versions v
+                       WHERE v.record_id = h.id AND v.is_shared = 1
+                   )",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![space.space_id], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sql_err)?;
+        rows
+    };
+
+    let mut imported = 0usize;
+    for record_id in record_ids {
+        ensure_legacy_edit_seeded_tx(conn, &record_id)?;
+        let versions: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        )> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT edit_id, source_device_id, edit_kind, parent_edit_ids_json,
+                            hlc, edited_at, final_text, metadata_json
+                     FROM history_edit_versions
+                     WHERE record_id = ?1 AND is_shared = 0
+                     ORDER BY hlc ASC, edit_id ASC",
+                )
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(params![record_id], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                })
+                .map_err(sql_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_err)?;
+            rows
+        };
+
+        for (
+            edit_id,
+            source_device_id,
+            edit_kind_str,
+            parents_json,
+            hlc,
+            edited_at,
+            final_text,
+            meta_json,
+        ) in versions
+        {
+            let edit_kind: EditKind = edit_kind_str.parse().unwrap_or(EditKind::Observed);
+            let parent_edit_ids: Vec<String> =
+                serde_json::from_str(&parents_json).unwrap_or_default();
+            let metadata: Option<EditMetadataPayload> = meta_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            conn.execute(
+                "UPDATE history_edit_versions
+                 SET is_shared = 1, space_id = ?2
+                 WHERE edit_id = ?1",
+                params![edit_id, space.space_id],
+            )
+            .map_err(sql_err)?;
+            let op = HistoryOpPayload::Edit(HistoryEditPayload {
+                schema: PAYLOAD_SCHEMA_V1,
+                edit_id: edit_id.clone(),
+                record_id: record_id.clone(),
+                source_device_id,
+                edit_kind,
+                parent_edit_ids,
+                hlc,
+                edited_at,
+                final_text,
+                metadata,
+            });
+            enqueue_outbox_op_tx(
+                conn,
+                &space.space_id,
+                &format!("edit:{edit_id}"),
+                SyncDomain::Edits,
+                "history.edit",
+                &record_id,
+                &op,
+            )?;
+            imported += 1;
+        }
+        project_resolved_edits_to_history_tx(conn, &record_id)?;
+    }
+
+    Ok(imported)
+}
+
 fn project_resolved_edits_to_history_tx(
     conn: &Connection,
     record_id: &str,
@@ -1546,6 +2085,8 @@ pub fn apply_remote_history_op_tx(
                 .map_err(sql_err)?;
 
             if inserted == 0 {
+                // Preserve any legacy v1 edited_text before re-projecting versions.
+                ensure_legacy_edit_seeded_tx(conn, &create.record_id)?;
                 // Ensure existing local row is marked shared with this space and merge any staged edits.
                 conn.execute(
                     "UPDATE history_record SET sync_eligible = 1, sync_space_id = ?2 WHERE id = ?1",
@@ -1573,6 +2114,26 @@ pub fn apply_remote_history_op_tx(
                 .unwrap_or(false);
             if tombstoned {
                 return Ok(RemoteApplyOutcome::IgnoredTombstoned);
+            }
+
+            // If this record has an unseeded legacy v1 edit from a different edit/text,
+            // seed it as private before applying the remote edit so it isn't silently lost.
+            // If the incoming edit is this device's own identical migrated edit, let the
+            // authoritative server edit_id take over directly without creating a duplicate row.
+            let local_edited_text: Option<String> = conn
+                .query_row(
+                    "SELECT edited_text FROM history_record WHERE id = ?1",
+                    params![edit.record_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(sql_err)?
+                .flatten();
+            let is_same_device_identical_migrated = edit.source_device_id == local_device_id
+                && edit.final_text.is_some()
+                && edit.final_text == local_edited_text;
+            if !is_same_device_identical_migrated {
+                ensure_legacy_edit_seeded_tx(conn, &edit.record_id)?;
             }
 
             let parents_json = serde_json::to_string(&edit.parent_edit_ids)
@@ -2644,5 +3205,185 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(ops, vec!["history.delete".to_string()]);
+    }
+
+    #[test]
+    fn m3_v1_outbox_handoff_is_idempotent_and_prevents_delete_resurrection() {
+        let conn = open_test_db();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sync_outbox (
+                event_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                record_id TEXT,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        upsert_sync_space_tx(
+            &conn,
+            "selfhost:srv:acc",
+            "selfhost",
+            "http://127.0.0.1:8787",
+            "srv",
+            "acc",
+            "win-dev",
+            true,
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+
+        // Record r-keep: pending create; r-del: pending delete; r-both: upsert then delete (delete wins)
+        conn.execute(
+            "INSERT INTO history_record (id, timestamp, text, mode, duration_ms, source_device_id)
+             VALUES ('r-keep', '2026-11-24T12:00:00Z', 'offline text', 'assistant_hands_free', 1500, 'win-dev')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sync_outbox (event_id, event_type, record_id, payload, created_at) VALUES
+             ('ev-1', 'history.upsert', 'r-keep', '{}', '2026-11-24T12:00:01Z'),
+             ('ev-2', 'history.delete', 'r-del', '{}', '2026-11-24T12:00:02Z'),
+             ('ev-3', 'history.upsert', 'r-both', '{}', '2026-11-24T12:00:03Z'),
+             ('ev-4', 'history.delete', 'r-both', '{}', '2026-11-24T12:00:04Z')",
+            [],
+        )
+        .unwrap();
+
+        let first = handoff_v1_outbox_to_v2_tx(&conn, "selfhost:srv:acc", "win-dev", true).unwrap();
+        assert!(!first.already_completed);
+        assert_eq!(first.deletes_handed_off, 2);
+        assert_eq!(first.creates_handed_off, 1);
+
+        // Second execution is a no-op (idempotent)
+        let second =
+            handoff_v1_outbox_to_v2_tx(&conn, "selfhost:srv:acc", "win-dev", true).unwrap();
+        assert!(second.already_completed);
+        assert_eq!(second.deletes_handed_off, 0);
+        assert_eq!(second.creates_handed_off, 0);
+
+        // Original v1 sync_outbox is preserved intact for reconciliation
+        let v1_cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_outbox", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v1_cnt, 4);
+
+        // First v2 pull receiving r-del cannot resurrect it because tombstone is already persisted
+        let remote_create_deleted = HistoryOpPayload::Create(HistoryCreatePayload {
+            schema: PAYLOAD_SCHEMA_V1,
+            record_id: "r-del".into(),
+            source_device_id: "mac-dev".into(),
+            timestamp: "2026-11-24T11:00:00Z".into(),
+            text: "should not return".into(),
+            original_text: None,
+            ai_correction_applied: false,
+            llm_invoked: false,
+            mode: "assistant_hands_free".into(),
+            duration_ms: 1000,
+            asr_model_name: None,
+            llm_model_name: None,
+            target_app_platform: None,
+            target_app_key: None,
+            target_app_name: None,
+        });
+        assert_eq!(
+            apply_remote_history_op_tx(
+                &conn,
+                "selfhost:srv:acc",
+                "win-dev",
+                &remote_create_deleted,
+                0
+            )
+            .unwrap(),
+            RemoteApplyOutcome::IgnoredTombstoned
+        );
+    }
+
+    #[test]
+    fn m5_duplicate_create_and_explicit_import_preserve_v1_local_edits() {
+        let conn = open_test_db();
+        upsert_sync_space_tx(
+            &conn,
+            "selfhost:srv:acc",
+            "selfhost",
+            "http://127.0.0.1:8787",
+            "srv",
+            "acc",
+            "win-dev",
+            true,
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+
+        // Pre-existing v1 record with edited_text and ZERO history_edit_versions rows
+        conn.execute(
+            "INSERT INTO history_record (id, timestamp, text, mode, duration_ms, source_device_id, edited_text, edit_source, edited_at)
+             VALUES ('r-v1-edit', '2026-11-24T10:00:00Z', 'raw text', 'assistant_hands_free', 1200, 'win-dev', 'manual v1 fix', 'manual', '2026-11-24T10:05:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let dup_create = HistoryOpPayload::Create(HistoryCreatePayload {
+            schema: PAYLOAD_SCHEMA_V1,
+            record_id: "r-v1-edit".into(),
+            source_device_id: "win-dev".into(),
+            timestamp: "2026-11-24T10:00:00Z".into(),
+            text: "raw text".into(),
+            original_text: None,
+            ai_correction_applied: false,
+            llm_invoked: false,
+            mode: "assistant_hands_free".into(),
+            duration_ms: 1200,
+            asr_model_name: None,
+            llm_model_name: None,
+            target_app_platform: None,
+            target_app_key: None,
+            target_app_name: None,
+        });
+
+        // Duplicate create with edits OFF must preserve edited_text and seed 1 private version
+        for _ in 0..2 {
+            assert_eq!(
+                apply_remote_history_op_tx(&conn, "selfhost:srv:acc", "win-dev", &dup_create, 0)
+                    .unwrap(),
+                RemoteApplyOutcome::IgnoredDuplicate
+            );
+            let edited: Option<String> = conn
+                .query_row(
+                    "SELECT edited_text FROM history_record WHERE id = 'r-v1-edit'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(edited.as_deref(), Some("manual v1 fix"));
+        }
+
+        let (ver_cnt, shared_cnt): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), SUM(is_shared) FROM history_edit_versions WHERE record_id = 'r-v1-edit'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((ver_cnt, shared_cnt), (1, 0));
+
+        // Explicit import promotes that exact private row to shared and enqueues 1 history.edit
+        update_sync_scope_tx(&conn, "selfhost:srv:acc", true, true).unwrap();
+        let space = active_space_in(&conn).unwrap().unwrap();
+        assert_eq!(import_existing_edits_tx(&conn, &space).unwrap(), 1);
+        assert_eq!(import_existing_edits_tx(&conn, &space).unwrap(), 0); // idempotent
+
+        let (ver_cnt_after, shared_cnt_after): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), SUM(is_shared) FROM history_edit_versions WHERE record_id = 'r-v1-edit'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((ver_cnt_after, shared_cnt_after), (1, 1));
     }
 }

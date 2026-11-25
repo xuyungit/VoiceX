@@ -21,6 +21,7 @@ fn usage() -> ! {
   [--server-url <url>] \\
   [--label <account_label>] \\
   [--recovery-key <VXK2-...>] \\
+  [--out-recovery-key <path>] (required when generating a new recovery key; written mode 0600) \\
   [--verify-replay]"
     );
     std::process::exit(2);
@@ -83,6 +84,7 @@ fn main() {
     let mut server_url = "http://127.0.0.1:8787".to_string();
     let mut account_label = "personal".to_string();
     let mut recovery_key: Option<String> = None;
+    let mut out_recovery_key_path: Option<PathBuf> = None;
     let mut verify_replay = false;
 
     let mut i = 0;
@@ -123,6 +125,10 @@ fn main() {
                 i += 1;
                 recovery_key = args.get(i).cloned();
             }
+            "--out-recovery-key" => {
+                i += 1;
+                out_recovery_key_path = args.get(i).map(PathBuf::from);
+            }
             "--verify-replay" => {
                 verify_replay = true;
             }
@@ -134,6 +140,13 @@ fn main() {
         i += 1;
     }
 
+    if recovery_key.is_none() && out_recovery_key_path.is_none() {
+        eprintln!(
+            "error: generating a new recovery key requires --out-recovery-key <path> so the secret is written to a 0600 file rather than stdout"
+        );
+        std::process::exit(2);
+    }
+
     let cfg = MigrationConfig {
         server_v1_db: server_v1_db.unwrap_or_else(|| usage()),
         out_server_v2_db: out_server_v2_db.unwrap_or_else(|| usage()),
@@ -143,7 +156,7 @@ fn main() {
         recovery_key,
     };
 
-    let report = match run_migration(&cfg) {
+    let outcome = match run_migration(&cfg) {
         Ok(r) => r,
         Err(err) => {
             eprintln!("Migration failed: {err}");
@@ -151,8 +164,16 @@ fn main() {
         }
     };
 
+    if let Some(key_path) = out_recovery_key_path.as_deref() {
+        if let Err(err) = write_secret_file(key_path, &outcome.recovery_key) {
+            eprintln!("Failed to write recovery key file {}: {err}", key_path.display());
+            std::process::exit(1);
+        }
+        eprintln!("Recovery key written securely (0600) to {}", key_path.display());
+    }
+
     let replay = if verify_replay {
-        match verify_server_v2_replay(&cfg.out_server_v2_db, &report.recovery_key) {
+        match verify_server_v2_replay(&cfg.out_server_v2_db, &outcome.recovery_key) {
             Ok(v) => Some(v),
             Err(err) => {
                 eprintln!("Replay verification failed: {err}");
@@ -163,9 +184,44 @@ fn main() {
         None
     };
 
+    // Stdout JSON contains ONLY the public reconciliation report (never recoveryKey).
     let output = serde_json::json!({
-        "migration": report,
+        "migration": outcome.report,
         "replayVerification": replay,
     });
     println!("{}", serde_json::to_string_pretty(&output).unwrap());
+}
+
+fn write_secret_file(path: &std::path::Path, secret: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let content = format!("{}\n", secret.trim());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
+    Ok(())
 }

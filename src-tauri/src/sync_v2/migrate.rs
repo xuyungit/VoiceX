@@ -30,7 +30,8 @@ use crate::sync_v2::payloads::{
 };
 use crate::sync_v2::store::{
     apply_remote_history_op_tx, apply_remote_stats_daily_month_tx, apply_remote_stats_totals_tx,
-    get_overview_usage_stats_in, init_schema, upsert_sync_space_tx, OverviewScope,
+    get_overview_usage_stats_in, init_schema, seed_all_legacy_local_edits_tx, upsert_sync_space_tx,
+    OverviewScope,
 };
 
 #[derive(Debug, Clone)]
@@ -59,17 +60,39 @@ pub struct DeviceReconciliation {
     pub device_name: String,
     pub platform: String,
     pub migrated_surviving_history: usize,
+    /// Totals reconstructed strictly from all-time valid dictations (excluding translate_read & failed).
+    pub server_rebuilt_dictations: i64,
+    pub server_rebuilt_characters: i64,
+    pub server_rebuilt_duration_ms: i64,
+    pub server_rebuilt_llm_invoked: i64,
+    pub server_rebuilt_ai_corrections: i64,
+    /// Raw lifetime counters from the device's v1 `device_usage_stats` (when device DB was supplied).
+    pub local_device_recording_count: Option<i64>,
+    pub local_device_characters: Option<i64>,
+    pub local_device_duration_ms: Option<i64>,
+    pub local_device_llm_invoked: Option<i64>,
+    /// Legacy `translate_read` rows attributed to this device and excluded from dictation counters.
+    pub excluded_translate_read_count: i64,
+    pub excluded_translate_read_characters: i64,
+    pub excluded_translate_read_duration_ms: i64,
+    pub excluded_translate_read_llm_count: i64,
+    /// Adopted lifetime counters written identically to server stats shards and device DBs.
     pub migrated_all_time_dictations: i64,
     pub migrated_characters: i64,
     pub migrated_duration_ms: i64,
     pub migrated_llm_invoked: i64,
     pub migrated_ai_corrections: i64,
+    /// Device-level baseline adjustment (`adopted - server_rebuilt`); never fabricated into daily tables.
+    pub baseline_adjustment_dictations: i64,
+    pub baseline_adjustment_characters: i64,
+    pub baseline_adjustment_duration_ms: i64,
+    pub baseline_adjustment_llm_invoked: i64,
+    pub baseline_decision: String,
     pub tts_read_count: i64,
     pub tts_translate_count: i64,
     pub tts_characters: i64,
     pub tts_duration_ms: i64,
     pub tts_llm_count: i64,
-    pub local_device_recording_count: Option<i64>,
     pub local_vs_migrated_recording_diff: Option<i64>,
 }
 
@@ -79,6 +102,9 @@ pub struct AccountReconciliation {
     pub v1_server_total_characters: i64,
     pub v1_server_total_duration_ms: i64,
     pub v1_server_llm_correction_count: i64,
+    pub server_rebuilt_total_characters: i64,
+    pub server_rebuilt_total_duration_ms: i64,
+    pub server_rebuilt_llm_invoked_count: i64,
     pub migrated_total_characters: i64,
     pub migrated_total_duration_ms: i64,
     pub migrated_llm_invoked_count: i64,
@@ -90,6 +116,7 @@ pub struct AccountReconciliation {
     pub unexplained_llm_diff: i64,
 }
 
+/// Public, secret-free migration and reconciliation report safe to write to JSON/logs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrationReport {
@@ -97,10 +124,10 @@ pub struct MigrationReport {
     pub account_id: String,
     pub space_id: String,
     pub key_check_tag: String,
-    pub recovery_key: String,
     pub surviving_shared_history_count: usize,
     pub excluded_translate_read_count: usize,
     pub excluded_failed_count: usize,
+    pub excluded_private_local_only_count: usize,
     pub tombstone_count: usize,
     pub imported_edits_count: usize,
     pub local_only_edits_preserved_count: usize,
@@ -110,6 +137,23 @@ pub struct MigrationReport {
     pub server_used_bytes: i64,
     pub devices: Vec<DeviceReconciliation>,
     pub account_reconciliation: AccountReconciliation,
+}
+
+/// Full migration result separating the public reconciliation report from the
+/// secret recovery key (intentionally NOT `Serialize` so it cannot leak into logs).
+#[derive(Clone)]
+pub struct MigrationOutcome {
+    pub report: MigrationReport,
+    pub recovery_key: String,
+}
+
+impl std::fmt::Debug for MigrationOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MigrationOutcome")
+            .field("report", &self.report)
+            .field("recovery_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,7 +320,7 @@ pub fn init_v2_server_schema(conn: &Connection) -> Result<(), StorageError> {
 
 /// Run the deterministic v1 -> v2 migration on read-only backups and produce
 /// fresh v2 server DB + upgraded device DB copies + reconciliation report.
-pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageError> {
+pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationOutcome, StorageError> {
     let srv_ro = open_ro(&cfg.server_v1_db)?;
 
     let server_id: String = srv_ro
@@ -372,13 +416,19 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
     }
 
     // 3. Parse v1 server events in seq order: deduplicate upserts + collect deletes
-    let mut all_time_upserts: BTreeMap<String, MergedHistoryRow> = BTreeMap::new();
+    // `stats_records` holds all valid dictations for stats/daily breakdown (including local-only);
+    // `shared_history_ids` holds ONLY records authorized to be published to the v2 server `history` domain (M2).
+    let mut stats_records: BTreeMap<String, MergedHistoryRow> = BTreeMap::new();
+    let mut shared_history_ids: BTreeSet<String> = BTreeSet::new();
     let mut deleted_ids: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut excluded_translate_read_ids: BTreeSet<String> = BTreeSet::new();
+    let mut excluded_translate_read_by_dev: BTreeMap<String, DictationTotalsPayload> =
+        BTreeMap::new();
     let mut excluded_translate_read_chars: i64 = 0;
     let mut excluded_translate_read_dur: i64 = 0;
     let mut excluded_translate_read_llm: i64 = 0;
     let mut excluded_failed_count: usize = 0;
+    let mut excluded_private_local_only_count: usize = 0;
 
     {
         let mut stmt = srv_ro
@@ -446,11 +496,28 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
                 .and_then(Value::as_bool)
                 .unwrap_or(ai_corr);
 
+            let source_device_id = rec
+                .get("sourceDeviceId")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(&dev_id)
+                .to_string();
+
             if mode == HISTORY_MODE_TRANSLATE_READ {
                 if excluded_translate_read_ids.insert(record_id) {
-                    excluded_translate_read_chars += text.chars().count() as i64;
-                    excluded_translate_read_dur += duration_ms.max(0);
-                    excluded_translate_read_llm += i64::from(llm_invoked);
+                    let chars = text.chars().count() as i64;
+                    let dur = duration_ms.max(0);
+                    let llm = i64::from(llm_invoked);
+                    excluded_translate_read_chars += chars;
+                    excluded_translate_read_dur += dur;
+                    excluded_translate_read_llm += llm;
+                    let tr_dev = excluded_translate_read_by_dev
+                        .entry(source_device_id)
+                        .or_default();
+                    tr_dev.recording_count += 1;
+                    tr_dev.total_characters += chars;
+                    tr_dev.total_duration_ms += dur;
+                    tr_dev.llm_invoked_count += llm;
                 }
                 continue;
             }
@@ -459,19 +526,14 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
                 continue;
             }
 
-            let source_device_id = rec
-                .get("sourceDeviceId")
-                .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or(&dev_id)
-                .to_string();
             let timestamp = rec
                 .get("timestamp")
                 .and_then(Value::as_str)
                 .unwrap_or(&created_at)
                 .to_string();
 
-            all_time_upserts.insert(
+            shared_history_ids.insert(record_id.clone());
+            stats_records.insert(
                 record_id.clone(),
                 MergedHistoryRow {
                     record_id,
@@ -504,9 +566,9 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
         }
     }
 
-    // 4. Merge each supplied device DB (read-only): unsynced creates, pending
-    //    deletes, target apps, local edits, and local device totals comparison.
-    let mut local_device_recording_counts: HashMap<String, i64> = HashMap::new();
+    // 4. Merge each supplied device DB (read-only): authorized pending creates,
+    //    pending deletes, target apps, local edits, and local device totals comparison.
+    let mut local_device_raw_totals: HashMap<String, DictationTotalsPayload> = HashMap::new();
     let mut imported_edits: Vec<LocalEditEntry> = Vec::new();
     let mut local_only_edits_preserved_count: usize = 0;
     let mut device_id_by_input_idx: Vec<String> = Vec::with_capacity(cfg.device_inputs.len());
@@ -522,22 +584,30 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
             .map_err(sql_err)?;
         device_id_by_input_idx.push(dev_id.clone());
 
-        // Check local device_usage_stats for reconciliation & TTS comparison
-        if let Some((rec_cnt, tts)) = dev_ro
+        // Check local device_usage_stats for full lifetime reconciliation & TTS comparison (M1)
+        if let Some((local_dict, tts)) = dev_ro
             .query_row(
-                "SELECT total_recording_count, tts_read_count, tts_translate_count,
+                "SELECT total_recording_count, total_characters, total_duration_ms,
+                        llm_correction_count,
+                        tts_read_count, tts_translate_count,
                         tts_characters, tts_duration_ms, tts_llm_count
                  FROM device_usage_stats WHERE device_id = ?1 LIMIT 1",
                 params![dev_id],
                 |r| {
                     Ok((
-                        r.get::<_, i64>(0)?,
+                        DictationTotalsPayload {
+                            recording_count: r.get(0)?,
+                            total_characters: r.get(1)?,
+                            total_duration_ms: r.get(2)?,
+                            llm_invoked_count: r.get(3)?,
+                            ai_correction_count: 0,
+                        },
                         TtsTotalsPayload {
-                            read_count: r.get(1)?,
-                            translate_count: r.get(2)?,
-                            characters: r.get(3)?,
-                            duration_ms: r.get(4)?,
-                            llm_count: r.get(5)?,
+                            read_count: r.get(4)?,
+                            translate_count: r.get(5)?,
+                            characters: r.get(6)?,
+                            duration_ms: r.get(7)?,
+                            llm_count: r.get(8)?,
                         },
                     ))
                 },
@@ -545,7 +615,7 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
             .optional()
             .map_err(sql_err)?
         {
-            local_device_recording_counts.insert(dev_id.clone(), rec_cnt);
+            local_device_raw_totals.insert(dev_id.clone(), local_dict);
             let entry = tts_by_device.entry(dev_id.clone()).or_default();
             entry.read_count = entry.read_count.max(tts.read_count);
             entry.translate_count = entry.translate_count.max(tts.translate_count);
@@ -554,20 +624,65 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
             entry.llm_count = entry.llm_count.max(tts.llm_count);
         }
 
-        // Check pending local deletes in v1 sync_outbox
+        // Inspect v1 sync_outbox: pending deletes + explicit v1 pending upsert evidence (M2)
+        let mut device_outbox_upsert_ids: BTreeSet<String> = BTreeSet::new();
         {
-            let mut stmt = dev_ro
-                .prepare(
-                    "SELECT record_id, created_at FROM sync_outbox
-                     WHERE event_type = 'history.delete' AND record_id IS NOT NULL",
+            let has_outbox: bool = dev_ro
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_outbox')",
+                    [],
+                    |r| Ok(r.get::<_, i32>(0)? != 0),
                 )
                 .map_err(sql_err)?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-                .map_err(sql_err)?;
-            for row in rows {
-                let (rid, ts) = row.map_err(sql_err)?;
-                deleted_ids.entry(rid).or_insert((dev_id.clone(), ts));
+            if has_outbox {
+                let mut stmt = dev_ro
+                    .prepare(
+                        "SELECT event_type, record_id, payload, created_at
+                         FROM sync_outbox
+                         ORDER BY created_at ASC, event_id ASC",
+                    )
+                    .map_err(sql_err)?;
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                        ))
+                    })
+                    .map_err(sql_err)?;
+                for row in rows {
+                    let (ev_type, rid_opt, payload_str, ts) = row.map_err(sql_err)?;
+                    let rid = rid_opt
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| {
+                            serde_json::from_str::<Value>(&payload_str)
+                                .ok()
+                                .and_then(|v| {
+                                    v.get("recordId")
+                                        .or_else(|| v.get("id"))
+                                        .or_else(|| v.get("record").and_then(|r| r.get("id")))
+                                        .and_then(Value::as_str)
+                                        .map(String::from)
+                                })
+                        });
+                    let Some(rid) = rid.filter(|s| !s.trim().is_empty()) else {
+                        continue;
+                    };
+                    match ev_type.as_str() {
+                        "history.delete" => {
+                            device_outbox_upsert_ids.remove(&rid);
+                            deleted_ids.entry(rid).or_insert((dev_id.clone(), ts));
+                        }
+                        "history.upsert" => {
+                            if !deleted_ids.contains_key(&rid) {
+                                device_outbox_upsert_ids.insert(rid);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -639,7 +754,7 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
                     .filter(|s| !s.trim().is_empty())
                     .unwrap_or_else(|| dev_id.clone());
 
-                if let Some(existing) = all_time_upserts.get_mut(&id) {
+                if let Some(existing) = stats_records.get_mut(&id) {
                     if existing.target_app_key.is_none() && app_key.as_deref().is_some_and(|k| !k.is_empty()) {
                         existing.target_app_platform = app_plat;
                         existing.target_app_key = app_key;
@@ -652,7 +767,17 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
                         existing.llm_model_name = llm_model;
                     }
                 } else if !deleted_ids.contains_key(&id) {
-                    all_time_upserts.insert(
+                    // Always include eligible local dictations in stats reconstruction,
+                    // but ONLY authorize publishing text to `history` if this device is
+                    // history-scoped AND has explicit v1 outbox upload evidence (M2).
+                    let can_publish_local =
+                        input.scope_history && device_outbox_upsert_ids.contains(&id);
+                    if can_publish_local {
+                        shared_history_ids.insert(id.clone());
+                    } else {
+                        excluded_private_local_only_count += 1;
+                    }
+                    stats_records.insert(
                         id.clone(),
                         MergedHistoryRow {
                             record_id: id.clone(),
@@ -677,7 +802,11 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
                     if deleted_ids.contains_key(&id) {
                         continue;
                     }
-                    if input.scope_history && input.scope_edits && input.import_existing_edits {
+                    if shared_history_ids.contains(&id)
+                        && input.scope_history
+                        && input.scope_edits
+                        && input.import_existing_edits
+                    {
                         let edit_kind = match edit_source.as_deref() {
                             Some("manual") => EditKind::Manual,
                             _ => EditKind::Observed,
@@ -740,9 +869,9 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
     }
 
     // 5. Partition surviving shared records vs all-time lifetime stats per device
-    let mut surviving_records: Vec<&MergedHistoryRow> = all_time_upserts
+    let mut surviving_records: Vec<&MergedHistoryRow> = stats_records
         .values()
-        .filter(|r| !deleted_ids.contains_key(&r.record_id))
+        .filter(|r| shared_history_ids.contains(&r.record_id) && !deleted_ids.contains_key(&r.record_id))
         .collect();
     surviving_records.sort_by(|a, b| {
         a.timestamp
@@ -750,8 +879,8 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
             .then_with(|| a.record_id.cmp(&b.record_id))
     });
 
-    // Aggregate per-device lifetime totals + per-month daily app & model rows from ALL-TIME valid dictations
-    let mut totals_by_dev: BTreeMap<String, DictationTotalsPayload> = BTreeMap::new();
+    // Aggregate per-device server-rebuilt lifetime totals + per-month daily app & model rows
+    let mut server_rebuilt_by_dev: BTreeMap<String, DictationTotalsPayload> = BTreeMap::new();
     let mut surviving_count_by_dev: HashMap<String, usize> = HashMap::new();
     for rec in &surviving_records {
         *surviving_count_by_dev
@@ -768,9 +897,9 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
         BTreeMap<(String, String, LlmUsageState, String), DailyModelStatPayload>,
     > = BTreeMap::new();
 
-    for rec in all_time_upserts.values() {
+    for rec in stats_records.values() {
         let chars = rec.text.chars().count() as i64;
-        let tot = totals_by_dev
+        let tot = server_rebuilt_by_dev
             .entry(rec.source_device_id.clone())
             .or_default();
         tot.recording_count += 1;
@@ -892,8 +1021,52 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
 
     // Ensure every device appearing in totals or TTS exists in `devices`
     let mut all_device_ids: BTreeSet<String> = devices_by_id.keys().cloned().collect();
-    all_device_ids.extend(totals_by_dev.keys().cloned());
+    all_device_ids.extend(server_rebuilt_by_dev.keys().cloned());
+    all_device_ids.extend(local_device_raw_totals.keys().cloned());
     all_device_ids.extend(tts_by_device.keys().cloned());
+
+    // M1: Compute adopted lifetime totals per device (preserving same-metric local lifetime
+    // baseline after deducting excluded `translate_read` rows, without fabricating daily rows).
+    let mut adopted_totals_by_dev: BTreeMap<String, DictationTotalsPayload> = BTreeMap::new();
+    let mut baseline_decision_by_dev: BTreeMap<String, String> = BTreeMap::new();
+    for dev_id in &all_device_ids {
+        let rebuilt = server_rebuilt_by_dev.get(dev_id).cloned().unwrap_or_default();
+        let tr = excluded_translate_read_by_dev
+            .get(dev_id)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(local_raw) = local_device_raw_totals.get(dev_id) {
+            let local_adj_rec = (local_raw.recording_count - tr.recording_count).max(0);
+            let local_adj_chars = (local_raw.total_characters - tr.total_characters).max(0);
+            let local_adj_dur = (local_raw.total_duration_ms - tr.total_duration_ms).max(0);
+            let local_adj_llm = (local_raw.llm_invoked_count - tr.llm_invoked_count).max(0);
+
+            let adopted = DictationTotalsPayload {
+                recording_count: rebuilt.recording_count.max(local_adj_rec),
+                total_characters: rebuilt.total_characters.max(local_adj_chars),
+                total_duration_ms: rebuilt.total_duration_ms.max(local_adj_dur),
+                llm_invoked_count: rebuilt.llm_invoked_count.max(local_adj_llm),
+                ai_correction_count: rebuilt.ai_correction_count,
+            };
+            let used_local = adopted.recording_count > rebuilt.recording_count
+                || adopted.total_characters > rebuilt.total_characters
+                || adopted.total_duration_ms > rebuilt.total_duration_ms
+                || adopted.llm_invoked_count > rebuilt.llm_invoked_count;
+            baseline_decision_by_dev.insert(
+                dev_id.clone(),
+                if used_local {
+                    "adopted_local_baseline_minus_translate_read".to_string()
+                } else {
+                    "matched_server_rebuilt".to_string()
+                },
+            );
+            adopted_totals_by_dev.insert(dev_id.clone(), adopted);
+        } else {
+            baseline_decision_by_dev
+                .insert(dev_id.clone(), "server_rebuilt_only_no_local_db".to_string());
+            adopted_totals_by_dev.insert(dev_id.clone(), rebuilt);
+        }
+    }
 
     for dev_id in &all_device_ids {
         let meta = devices_by_id.get(dev_id);
@@ -1009,7 +1182,7 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
 
     let mut stats_end_seq: i64 = 0;
     for dev_id in &all_device_ids {
-        let dictation = totals_by_dev.get(dev_id).cloned().unwrap_or_default();
+        let dictation = adopted_totals_by_dev.get(dev_id).cloned().unwrap_or_default();
         let tts = tts_by_device.get(dev_id).cloned().unwrap_or_default();
         let totals_payload = StatsTotalsPayload {
             schema: PAYLOAD_SCHEMA_V1,
@@ -1087,7 +1260,6 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
     }
 
     // 6b. Publish surviving shared history.create envelopes
-    let mut history_end_seq = stats_end_seq;
     for rec in &surviving_records {
         let op = HistoryOpPayload::Create(HistoryCreatePayload {
             schema: PAYLOAD_SCHEMA_V1,
@@ -1109,7 +1281,7 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
         let bytes =
             serde_json::to_vec(&op).map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
         let op_id = format!("create:{}", rec.record_id);
-        history_end_seq = write_envelope(
+        let _ = write_envelope(
             SyncDomain::History,
             &rec.source_device_id,
             &rec.record_id,
@@ -1138,7 +1310,7 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
         let bytes =
             serde_json::to_vec(&op).map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
         let op_id = format!("delete:{rid}");
-        history_end_seq = write_envelope(
+        let _ = write_envelope(
             SyncDomain::History,
             dev_id,
             rid,
@@ -1151,7 +1323,6 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
     }
 
     // 6d. Publish authorized imported edits (only when explicitly enabled for a device)
-    let mut edits_end_seq = history_end_seq;
     let mut edit_counter: u32 = 0;
     for edit in &imported_edits {
         let hlc = Hlc::new(
@@ -1177,7 +1348,7 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
         let bytes =
             serde_json::to_vec(&op).map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
         let op_id = format!("edit:{}", edit.edit_id);
-        edits_end_seq = write_envelope(
+        let _ = write_envelope(
             SyncDomain::Edits,
             &edit.source_device_id,
             &edit.record_id,
@@ -1260,7 +1431,26 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
             .map_err(sql_err)?;
         }
 
-        // Apply all per-device stats shards so Overview All/Local matches server immediately
+        // Read this device's configured text retention policy (default 0 = keep all).
+        let dev_retention_days: u32 = dtx
+            .query_row(
+                "SELECT value FROM user_config WHERE key = 'app_settings' LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sql_err)?
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|v| v.get("textRetentionDays").and_then(Value::as_u64))
+            .map(|n| n as u32)
+            .unwrap_or(0);
+
+        // M4: Replay authorized server envelopes using the exact same pull apply logic
+        // so device DB records, edit versions, tombstones, retention, and cursors match live pull.
+        let mut dev_history_cursor: i64 = 0;
+        let mut dev_edits_cursor: i64 = 0;
+
+        // 7a. Replay stats domain (always authorized)
         for tp in &totals_payloads {
             apply_remote_stats_totals_tx(&dtx, &space_id, tp)?;
             if tp.device_id == *dev_id {
@@ -1284,40 +1474,80 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
                 .map_err(sql_err)?;
             }
         }
+        let dev_stats_cursor = stats_end_seq;
 
-        // Persist tombstones & mark already-shared local history rows
-        for (rid, (del_dev, del_at)) in &deleted_ids {
-            let hlc = Hlc::new(epoch_ms_from_rfc3339(del_at), 0, del_dev)
-                .map_err(|e| StorageError::QueryFailed(e.to_string()))?
-                .to_wire_string();
-            dtx.execute(
-                "INSERT OR IGNORE INTO history_tombstones (space_id, record_id, deleted_by_device_id, hlc, deleted_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![space_id, rid, del_dev, hlc, del_at],
-            )
-            .map_err(sql_err)?;
-            dtx.execute("DELETE FROM history_record WHERE id = ?1", params![rid])
+        // Helper to decrypt & replay all active envelopes of a single domain from `srv_v2`.
+        let replay_domain = |domain: SyncDomain, dtx: &Connection| -> Result<i64, StorageError> {
+            let mut stmt = srv_v2
+                .prepare(
+                    "SELECT seq, op_id, object_id, revision, nonce, ciphertext
+                     FROM envelopes
+                     WHERE account_id = ?1 AND domain = ?2 AND superseded = 0
+                     ORDER BY seq ASC",
+                )
                 .map_err(sql_err)?;
+            let rows = stmt
+                .query_map(params![account_id, domain.as_str()], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                })
+                .map_err(sql_err)?;
+            let mut last_seq = 0i64;
+            for row in rows {
+                let (env_seq, op_id, object_id, revision, nonce, ciphertext) = row.map_err(sql_err)?;
+                let plaintext = decrypt_envelope(
+                    &master_key,
+                    EnvelopeContext {
+                        account_id: &account_id,
+                        space_id: &space_id,
+                        domain,
+                        object_id: &object_id,
+                        revision,
+                        op_id: &op_id,
+                    },
+                    &nonce,
+                    &ciphertext,
+                )
+                .map_err(|e| StorageError::QueryFailed(format!("decrypt failed for {op_id}: {e}")))?;
+                let op: HistoryOpPayload = serde_json::from_slice(&plaintext)
+                    .map_err(|e| StorageError::SerializeFailed(e.to_string()))?;
+                apply_remote_history_op_tx(dtx, &space_id, dev_id, &op, dev_retention_days)?;
+                last_seq = env_seq;
+            }
+            Ok(last_seq)
+        };
+
+        // 7b. Replay `edits` BEFORE `history` when authorized so imported edits land with their
+        // authoritative server `edit_id` (`is_shared = 1`) before `Create` checks legacy edits (M4+M5).
+        if input.scope_history && input.scope_edits {
+            dev_edits_cursor = replay_domain(SyncDomain::Edits, &dtx)?;
         }
-        for rec in &surviving_records {
-            dtx.execute(
-                "UPDATE history_record SET sync_eligible = 1, sync_space_id = ?2 WHERE id = ?1",
-                params![rec.record_id, space_id],
-            )
-            .map_err(sql_err)?;
+        if input.scope_history {
+            dev_history_cursor = replay_domain(SyncDomain::History, &dtx)?;
         }
 
-        let hist_cursor = if input.scope_history { history_end_seq } else { 0 };
-        let edit_cursor = if input.scope_history && input.scope_edits {
-            edits_end_seq
-        } else {
-            0
-        };
+        // 7c. Seed any remaining unimported local legacy edits as private (`is_shared = 0`) versions (M5).
+        seed_all_legacy_local_edits_tx(&dtx)?;
+
+        // 7d. Mark v1 outbox handoff done since offline migration already processed this device's v1 outbox.
+        dtx.execute(
+            "INSERT INTO user_config (key, value) VALUES (?1, '1')
+             ON CONFLICT(key) DO UPDATE SET value = '1'",
+            params![format!("v1_outbox_handoff_done:{space_id}")],
+        )
+        .map_err(sql_err)?;
+
         dtx.execute(
             "UPDATE sync_spaces
              SET stats_cursor = ?2, history_cursor = ?3, edits_cursor = ?4, last_sync_at = ?5, updated_at = ?5
              WHERE space_id = ?1",
-            params![space_id, stats_end_seq, hist_cursor, edit_cursor, now],
+            params![space_id, dev_stats_cursor, dev_history_cursor, dev_edits_cursor, now],
         )
         .map_err(sql_err)?;
         // Disable legacy v1 sync flag in app_settings on the upgraded DB copy so
@@ -1347,22 +1577,35 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
         dtx.commit().map_err(sql_err)?;
     }
 
-    // 8. Build reconciliation report
+    // 8. Build reconciliation report (secret-free: recovery_key returned separately in MigrationOutcome)
     let mut device_reports = Vec::new();
+    let mut rebuilt_tot_chars = 0i64;
+    let mut rebuilt_tot_dur = 0i64;
+    let mut rebuilt_tot_llm = 0i64;
     let mut mig_tot_chars = 0i64;
     let mut mig_tot_dur = 0i64;
     let mut mig_tot_llm = 0i64;
 
     for dev_id in &all_device_ids {
         let meta = devices_by_id.get(dev_id);
-        let d = totals_by_dev.get(dev_id).cloned().unwrap_or_default();
+        let rebuilt = server_rebuilt_by_dev.get(dev_id).cloned().unwrap_or_default();
+        let adopted = adopted_totals_by_dev.get(dev_id).cloned().unwrap_or_default();
+        let tr = excluded_translate_read_by_dev
+            .get(dev_id)
+            .cloned()
+            .unwrap_or_default();
         let t = tts_by_device.get(dev_id).cloned().unwrap_or_default();
-        mig_tot_chars += d.total_characters;
-        mig_tot_dur += d.total_duration_ms;
-        mig_tot_llm += d.llm_invoked_count;
 
-        let local_cnt = local_device_recording_counts.get(dev_id).copied();
-        let diff = local_cnt.map(|lc| lc - d.recording_count);
+        rebuilt_tot_chars += rebuilt.total_characters;
+        rebuilt_tot_dur += rebuilt.total_duration_ms;
+        rebuilt_tot_llm += rebuilt.llm_invoked_count;
+        mig_tot_chars += adopted.total_characters;
+        mig_tot_dur += adopted.total_duration_ms;
+        mig_tot_llm += adopted.llm_invoked_count;
+
+        let local_raw = local_device_raw_totals.get(dev_id);
+        let local_cnt = local_raw.map(|r| r.recording_count);
+        let diff = local_cnt.map(|lc| lc - adopted.recording_count);
         device_reports.push(DeviceReconciliation {
             device_id: dev_id.clone(),
             device_name: meta
@@ -1370,17 +1613,37 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
                 .unwrap_or_else(|| dev_id.clone()),
             platform: meta.map(|m| m.platform.clone()).unwrap_or_default(),
             migrated_surviving_history: surviving_count_by_dev.get(dev_id).copied().unwrap_or(0),
-            migrated_all_time_dictations: d.recording_count,
-            migrated_characters: d.total_characters,
-            migrated_duration_ms: d.total_duration_ms,
-            migrated_llm_invoked: d.llm_invoked_count,
-            migrated_ai_corrections: d.ai_correction_count,
+            server_rebuilt_dictations: rebuilt.recording_count,
+            server_rebuilt_characters: rebuilt.total_characters,
+            server_rebuilt_duration_ms: rebuilt.total_duration_ms,
+            server_rebuilt_llm_invoked: rebuilt.llm_invoked_count,
+            server_rebuilt_ai_corrections: rebuilt.ai_correction_count,
+            local_device_recording_count: local_cnt,
+            local_device_characters: local_raw.map(|r| r.total_characters),
+            local_device_duration_ms: local_raw.map(|r| r.total_duration_ms),
+            local_device_llm_invoked: local_raw.map(|r| r.llm_invoked_count),
+            excluded_translate_read_count: tr.recording_count,
+            excluded_translate_read_characters: tr.total_characters,
+            excluded_translate_read_duration_ms: tr.total_duration_ms,
+            excluded_translate_read_llm_count: tr.llm_invoked_count,
+            migrated_all_time_dictations: adopted.recording_count,
+            migrated_characters: adopted.total_characters,
+            migrated_duration_ms: adopted.total_duration_ms,
+            migrated_llm_invoked: adopted.llm_invoked_count,
+            migrated_ai_corrections: adopted.ai_correction_count,
+            baseline_adjustment_dictations: adopted.recording_count - rebuilt.recording_count,
+            baseline_adjustment_characters: adopted.total_characters - rebuilt.total_characters,
+            baseline_adjustment_duration_ms: adopted.total_duration_ms - rebuilt.total_duration_ms,
+            baseline_adjustment_llm_invoked: adopted.llm_invoked_count - rebuilt.llm_invoked_count,
+            baseline_decision: baseline_decision_by_dev
+                .get(dev_id)
+                .cloned()
+                .unwrap_or_default(),
             tts_read_count: t.read_count,
             tts_translate_count: t.translate_count,
             tts_characters: t.characters,
             tts_duration_ms: t.duration_ms,
             tts_llm_count: t.llm_count,
-            local_device_recording_count: local_cnt,
             local_vs_migrated_recording_diff: diff,
         });
     }
@@ -1389,35 +1652,41 @@ pub fn run_migration(cfg: &MigrationConfig) -> Result<MigrationReport, StorageEr
         v1_server_total_characters: v1_srv_chars,
         v1_server_total_duration_ms: v1_srv_dur,
         v1_server_llm_correction_count: v1_srv_llm,
+        server_rebuilt_total_characters: rebuilt_tot_chars,
+        server_rebuilt_total_duration_ms: rebuilt_tot_dur,
+        server_rebuilt_llm_invoked_count: rebuilt_tot_llm,
         migrated_total_characters: mig_tot_chars,
         migrated_total_duration_ms: mig_tot_dur,
         migrated_llm_invoked_count: mig_tot_llm,
         excluded_translate_read_characters: excluded_translate_read_chars,
         excluded_translate_read_duration_ms: excluded_translate_read_dur,
         excluded_translate_read_llm_count: excluded_translate_read_llm,
-        unexplained_characters_diff: v1_srv_chars - mig_tot_chars - excluded_translate_read_chars,
-        unexplained_duration_ms_diff: v1_srv_dur - mig_tot_dur - excluded_translate_read_dur,
-        unexplained_llm_diff: v1_srv_llm - mig_tot_llm - excluded_translate_read_llm,
+        unexplained_characters_diff: v1_srv_chars - rebuilt_tot_chars - excluded_translate_read_chars,
+        unexplained_duration_ms_diff: v1_srv_dur - rebuilt_tot_dur - excluded_translate_read_dur,
+        unexplained_llm_diff: v1_srv_llm - rebuilt_tot_llm - excluded_translate_read_llm,
     };
 
-    Ok(MigrationReport {
-        server_id,
-        account_id,
-        space_id,
-        key_check_tag,
+    Ok(MigrationOutcome {
+        report: MigrationReport {
+            server_id,
+            account_id,
+            space_id,
+            key_check_tag,
+            surviving_shared_history_count: surviving_records.len(),
+            excluded_translate_read_count: excluded_translate_read_ids.len(),
+            excluded_failed_count,
+            excluded_private_local_only_count,
+            tombstone_count: deleted_ids.len(),
+            imported_edits_count: imported_edits.len(),
+            local_only_edits_preserved_count,
+            stats_shards_published,
+            total_envelopes_written: seq as usize,
+            server_latest_seq: seq,
+            server_used_bytes: used_bytes,
+            devices: device_reports,
+            account_reconciliation,
+        },
         recovery_key,
-        surviving_shared_history_count: surviving_records.len(),
-        excluded_translate_read_count: excluded_translate_read_ids.len(),
-        excluded_failed_count,
-        tombstone_count: deleted_ids.len(),
-        imported_edits_count: imported_edits.len(),
-        local_only_edits_preserved_count,
-        stats_shards_published,
-        total_envelopes_written: seq as usize,
-        server_latest_seq: seq,
-        server_used_bytes: used_bytes,
-        devices: device_reports,
-        account_reconciliation,
     })
 }
 
@@ -1644,4 +1913,336 @@ pub fn verify_server_v2_replay(
         deleted_ids_resurrected,
         translate_read_leaked,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn create_v1_server_fixture(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE server_info (id INTEGER PRIMARY KEY, server_id TEXT NOT NULL);
+            CREATE TABLE accounts (account_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+            CREATE TABLE devices (
+                account_id TEXT NOT NULL, device_id TEXT NOT NULL, device_name TEXT NOT NULL,
+                platform TEXT, app_version TEXT, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+            );
+            CREATE TABLE usage_stats (
+                account_id TEXT PRIMARY KEY, total_duration_ms INTEGER NOT NULL,
+                total_characters INTEGER NOT NULL, llm_correction_count INTEGER NOT NULL,
+                updated_at TEXT
+            );
+            CREATE TABLE device_tts_stats (
+                account_id TEXT NOT NULL, device_id TEXT NOT NULL,
+                read_count INTEGER NOT NULL, translate_count INTEGER NOT NULL,
+                characters INTEGER NOT NULL, duration_ms INTEGER NOT NULL, llm_count INTEGER NOT NULL
+            );
+            CREATE TABLE events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL, event_id TEXT NOT NULL, device_id TEXT NOT NULL,
+                type TEXT NOT NULL, record_id TEXT, payload TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            INSERT INTO server_info VALUES (1, 'srv-1');
+            INSERT INTO accounts VALUES ('acc-1', '2026-01-01T00:00:00Z');
+            INSERT INTO devices VALUES ('acc-1', 'dev-a', 'MacA', 'macos', '0.19.4', '2026-01-01T00:00:00Z', '2026-11-25T00:00:00Z');
+            INSERT INTO devices VALUES ('acc-1', 'dev-b', 'WinB', 'windows', '0.19.4', '2026-01-01T00:00:00Z', '2026-11-25T00:00:00Z');
+            INSERT INTO usage_stats VALUES ('acc-1', 3000, 30, 3, '2026-11-25T00:00:00Z');
+            "#,
+        )
+        .unwrap();
+
+        let evs = [
+            (
+                "ev-1",
+                "dev-a",
+                "history.upsert",
+                "r-shared-1",
+                r#"{"id":"r-shared-1","sourceDeviceId":"dev-a","timestamp":"2026-11-24T01:00:00Z","text":"1234567890","durationMs":1000,"aiCorrectionApplied":true,"llmInvoked":true,"mode":"assistant_hands_free","isFinal":true,"errorCode":0}"#,
+            ),
+            (
+                "ev-2",
+                "dev-a",
+                "history.upsert",
+                "r-server-only",
+                r#"{"id":"r-server-only","sourceDeviceId":"dev-a","timestamp":"2026-11-24T02:00:00Z","text":"abcdefghij","durationMs":2000,"aiCorrectionApplied":false,"llmInvoked":true,"mode":"assistant_hands_free","isFinal":true,"errorCode":0}"#,
+            ),
+            (
+                "ev-3",
+                "dev-a",
+                "history.upsert",
+                "r-tr-1",
+                r#"{"id":"r-tr-1","sourceDeviceId":"dev-a","timestamp":"2026-11-24T02:30:00Z","text":"1234567890","durationMs":0,"aiCorrectionApplied":true,"llmInvoked":true,"mode":"translate_read","isFinal":true,"errorCode":0}"#,
+            ),
+            (
+                "ev-4",
+                "dev-a",
+                "history.upsert",
+                "r-deleted",
+                r#"{"id":"r-deleted","sourceDeviceId":"dev-a","timestamp":"2026-11-24T03:00:00Z","text":"gone","durationMs":500,"aiCorrectionApplied":false,"llmInvoked":false,"mode":"assistant_hands_free","isFinal":true,"errorCode":0}"#,
+            ),
+            (
+                "ev-5",
+                "dev-a",
+                "history.delete",
+                "r-deleted",
+                r#"{"recordId":"r-deleted"}"#,
+            ),
+        ];
+        for (eid, dev, typ, rid, payload) in evs {
+            conn.execute(
+                "INSERT INTO events (account_id, event_id, device_id, type, record_id, payload, created_at)
+                 VALUES ('acc-1', ?1, ?2, ?3, ?4, ?5, '2026-11-24T03:00:00Z')",
+                params![eid, dev, typ, rid, payload],
+            )
+            .unwrap();
+        }
+    }
+
+    fn create_v1_device_fixture(path: &Path, dev_id: &str) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE history_record (
+                id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, text TEXT NOT NULL,
+                original_text TEXT, ai_correction_applied INTEGER DEFAULT 0, llm_invoked INTEGER DEFAULT 0,
+                mode TEXT NOT NULL, duration_ms INTEGER NOT NULL, audio_path TEXT,
+                is_final INTEGER DEFAULT 1, error_code INTEGER DEFAULT 0, error_message TEXT,
+                source_device_id TEXT, asr_model_name TEXT, llm_model_name TEXT,
+                edited_text TEXT, edit_source TEXT, edited_at TEXT,
+                target_app_platform TEXT, target_app_key TEXT, target_app_name TEXT
+            );
+            CREATE TABLE usage_stats (
+                id INTEGER PRIMARY KEY CHECK (id = 1), total_duration_ms INTEGER DEFAULT 0,
+                total_characters INTEGER DEFAULT 0, llm_correction_count INTEGER DEFAULT 0,
+                last_updated TEXT, total_recording_count INTEGER DEFAULT 0,
+                tts_read_count INTEGER DEFAULT 0, tts_translate_count INTEGER DEFAULT 0,
+                tts_characters INTEGER DEFAULT 0, tts_duration_ms INTEGER DEFAULT 0, tts_llm_count INTEGER DEFAULT 0
+            );
+            INSERT INTO usage_stats (id) VALUES (1);
+            CREATE TABLE device_usage_stats (
+                device_id TEXT PRIMARY KEY, total_duration_ms INTEGER DEFAULT 0,
+                total_characters INTEGER DEFAULT 0, llm_correction_count INTEGER DEFAULT 0,
+                last_updated TEXT, total_recording_count INTEGER DEFAULT 0,
+                tts_read_count INTEGER DEFAULT 0, tts_translate_count INTEGER DEFAULT 0,
+                tts_characters INTEGER DEFAULT 0, tts_duration_ms INTEGER DEFAULT 0, tts_llm_count INTEGER DEFAULT 0
+            );
+            CREATE TABLE daily_usage_stats (
+                device_id TEXT NOT NULL, local_date TEXT NOT NULL, feature_kind TEXT NOT NULL,
+                platform TEXT NOT NULL, app_key TEXT NOT NULL, app_name TEXT NOT NULL,
+                usage_count INTEGER NOT NULL DEFAULT 0, total_characters INTEGER NOT NULL DEFAULT 0,
+                total_duration_ms INTEGER NOT NULL DEFAULT 0, llm_count INTEGER NOT NULL DEFAULT 0,
+                last_used_at TEXT NOT NULL,
+                PRIMARY KEY (device_id, local_date, feature_kind, platform, app_key)
+            );
+            CREATE TABLE user_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE device_registry (device_id TEXT PRIMARY KEY, device_name TEXT NOT NULL, updated_at TEXT NOT NULL);
+            CREATE TABLE sync_outbox (
+                event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, record_id TEXT,
+                payload TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+        crate::post_edit::records::create_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO user_config (key, value) VALUES ('sync_device_id', ?1)",
+            params![dev_id],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn migration_m1_m2_m4_m5_c2_preserves_baselines_blocks_private_replays_device_and_redacts_report()
+    {
+        let dir = TempDir::new().unwrap();
+        let srv_v1 = dir.path().join("srv-v1.db");
+        let srv_v2 = dir.path().join("srv-v2.db");
+        let dev_a_in = dir.path().join("dev-a-v1.db");
+        let dev_a_out = dir.path().join("dev-a-v2.db");
+        let dev_b_in = dir.path().join("dev-b-v1.db");
+        let dev_b_out = dir.path().join("dev-b-v2.db");
+
+        create_v1_server_fixture(&srv_v1);
+
+        // Device A: history+edits+import_edits; has +5 baseline dictations (+1 translate_read in v1 local),
+        // 1 unseen private record (must NOT leak to server), 1 pending outbox record (MUST publish),
+        // and 1 shared record with a manual edit. Notice r-server-only is NOT in dev-a-v1!
+        {
+            let ca = create_v1_device_fixture(&dev_a_in, "dev-a");
+            // Local raw = 10 dictations (3 server valid + 1 outbox + 1 private + 4 early pruned + 1 translate_read)
+            // Local chars = 60 (10+10+4+6+5 + 15 pruned + 10 translate_read)
+            ca.execute(
+                "INSERT INTO device_usage_stats (device_id, total_recording_count, total_characters, total_duration_ms, llm_correction_count)
+                 VALUES ('dev-a', 10, 60, 9000, 4)",
+                [],
+            )
+            .unwrap();
+            ca.execute(
+                "INSERT INTO history_record (id, timestamp, text, mode, duration_ms, source_device_id, edited_text, edit_source, edited_at)
+                 VALUES ('r-shared-1', '2026-11-24T01:00:00Z', '1234567890', 'assistant_hands_free', 1000, 'dev-a', 'edited-shared', 'manual', '2026-11-24T01:05:00Z')",
+                [],
+            )
+            .unwrap();
+            ca.execute(
+                "INSERT INTO history_record (id, timestamp, text, mode, duration_ms, source_device_id, edited_text, edit_source, edited_at)
+                 VALUES ('r-local-private', '2026-11-24T04:00:00Z', 'secret', 'assistant_hands_free', 500, 'dev-a', 'private-edit', 'manual', '2026-11-24T04:01:00Z')",
+                [],
+            )
+            .unwrap();
+            ca.execute(
+                "INSERT INTO history_record (id, timestamp, text, mode, duration_ms, source_device_id)
+                 VALUES ('r-outbox-pending', '2026-11-24T05:00:00Z', 'queued', 'assistant_hands_free', 600, 'dev-a')",
+                [],
+            )
+            .unwrap();
+            ca.execute(
+                "INSERT INTO sync_outbox (event_id, event_type, record_id, payload, created_at)
+                 VALUES ('ev-local-1', 'history.upsert', 'r-outbox-pending', '{}', '2026-11-24T05:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Device B: stats_only; has a local record with an edit (must NOT leak create or edit to server,
+        // must keep history_cursor = 0, edits_cursor = 0, and must preserve local edit!)
+        {
+            let cb = create_v1_device_fixture(&dev_b_in, "dev-b");
+            cb.execute(
+                "INSERT INTO device_usage_stats (device_id, total_recording_count, total_characters, total_duration_ms, llm_correction_count)
+                 VALUES ('dev-b', 1, 7, 700, 0)",
+                [],
+            )
+            .unwrap();
+            cb.execute(
+                "INSERT INTO history_record (id, timestamp, text, mode, duration_ms, source_device_id, edited_text, edit_source, edited_at)
+                 VALUES ('r-b-private', '2026-11-24T06:00:00Z', 'winpriv', 'assistant_hands_free', 700, 'dev-b', 'win-edit', 'manual', '2026-11-24T06:01:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let outcome = run_migration(&MigrationConfig {
+            server_v1_db: srv_v1,
+            out_server_v2_db: srv_v2.clone(),
+            device_inputs: vec![
+                DeviceMigrationInput {
+                    db_path: dev_a_in,
+                    out_db_path: dev_a_out.clone(),
+                    scope_history: true,
+                    scope_edits: true,
+                    import_existing_edits: true,
+                },
+                DeviceMigrationInput {
+                    db_path: dev_b_in,
+                    out_db_path: dev_b_out.clone(),
+                    scope_history: false,
+                    scope_edits: false,
+                    import_existing_edits: false,
+                },
+            ],
+            server_url: "http://127.0.0.1:8787".into(),
+            account_label: "test".into(),
+            recovery_key: None,
+        })
+        .unwrap();
+
+        // C2: Serialized report must NOT contain recoveryKey or VXK2-
+        let report_json = serde_json::to_string(&outcome.report).unwrap();
+        assert!(!report_json.contains("recoveryKey"));
+        assert!(!report_json.contains("VXK2-"));
+
+        // M2: Server must have ONLY r-shared-1, r-server-only, r-outbox-pending (3 surviving shared),
+        // NEVER r-local-private or r-b-private!
+        assert_eq!(outcome.report.surviving_shared_history_count, 3);
+        assert_eq!(outcome.report.excluded_private_local_only_count, 2);
+        assert_eq!(outcome.report.imported_edits_count, 1); // only r-shared-1, NOT r-local-private or r-b-private
+        let srv_conn = open_ro(&srv_v2).unwrap();
+        let leaked_private: i64 = srv_conn
+            .query_row(
+                "SELECT COUNT(*) FROM envelopes WHERE object_id IN ('r-local-private', 'r-b-private')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaked_private, 0);
+
+        // M1: Device A raw=10 minus 1 translate_read = 9 adopted dictations (60 - 10 = 50 chars)
+        let dev_a_rep = outcome
+            .report
+            .devices
+            .iter()
+            .find(|d| d.device_id == "dev-a")
+            .unwrap();
+        assert_eq!(dev_a_rep.excluded_translate_read_count, 1);
+        assert_eq!(dev_a_rep.migrated_all_time_dictations, 9);
+        assert_eq!(dev_a_rep.migrated_characters, 50);
+        assert_eq!(
+            dev_a_rep.baseline_decision,
+            "adopted_local_baseline_minus_translate_read"
+        );
+
+        // Verify replay matches adopted totals (dev-a: 9 + dev-b: 1 = 10)
+        let replay = verify_server_v2_replay(&srv_v2, &outcome.recovery_key).unwrap();
+        assert_eq!(replay.replayed_history_count, 3);
+        assert_eq!(replay.replayed_total_recordings, 10);
+        assert_eq!(replay.deleted_ids_resurrected, 0);
+        assert_eq!(replay.translate_read_leaked, 0);
+
+        // M4 & M5 on Device A output DB:
+        let ca_out = open_ro(&dev_a_out).unwrap();
+        // Must have replayed r-server-only, plus kept r-shared-1, r-outbox-pending, and r-local-private!
+        let has_srv_only: bool = ca_out
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM history_record WHERE id = 'r-server-only' AND sync_eligible = 1)",
+                [],
+                |r| Ok(r.get::<_, i32>(0)? != 0),
+            )
+            .unwrap();
+        assert!(has_srv_only);
+        // r-shared-1 edit version must exist with is_shared = 1, and r-local-private edit with is_shared = 0
+        let shared_ver_cnt: i64 = ca_out
+            .query_row(
+                "SELECT COUNT(*) FROM history_edit_versions WHERE record_id = 'r-shared-1' AND is_shared = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(shared_ver_cnt, 1);
+        let priv_ver: (String, i32) = ca_out
+            .query_row(
+                "SELECT final_text, is_shared FROM history_edit_versions WHERE record_id = 'r-local-private'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(priv_ver, ("private-edit".to_string(), 0));
+        // Device A Overview Local & All match M1 adopted totals
+        let a_local = get_overview_usage_stats_in(&ca_out, "dev-a", OverviewScope::Local).unwrap();
+        let a_all = get_overview_usage_stats_in(&ca_out, "dev-a", OverviewScope::All).unwrap();
+        assert_eq!(a_local.total_recording_count, 9);
+        assert_eq!(a_all.total_recording_count, 10);
+
+        // M4 & M5 on Device B (stats_only) output DB:
+        let cb_out = open_ro(&dev_b_out).unwrap();
+        let (b_hist_cur, b_edit_cur): (i64, i64) = cb_out
+            .query_row(
+                "SELECT history_cursor, edits_cursor FROM sync_spaces LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((b_hist_cur, b_edit_cur), (0, 0));
+        let b_edit: (String, i32) = cb_out
+            .query_row(
+                "SELECT final_text, is_shared FROM history_edit_versions WHERE record_id = 'r-b-private'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(b_edit, ("win-edit".to_string(), 0));
+    }
 }
